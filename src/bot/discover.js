@@ -55,8 +55,7 @@ async function runDiscovery() {
   const runId = runRes.rows[0].id;
 
   let queriesRun = 0, totalFound = 0, newAdded = 0, errors = 0;
-
-  for (const market of TARGET_MARKETS) {
+  outer: for (const market of TARGET_MARKETS) {
     for (const { query, industry, score } of INDUSTRIES) {
       queriesRun++;
       const label = `${query} in ${market}`;
@@ -85,8 +84,14 @@ async function runDiscovery() {
 
       } catch (err) {
         errors++;
+        const status = err.response?.status;
+        const reason = err.response?.data?.error?.status;
         console.error(`[bot] ✗ Error on "${label}": ${err.message}`);
-        // Continue rather than abort the whole run
+        // Stop immediately on quota exhaustion — resets at midnight Pacific
+        if (status === 429 || reason === 'RESOURCE_EXHAUSTED') {
+          console.error('[bot] ✗ Daily quota exhausted — stopping early. Try again tomorrow.');
+          break outer;
+        }
         await sleep(1000);
       }
     }
