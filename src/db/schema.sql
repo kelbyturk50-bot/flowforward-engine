@@ -54,3 +54,70 @@ CREATE TABLE IF NOT EXISTS discovery_runs (
   errors       INTEGER DEFAULT 0,
   status       TEXT DEFAULT 'running'  -- running|done|failed
 );
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- CRM buildout (idempotent — safe to re-run; applied automatically on boot)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Lead fields for fit ranking, contact info and follow-ups
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS fit_score         INTEGER;      -- 0–100, computed
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS fit_tier          TEXT;         -- A|B|C|D, computed
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS fit_reasons       JSONB;        -- [{label, points, max, detail}]
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS fit_boost         INTEGER DEFAULT 0; -- manual -20..+20
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS contact_name      TEXT;
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS email             TEXT;
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS next_action       TEXT;
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS next_action_at    DATE;
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS last_contacted_at TIMESTAMPTZ;
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS est_value         NUMERIC(12,2);
+
+-- Stage model: found → contacted → responded → qualified → proposal → won | lost | disqualified
+UPDATE prospects SET stage = 'qualified' WHERE stage = 'vetted';
+UPDATE prospects SET stage = 'proposal'  WHERE stage = 'brief';
+
+CREATE INDEX IF NOT EXISTS idx_prospects_fit         ON prospects(fit_score DESC);
+CREATE INDEX IF NOT EXISTS idx_prospects_next_action ON prospects(next_action_at);
+CREATE INDEX IF NOT EXISTS idx_prospects_city        ON prospects(city);
+
+-- Activity log per lead (calls, emails, meetings, notes, stage changes)
+CREATE TABLE IF NOT EXISTS prospect_activities (
+  id           SERIAL PRIMARY KEY,
+  prospect_id  INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  type         TEXT NOT NULL DEFAULT 'note',   -- note|call|email|meeting|stage_change
+  body         TEXT,
+  created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_activities_prospect ON prospect_activities(prospect_id, created_at DESC);
+
+-- Work projects — linked to a client (prospect) or standalone
+CREATE TABLE IF NOT EXISTS projects (
+  id           SERIAL PRIMARY KEY,
+  name         TEXT NOT NULL,
+  prospect_id  INTEGER REFERENCES prospects(id) ON DELETE SET NULL,
+  status       TEXT NOT NULL DEFAULT 'planning', -- planning|active|on_hold|done|cancelled
+  priority     TEXT NOT NULL DEFAULT 'medium',   -- low|medium|high
+  value        NUMERIC(12,2),
+  start_date   DATE,
+  due_date     DATE,
+  description  TEXT,
+  created_at   TIMESTAMPTZ DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+
+DROP TRIGGER IF EXISTS projects_updated_at ON projects;
+CREATE TRIGGER projects_updated_at
+  BEFORE UPDATE ON projects
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id           SERIAL PRIMARY KEY,
+  project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title        TEXT NOT NULL,
+  done         BOOLEAN NOT NULL DEFAULT FALSE,
+  due_date     DATE,
+  sort_order   INTEGER DEFAULT 0,
+  created_at   TIMESTAMPTZ DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
