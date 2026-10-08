@@ -1,0 +1,3 @@
+{ "name": "FlowForward CRM", "short_name": "FlowForward", "start_url": "/", "display": "standalone",
+  "background_color": "#F5F7F6", "theme_color": "#2F6B57",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }] }

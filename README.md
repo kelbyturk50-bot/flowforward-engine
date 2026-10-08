@@ -77,8 +77,56 @@ curl -X POST https://your-railway-url.railway.app/api/runs/trigger
 
 ## API Reference
 
+All `/api/*` routes require the `x-api-key` header once `CRM_API_KEY` is set.
+
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/health` | Server health check (no key needed) |
+| GET | `/api/focus` | Today queue: follow-ups due, best untouched leads, gone-quiet deals, tasks due this week |
+| GET | `/api/prospects` | Leads, ranked by fit. Filters: `stage` (list, `open`, `closed`), `tier`, `industry`, `city`, `q`, `min_fit`, `sort`, `limit`, `offset` |
+| POST | `/api/prospects` | Add a lead by hand |
+| GET | `/api/prospects/stats` | Counts by stage, tier, industry |
+| GET | `/api/prospects/meta` | Filter options (stages, industries, cities) |
+| POST | `/api/prospects/rescore` | Recompute every fit score |
+| GET | `/api/prospects/:id` | Lead with activity log and linked projects |
+| PATCH | `/api/prospects/:id` | Update stage, contact info, next step, value, fit boost, notes |
+| POST | `/api/prospects/:id/activities` | Log a call, email, meeting or note |
+| POST | `/api/prospects/:id/convert` | Mark won and create a linked project |
+| DELETE | `/api/prospects/:id` | Remove a lead |
+| GET/POST | `/api/projects` | List or create projects (client-linked or internal) |
+| GET/PATCH/DELETE | `/api/projects/:id` | One project with its tasks |
+| POST | `/api/projects/:id/tasks` | Add a task |
+| PATCH/DELETE | `/api/tasks/:id` | Update or remove a task |
+| GET | `/api/runs` | Last 20 discovery run logs |
+| POST | `/api/runs/trigger` | Manually trigger a discovery run |
+
+## Fit scoring
+
+Every lead gets a 0–100 fit score and an A–D tier, recomputed on boot, after each discovery run, and whenever a scoring input changes. The breakdown is stored in `fit_reasons` and shown in the CRM.
+
+| Factor | Points | Logic |
+|---|---|---|
+| Industry | 30 | Automation leverage per trade (`src/scoring/config.js`) |
+| Size | 25 | Review count as a job-volume proxy; sweet spot 75–400 |
+| Reputation | 10 | Google rating |
+| Reachability | 15 | Real website + phone (social-only pages score lower) |
+| Location | 10 | In your drive-to cities (`FIT_HOME_CITIES`) |
+| Franchise | −20 | National brands / franchises |
+| Your boost | ±20 | Manual adjustment per lead |
+
+Tiers: A ≥ 80, B ≥ 65, C ≥ 50, D below. Tune everything in `src/scoring/config.js`, then hit "Re-rank all leads" in Settings.
+
+## CRM frontend (`web/`)
+
+Vite + React app deployed on Vercel. Views: Today, Leads, Pipeline (drag-and-drop), Projects, Settings.
+
+```bash
+cd web && npm install && npm run dev   # http://localhost:5173
+```
+
+Deploy: Vercel → Add New Project → import this repo → set **Root Directory** to `web` → deploy. Optionally set `VITE_API_URL`. On first open, enter the API key in Settings (stored per device).
+
+--------|------|-------------|
 | GET | `/health` | Server health check |
 | GET | `/api/prospects` | All prospects (optional `?stage=found&industry=HVAC`) |
 | GET | `/api/prospects/stats` | Pipeline counts by stage/industry |

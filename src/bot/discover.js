@@ -10,6 +10,7 @@ require('dotenv').config();
 const pool = require('../db/client');
 const { searchPlaces, normalizePplace } = require('./google-places');
 const INDUSTRIES = require('./industries');
+const { rescore } = require('../scoring/fit');
 
 const TARGET_MARKETS = (process.env.TARGET_MARKETS || 'Salt Lake City UT')
   .split(',')
@@ -104,6 +105,14 @@ async function runDiscovery() {
      WHERE id=$7`,
     [new Date(), queriesRun, totalFound, newAdded, errors, errors > 0 ? 'done_with_errors' : 'done', runId]
   );
+
+  // Rank everything (new leads + any config changes)
+  try {
+    const n = await rescore();
+    console.log(`[bot] Fit scores refreshed for ${n} prospects`);
+  } catch (err) {
+    console.error('[bot] ✗ Rescore failed:', err.message);
+  }
 
   console.log(`\n[bot] ═══ Run Complete ═══`);
   console.log(`[bot] Queries run : ${queriesRun}`);
