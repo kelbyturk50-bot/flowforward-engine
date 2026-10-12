@@ -21,6 +21,9 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', ts: new Date().toISOString() });
 });
 
+// Public one-page proposals (no API key — the slug is unguessable)
+app.use('/p', require('./proposals/onepager').router);
+
 // ─── Routes ───────────────────────────────────────────────────────────────
 app.use('/api', requireApiKey);
 app.use('/api/prospects', require('./api/prospects'));
@@ -28,6 +31,7 @@ app.use('/api/projects',  projects);
 app.use('/api/tasks',     tasks);
 app.use('/api/focus',     require('./api/focus'));
 app.use('/api/runs',      require('./api/runs'));
+app.use('/api/proposals', require('./api/proposals'));
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────
 const CRON_SCHEDULE = process.env.DISCOVERY_CRON || '0 6 * * *';
@@ -43,6 +47,19 @@ if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_CRON !== '1') {
     }
   }, { timezone: process.env.CRON_TZ || 'America/Denver' });
   console.log(`[server] Discovery cron scheduled: ${CRON_SCHEDULE} (${process.env.CRON_TZ || 'America/Denver'})`);
+
+  // ─── Proposal bot: nightly drafts + follow-up sender / inbox watcher ─────
+  const pcfg = require('./proposals/config');
+  if (process.env.DISABLE_PROPOSAL_CRON !== '1') {
+    cron.schedule(pcfg.CRON, async () => {
+      if (!pcfg.anthropicConfigured()) return console.log('[cron] Proposal drafting skipped: ANTHROPIC_API_KEY not set');
+      const { runProposalBatch } = require('./proposals/draft');
+      try { await runProposalBatch({ trigger: 'nightly' }); }
+      catch (err) { console.error('[cron] Proposal run failed:', err.message); }
+    }, { timezone: pcfg.SEND_TZ });
+    cron.schedule(pcfg.SENDER_CRON, () => require('./proposals/send').senderTick(), { timezone: pcfg.SEND_TZ });
+    console.log(`[server] Proposal drafting scheduled: ${pcfg.CRON}; follow-ups/inbox: ${pcfg.SENDER_CRON}`);
+  }
 }
 
 // ─── Start ─────────────────────────────────────────────────────────────────

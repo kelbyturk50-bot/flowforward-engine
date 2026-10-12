@@ -36,10 +36,11 @@ export default function Today({ version, bump, openLead, openProject }) {
       {c && (
         <dl className="tally">
           <div><dt>Follow-ups due</dt><dd className={data.followups_due.length ? 'hot' : ''}>{data.followups_due.length}</dd></div>
+          <div><dt><a href="#/proposals">Proposals to review</a></dt><dd className={c.proposals_to_review ? 'hot' : ''}>{c.proposals_to_review ?? 0}</dd></div>
           <div><dt>Open A-tier leads</dt><dd>{c.a_tier_open}</dd></div>
           <div><dt>Qualified + proposal</dt><dd>{c.hot}{c.pipeline_value ? <small> {money(c.pipeline_value)}</small> : null}</dd></div>
           <div><dt>Active projects</dt><dd>{c.active_projects}</dd></div>
-          <div><dt>New in 24h</dt><dd>{c.new_24h}</dd></div>
+          <div><dt>Replies this week</dt><dd>{c.proposal_replies_7d ?? 0}</dd></div>
         </dl>
       )}
 

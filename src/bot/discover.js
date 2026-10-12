@@ -9,7 +9,9 @@
 require('dotenv').config();
 const pool = require('../db/client');
 const { searchPlaces, normalizePplace } = require('./google-places');
-const INDUSTRIES = require('./industries');
+const { EXCLUDED_INDUSTRIES } = require('../proposals/config');
+// Industries listed in EXCLUDED_INDUSTRIES (default: Pest Control) aren't searched.
+const INDUSTRIES = require('./industries').filter(i => !EXCLUDED_INDUSTRIES.includes(i.industry));
 const { rescore } = require('../scoring/fit');
 
 const TARGET_MARKETS = (process.env.TARGET_MARKETS || 'Salt Lake City UT')

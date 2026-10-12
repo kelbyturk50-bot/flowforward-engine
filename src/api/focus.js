@@ -40,7 +40,9 @@ router.get('/', async (req, res) => {
                     (SELECT COUNT(*) FROM prospects WHERE stage IN ('qualified','proposal'))::int AS hot,
                     (SELECT COALESCE(SUM(est_value),0) FROM prospects WHERE stage IN ('qualified','proposal'))::float AS pipeline_value,
                     (SELECT COUNT(*) FROM projects WHERE status = 'active')::int AS active_projects,
-                    (SELECT COUNT(*) FROM prospects WHERE discovered_at > NOW() - INTERVAL '24 hours')::int AS new_24h`, [CLOSED]),
+                    (SELECT COUNT(*) FROM prospects WHERE discovered_at > NOW() - INTERVAL '24 hours')::int AS new_24h,
+                    (SELECT COUNT(*) FROM proposals WHERE status = 'draft')::int AS proposals_to_review,
+                    (SELECT COUNT(*) FROM proposals WHERE status = 'replied' AND replied_at > NOW() - INTERVAL '7 days')::int AS proposal_replies_7d`, [CLOSED]),
     ]);
 
     res.json({

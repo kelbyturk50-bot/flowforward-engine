@@ -138,6 +138,59 @@ Deploy: Vercel → Add New Project → import this repo → set **Root Directory
 
 ---
 
+## Proposal bot
+
+Each night (3am Denver) the bot picks up to 5 new **A-tier** leads (stage `found`, not Pest Control, no proposal yet), researches them, and drafts a proposal for you to review in the CRM under **Proposals**. Nothing is ever sent until you click **Approve and send**.
+
+**Per lead it:**
+1. Reads their website (homepage + contact/about/services pages): emails, contact form, socials, and the tools they run (ServiceTitan, Housecall Pro, Jobber, Podium, chat widgets, booking, financing, site builder).
+2. Pulls up to 5 Google review texts and hours (Place Details).
+3. Has Claude (with a few web searches for the owner's name and socials) write: an analysis for you, a cold email, day-3 and day-10 follow-ups, and a personalized one-page proposal served at `/p/<slug>`.
+4. Flags poor fits (franchise, closed, wrong trade) and moves them to *Not a fit*; restore any you disagree with.
+
+**Sending** goes through Gmail (`flowforward50@gmail.com`) with an app password, so sent mail shows in that account and replies land in its inbox. Follow-ups go out as replies in the same thread on weekdays 8am–5pm. Every 15 minutes the bot checks the inbox and stops the sequence when the lead replies, books on Calendly, bounces, or asks not to be contacted (opt-outs are marked do-not-contact). Emails are plain text with one link and a CAN-SPAM footer (your mailing address + opt-out line).
+
+**Tuning:** edit any draft before sending (the AI's original is kept so edits can be compared), leave 👍/👎 and a note, ask for a rewrite with instructions, and set standing voice rules in **Settings → Proposal voice**. The bot reads your notes, recent feedback, and the last few emails you rewrote before sending on every new draft. The prompt and per-trade playbooks live in `src/proposals/prompt.js`.
+
+### Railway variables
+
+| Variable | Required | Default / notes |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | yes | From platform.claude.com → API keys |
+| `GMAIL_USER` | to send | `flowforward50@gmail.com` |
+| `GMAIL_APP_PASSWORD` | to send | Google Account → Security → 2-Step Verification → App passwords |
+| `SENDER_ADDRESS` | to send | Mailing address for the email footer (a PO box or virtual mailbox works) |
+| `SENDER_PHONE` | no | Shown on the one-pager and allowed in signatures |
+| `CALENDLY_URL` | no | `https://calendly.com/flowforward50` |
+| `PUBLIC_BASE_URL` | no | Where one-pagers are served; set this if you add a custom domain |
+| `PROPOSAL_MODEL` | no | `claude-sonnet-5-5` |
+| `PROPOSAL_NIGHTLY_COUNT` | no | `5` |
+| `PROPOSAL_TIERS` | no | `A` (e.g. `A,B` later) |
+| `EXCLUDED_INDUSTRIES` | no | `Pest Control` (also skipped by discovery) |
+| `PROPOSAL_CRON` | no | `0 3 * * *` |
+| `PROPOSAL_WEB_SEARCH` / `PROPOSAL_WEB_SEARCH_MAX` | no | on / `3` searches per lead |
+| `PROPOSAL_FETCH_REVIEWS` | no | on (Place Details, 1,000 free/month) |
+| `PROPOSAL_MAX_COST` | no | `0.75` USD hard cap per draft |
+| `SEND_DAILY_LIMIT` | no | `20` emails/day including follow-ups |
+| `FOLLOWUP_DAYS` | no | `3,10` |
+| `SEND_HOURS` / `SEND_DAYS` | no | `8,17` / `1,2,3,4,5` |
+
+### Endpoints
+
+| Method | Path | |
+|---|---|---|
+| GET | `/api/proposals?view=review\|out\|replied\|flagged\|closed` or `?prospect_id=` | Lists |
+| GET | `/api/proposals/summary` | Counts, setup problems, spend, sends today |
+| POST | `/api/proposals` `{prospect_id, instructions}` | Draft one now (any tier, ~1 min) |
+| GET/PATCH | `/api/proposals/:id` | Full proposal + versions + rendered email / edit copy, feedback |
+| POST | `/api/proposals/:id/send` | Approve and send the first email |
+| POST | `/api/proposals/:id/regenerate` `{instructions, fresh_research}` | New version |
+| POST | `/api/proposals/:id/stop` · `/replied` · `/discard` · `/restore` | Sequence control |
+| GET/POST | `/api/proposals/runs` · `/runs/trigger` | Nightly run history / run now |
+| GET/PUT | `/api/proposals/settings` | Voice notes |
+| POST | `/api/proposals/check-inbox` | Check replies + send due follow-ups now |
+| GET | `/p/:slug` | Public one-pager (`?preview=1` doesn't count a view) |
+
 ## Target markets
 
 Edit `TARGET_MARKETS` in your `.env` file. Format: `City State` (comma-separated).

@@ -121,3 +121,82 @@ CREATE TABLE IF NOT EXISTS tasks (
   completed_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Proposal bot (idempotent — applied automatically on boot)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS do_not_contact BOOLEAN NOT NULL DEFAULT FALSE; -- opted out / bounced
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS researched_at  TIMESTAMPTZ;
+
+-- One row per generated version. Regenerating creates a new version and marks
+-- the previous draft 'superseded'. Human edits land on the same row; the AI's
+-- untouched output is kept in ai_original so edits can be compared later.
+CREATE TABLE IF NOT EXISTS proposals (
+  id                SERIAL PRIMARY KEY,
+  prospect_id       INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  version           INTEGER NOT NULL DEFAULT 1,
+  status            TEXT NOT NULL DEFAULT 'draft',
+    -- draft | sent (sequence running) | replied | bounced | opted_out | finished | stopped | discarded | superseded
+  slug              TEXT UNIQUE NOT NULL,          -- public one-pager URL: /p/<slug>
+  to_email          TEXT,
+  to_name           TEXT,
+  subject           TEXT,
+  body              TEXT,                          -- first email
+  followup1         TEXT,                          -- day-3 nudge (sent as reply in thread)
+  followup2         TEXT,                          -- day-10 nudge
+  onepager          JSONB,                         -- {headline, intro, observations[], opportunities[], next_steps}
+  analysis          JSONB,                         -- {snapshot, pain_signals[], fit_verdict, fit_reason, owner_name, confidence...}
+  research          JSONB,                         -- raw signals gathered (site, reviews, socials, emails)
+  ai_original       JSONB,                         -- untouched AI copy for this version
+  instructions      TEXT,                          -- extra guidance given when regenerating
+  model             TEXT,
+  input_tokens      INTEGER DEFAULT 0,
+  output_tokens     INTEGER DEFAULT 0,
+  searches          INTEGER DEFAULT 0,
+  cost_usd          NUMERIC(10,4) DEFAULT 0,
+  feedback_rating   SMALLINT,                      -- 1 = good, -1 = bad
+  feedback_note     TEXT,
+  approved_at       TIMESTAMPTZ,
+  sent_at           TIMESTAMPTZ,
+  message_id        TEXT,                          -- Message-ID of the first email (threading)
+  followup1_due_at  TIMESTAMPTZ,
+  followup1_sent_at TIMESTAMPTZ,
+  followup2_due_at  TIMESTAMPTZ,
+  followup2_sent_at TIMESTAMPTZ,
+  replied_at        TIMESTAMPTZ,
+  stop_reason       TEXT,
+  views             INTEGER NOT NULL DEFAULT 0,    -- one-pager opens
+  last_viewed_at    TIMESTAMPTZ,
+  error             TEXT,
+  created_at        TIMESTAMPTZ DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_proposals_prospect ON proposals(prospect_id, version DESC);
+CREATE INDEX IF NOT EXISTS idx_proposals_status   ON proposals(status);
+
+DROP TRIGGER IF EXISTS proposals_updated_at ON proposals;
+CREATE TRIGGER proposals_updated_at
+  BEFORE UPDATE ON proposals
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- Nightly / manual drafting runs
+CREATE TABLE IF NOT EXISTS proposal_runs (
+  id           SERIAL PRIMARY KEY,
+  trigger      TEXT NOT NULL DEFAULT 'nightly',   -- nightly | manual
+  started_at   TIMESTAMPTZ DEFAULT NOW(),
+  finished_at  TIMESTAMPTZ,
+  status       TEXT NOT NULL DEFAULT 'running',   -- running | done | done_with_errors | failed
+  requested    INTEGER DEFAULT 0,
+  drafted      INTEGER DEFAULT 0,
+  errors       INTEGER DEFAULT 0,
+  cost_usd     NUMERIC(10,4) DEFAULT 0,
+  log          JSONB DEFAULT '[]'::jsonb
+);
+
+-- Small key/value store for settings editable from the CRM (e.g. proposal voice notes)
+CREATE TABLE IF NOT EXISTS app_settings (
+  key         TEXT PRIMARY KEY,
+  value       JSONB,
+  updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
