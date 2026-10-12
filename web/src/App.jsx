@@ -3,6 +3,8 @@ import Today from './views/Today';
 import Leads from './views/Leads';
 import Pipeline from './views/Pipeline';
 import Projects from './views/Projects';
+import Proposals from './views/Proposals';
+import ProposalDrawer from './views/ProposalDrawer';
 import Settings from './views/Settings';
 import LeadDrawer from './views/LeadDrawer';
 import ProjectDrawer from './views/ProjectDrawer';
@@ -12,6 +14,7 @@ import { settings } from './api';
 const ROUTES = [
   { id: 'today',    label: 'Today',    icon: 'M4 12h4l3-8 4 16 3-8h2' },
   { id: 'leads',    label: 'Leads',    icon: 'M4 6h16M4 12h16M4 18h10' },
+  { id: 'proposals', label: 'Proposals', icon: 'M4 6l8 6 8-6M4 6h16v12H4z' },
   { id: 'pipeline', label: 'Pipeline', icon: 'M4 5v14M10 5v10M16 5v6M22 5v3' },
   { id: 'projects', label: 'Projects', icon: 'M4 7h16v12H4zM9 7V4h6v3' },
   { id: 'settings', label: 'Settings', icon: 'M12 8a4 4 0 100 8 4 4 0 000-8zM12 2v3M12 19v3M2 12h3M19 12h3' },
@@ -26,6 +29,7 @@ export default function App() {
   const [route, setRoute] = useState(readRoute);
   const [leadId, setLeadId] = useState(null);
   const [projectId, setProjectId] = useState(null);
+  const [proposalId, setProposalId] = useState(null);
   const [version, setVersion] = useState(0);
   const [authProblem, setAuthProblem] = useState(false);
 
@@ -38,9 +42,10 @@ export default function App() {
   }, []);
 
   const bump = useCallback(() => setVersion(v => v + 1), []);
-  const openLead = useCallback((id) => { setProjectId(null); setLeadId(id); }, []);
-  const openProject = useCallback((id) => { setLeadId(null); setProjectId(id); }, []);
-  const shared = { version, bump, openLead, openProject };
+  const openLead = useCallback((id) => { setProjectId(null); setProposalId(null); setLeadId(id); }, []);
+  const openProject = useCallback((id) => { setLeadId(null); setProposalId(null); setProjectId(id); }, []);
+  const openProposal = useCallback((id) => { setLeadId(null); setProjectId(null); setProposalId(id); }, []);
+  const shared = { version, bump, openLead, openProject, openProposal };
 
   return (
     <div className="shell">
@@ -61,6 +66,7 @@ export default function App() {
       <main id="main" className="main">
         {route === 'today'    && <Today {...shared} />}
         {route === 'leads'    && <Leads {...shared} />}
+        {route === 'proposals' && <Proposals {...shared} />}
         {route === 'pipeline' && <Pipeline {...shared} />}
         {route === 'projects' && <Projects {...shared} />}
         {route === 'settings' && <Settings {...shared} authProblem={authProblem} onSaved={() => { setAuthProblem(false); bump(); }} />}
@@ -68,6 +74,7 @@ export default function App() {
 
       <LeadDrawer id={leadId} onClose={() => setLeadId(null)} {...shared} />
       <ProjectDrawer id={projectId} onClose={() => setProjectId(null)} {...shared} />
+      <ProposalDrawer id={proposalId} onClose={() => setProposalId(null)} {...shared} />
       <Toaster />
     </div>
   );

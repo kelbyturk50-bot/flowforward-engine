@@ -74,7 +74,7 @@ export const addDays = (n) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-export function Drawer({ open, onClose, children, label }) {
+export function Drawer({ open, onClose, children, label, wide }) {
   const ref = useRef(null);
   useEffect(() => {
     if (!open) return;
@@ -86,7 +86,7 @@ export function Drawer({ open, onClose, children, label }) {
   if (!open) return null;
   return (
     <div className="drawer-wrap" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <aside className="drawer" role="dialog" aria-modal="true" aria-label={label} tabIndex={-1} ref={ref}>
+      <aside className={`drawer ${wide ? 'drawer-wide' : ''}`} role="dialog" aria-modal="true" aria-label={label} tabIndex={-1} ref={ref}>
         <button className="drawer-close" onClick={onClose} aria-label="Close">×</button>
         {children}
       </aside>
@@ -130,3 +130,37 @@ export function Toaster() {
 export const telHref = (p) => p ? 'tel:' + p.replace(/[^\d+]/g, '') : null;
 export const mapsHref = (lead) => 'https://www.google.com/maps/search/?api=1&query=' +
   encodeURIComponent([lead.company, lead.address || lead.city, lead.state].filter(Boolean).join(' '));
+
+// ── Proposal bot ─────────────────────────────────────────
+export const PROPOSAL_STATUS = {
+  draft: 'To review', sending: 'Sending', sent: 'Out', replied: 'Replied', bounced: 'Bounced', opted_out: 'Opted out',
+  finished: 'No reply', stopped: 'Stopped', discarded: 'Discarded', superseded: 'Older version',
+};
+export function ProposalChip({ status, verdict }) {
+  const label = status === 'discarded' && verdict === 'disqualify' ? 'Not a fit' : (PROPOSAL_STATUS[status] || status);
+  return <span className={`pchip pchip-${status}`}>{label}</span>;
+}
+
+export const money2 = (v) => v == null ? '' : `$${Number(v).toFixed(2)}`;
+
+// Lightweight cold-email checks: things that hurt deliverability or reads.
+const SPAMMY = ['guarantee', 'act now', 'limited time', 'no obligation', 'risk-free', 'click here', '100%', 'winner',
+  'urgent', 'cash', 'earn', 'increase sales', 'synergy', 'leverage', 'cutting-edge', 'revolutionize', 'game-changer', 'unlock'];
+export function emailChecks({ subject = '', body = '' }, { firstEmail = true } = {}) {
+  const out = [];
+  const words = body.trim() ? body.trim().split(/\s+/).length : 0;
+  const links = (body.match(/https?:\/\/|\{\{\s*(ONEPAGER|CALENDLY)_URL\s*\}\}/gi) || []).length;
+  if (firstEmail && words > 130) out.push(`${words} words. Under ~110 gets read more.`);
+  if (!firstEmail && words > 80) out.push(`${words} words. Follow-ups work best under ~60.`);
+  if (firstEmail && links === 0) out.push('No link to the one-pager ({{ONEPAGER_URL}}).');
+  if (links > 1 && firstEmail) out.push(`${links} links. One link is safest for a cold email.`);
+  if (subject && subject.length > 60) out.push('Long subject line.');
+  if (/!/.test(subject)) out.push('Exclamation mark in the subject.');
+  if (subject && subject === subject.toUpperCase() && /[A-Z]/.test(subject)) out.push('Subject is all caps.');
+  const text = `${subject} ${body}`.toLowerCase();
+  const hits = SPAMMY.filter(w => /^[\w -]+$/.test(w) ? new RegExp(`\\b${w.replace(/-/g, '[- ]?')}\\b`).test(text) : text.includes(w));
+  if (hits.length) out.push(`Watch these words: ${hits.join(', ')}.`);
+  if (/\$\d|\d%/.test(subject)) out.push('Dollar amounts or percents in the subject.');
+  if (/\bfree\b/i.test(subject)) out.push('"Free" in the subject line trips spam filters; keep it in the body.');
+  return { words, links, issues: out };
+}

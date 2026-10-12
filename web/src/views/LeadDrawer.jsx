@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { Drawer, FitBadge, STAGES, Stars, ErrorNote, money, relDate, isOverdue, timeAgo, addDays, telHref, mapsHref, statusLabel, toast } from '../ui';
+import { Drawer, FitBadge, STAGES, Stars, ErrorNote, money, money2, relDate, isOverdue, timeAgo, addDays, telHref, mapsHref, statusLabel, toast, ProposalChip } from '../ui';
 
 const ACT_LABEL = { note: 'Note', call: 'Call', email: 'Email', meeting: 'Meeting', stage_change: 'Stage' };
 
-export default function LeadDrawer({ id, onClose, bump, openProject }) {
+export default function LeadDrawer({ id, onClose, bump, openProject, openProposal }) {
   const [lead, setLead] = useState(null);
   const [error, setError] = useState(null);
 
@@ -29,7 +29,7 @@ export default function LeadDrawer({ id, onClose, bump, openProject }) {
     <Drawer open={!!id} onClose={onClose} label={lead?.company || 'Lead'}>
       {error && <div className="drawer-body"><ErrorNote error={error} /></div>}
       {!lead && !error && <div className="drawer-body"><p className="muted">Loading…</p></div>}
-      {lead && lead.id === id && <LeadBody key={lead.id} lead={lead} save={save} setLead={setLead} bump={bump} openProject={openProject} />}
+      {lead && lead.id === id && <LeadBody key={lead.id} lead={lead} save={save} setLead={setLead} bump={bump} openProject={openProject} openProposal={openProposal} />}
     </Drawer>
   );
 }
@@ -46,7 +46,7 @@ function Field({ label, value, onSave, type = 'text', placeholder, multiline }) 
   );
 }
 
-function LeadBody({ lead, save, setLead, bump, openProject }) {
+function LeadBody({ lead, save, setLead, bump, openProject, openProposal }) {
   const [boost, setBoost] = useState(lead.fit_boost || 0);
   const [actType, setActType] = useState('call');
   const [actBody, setActBody] = useState('');
@@ -117,6 +117,8 @@ function LeadBody({ lead, save, setLead, bump, openProject }) {
           <p className={isOverdue(lead.next_action_at) ? 'overdue' : 'muted'}>Due {relDate(lead.next_action_at)}</p>
         )}
       </section>
+
+      <ProposalBlock lead={lead} bump={bump} openProposal={openProposal} />
 
       <section className="block">
         <h3>Log a touch</h3>
@@ -194,5 +196,44 @@ function LeadBody({ lead, save, setLead, bump, openProject }) {
         {lead.est_value && <span className="muted small"> Carries over {money(lead.est_value)}</span>}
       </section>
     </div>
+  );
+}
+
+function ProposalBlock({ lead, bump, openProposal }) {
+  const [list, setList] = useState(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    api.proposals({ prospect_id: lead.id }).then(r => live && setList(r.proposals)).catch(() => live && setList([]));
+    return () => { live = false; };
+  }, [lead.id]);
+  const current = list?.find(p => !['superseded'].includes(p.status));
+  const draft = async () => {
+    setBusy(true);
+    try {
+      const p = await api.draftProposal(lead.id);
+      toast(`Proposal drafted for ${lead.company}.`);
+      bump(); openProposal(p.id);
+    } catch (e) { toast(e.message); setBusy(false); }
+  };
+  if (!list) return null;
+  return (
+    <section className="block">
+      <h3>Proposal</h3>
+      {current ? (
+        <div className="prop-mini">
+          <ProposalChip status={current.status} verdict={current.fit_verdict} />
+          <span className="grow">{current.subject ? `“${current.subject}”` : `Version ${current.version}`}
+            <span className="muted small"> · v{current.version} · {money2(current.cost_usd)}{current.sent_at ? ` · sent ${timeAgo(current.sent_at)}` : ''}</span></span>
+          <button className="btn btn-sm" onClick={() => openProposal(current.id)}>Open</button>
+        </div>
+      ) : (
+        <>
+          <p className="muted">The bot reads their site, reviews and socials, then drafts an email sequence and a one-page proposal for you to review. Nothing sends until you approve it.</p>
+          <div><button className="btn" onClick={draft} disabled={busy || lead.do_not_contact}>{busy ? 'Researching and writing… (about a minute)' : 'Draft a proposal'}</button></div>
+          {lead.do_not_contact && <p className="warn-text small">This lead asked not to be contacted.</p>}
+        </>
+      )}
+    </section>
   );
 }
