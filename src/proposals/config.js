@@ -53,7 +53,9 @@ const config = {
   NIGHTLY_COUNT:       num(process.env.PROPOSAL_NIGHTLY_COUNT, 5),
   TIERS:               list(process.env.PROPOSAL_TIERS, 'A'),
   EXCLUDED_INDUSTRIES: list(process.env.EXCLUDED_INDUSTRIES, 'Pest Control'),
-  CRON:                process.env.PROPOSAL_CRON || '0 3 * * *',      // nightly 3am
+  // Automatic nightly drafting is OFF unless PROPOSAL_AUTO_DRAFT=1. Drafts are made on demand from the CRM.
+  AUTO_DRAFT:          process.env.PROPOSAL_AUTO_DRAFT === '1',
+  CRON:                process.env.PROPOSAL_CRON || '0 3 * * *',      // used only when AUTO_DRAFT is on
   // Research
   WEB_SEARCH:          process.env.PROPOSAL_WEB_SEARCH !== '0',        // let Claude search the web (owner name, socials, news)
   WEB_SEARCH_MAX:      num(process.env.PROPOSAL_WEB_SEARCH_MAX, 3),

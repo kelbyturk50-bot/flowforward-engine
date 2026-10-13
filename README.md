@@ -140,7 +140,7 @@ Deploy: Vercel → Add New Project → import this repo → set **Root Directory
 
 ## Proposal bot
 
-Each night (3am Denver) the bot picks up to 5 new **A-tier** leads (stage `found`, not Pest Control, no proposal yet), researches them, and drafts a proposal for you to review in the CRM under **Proposals**. Nothing is ever sent until you click **Approve and send**.
+Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and click **Draft**, and the bot takes your top **A-tier** leads (stage `found`, not Pest Control, no proposal yet), researches them, and writes drafts for review. You can also draft for any single lead from its page. Nothing is ever sent until you click **Approve and send**. (Set `PROPOSAL_AUTO_DRAFT=1` to also draft automatically each night at `PROPOSAL_CRON`.)
 
 **Per lead it:**
 1. Reads their website (homepage + contact/about/services pages): emails, contact form, socials, and the tools they run (ServiceTitan, Housecall Pro, Jobber, Podium, chat widgets, booking, financing, site builder).
@@ -167,7 +167,8 @@ Each night (3am Denver) the bot picks up to 5 new **A-tier** leads (stage `found
 | `PROPOSAL_NIGHTLY_COUNT` | no | `5` |
 | `PROPOSAL_TIERS` | no | `A` (e.g. `A,B` later) |
 | `EXCLUDED_INDUSTRIES` | no | `Pest Control` (also skipped by discovery) |
-| `PROPOSAL_CRON` | no | `0 3 * * *` |
+| `PROPOSAL_AUTO_DRAFT` | no | off. `1` = also draft automatically each night |
+| `PROPOSAL_CRON` | no | `0 3 * * *` (only used when auto-draft is on) |
 | `PROPOSAL_WEB_SEARCH` / `PROPOSAL_WEB_SEARCH_MAX` | no | on / `3` searches per lead |
 | `PROPOSAL_FETCH_REVIEWS` | no | on (Place Details, 1,000 free/month) |
 | `PROPOSAL_MAX_COST` | no | `0.75` USD hard cap per draft |
@@ -186,7 +187,7 @@ Each night (3am Denver) the bot picks up to 5 new **A-tier** leads (stage `found
 | POST | `/api/proposals/:id/send` | Approve and send the first email |
 | POST | `/api/proposals/:id/regenerate` `{instructions, fresh_research}` | New version |
 | POST | `/api/proposals/:id/stop` · `/replied` · `/discard` · `/restore` | Sequence control |
-| GET/POST | `/api/proposals/runs` · `/runs/trigger` | Nightly run history / run now |
+| GET/POST | `/api/proposals/runs` · `/runs/trigger` | Drafting run history / draft N now |
 | GET/PUT | `/api/proposals/settings` | Voice notes |
 | POST | `/api/proposals/check-inbox` | Check replies + send due follow-ups now |
 | GET | `/p/:slug` | Public one-pager (`?preview=1` doesn't count a view) |

@@ -352,6 +352,13 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .prop-mini { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .tally dt a { color: inherit; }
 
+.generate { display: grid; grid-template-columns: 1fr auto; gap: .4rem 1.5rem; align-items: end; padding-bottom: 1rem; }
+.gen-copy p { margin-top: .25rem; max-width: 62ch; }
+.gen-controls { display: flex; gap: .5rem; align-items: flex-end; }
+.gen-count { width: 92px; }
+.gen-note { grid-column: 1 / -1; }
+@media (max-width: 860px) { .generate { grid-template-columns: 1fr; } .gen-controls .btn { flex: 1; } }
+
 /* ── Notes & toast ─────────────────────────────────────── */
 .error-note { display: flex; justify-content: space-between; align-items: center; gap: 1rem; background: var(--rust-wash); color: var(--rust); border-radius: var(--radius-s); padding: .7rem 1rem; margin-bottom: 1rem; }
 .error-text { color: var(--rust); }

@@ -29,18 +29,23 @@ function sequenceLine(p) {
 export default function Proposals({ version, bump, openProposal }) {
   const [tab, setTab] = useState(readTab);
   const [busy, setBusy] = useState(false);
+  const [count, setCount] = useState(3);
   const summary = useAsync(() => api.proposalSummary(), [version]);
   const list = useAsync(() => api.proposals({ view: tab }), [tab, version]);
   const s = summary.data;
 
   const go = (id) => { setTab(id); history.replaceState(null, '', `#/proposals?tab=${id}`); };
 
+  const needsKey = !!s?.setup?.some(x => x.includes('ANTHROPIC'));
   const draftNow = async () => {
     setBusy(true);
     try {
-      const r = await api.triggerProposals(s?.config?.nightly_count || 5);
-      toast(r.message + ' They show up here in a few minutes.');
-      setTimeout(() => { bump(); setBusy(false); }, 45000);
+      await api.triggerProposals(count);
+      const n = Math.min(count, s?.eligible_leads || count);
+      toast(`Drafting ${n}. Each takes about a minute; they appear below as they finish.`);
+      go('review');
+      // Refresh a few times while the drafts come in
+      [30, 60, 90, 120, 180].forEach((sec, i, all) => setTimeout(() => { bump(); if (i === all.length - 1) setBusy(false); }, sec * 1000));
     } catch (e) { toast(e.message); setBusy(false); }
   };
 
@@ -54,14 +59,35 @@ export default function Proposals({ version, bump, openProposal }) {
           <h1>Proposals</h1>
           <p className="muted">
             {s ? <>
-              {s.eligible_leads} {s.config.tiers.join('/')}-tier leads waiting · {s.sent_today}/{s.daily_limit} emails sent today · {money2(s.spend_this_month)} on drafts this month
+              {s.eligible_leads} {s.config.tiers.join('/')}-tier {s.eligible_leads === 1 ? 'lead' : 'leads'} without a proposal · {s.sent_today}/{s.daily_limit} emails sent today · {money2(s.spend_this_month)} on drafts this month
             </> : ' '}
           </p>
         </div>
-        <button className="btn" onClick={draftNow} disabled={busy || s?.running || !s || s.setup.some(x => x.includes('ANTHROPIC'))}>
-          {busy || s?.running ? 'Drafting…' : `Draft ${s?.config?.nightly_count || 5} now`}
-        </button>
       </header>
+
+      <section className="panel generate" aria-label="Generate drafts">
+        <div className="gen-copy">
+          <h2>Generate drafts</h2>
+          <p className="muted">
+            Researches your top {s?.config?.tiers?.join('/') || 'A'}-tier leads that don't have a proposal yet and writes drafts for you to review.
+            Nothing is sent. About $0.10–0.15 each.{s ? ` ${s.eligible_leads} ${s.eligible_leads === 1 ? 'lead' : 'leads'} ready.` : ''}
+            {s?.config && !s.config.auto_draft ? ' Runs only when you click.' : ''}
+          </p>
+          <p className="muted small">To draft for one specific lead, open it from Leads and click "Draft a proposal".</p>
+        </div>
+        <div className="gen-controls">
+          <label className="gen-count">How many
+            <select className="input" value={count} onChange={e => setCount(Number(e.target.value))} disabled={busy || s?.running}>
+              {[1, 2, 3, 5, 10].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+          <button className="btn" onClick={draftNow} disabled={busy || s?.running || !s || needsKey || s.eligible_leads === 0}>
+            {busy || s?.running ? 'Drafting…' : `Draft ${count}`}
+          </button>
+        </div>
+        {needsKey && <p className="warn-text small gen-note">Add ANTHROPIC_API_KEY in Railway first, then refresh this page.</p>}
+        {s && !needsKey && s.eligible_leads === 0 && <p className="muted small gen-note">No untouched {s.config.tiers.join('/')}-tier leads left. Run discovery from Settings, or draft for a specific lead from its page.</p>}
+      </section>
 
       {s?.setup?.length > 0 && (
         <div className="setup-note" role="note">
@@ -85,7 +111,7 @@ export default function Proposals({ version, bump, openProposal }) {
         {list.loading && !list.data && <p className="muted">Loading…</p>}
         {list.data && rows.length === 0 && (
           <p className="empty">{tab === 'review'
-            ? `Nothing to review. The bot drafts ${s?.config?.nightly_count || 5} each night for new ${s?.config?.tiers?.join('/') || 'A'}-tier leads, or use "Draft now".`
+            ? 'Nothing to review yet. Use "Generate drafts" above.'
             : 'Nothing here yet.'}</p>
         )}
         {rows.length > 0 && (

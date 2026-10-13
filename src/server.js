@@ -51,14 +51,18 @@ if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_CRON !== '1') {
   // ─── Proposal bot: nightly drafts + follow-up sender / inbox watcher ─────
   const pcfg = require('./proposals/config');
   if (process.env.DISABLE_PROPOSAL_CRON !== '1') {
-    cron.schedule(pcfg.CRON, async () => {
-      if (!pcfg.anthropicConfigured()) return console.log('[cron] Proposal drafting skipped: ANTHROPIC_API_KEY not set');
-      const { runProposalBatch } = require('./proposals/draft');
-      try { await runProposalBatch({ trigger: 'nightly' }); }
-      catch (err) { console.error('[cron] Proposal run failed:', err.message); }
-    }, { timezone: pcfg.SEND_TZ });
+    // Nightly drafting only when PROPOSAL_AUTO_DRAFT=1; otherwise drafts are made on demand.
+    if (pcfg.AUTO_DRAFT) {
+      cron.schedule(pcfg.CRON, async () => {
+        if (!pcfg.anthropicConfigured()) return console.log('[cron] Proposal drafting skipped: ANTHROPIC_API_KEY not set');
+        const { runProposalBatch } = require('./proposals/draft');
+        try { await runProposalBatch({ trigger: 'nightly' }); }
+        catch (err) { console.error('[cron] Proposal run failed:', err.message); }
+      }, { timezone: pcfg.SEND_TZ });
+    }
+    // Follow-ups for emails you approved + reply/opt-out detection. Sends nothing you haven't approved.
     cron.schedule(pcfg.SENDER_CRON, () => require('./proposals/send').senderTick(), { timezone: pcfg.SEND_TZ });
-    console.log(`[server] Proposal drafting scheduled: ${pcfg.CRON}; follow-ups/inbox: ${pcfg.SENDER_CRON}`);
+    console.log(`[server] Proposal drafting: ${pcfg.AUTO_DRAFT ? `automatic (${pcfg.CRON})` : 'on demand only'}; follow-ups/inbox: ${pcfg.SENDER_CRON}`);
   }
 }
 
