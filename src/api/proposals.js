@@ -63,7 +63,7 @@ router.get('/summary', async (req, res) => {
       sent_today: sentToday, daily_limit: cfg.SEND_DAILY_LIMIT,
       eligible_leads: eligible.rows[0].n,
       config: {
-        model: cfg.MODEL, nightly_count: cfg.NIGHTLY_COUNT, tiers: cfg.TIERS, excluded: cfg.EXCLUDED_INDUSTRIES, cron: cfg.CRON,
+        model: cfg.MODEL, nightly_count: cfg.NIGHTLY_COUNT, auto_draft: cfg.AUTO_DRAFT, tiers: cfg.TIERS, excluded: cfg.EXCLUDED_INDUSTRIES, cron: cfg.CRON,
         followup_days: cfg.FOLLOWUP_DAYS, web_search: cfg.WEB_SEARCH, reviews: cfg.FETCH_REVIEWS,
         sender: { name: cfg.SENDER.name, email: cfg.SENDER.email, calendly: cfg.SENDER.calendly, address: cfg.SENDER.address },
       },

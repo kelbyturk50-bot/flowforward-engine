@@ -115,7 +115,9 @@ function ProposalSettings({ version }) {
         {s?.setup?.length > 0 && <div className="setup-note"><strong>Finish setup in Railway</strong><ul>{s.setup.map(x => <li key={x}>{x}</li>)}</ul></div>}
         {c && (
           <dl className="facts">
-            <dt>Nightly</dt><dd>Drafts up to {c.nightly_count} for new {c.tiers.join('/')}-tier leads ({cronText(c.cron)}, Denver time). {s.eligible_leads} waiting.</dd>
+            <dt>Drafting</dt><dd>{c.auto_draft
+              ? <>Automatic: up to {c.nightly_count} new {c.tiers.join('/')}-tier leads {cronText(c.cron)} (Denver time).</>
+              : <>On demand only, from the Proposals page or a lead.</>} {s.eligible_leads} {c.tiers.join('/')}-tier leads ready.</dd>
             <dt>Skips</dt><dd>{c.excluded.join(', ') || 'nothing'}</dd>
             <dt>Research</dt><dd>Website{c.reviews ? ', Google reviews' : ''}{c.web_search ? ', web search (owner, socials)' : ''}. Model: {c.model}.</dd>
             <dt>Sends from</dt><dd>{c.sender.name} &lt;{c.sender.email}&gt; · booking link {c.sender.calendly}</dd>
