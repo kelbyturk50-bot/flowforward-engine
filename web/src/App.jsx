@@ -52,8 +52,8 @@ export default function App() {
       <a className="skip" href="#main">Skip to content</a>
       <nav className="rail" aria-label="Main">
         <div className="brand">
-          <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M8 50 L24 24 L36 38 L44 28 L58 50 Z" fill="currentColor"/><path d="M40 33 L44 28 L49 35 Z" className="brand-peak"/></svg>
-          <span>FlowForward</span>
+          <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M2 44 L20 16 L30 30 L42 12 L62 44 Z" className="brand-peaks"/><path d="M29 30 C24 36 22 42 30 46 C38 50 50 50 62 52 L62 58 C48 58 34 58 25 52 C17 47 21 37 29 30 Z" className="brand-river"/></svg>
+          <span>Flow<span className="brand-forward">Forward</span></span>
         </div>
         {ROUTES.map(r => (
           <a key={r.id} href={`#/${r.id}`} className={`rail-link ${route === r.id ? 'active' : ''}`} aria-current={route === r.id ? 'page' : undefined}>

@@ -13,8 +13,9 @@
 body{background:var(--paper);color:var(--ink);font-family:Barlow,system-ui,-apple-system,"Segoe UI",sans-serif;font-size:17px;line-height:1.6}
 .wrap{max-width:760px;margin:0 auto;padding:0 20px 48px}
 header{padding:28px 0}
-.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:1.15rem;color:var(--juniper);text-decoration:none}
-.brand img{width:34px;height:34px}
+.brand{display:inline-flex;align-items:center;gap:10px;font-weight:700;font-size:1.3rem;letter-spacing:-.015em;color:var(--ink);text-decoration:none}
+.brand svg{width:36px;height:36px;flex:none}
+.brand .fwd{color:var(--juniper)}
 h1{font-size:2.2rem;line-height:1.15;margin:20px 0 6px}
 h2{font-size:1.2rem;margin:32px 0 8px}
 p,li{margin:0 0 12px}
@@ -26,7 +27,7 @@ a:focus-visible{outline:3px solid var(--ochre);outline-offset:2px}
 </head>
 <body>
 <div class="wrap">
-<header><a class="brand" href="/about"><img src="/icon.svg" alt="">FlowForward</a></header>
+<header><a class="brand" href="/about" aria-label="FlowForward home"><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M2 44 L20 16 L30 30 L42 12 L62 44 Z" fill="#2F6B57"/><path d="M29 30 C24 36 22 42 30 46 C38 50 50 50 62 52 L62 58 C48 58 34 58 25 52 C17 47 21 37 29 30 Z" fill="#4F7FA8" stroke="#F3F6F5" stroke-width="2.5" stroke-linejoin="round"/></svg><span>Flow<span class="fwd">Forward</span></span></a></header>
 <main>
 <h1>Privacy Policy</h1>
 <p class="muted">Effective October 13, 2026</p>

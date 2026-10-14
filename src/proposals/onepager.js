@@ -8,6 +8,8 @@ const { SENDER } = require('./config');
 const router = express.Router();
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// "FlowForward" renders as the two-tone wordmark; any other company name stays plain.
+const wordmark = (name) => /^FlowForward$/.test(name) ? 'Flow<span class="fwd">Forward</span>' : esc(name);
 const para = (s) => esc(s).split(/\n{2,}/).map(x => `<p>${x.replace(/\n/g, '<br>')}</p>`).join('');
 const BOT_UA = /bot|crawler|spider|preview|slurp|facebookexternalhit|google-?(read|inspection)|linkedin|skype|whatsapp|proofpoint|mimecast|barracuda|scanner/i;
 
@@ -41,8 +43,9 @@ body{background:var(--paper);color:var(--ink);font-family:Barlow,system-ui,-appl
 .wrap{max-width:760px;margin:0 auto;padding:0 20px}
 header.top{background:var(--ink);color:#fff;padding:22px 0 64px;position:relative;overflow:hidden}
 header.top svg.ridge{position:absolute;left:0;right:0;bottom:-1px;width:100%;height:70px}
-.brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:.02em}
-.brand svg{width:30px;height:30px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:1.15rem;letter-spacing:-.015em}
+.brand svg{width:32px;height:32px;flex:none}
+.brand .fwd{color:#8CCFB2}
 .for{margin-top:40px;font-family:"Barlow Semi Condensed",Barlow,sans-serif;text-transform:uppercase;letter-spacing:.12em;font-size:.82rem;color:#B8C9C4}
 h1{font-size:clamp(1.8rem,5vw,2.6rem);line-height:1.12;margin:.35rem 0 0;font-weight:700;letter-spacing:-.01em;max-width:22ch}
 main{margin-top:-28px;position:relative}
@@ -77,7 +80,7 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
 </style></head>
 <body>
 <header class="top"><div class="wrap">
-  <div class="brand"><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M8 50 L24 24 L36 38 L44 28 L58 50 Z" fill="#5FAE8E"/><path d="M40 33 L44 28 L49 35 Z" fill="#E0B04A"/></svg>${esc(SENDER.company)}</div>
+  <div class="brand"><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M2 44 L20 16 L30 30 L42 12 L62 44 Z" fill="#F3F6F5"/><path d="M29 30 C24 36 22 42 30 46 C38 50 50 50 62 52 L62 58 C48 58 34 58 25 52 C17 47 21 37 29 30 Z" fill="#7FB0DA" stroke="#1E2A2F" stroke-width="2.5" stroke-linejoin="round"/></svg>${wordmark(SENDER.company)}</div>
   <p class="for">Prepared for ${esc(lead.company)}${lead.city ? ` · ${esc(lead.city)}` : ''}</p>
   <h1>${esc(o.headline || `A few ideas for ${lead.company}`)}</h1>
 </div>

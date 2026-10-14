@@ -61,9 +61,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
   position: sticky; top: 0; height: 100vh; padding: 1.25rem .75rem; border-right: 1px solid var(--line);
   display: flex; flex-direction: column; gap: .25rem; background: var(--surface);
 }
-.brand { display: flex; align-items: center; gap: .6rem; padding: 0 .6rem 1.25rem; font-weight: 700; font-size: 1.1rem; color: var(--juniper); }
-.brand svg { width: 30px; height: 30px; }
-.brand-peak { fill: var(--ochre); }
+.brand { display: flex; align-items: center; gap: .6rem; padding: 0 .6rem 1.25rem; font-weight: 700; font-size: 1.1rem; letter-spacing: -.015em; color: var(--ink); }
+.brand svg { width: 30px; height: 30px; flex: none; }
+.brand-peaks { fill: var(--juniper); }
+.brand-river { fill: var(--sky); stroke: var(--surface); stroke-width: 2.5; stroke-linejoin: round; }
+.brand-forward { color: var(--juniper); }
 .rail-link {
   display: flex; align-items: center; gap: .7rem; padding: .55rem .7rem; border-radius: var(--radius-s);
   color: var(--ink-2); text-decoration: none; font-weight: 500;
