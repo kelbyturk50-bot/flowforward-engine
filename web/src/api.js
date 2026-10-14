@@ -92,4 +92,7 @@ export const api = {
   proposalSettings:  ()             => request('GET', '/api/proposals/settings'),
   saveProposalSettings: (b)         => request('PUT', '/api/proposals/settings', b),
   checkInbox:        ()             => request('POST', '/api/proposals/check-inbox'),
+  gmailStatus:       ()             => request('GET', '/api/proposals/gmail/status'),
+  gmailConnect:      (return_to)    => request('POST', '/api/proposals/gmail/connect', { return_to }),
+  gmailDisconnect:   ()             => request('POST', '/api/proposals/gmail/disconnect'),
 };

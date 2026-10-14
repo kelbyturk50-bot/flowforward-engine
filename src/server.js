@@ -21,6 +21,22 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', ts: new Date().toISOString() });
 });
 
+// Google sign-in callback for "Connect Gmail" (public; protected by a one-time state value)
+app.get('/oauth/google/callback', async (req, res) => {
+  const gmail = require('./proposals/gmail');
+  let result;
+  try { result = await gmail.handleCallback(req.query); }
+  catch (err) { result = { ok: false, message: err.response?.data?.error_description || err.message }; }
+  const back = result.returnTo ? `${result.returnTo.replace(/#.*$/, '')}#/settings?gmail=${result.ok ? 'connected' : 'error'}` : null;
+  const esc = (t) => String(t || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  res.type('html').send(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gmail ${result.ok ? 'connected' : 'not connected'}</title>
+<body style="font-family:system-ui,sans-serif;max-width:520px;margin:12vh auto;padding:0 20px;color:#1E2A2F">
+<h1 style="font-size:1.5rem">${result.ok ? `Gmail connected` : `Gmail not connected`}</h1>
+<p>${result.ok ? `FlowForward can now send from <strong>${esc(result.email)}</strong> and watch its inbox for replies.` : esc(result.message)}</p>
+${back ? `<p><a href="${esc(back)}" style="color:#2F6B57;font-weight:600">Back to the CRM</a></p><script>setTimeout(()=>location.href=${JSON.stringify(back)},${result.ok ? 1500 : 6000})</script>` : '<p>You can close this tab.</p>'}
+</body>`);
+});
+
 // Public one-page proposals (no API key — the slug is unguessable)
 app.use('/p', require('./proposals/onepager').router);
 
