@@ -56,9 +56,11 @@ router.get('/summary', async (req, res) => {
     ]);
     const setup = [];
     if (!cfg.anthropicConfigured()) setup.push('Add ANTHROPIC_API_KEY in Railway Variables so the bot can write drafts.');
-    setup.push(...send.sendReadiness());
+    setup.push(...await send.sendReadiness());
+    const gstatus = await require('../proposals/gmail').status();
     res.json({
       counts, setup, running: isRunning(),
+      email: { mode: await send.mailMode(), gmail: gstatus },
       spend_this_month: spend.rows[0].month,
       sent_today: sentToday, daily_limit: cfg.SEND_DAILY_LIMIT,
       eligible_leads: eligible.rows[0].n,
@@ -97,6 +99,18 @@ router.put('/settings', async (req, res) => {
                       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`, [JSON.stringify(notes)]);
     res.json({ style_notes: notes });
   } catch (err) { fail(res, err); }
+});
+
+// Gmail connection (Gmail API over HTTPS; Railway blocks SMTP on non-Pro plans)
+const gmail = require('../proposals/gmail');
+router.get('/gmail/status', async (req, res) => {
+  try { res.json({ ...(await gmail.status()), redirect_uri: gmail.redirectUri() }); } catch (err) { fail(res, err); }
+});
+router.post('/gmail/connect', async (req, res) => {
+  try { res.json({ url: await gmail.authUrl(req.body?.return_to) }); } catch (err) { fail(res, err); }
+});
+router.post('/gmail/disconnect', async (req, res) => {
+  try { await gmail.disconnect(); res.json({ ok: true }); } catch (err) { fail(res, err); }
 });
 
 // POST /api/proposals/check-inbox — run the reply check + follow-up sender now

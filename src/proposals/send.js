@@ -15,18 +15,35 @@ const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const GENERIC_DOMAINS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'aol.com', 'live.com', 'msn.com', 'comcast.net', 'me.com', 'protonmail.com'];
 
+const gmail = require('./gmail');
+
+// How mail goes out: the Gmail API (HTTPS) when Gmail is connected in Settings;
+// otherwise SMTP with an app password (only works on Railway Pro, which allows SMTP).
 let transport = null;
-function mailer() {
-  if (!cfg.mailConfigured()) throw new Error('Email is not set up. Add GMAIL_USER and GMAIL_APP_PASSWORD in Railway Variables.');
-  if (!transport) {
-    transport = nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
-    });
-  }
-  return transport;
+let testTransport = null;
+async function mailMode() {
+  if (testTransport) return 'test';
+  if ((await gmail.status()).connected) return 'gmail_api';
+  if (cfg.mailConfigured()) return 'smtp';
+  return null;
 }
-function _setTransport(t) { transport = t; } // tests
+async function mailer() {
+  const mode = await mailMode();
+  if (mode === 'test') return testTransport;
+  if (mode === 'gmail_api') return gmail;
+  if (mode === 'smtp') {
+    if (!transport) {
+      transport = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+        connectionTimeout: 20000,
+      });
+    }
+    return transport;
+  }
+  throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
+}
+function _setTransport(t) { testTransport = t; } // tests
 
 const onepagerUrl = (p) => `${cfg.PUBLIC_BASE_URL}/p/${p.slug}`;
 
@@ -71,9 +88,14 @@ async function sentToday() {
   return Number(rows[0].n);
 }
 
-function sendReadiness() {
+async function sendReadiness() {
   const problems = [];
-  if (!cfg.mailConfigured()) problems.push('Add GMAIL_USER and GMAIL_APP_PASSWORD in Railway Variables.');
+  const mode = await mailMode();
+  if (!mode) {
+    problems.push(gmail.clientConfigured()
+      ? 'Connect Gmail: go to Settings and click Connect Gmail.'
+      : 'Set up Gmail sending: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Railway, then click Connect Gmail in Settings.');
+  }
   if (!SENDER.address) problems.push('Add SENDER_ADDRESS (a mailing address for the email footer; the law requires one).');
   return problems;
 }
@@ -82,7 +104,7 @@ const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(x || '');
 
 /** Approve a draft and send the first email now. */
 async function approveAndSend(proposalId) {
-  const problems = sendReadiness();
+  const problems = await sendReadiness();
   if (problems.length) throw Object.assign(new Error(problems.join(' ')), { status: 400 });
 
   const { rows } = await pool.query(
@@ -104,7 +126,7 @@ async function approveAndSend(proposalId) {
 
   let info;
   try {
-    info = await mailer().sendMail({
+    info = await (await mailer()).sendMail({
       from: { name: SENDER.name, address: SENDER.email },
       to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
       subject: p.subject.trim(),
@@ -113,16 +135,16 @@ async function approveAndSend(proposalId) {
     });
   } catch (err) {
     await pool.query(`UPDATE proposals SET status = 'draft', approved_at = NULL, error = $2 WHERE id = $1`, [p.id, `Send failed: ${err.message}`]);
-    throw Object.assign(new Error(`Gmail refused the message: ${err.message}`), { status: 502 });
+    throw Object.assign(new Error(`The email didn't send: ${err.message}`), { status: 502 });
   }
 
   const [d1, d2] = cfg.FOLLOWUP_DAYS;
   const { rows: updated } = await pool.query(
-    `UPDATE proposals SET status = 'sent', sent_at = NOW(), message_id = $2, error = NULL,
+    `UPDATE proposals SET status = 'sent', sent_at = NOW(), message_id = $2, thread_id = $5, error = NULL,
             followup1_due_at = CASE WHEN COALESCE(followup1, '') <> '' THEN NOW() + make_interval(days => $3) END,
             followup2_due_at = CASE WHEN COALESCE(followup2, '') <> '' THEN NOW() + make_interval(days => $4) END
       WHERE id = $1 RETURNING *`,
-    [p.id, info.messageId, d1 ?? 3, d2 ?? 10]);
+    [p.id, info.messageId || null, d1 ?? 3, d2 ?? 10, info.threadId || null]);
 
   await pool.query(
     `UPDATE prospects SET last_contacted_at = NOW(), email = COALESCE(NULLIF(email, ''), $2),
@@ -148,7 +170,7 @@ async function stopSequence(proposalId, reason, status = 'stopped') {
 
 /** Send any follow-ups that are due. Called every 15 minutes. */
 async function sendDueFollowups() {
-  if (!cfg.mailConfigured() || !SENDER.address || !inSendWindow()) return { sent: 0 };
+  if (!(await mailMode()) || !SENDER.address || !inSendWindow()) return { sent: 0 };
   const { rows } = await pool.query(
     `SELECT pr.*, p.company, p.stage, p.do_not_contact FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
       WHERE pr.status = 'sent' AND (
@@ -167,7 +189,8 @@ async function sendDueFollowups() {
       `UPDATE proposals SET ${which}_sent_at = NOW() WHERE id = $1 AND ${which}_sent_at IS NULL AND status = 'sent' RETURNING id`, [p.id]);
     if (!claim.rows.length) continue;
     try {
-      await mailer().sendMail({
+      await (await mailer()).sendMail({
+        threadId: p.thread_id || undefined,
         from: { name: SENDER.name, address: SENDER.email },
         to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
         subject: /^re:/i.test(p.subject) ? p.subject : `Re: ${p.subject}`,
@@ -210,7 +233,8 @@ function classifyMessage(msg, p) {
   const text = (msg.text || '').slice(0, 20000);
   const textLower = text.toLowerCase();
   const refs = [msg.inReplyTo, ...(msg.references || [])].filter(Boolean).map(s => s.toLowerCase());
-  const threaded = p.message_id && refs.includes(p.message_id.toLowerCase());
+  const threaded = (p.message_id && refs.includes(p.message_id.toLowerCase())) ||
+                   (!!p.thread_id && !!msg.threadId && msg.threadId === p.thread_id);
 
   if (/mailer-daemon|postmaster|mail delivery subsystem/i.test(from + ' ' + (msg.subject || '')) && (textLower.includes(to) || threaded)) {
     return { kind: 'bounced' };
@@ -253,59 +277,69 @@ async function applyOutcome(p, outcome, msg) {
     : `Replied to the proposal email${snippet ? `: "${snippet}"` : ''}. Follow-ups stopped.`);
 }
 
-let checking = false;
-/** Look through the Gmail inbox for replies, bookings, bounces and opt-outs. */
-async function checkInbox() {
-  if (!cfg.mailConfigured() || checking) return { checked: 0 };
-  const { rows: active } = await pool.query(
-    `SELECT pr.*, p.stage FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'sent' AND pr.to_email IS NOT NULL`);
-  if (!active.length) return { checked: 0 };
-  checking = true;
-
+// Pull inbox messages since a date: Gmail API when connected, else IMAP.
+async function fetchInbox(since) {
+  if ((await mailMode()) === 'gmail_api') return gmail.inboxSince(since);
   const { ImapFlow } = require('imapflow');
   const { simpleParser } = require('mailparser');
   const imap = new ImapFlow({
     host: 'imap.gmail.com', port: 993, secure: true, logger: false,
     auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
   });
-  let checked = 0; const outcomes = [];
+  const out = [];
   try {
     await imap.connect();
     const lock = await imap.getMailboxLock('INBOX');
     try {
-      const since = new Date(Math.min(...active.map(p => new Date(p.sent_at).getTime())) - 86400000);
       const uids = await imap.search({ since }, { uid: true });
       const recent = (uids || []).slice(-400);
       if (recent.length) {
         for await (const m of imap.fetch(recent, { uid: true, envelope: true, source: true }, { uid: true })) {
-          checked++;
-          const fromAddr = m.envelope?.from?.[0]?.address || '';
-          const date = m.envelope?.date ? new Date(m.envelope.date) : null;
-          if (fromAddr.toLowerCase() === SENDER.email.toLowerCase()) continue;
           let parsed;
           try { parsed = await simpleParser(m.source, { skipHtmlToText: false, skipImageLinks: true }); } catch { continue; }
-          const msg = {
-            from: fromAddr, subject: m.envelope?.subject || '', date,
-            inReplyTo: parsed.inReplyTo || '', references: [].concat(parsed.references || []),
-            text: parsed.text || '',
-          };
-          for (const p of active) {
-            if (p._done || (date && date < new Date(p.sent_at))) continue;
-            const outcome = classifyMessage(msg, p);
-            if (outcome) { p._done = true; outcomes.push([p, outcome, msg]); }
-          }
+          out.push({
+            from: (m.envelope?.from?.[0]?.address || '').toLowerCase(), subject: m.envelope?.subject || '',
+            date: m.envelope?.date ? new Date(m.envelope.date) : null,
+            inReplyTo: parsed.inReplyTo || '', references: [].concat(parsed.references || []), text: parsed.text || '',
+          });
         }
       }
     } finally { lock.release(); }
     await imap.logout();
   } catch (err) {
-    console.error('[inbox] ✗ check failed:', err.message);
     try { await imap.close(); } catch { /* already closed */ }
+    throw err;
+  }
+  return out;
+}
+
+let checking = false;
+/** Look through the inbox for replies, bookings, bounces and opt-outs. */
+async function checkInbox() {
+  if (checking || !(await mailMode()) || (await mailMode()) === 'test') return { checked: 0 };
+  const { rows: active } = await pool.query(
+    `SELECT pr.*, p.stage FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'sent' AND pr.to_email IS NOT NULL`);
+  if (!active.length) return { checked: 0 };
+  checking = true;
+  const outcomes = []; let messages = [];
+  try {
+    const since = new Date(Math.min(...active.map(p => new Date(p.sent_at).getTime())) - 86400000);
+    messages = await fetchInbox(since);
+    for (const msg of messages) {
+      if (msg.from === SENDER.email.toLowerCase()) continue;
+      for (const p of active) {
+        if (p._done || (msg.date && msg.date < new Date(p.sent_at))) continue;
+        const outcome = classifyMessage(msg, p);
+        if (outcome) { p._done = true; outcomes.push([p, outcome, msg]); }
+      }
+    }
+  } catch (err) {
+    console.error('[inbox] ✗ check failed:', err.message);
   } finally {
     checking = false;
   }
   for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
-  return { checked, matched: outcomes.length };
+  return { checked: messages.length, matched: outcomes.length };
 }
 
 async function senderTick() {
@@ -315,5 +349,5 @@ async function senderTick() {
 
 module.exports = {
   approveAndSend, sendDueFollowups, checkInbox, senderTick, stopSequence, classifyMessage, applyOutcome,
-  renderMessage, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, _setTransport,
+  renderMessage, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

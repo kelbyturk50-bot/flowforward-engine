@@ -200,3 +200,6 @@ CREATE TABLE IF NOT EXISTS app_settings (
   value       JSONB,
   updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Gmail API sending: thread id of the first email so follow-ups land in the same thread
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS thread_id TEXT;

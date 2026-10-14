@@ -75,6 +75,7 @@ export default function Settings({ authProblem, onSaved, version }) {
         </section>
       )}
 
+      {connected && <EmailSettings />}
       {connected && <ProposalSettings version={version} />}
     </div>
   );
@@ -147,4 +148,49 @@ function cronText(expr) {
   if (!m) return expr;
   const h = Number(m[2]); const min = String(m[1]).padStart(2, '0');
   return `nightly at ${h % 12 || 12}${min !== '00' ? ':' + min : ''}${h < 12 ? 'am' : 'pm'}`;
+}
+
+function EmailSettings() {
+  const st = useAsync(() => api.gmailStatus(), []);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const m = window.location.hash.match(/gmail=(connected|error)/);
+    if (!m) return;
+    toast(m[1] === 'connected' ? 'Gmail connected.' : 'Gmail did not connect. Try again.');
+    history.replaceState(null, '', '#/settings');
+  }, []);
+  const g = st.data;
+  const connect = async () => {
+    setBusy(true);
+    try { const { url } = await api.gmailConnect(window.location.origin + window.location.pathname); window.location.href = url; }
+    catch (e) { toast(e.message); setBusy(false); }
+  };
+  const disconnect = async () => {
+    setBusy(true);
+    try { await api.gmailDisconnect(); toast('Gmail disconnected.'); st.reload(); } catch (e) { toast(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <section className="panel">
+      <h2>Email sending</h2>
+      <p className="muted">Proposals go out from your Gmail through Google's API, and replies are picked up from its inbox.</p>
+      <ErrorNote error={st.error} onRetry={st.reload} />
+      {g && (
+        <>
+          <dl className="facts">
+            <dt>Status</dt>
+            <dd>{g.connected ? <span className="ok-note">Connected as {g.email}</span>
+              : !g.configured ? <span className="warn-text">Not set up. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Railway first.</span>
+              : <span className="warn-text">Not connected</span>}</dd>
+            {g.connected_at && <><dt>Since</dt><dd>{timeAgo(g.connected_at)}</dd></>}
+            {g.error && <><dt>Problem</dt><dd className="warn-text">{g.error}</dd></>}
+            {!g.connected && <><dt>Redirect URI</dt><dd><code>{g.redirect_uri}</code> <span className="muted small">(paste this into the Google OAuth client)</span></dd></>}
+          </dl>
+          <div className="link-row">
+            {g.configured && <button className="btn" onClick={connect} disabled={busy}>{g.connected || g.error ? 'Reconnect Gmail' : 'Connect Gmail'}</button>}
+            {g.connected && <button className="btn btn-quiet" onClick={disconnect} disabled={busy}>Disconnect</button>}
+          </div>
+        </>
+      )}
+    </section>
+  );
 }

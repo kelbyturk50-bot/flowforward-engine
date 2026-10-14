@@ -148,7 +148,7 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 3. Has Claude (with a few web searches for the owner's name and socials) write: an analysis for you, a cold email, day-3 and day-10 follow-ups, and a personalized one-page proposal served at `/p/<slug>`.
 4. Flags poor fits (franchise, closed, wrong trade) and moves them to *Not a fit*; restore any you disagree with.
 
-**Sending** goes through Gmail (`flowforward50@gmail.com`) with an app password, so sent mail shows in that account and replies land in its inbox. Follow-ups go out as replies in the same thread on weekdays 8am–5pm. Every 15 minutes the bot checks the inbox and stops the sequence when the lead replies, books on Calendly, bounces, or asks not to be contacted (opt-outs are marked do-not-contact). Emails are plain text with one link and a CAN-SPAM footer (your mailing address + opt-out line).
+**Sending** goes through Gmail (`flowforward50@gmail.com`) using the **Gmail API over HTTPS**, because Railway blocks SMTP on non-Pro plans. Mail still lands in that account's Sent folder and replies in its inbox. Connect it once from the CRM: **Settings → Email sending → Connect Gmail**. Follow-ups go out as replies in the same Gmail thread on weekdays 8am–5pm. Every 15 minutes the bot checks the inbox and stops the sequence when the lead replies, books on Calendly, bounces, or asks not to be contacted (opt-outs are marked do-not-contact). Emails are plain text with one link and a CAN-SPAM footer (your mailing address + opt-out line). (If `GMAIL_USER` + `GMAIL_APP_PASSWORD` are set and Gmail isn't connected, it falls back to SMTP/IMAP, which only works on Railway Pro.)
 
 **Tuning:** edit any draft before sending (the AI's original is kept so edits can be compared), leave 👍/👎 and a note, ask for a rewrite with instructions, and set standing voice rules in **Settings → Proposal voice**. The bot reads your notes, recent feedback, and the last few emails you rewrote before sending on every new draft. The prompt and per-trade playbooks live in `src/proposals/prompt.js`.
 
@@ -157,8 +157,8 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | Variable | Required | Default / notes |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | yes | From platform.claude.com → API keys |
-| `GMAIL_USER` | to send | `flowforward50@gmail.com` |
-| `GMAIL_APP_PASSWORD` | to send | Google Account → Security → 2-Step Verification → App passwords |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | to send | OAuth client from Google Cloud (see *Gmail setup* below), then click **Connect Gmail** in the CRM |
+| `GMAIL_USER` / `GMAIL_APP_PASSWORD` | no | SMTP fallback; only works on Railway Pro |
 | `SENDER_ADDRESS` | to send | Mailing address for the email footer (a PO box or virtual mailbox works) |
 | `SENDER_PHONE` | no | Shown on the one-pager and allowed in signatures |
 | `CALENDLY_URL` | no | `https://calendly.com/flowforward50` |
@@ -176,6 +176,15 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | `FOLLOWUP_DAYS` | no | `3,10` |
 | `SEND_HOURS` / `SEND_DAYS` | no | `8,17` / `1,2,3,4,5` |
 
+### Gmail setup (one time, ~15 minutes)
+1. [console.cloud.google.com](https://console.cloud.google.com) → create a project (e.g. "FlowForward").
+2. **APIs & Services → Library** → enable **Gmail API**.
+3. **Google Auth platform → Branding → Get started**: app name "FlowForward", support email flowforward50@gmail.com, audience **External**, contact email, agree, Create.
+4. **Audience → Publish app** (move it to *In production*). Apps left in *Testing* lose access every 7 days. It stays unverified, which is fine for your own account.
+5. **Clients → Create client** → type **Web application** → under *Authorized redirect URIs* add `https://<your-railway-domain>/oauth/google/callback` (shown in CRM Settings) → Create. Copy the client ID and secret.
+6. Railway → Variables: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`. Redeploy.
+7. CRM → Settings → **Connect Gmail** → sign in as flowforward50@gmail.com → on "Google hasn't verified this app" click **Advanced → Go to FlowForward** → allow both Gmail permissions.
+
 ### Endpoints
 
 | Method | Path | |
@@ -190,6 +199,8 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | GET/POST | `/api/proposals/runs` · `/runs/trigger` | Drafting run history / draft N now |
 | GET/PUT | `/api/proposals/settings` | Voice notes |
 | POST | `/api/proposals/check-inbox` | Check replies + send due follow-ups now |
+| GET/POST | `/api/proposals/gmail/status` · `/gmail/connect` · `/gmail/disconnect` | Gmail connection |
+| GET | `/oauth/google/callback` | Google sign-in return (public) |
 | GET | `/p/:slug` | Public one-pager (`?preview=1` doesn't count a view) |
 
 ## Target markets
