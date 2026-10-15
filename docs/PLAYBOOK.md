@@ -2,7 +2,7 @@
 
 How the Grok Bot team ships work on FlowForward. Coding agents follow `AGENTS.md` at the repo root. This file is the human process around them.
 
-Kelby owns the product. Merge as flowForward50 after proof + fresh-agent review + QA (and Security when relevant) pass; never push directly to main; merging deploys to Railway/Vercel.
+Kelby owns the product. Who presses merge, and when, is Change flow step 8.
 
 ## Roles
 
@@ -10,12 +10,14 @@ Kelby owns the product. Merge as flowForward50 after proof + fresh-agent review 
 |---|---|---|---|
 | Summit | Head of Engineering | Front door. Routes work, keeps the roadmap, writes or accepts the spec before anyone builds. | Code. Merge. |
 | Juniper | Chief of Staff | Ops. Morning brief, board hygiene, daily 1:1s, postmortems. | — |
-| Canyon | Backend Engineer | Ships API, bot, proposals, and database work by launching cloud agents with a spec. | Merge. Touch production. |
+| Canyon | Backend Engineer | Ships API, bot, proposals, and database work by launching cloud agents with a spec. Presses merge on backend PRs (step 8). | Touch production. |
 | Gauge | QA Lead | Checks the proof on every PR. Runs tests only against previews and a test database. | Test against production data or the production API. |
 | Warden | Security Lead | Reviews auth, send paths, OAuth, secrets, and schema changes that run on boot. | — |
 | Scout | Product Lead | Specs and acceptance for CRM behavior. | — |
-| Delta | Frontend Engineer | CRM in `web/`. | — |
+| Delta | Frontend Engineer | CRM in `web/`. Presses merge on frontend PRs (step 8). | — |
 | Ochre | UX and Product Designer | UI and one-pager presentation. | — |
+
+The owning engineer bot for that PR presses merge (Canyon for backend, Delta for frontend), merging as flowForward50, only after the gates in step 8.
 
 ## Board
 
@@ -24,8 +26,8 @@ One GitHub Project. Columns, in order:
 1. **Todo** — accepted, not started.
 2. **Working** — an owner is driving it.
 3. **Blocked** — cannot move. The owner says why in one line.
-4. **Ready for Review** — branch is up, proof is attached, PR is open. Merge as flowForward50 after proof + fresh-agent review + QA (and Security when relevant) pass; never push directly to main; merging deploys to Railway/Vercel.
-5. **Done** — Merged as flowForward50 after proof + fresh-agent review + QA (and Security when relevant) pass; never push directly to main; merging deploys to Railway/Vercel. Or the card was closed without a merge and the reason is on the card.
+4. **Ready for Review** — branch is up, proof is attached, PR is open. Waiting on merge per step 8.
+5. **Done** — Merged per step 8, or the card was closed without a merge and the reason is on the card.
 
 Rules:
 
@@ -42,7 +44,7 @@ Rules:
 5. **QA.** Gauge checks the proof on a preview and a test database only. Warden also reviews when the diff touches auth, send paths, OAuth, secrets, or `src/db/schema.sql`.
 6. **PR.** The PR opens against `main` with the proof in the description.
 7. **Board.** The owner moves the card to **Ready for Review** and links the PR.
-8. **Merge.** Merge as flowForward50 after proof + fresh-agent review + QA (and Security when relevant) pass; never push directly to main; merging deploys to Railway/Vercel.
+8. **Merge.** The owning engineer bot for that PR presses merge (Canyon for backend, Delta for frontend), merging as flowForward50, only after proof + an independent fresh-agent review + QA (and Security when relevant) pass. The owner never approves its own work. Never push directly to main. Merging deploys to Railway/Vercel.
 
 ## Cost
 
@@ -55,7 +57,9 @@ Rules:
 
 Scheduled and agent routines stop at a **draft, an issue, or a PR**.
 
-They do not send email, contact a prospect, run discovery against live Places, approve a proposal, merge, or change Railway or Vercel settings. A person does those. Merge as flowForward50 after proof + fresh-agent review + QA (and Security when relevant) pass; never push directly to main; merging deploys to Railway/Vercel. Kelby approves spend.
+They do not send email, contact a prospect, run discovery against live Places, approve a proposal, or change Railway or Vercel settings. A person does those. Kelby approves spend.
+
+Routines never merge. Merging is always a deliberate step by the owning engineer bot, never automated by a routine. See step 8.
 
 Nightly proposal drafting stays off (`PROPOSAL_AUTO_DRAFT` unset). Drafts are made on demand.
 
