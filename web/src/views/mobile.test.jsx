@@ -99,6 +99,46 @@ describe('phone leads', () => {
     expect(screen.queryByRole('columnheader', { name: 'Trade' })).not.toBeInTheDocument();
   });
 
+  it('keeps focus on Trade after changing it', async () => {
+    useNarrowViewport(true);
+    const user = userEvent.setup();
+    render(<Leads {...shared} />);
+    await user.click(await screen.findByRole('button', { name: /^Filter/ }));
+    const trade = within(screen.getByRole('dialog', { name: 'Filter leads' })).getByRole('combobox', { name: 'Trade' });
+    await user.selectOptions(trade, 'HVAC');
+    expect(trade).toHaveFocus();
+  });
+
+  it('traps Tab inside the filter sheet', async () => {
+    useNarrowViewport(true);
+    const user = userEvent.setup();
+    render(<Leads {...shared} />);
+    await user.click(await screen.findByRole('button', { name: /^Filter/ }));
+    const dialog = screen.getByRole('dialog', { name: 'Filter leads' });
+    const trade = within(dialog).getByRole('combobox', { name: 'Trade' });
+    await user.selectOptions(trade, 'HVAC');
+    const done = within(dialog).getByRole('button', { name: 'Done' });
+    const clear = within(dialog).getByRole('button', { name: 'Clear filters' });
+    clear.focus();
+    await user.tab();
+    expect(done).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(clear).toHaveFocus();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it('returns focus to Filter when Escape closes the sheet', async () => {
+    useNarrowViewport(true);
+    const user = userEvent.setup();
+    render(<Leads {...shared} />);
+    const filter = await screen.findByRole('button', { name: /^Filter/ });
+    await user.click(filter);
+    expect(screen.getByRole('dialog', { name: 'Filter leads' })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog', { name: 'Filter leads' })).not.toBeInTheDocument();
+    expect(filter).toHaveFocus();
+  });
+
   it('filters trade and revenue from the bottom sheet', async () => {
     useNarrowViewport(true);
     const user = userEvent.setup();

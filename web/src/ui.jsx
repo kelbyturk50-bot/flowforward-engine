@@ -89,12 +89,45 @@ export const addDays = (n) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-/** Phone bottom sheet. Escape, the scrim, or Done closes it. */
+const TABBABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])';
+
+function tabbables(root) {
+  return [...root.querySelectorAll(TABBABLE)].filter((el) => el.tabIndex !== -1);
+}
+
+/** Phone bottom sheet. Focus enters on open, stays inside while open, and returns to the opener on close. */
 export function BottomSheet({ open, onClose, title, children }) {
   const ref = useRef(null);
+  const onCloseRef = useRef(onClose);
+  const returnFocus = useRef(null);
+  onCloseRef.current = onClose;
   useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => e.key === 'Escape' && onClose();
+    if (!open) return undefined;
+    returnFocus.current = document.activeElement;
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== 'Tab' || !ref.current) return;
+      const items = tabbables(ref.current);
+      if (items.length === 0) {
+        e.preventDefault();
+        ref.current.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || active === ref.current || !ref.current.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !ref.current.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
     window.addEventListener('keydown', onKey);
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -102,8 +135,10 @@ export function BottomSheet({ open, onClose, title, children }) {
     return () => {
       window.removeEventListener('keydown', onKey);
       document.body.style.overflow = prev;
+      const back = returnFocus.current;
+      if (back instanceof HTMLElement) back.focus();
     };
-  }, [open, onClose]);
+  }, [open]);
   if (!open) return null;
   return (
     <div className="sheet-wrap" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
