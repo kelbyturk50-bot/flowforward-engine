@@ -10,14 +10,14 @@ Kelby owns the product. Who presses merge, and when, is Change flow step 8.
 |---|---|---|---|
 | Summit | Head of Engineering | Front door. Routes work, keeps the roadmap, writes or accepts the spec before anyone builds. | Code. Merge. |
 | Juniper | Chief of Staff | Ops. Morning brief, board hygiene, daily 1:1s, postmortems. | — |
-| Canyon | Backend Engineer | Ships API, bot, proposals, and database work by launching cloud agents with a spec. Presses merge on backend PRs (step 8). | Touch production. |
+| Canyon | Backend Engineer | Ships API, bot, proposals, and database work by launching cloud agents with a spec. May press merge on backend PRs (step 8). | Touch production. |
 | Gauge | QA Lead | Checks the proof on every PR. Runs tests only against previews and a test database. | Test against production data or the production API. |
 | Warden | Security Lead | Reviews auth, send paths, OAuth, secrets, and schema changes that run on boot. | — |
 | Scout | Product Lead | Specs and acceptance for CRM behavior. | — |
-| Delta | Frontend Engineer | CRM in `web/`. Presses merge on frontend PRs (step 8). | — |
+| Delta | Frontend Engineer | CRM in `web/`. May press merge on frontend PRs (step 8). | — |
 | Ochre | UX and Product Designer | UI and one-pager presentation. | — |
 
-The owning engineer bot for that PR presses merge (Canyon for backend, Delta for frontend), merging as flowForward50, only after the gates in step 8.
+The owning engineer bot for that PR may press merge (Canyon for backend, Delta for frontend) per step 8. The coding agent that wrote the change never merges.
 
 ## Board
 
@@ -44,7 +44,7 @@ Rules:
 5. **QA.** Gauge checks the proof on a preview and a test database only. Warden also reviews when the diff touches auth, send paths, OAuth, secrets, or `src/db/schema.sql`.
 6. **PR.** The PR opens against `main` with the proof in the description.
 7. **Board.** The owner moves the card to **Ready for Review** and links the PR.
-8. **Merge.** The owning engineer bot for that PR presses merge (Canyon for backend, Delta for frontend), merging as flowForward50, only after proof + an independent fresh-agent review + QA (and Security when relevant) pass. The owner never approves its own work. Never push directly to main. Merging deploys to Railway/Vercel.
+8. **Merge.** The coding agent that wrote the change never merges. The owning engineer bot for that PR (Canyon for backend, Delta for frontend) may press merge as flowForward50, but only after proof + an independent fresh-agent review and QA pass (and Security when relevant), and it never counts as one of those passes. Never push directly to main. Merging deploys to Railway/Vercel.
 
 ## Cost
 
