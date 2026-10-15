@@ -24,6 +24,8 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   const editable = p.status === 'draft';
   const [busy, setBusy] = useState('');
   const [confirming, setConfirming] = useState(false);
+  const [confirmingManual, setConfirmingManual] = useState(false);
+  const [manualNote, setManualNote] = useState('');
   const [regen, setRegen] = useState(false);
   const a = p.analysis || {};
 
@@ -65,6 +67,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
       <div className="action-bar">
         {editable && <>
           <button className="btn" disabled={!!busy || !p.to_email} onClick={() => setConfirming(true)}>Approve and send</button>
+          <button className="btn btn-quiet" disabled={!!busy} onClick={() => setConfirmingManual(m => !m)}>Mark as manually sent…</button>
           <button className="btn btn-quiet" disabled={!!busy} onClick={() => setRegen(r => !r)}>Rewrite…</button>
           <a className="btn btn-quiet" href={`${p.onepager_url}?preview=1`} target="_blank" rel="noreferrer">Preview one-pager</a>
           <span className="spacer" />
@@ -93,6 +96,25 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
               {busy === 'send' ? 'Sending…' : 'Send it'}
             </button>
             <button className="btn btn-quiet" onClick={() => setConfirming(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {confirmingManual && (
+        <div className="confirm" role="alertdialog" aria-label="Confirm manual send">
+          <p><strong>Record this as manually sent?</strong></p>
+          <p className="muted">Use this when you reached out via Facebook, a contact form, direct email, or in person. The proposal moves to "Out" and follow-up reminders are set for day 3 and day 10.</p>
+          <label>How did you reach out? (optional)
+            <input className="input" value={manualNote} onChange={e => setManualNote(e.target.value)}
+              placeholder="e.g. Sent via Facebook message, emailed through contact form…" />
+          </label>
+          <div className="link-row">
+            <button className="btn" disabled={!!busy} onClick={() =>
+              act('mark-sent', () => api.markSentProposal(p.id, manualNote || undefined),
+                'Marked as sent. Follow-ups scheduled.',
+                async () => { setConfirmingManual(false); setManualNote(''); await reload(p.id); })}>
+              {busy === 'mark-sent' ? 'Saving…' : 'Yes, mark as sent'}
+            </button>
+            <button className="btn btn-quiet" onClick={() => { setConfirmingManual(false); setManualNote(''); }}>Cancel</button>
           </div>
         </div>
       )}

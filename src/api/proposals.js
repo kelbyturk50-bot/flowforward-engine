@@ -217,6 +217,46 @@ router.post('/:id/replied', async (req, res) => {
   } catch (err) { fail(res, err); }
 });
 
+// POST /api/proposals/:id/mark-sent — record a manual outreach as sent
+router.post('/:id/mark-sent', async (req, res) => {
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const { rows } = await db.query(`SELECT pr.*, p.stage FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1 FOR UPDATE`, [req.params.id]);
+    const p = rows[0];
+    if (!p) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+    if (p.status !== 'draft') { await db.query('ROLLBACK'); return res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` }); }
+
+    const now = new Date();
+    const fu1 = new Date(now); fu1.setDate(fu1.getDate() + 3);
+    const fu2 = new Date(now); fu2.setDate(fu2.getDate() + 10);
+    const note = req.body?.note || 'Manual outreach';
+
+    await db.query(
+      `UPDATE proposals SET status = 'sent', sent_at = $2,
+        followup1_due_at = $3, followup2_due_at = $4,
+        stop_reason = NULL, error = NULL
+       WHERE id = $1`,
+      [p.id, now, fu1, fu2]
+    );
+    await db.query(
+      `UPDATE prospects SET stage = CASE WHEN stage IN ('found','qualified') THEN 'contacted' ELSE stage END,
+        last_contacted_at = $2, updated_at = NOW() WHERE id = $1`,
+      [p.prospect_id, now]
+    );
+    await db.query(
+      `INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'note', $2)`,
+      [p.prospect_id, `Marked manually sent — ${note}`]
+    );
+    await db.query('COMMIT');
+    const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
+    res.json(withUrl(fresh.rows[0]));
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {});
+    fail(res, err);
+  } finally { db.release(); }
+});
+
 // POST /api/proposals/:id/discard — drop a draft
 router.post('/:id/discard', async (req, res) => {
   try {

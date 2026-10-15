@@ -83,6 +83,7 @@ export const api = {
   updateProposal:    (id, b)        => request('PATCH', `/api/proposals/${id}`, b),
   sendProposal:      (id)           => request('POST', `/api/proposals/${id}/send`),
   regenerateProposal:(id, b)        => request('POST', `/api/proposals/${id}/regenerate`, b),
+  markSentProposal:  (id, note)     => request('POST', `/api/proposals/${id}/mark-sent`, { note }),
   stopProposal:      (id, reason)   => request('POST', `/api/proposals/${id}/stop`, { reason }),
   repliedProposal:   (id, note)     => request('POST', `/api/proposals/${id}/replied`, { note }),
   discardProposal:   (id, b = {})   => request('POST', `/api/proposals/${id}/discard`, b),
