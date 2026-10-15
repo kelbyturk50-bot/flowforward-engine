@@ -166,11 +166,24 @@ function hostOfRequestArgs(args) {
   return '';
 }
 
+// Node's net.connect() calls Socket.prototype.connect with a normalized
+// argument list wrapped in an array: [[{ host, port }, null]]. Read every
+// nested host field so that shape cannot skip the guard.
 function hostOfConnectArgs(args) {
-  const first = args[0];
-  if (typeof first === 'object' && first) return first.servername || first.host || first.hostname || '';
-  if (typeof args[1] === 'string') return args[1];
-  return '';
+  const found = [];
+  const visit = (value) => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (typeof value === 'object') {
+      found.push(value.servername, value.host, value.hostname);
+    }
+  };
+  args.forEach(visit);
+  if (typeof args[1] === 'string') found.push(args[1]);
+  return found.find(Boolean) || '';
 }
 
 let networkGuardInstalled = false;

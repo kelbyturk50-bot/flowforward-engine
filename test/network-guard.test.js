@@ -82,6 +82,15 @@ describe('network guard', () => {
         return true;
       }
     );
+
+    const tls = require('tls');
+    assert.throws(
+      () => tls.connect({ host: 'smtp.gmail.com', port: 465, servername: 'smtp.gmail.com' }),
+      (err) => {
+        assertBlocked(err, 'smtp.gmail.com');
+        return true;
+      }
+    );
   });
 
   it('still allows a connection attempt to localhost', async () => {
