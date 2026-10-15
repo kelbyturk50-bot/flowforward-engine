@@ -6,6 +6,7 @@ const { spawnSync } = require('child_process');
 const path = require('path');
 const {
   normalizeHost,
+  classifyHost,
   inspectDatabaseUrl,
   inspectPgEnv,
   shouldUseProvidedDatabase,
@@ -92,19 +93,40 @@ describe('database guard', () => {
 
     const pghost = inspectPgEnv({ PGHOST: 'x.rlwy.net' });
     assert.equal(pghost.ok, false);
-    assert.match(pghost.reason, /PGHOST/);
+    assert.equal(pghost.source, 'PGHOST');
+    assert.match(pghost.reason, /hosted database/);
+
+    const plain = inspectPgEnv({ PGHOST: 'x' });
+    assert.equal(plain.ok, false);
+    assert.equal(plain.source, 'PGHOST');
+    assert.equal(plain.host, 'x');
+    assert.equal(plain.reason, 'not a local host');
 
     const list = inspectPgEnv({ PGHOST: '127.0.0.1,10.0.0.8' });
     assert.equal(list.ok, false);
-    assert.match(list.reason, /PGHOST/);
+    assert.equal(list.source, 'PGHOST');
 
     const addr = inspectPgEnv({ PGHOSTADDR: '8.8.8.8' });
     assert.equal(addr.ok, false);
-    assert.match(addr.reason, /PGHOSTADDR/);
+    assert.equal(addr.source, 'PGHOSTADDR');
 
     const service = inspectPgEnv({ PGSERVICE: 'prod' });
     assert.equal(service.ok, false);
-    assert.match(service.reason, /PGSERVICE/);
+    assert.equal(service.source, 'PGSERVICE');
+  });
+
+  it('treats only a single-slash absolute path as a Unix socket', () => {
+    assert.equal(classifyHost('/tmp/.s.PGSQL.5432').ok, true);
+    assert.equal(classifyHost('//evil.com').ok, false);
+    assert.equal(classifyHost('//evil.com').reason, 'not a local host');
+    assert.equal(classifyHost('///tmp/pg.sock').ok, false);
+
+    assert.equal(inspectPgEnv({ PGHOST: '/tmp/.s.PGSQL.5432' }).ok, true);
+    const evil = inspectPgEnv({ PGHOST: '//evil.com' });
+    assert.equal(evil.ok, false);
+    assert.equal(evil.source, 'PGHOST');
+    assert.equal(evil.host, '//evil.com');
+    assert.equal(evil.reason, 'not a local host');
   });
 
   it('uses a provided URL only when it is local and named flowforward_test', () => {
@@ -135,8 +157,16 @@ describe('database guard', () => {
         pattern: /\?service=/,
       },
       {
+        env: { DATABASE_URL: LOCAL, PGHOST: 'x' },
+        pattern: /PGHOST "x" is not a local host/,
+      },
+      {
+        env: { DATABASE_URL: LOCAL, PGHOST: '//evil.com' },
+        pattern: /PGHOST "\/\/evil\.com" is not a local host/,
+      },
+      {
         env: { DATABASE_URL: LOCAL, PGHOST: 'x.rlwy.net' },
-        pattern: /PGHOST/,
+        pattern: /PGHOST "x\.rlwy\.net" is a hosted database/,
       },
       {
         env: { DATABASE_URL: LOCAL, PGHOSTADDR: '8.8.8.8' },

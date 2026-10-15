@@ -105,11 +105,16 @@ function splitHostList(value) {
   return hosts;
 }
 
+function isSocketPath(host) {
+  // A Unix socket is an absolute path with one leading slash (/tmp/.s.PGSQL.5432).
+  // "//evil.com" is scheme-relative, not a socket, and must be refused.
+  return host.startsWith('/') && !host.startsWith('//');
+}
+
 function classifyHost(host) {
   const normalized = normalizeHost(host);
   if (!normalized) return { ok: false, host: normalized, reason: 'has no host' };
-  // Absolute path: a Unix socket. It cannot be a remote machine.
-  if (normalized.startsWith('/')) return { ok: true, host: normalized };
+  if (isSocketPath(normalized)) return { ok: true, host: normalized };
   const hosted = HOSTED_DB_SUFFIXES.find(suffix => hostMatches(normalized, suffix));
   if (hosted) return { ok: false, host: normalized, reason: `a hosted database (${hosted})` };
   if (!LOCAL_HOSTS.has(normalized)) return { ok: false, host: normalized, reason: 'not a local host' };
@@ -176,15 +181,16 @@ function inspectPgEnv(env) {
   if (env.PGSERVICE && String(env.PGSERVICE).trim()) {
     return {
       ok: false,
+      source: 'PGSERVICE',
       host: String(env.PGSERVICE).trim(),
-      reason: 'PGSERVICE is set (a service file can point at any host)',
+      reason: 'set (a service file can point at any host)',
     };
   }
   for (const key of ['PGHOST', 'PGHOSTADDR']) {
     if (!env[key] || !String(env[key]).trim()) continue;
     for (const host of splitHostList(env[key])) {
       const verdict = classifyHost(host);
-      if (!verdict.ok) return { ...verdict, reason: `${key} is ${verdict.reason}` };
+      if (!verdict.ok) return { ...verdict, source: key };
     }
   }
   return { ok: true };
@@ -216,8 +222,9 @@ function readDotenvDatabaseUrl(file = path.join(process.cwd(), '.env')) {
 }
 
 function formatRefusal(source, result) {
+  const label = result.source || source;
   const where = result.host ? ` "${result.host}"` : '';
-  return `Refusing to run tests: ${source}${where} is ${result.reason}. `
+  return `Refusing to run tests: ${label}${where} is ${result.reason}. `
     + 'Tests never connect to a non-local or production database. '
     + 'Unset DATABASE_URL, PGHOST, PGHOSTADDR, and PGSERVICE (including in .env) or point the host at 127.0.0.1. '
     + 'npm test starts its own disposable Postgres and will not use a hosted URL.';
@@ -231,7 +238,7 @@ function refusal(source, result) {
 
 function assertSafeDatabaseEnv({ allowUnset = false } = {}) {
   const envResult = inspectPgEnv(process.env);
-  if (!envResult.ok) throw refusal('the environment', envResult);
+  if (!envResult.ok) throw refusal(envResult.source || 'the environment', envResult);
 
   const sources = [];
   if (process.env.DATABASE_URL) sources.push(['the environment DATABASE_URL', process.env.DATABASE_URL]);
@@ -337,6 +344,7 @@ module.exports = {
   LOCAL_HOSTS,
   TestNetworkGuardError,
   normalizeHost,
+  classifyHost,
   inspectDatabaseUrl,
   inspectPgEnv,
   shouldUseProvidedDatabase,
