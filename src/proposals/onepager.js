@@ -13,6 +13,13 @@ const wordmark = (name) => /^FlowForward$/.test(name) ? 'Flow<span class="fwd">F
 const para = (s) => esc(s).split(/\n{2,}/).map(x => `<p>${x.replace(/\n/g, '<br>')}</p>`).join('');
 const BOT_UA = /bot|crawler|spider|preview|slurp|facebookexternalhit|google-?(read|inspection)|linkedin|skype|whatsapp|proofpoint|mimecast|barracuda|scanner/i;
 
+const ICONS = {
+  calendar: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="16" rx="2"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4"/></svg>',
+  mail: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 6.5 8.5 6.5 8.5-6.5"/></svg>',
+  phone: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.5h3.5l1.8 4.5-2.3 1.5a11 11 0 0 0 6.5 6.5l1.5-2.3 4.5 1.8V19a2 2 0 0 1-2 2A17 17 0 0 1 3 5.5a2 2 0 0 1 2-2z"/></svg>',
+};
+const bareUrl = (u) => String(u || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
+
 function renderPage(p, lead) {
   const o = p.onepager || {};
   const first = SENDER.name.split(' ')[0];
@@ -71,7 +78,9 @@ ol.steps li::before{content:counter(s);font-family:"Barlow Semi Condensed",sans-
 .cta{background:var(--juniper);color:#fff;border:0}
 .cta h2{color:#fff}.cta p{color:#E3EFEA;margin:0 0 18px}
 .btns{display:flex;flex-wrap:wrap;gap:12px}
-.btn{display:inline-block;padding:13px 22px;border-radius:10px;font-weight:600;text-decoration:none;font-size:1.02rem}
+.btn{display:inline-flex;align-items:center;gap:9px;padding:13px 22px;border-radius:10px;font-weight:600;text-decoration:none;font-size:1.02rem}
+.btn svg{flex:none}
+.print-contact{display:none}
 .btn-main{background:#fff;color:var(--juniper)}.btn-alt{background:transparent;color:#fff;border:1.5px solid rgba(255,255,255,.6)}
 .btn:focus-visible{outline:3px solid var(--ochre);outline-offset:2px}
 .pdf-bar{display:flex;justify-content:flex-end;padding:14px 0 6px}
@@ -86,9 +95,18 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
   header.top svg.ridge{display:none}
   .card{box-shadow:none;break-inside:avoid;border:1px solid #D5DEDB}
   .cta{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-  .btn-main{color:var(--juniper)!important}
-  .btn-alt{color:#fff!important}
   .pdf-bar{display:none}
+  .cta .btns{display:none}
+  .cta{padding:26px 28px}
+  .cta p{margin-bottom:16px}
+  .print-contact{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .pc-item:first-child,.pc-item:last-child:nth-child(2){grid-column:1 / -1}
+  .pc-item{display:flex;align-items:center;gap:11px;background:#fff;border-radius:10px;padding:11px 14px;color:var(--ink);text-decoration:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .pc-ico{width:30px;height:30px;border-radius:50%;background:var(--juniper-wash);color:var(--juniper);display:grid;place-items:center;flex:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .pc-text{display:flex;flex-direction:column;min-width:0;line-height:1.25}
+  .pc-lbl{font-family:"Barlow Semi Condensed",sans-serif;text-transform:uppercase;letter-spacing:.1em;font-size:.68rem;color:var(--ink-2)}
+  .pc-val{font-weight:600;font-size:.98rem;color:var(--juniper);white-space:nowrap}
+  .pc-item:first-child .pc-val{font-size:1.08rem}
 }
 </style></head>
 <body>
@@ -125,9 +143,14 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
     <h2>Want to talk it through?</h2>
     ${para(o.closing || `Grab 15 minutes on my calendar, shoot me an email, or give me a call. Happy to help.`)}
     <div class="btns">
-      <a class="btn btn-main" href="${esc(SENDER.calendly)}" target="_blank" rel="noopener">📅 Book a free 15-min call — ${esc(SENDER.calendly)}</a>
-      <a class="btn btn-alt" href="${esc(mailto)}">✉️ Email — ${esc(SENDER.email)}</a>
-      ${SENDER.phone ? `<a class="btn btn-alt" href="tel:${esc(SENDER.phone)}">📞 Call — ${esc(SENDER.phone)}</a>` : ''}
+      <a class="btn btn-main" href="${esc(SENDER.calendly)}" target="_blank" rel="noopener">${ICONS.calendar}Book a free 15-minute call</a>
+      <a class="btn btn-alt" href="${esc(mailto)}">${ICONS.mail}Email ${esc(first)}</a>
+      ${SENDER.phone ? `<a class="btn btn-alt" href="tel:${esc(SENDER.phone.replace(/[^\d+]/g, ''))}">${ICONS.phone}Call ${esc(first)}</a>` : ''}
+    </div>
+    <div class="print-contact">
+      <a class="pc-item" href="${esc(SENDER.calendly)}"><span class="pc-ico">${ICONS.calendar}</span><span class="pc-text"><span class="pc-lbl">Book a free call</span><span class="pc-val">${esc(bareUrl(SENDER.calendly))}</span></span></a>
+      <a class="pc-item" href="mailto:${esc(SENDER.email)}"><span class="pc-ico">${ICONS.mail}</span><span class="pc-text"><span class="pc-lbl">Email</span><span class="pc-val">${esc(SENDER.email)}</span></span></a>
+      ${SENDER.phone ? `<a class="pc-item" href="tel:${esc(SENDER.phone.replace(/[^\d+]/g, ''))}"><span class="pc-ico">${ICONS.phone}</span><span class="pc-text"><span class="pc-lbl">Call</span><span class="pc-val">${esc(SENDER.phone)}</span></span></a>` : ''}
     </div>
   </section>
 </main>
