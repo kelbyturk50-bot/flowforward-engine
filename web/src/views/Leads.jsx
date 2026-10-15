@@ -130,7 +130,7 @@ function AddLead({ open, onClose, onCreated, industries }) {
     <Drawer open={open} onClose={onClose} label="Add lead">
       <form className="drawer-body form" onSubmit={submit}>
         <h2>Add a lead</h2>
-        <p className="muted">For referrals and anyone discovery didn't find. It gets a fit score as soon as you save.</p>
+        <p className="muted">{"For referrals and anyone discovery didn't find. It gets a fit score as soon as you save."}</p>
         <label>Company<input className="input" required value={b.company} onChange={set('company')} /></label>
         <label>Trade
           <input className="input" required list="trade-list" value={b.industry} onChange={set('industry')} placeholder="HVAC, Plumbing…" />

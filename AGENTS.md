@@ -63,11 +63,13 @@ cd web
 npm install
 npm run dev     # Vite, http://localhost:5173
 npm run build   # output in web/dist
+npm test        # Vitest, one shot. Mocks web/src/api.js. See web/README.md
+npm run lint    # ESLint (flat config)
 ```
 
 The CRM talks to `VITE_API_URL` (see `web/.env.example`) or the URL saved in the browser under Settings. For local UI work, point it at your local API, not production.
 
-There is no `npm test` script and no test suite in the repo today. Do not claim tests passed if you did not add and run them.
+`npm test` in `web/` is the CRM suite. It never loads the real `web/src/api.js` and `fetch` throws if a test tries to make a request. The API (`src/`) still has no test script. Do not claim tests passed if you did not run them.
 
 ## Crons and how to turn them off
 
@@ -99,7 +101,7 @@ Set `NODE_ENV=test` or `DISABLE_CRON=1` for any local server. A sender tick can 
 
 Every PR description includes:
 
-1. **Tests.** No suite exists yet. New behavior adds tests that use the mocks above (and a Places mock, once added) plus a disposable database. Paste the command and the pass output. Do not invent a green `npm test`.
+1. **Tests.** CRM changes: paste `cd web && npm test` (and `npm run lint` when you touched lint) with the pass output. API changes: add tests that use the mocks above (and a Places mock, once added) plus a disposable database. There is still no root `npm test`. Do not invent a green run.
 2. **Logs** for backend changes: the relevant server or script output from the disposable environment, including the failure you fixed if there was one.
 3. **Before/after screenshots** for any UI change in `web/`.
 

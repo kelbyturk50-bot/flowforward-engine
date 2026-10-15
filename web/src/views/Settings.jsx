@@ -104,7 +104,7 @@ function ProposalSettings({ version }) {
     <>
       <form className="panel form" onSubmit={saveNotes}>
         <h2>Proposal voice</h2>
-        <p className="muted">Standing notes the bot follows on every draft. Write them the way you'd brief a new hire.</p>
+        <p className="muted">{"Standing notes the bot follows on every draft. Write them the way you'd brief a new hire."}</p>
         <textarea className="input" rows={7} value={notes} onChange={e => setNotes(e.target.value)}
           placeholder={'e.g.\n- Never open with "I hope this finds you well."\n- Mention I grew up working in the trades.\n- Roofers: lead with storm-season lead follow-up.\n- Keep first emails under 90 words.'} />
         <div className="form-actions"><button className="btn" disabled={saving || !st.data}>{saving ? 'Saving…' : 'Save notes'}</button></div>
@@ -172,7 +172,7 @@ function EmailSettings() {
   return (
     <section className="panel">
       <h2>Email sending</h2>
-      <p className="muted">Proposals go out from your Gmail through Google's API, and replies are picked up from its inbox.</p>
+      <p className="muted">{"Proposals go out from your Gmail through Google's API, and replies are picked up from its inbox."}</p>
       <ErrorNote error={st.error} onRetry={st.reload} />
       {g && (
         <>

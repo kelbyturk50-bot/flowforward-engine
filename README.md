@@ -122,7 +122,11 @@ Vite + React app deployed on Vercel. Views: Today, Leads, Pipeline (drag-and-dro
 
 ```bash
 cd web && npm install && npm run dev   # http://localhost:5173
+cd web && npm test                     # Vitest, mocked API, no network
+cd web && npm run lint
 ```
+
+How the CRM tests run is in `web/README.md`.
 
 Deploy: Vercel → Add New Project → import this repo → set **Root Directory** to `web` → deploy. Optionally set `VITE_API_URL`. On first open, enter the API key in Settings (stored per device).
 
