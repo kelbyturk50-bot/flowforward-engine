@@ -60,7 +60,7 @@ export default function Today({ version, bump, openLead, openProject }) {
 
           <section className="panel">
             <h2>Call next</h2>
-            <p className="panel-note">Highest-fit leads you haven't contacted yet.</p>
+            <p className="panel-note">{"Highest-fit leads you haven't contacted yet."}</p>
             {data.top_new_leads.length === 0
               ? <p className="empty">No untouched A or B leads. Run discovery from Settings or widen your markets.</p>
               : <ul className="lead-list">{data.top_new_leads.map(l => (

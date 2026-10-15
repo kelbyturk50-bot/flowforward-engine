@@ -15,7 +15,7 @@ export default function ProposalDrawer({ id, onClose, bump, openLead, openPropos
       if (data.status === 'draft' && !data.reviewed_at) api.markProposalSeen(pid).then(() => bump()).catch(() => {});
     } catch (e) { setError(e); }
   };
-  useEffect(() => { setP(null); if (id) load(id); /* eslint-disable-next-line */ }, [id]);
+  useEffect(() => { setP(null); if (id) load(id); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Drawer open={!!id} onClose={onClose} label={p?.company ? `Proposal for ${p.company}` : 'Proposal'} wide>
@@ -110,7 +110,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
       {confirmingManual && (
         <div className="confirm" role="alertdialog" aria-label="Confirm manual send">
           <p><strong>Record this as manually sent?</strong></p>
-          <p className="muted">Use this when you reached out via Facebook, a contact form, direct email, or in person. The proposal moves to "Out" and follow-up reminders are set for day 3 and day 10.</p>
+          <p className="muted">{"Use this when you reached out via Facebook, a contact form, direct email, or in person. The proposal moves to \"Out\" and follow-up reminders are set for day 3 and day 10."}</p>
           <label>How did you reach out? (optional)
             <input className="input" value={manualNote} onChange={e => setManualNote(e.target.value)}
               placeholder="e.g. Sent via Facebook message, emailed through contact form…" />
@@ -175,7 +175,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <EmailField label="Follow-up 1" hint={p.followup1_sent_at ? `Sent ${timeAgo(p.followup1_sent_at)}` : 'Day 3, as a reply in the same thread'} value={p.followup1} disabled={!editable} onSave={v => save({ followup1: v }, 'Saved.')} />
           <EmailField label="Follow-up 2 (last)" hint={p.followup2_sent_at ? `Sent ${timeAgo(p.followup2_sent_at)}` : 'Day 10'} value={p.followup2} disabled={!editable} onSave={v => save({ followup2: v }, 'Saved.')} />
           <details className="preview">
-            <summary>Exactly what they'll receive</summary>
+            <summary>{"Exactly what they'll receive"}</summary>
             <pre>{p.preview?.first}</pre>
           </details>
 
@@ -264,7 +264,7 @@ function JobBanner({ p, openProposal }) {
         <div>
           <strong>{job.kind === 'rewrite' ? `Writing a new version${job.source_version ? ` from v${job.source_version}` : ''}…` : 'Drafting…'}</strong>
           <span className="muted small"> {job.status === 'queued' ? 'Waiting its turn' : `Running ${elapsed(job.started_at)}`}. Usually about a minute{job.fresh_research ? ' or two with fresh research' : ''}.</span>
-          <p className="small">You can close this and keep working. It'll show up in <strong>To review</strong> marked <strong>New</strong>.</p>
+          <p className="small">You can close this and keep working. It{"'"}ll show up in <strong>To review</strong> marked <strong>New</strong>.</p>
         </div>
       </div>
     );
@@ -281,7 +281,7 @@ function JobBanner({ p, openProposal }) {
   if (done && done.status === 'failed') {
     return (
       <div className="job-banner job-failed" role="alert">
-        <div><strong>The rewrite didn't finish.</strong> <span className="small">{done.error}</span></div>
+        <div><strong>{"The rewrite didn't finish."}</strong> <span className="small">{done.error}</span></div>
         <button className="btn btn-quiet btn-sm" onClick={() => dismiss(done.id)}>Dismiss</button>
       </div>
     );
