@@ -1,13 +1,19 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, relDate, timeAgo, toast, Stars } from '../ui';
+import { useJobs, elapsed } from '../jobs';
 
 export default function ProposalDrawer({ id, onClose, bump, openLead, openProposal }) {
   const [p, setP] = useState(null);
   const [error, setError] = useState(null);
 
   const load = async (pid = id) => {
-    try { setError(null); setP(await api.proposal(pid)); } catch (e) { setError(e); }
+    try {
+      setError(null);
+      const data = await api.proposal(pid);
+      setP(data);
+      if (data.status === 'draft' && !data.reviewed_at) api.markProposalSeen(pid).then(() => bump()).catch(() => {});
+    } catch (e) { setError(e); }
   };
   useEffect(() => { setP(null); if (id) load(id); /* eslint-disable-next-line */ }, [id]);
 
@@ -27,6 +33,8 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   const [confirmingManual, setConfirmingManual] = useState(false);
   const [manualNote, setManualNote] = useState('');
   const [regen, setRegen] = useState(false);
+  const { activeFor } = useJobs();
+  const rewriting = !!activeFor(p.prospect_id);
   const a = p.analysis || {};
 
   const act = async (label, fn, msg, after) => {
@@ -68,7 +76,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
         {editable && <>
           <button className="btn" disabled={!!busy || !p.to_email} onClick={() => setConfirming(true)}>Approve and send</button>
           <button className="btn btn-quiet" disabled={!!busy} onClick={() => setConfirmingManual(m => !m)}>Mark as manually sent…</button>
-          <button className="btn btn-quiet" disabled={!!busy} onClick={() => setRegen(r => !r)}>Rewrite…</button>
+          <button className="btn btn-quiet" disabled={!!busy || rewriting} onClick={() => setRegen(r => !r)}>{rewriting ? 'Rewriting…' : 'Rewrite…'}</button>
           <a className="btn btn-quiet" href={`${p.onepager_url}?preview=1`} target="_blank" rel="noreferrer">Preview one-pager</a>
           <span className="spacer" />
           <button className="btn btn-quiet" disabled={!!busy} onClick={() => act('discard', () => api.discardProposal(p.id), 'Draft discarded.')}>Discard</button>
@@ -83,7 +91,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <button className="btn" disabled={!!busy} onClick={() => act('restore', () => api.restoreProposal(p.id), 'Back in your review queue.')}>Restore to review</button>
         )}
         {!editable && ['replied', 'finished', 'stopped', 'bounced', 'opted_out'].includes(p.status) && (
-          <button className="btn btn-quiet" disabled={!!busy} onClick={() => setRegen(r => !r)}>Write a new version…</button>
+          <button className="btn btn-quiet" disabled={!!busy || rewriting} onClick={() => setRegen(r => !r)}>{rewriting ? 'Rewriting…' : 'Write a new version…'}</button>
         )}
       </div>
 
@@ -118,8 +126,9 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           </div>
         </div>
       )}
-      {regen && <Regenerate p={p} busy={busy} act={act} openProposal={openProposal} done={() => setRegen(false)} />}
-      {busy && busy !== 'save' && busy !== 'send' && <p className="muted" role="status">Working…{busy === 'regen' ? ' Researching and rewriting takes about a minute.' : ''}</p>}
+      <JobBanner p={p} openProposal={openProposal} />
+      {regen && <Regenerate p={p} done={() => setRegen(false)} />}
+      {busy && !['save', 'send', 'mark-sent'].includes(busy) && <p className="muted" role="status">Working…</p>}
 
       {p.status === 'sent' || p.sent_at ? <Sequence p={p} /> : null}
 
@@ -242,9 +251,59 @@ function OnePagerEditor({ p, editable, save }) {
   );
 }
 
-function Regenerate({ p, busy, act, openProposal, done }) {
+function JobBanner({ p, openProposal }) {
+  const { activeFor, finishedFor, dismiss } = useJobs();
+  const [, tick] = useState(0);
+  const job = activeFor(p.prospect_id);
+  const done = !job && finishedFor(p.prospect_id);
+  useEffect(() => { if (!job) return; const t = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(t); }, [job]);
+  if (job) {
+    return (
+      <div className="job-banner job-running" role="status" aria-live="polite">
+        <span className="spinner" aria-hidden="true" />
+        <div>
+          <strong>{job.kind === 'rewrite' ? `Writing a new version${job.source_version ? ` from v${job.source_version}` : ''}…` : 'Drafting…'}</strong>
+          <span className="muted small"> {job.status === 'queued' ? 'Waiting its turn' : `Running ${elapsed(job.started_at)}`}. Usually about a minute{job.fresh_research ? ' or two with fresh research' : ''}.</span>
+          <p className="small">You can close this and keep working. It'll show up in <strong>To review</strong> marked <strong>New</strong>.</p>
+        </div>
+      </div>
+    );
+  }
+  if (done && done.status === 'done' && done.result_proposal_id && done.result_proposal_id !== p.id) {
+    return (
+      <div className="job-banner job-done" role="status">
+        <div><strong>Version {done.result_version} is ready.</strong> <span className="muted small">Finished {timeAgo(done.finished_at)}.</span></div>
+        <div className="link-row"><button className="btn btn-sm" onClick={() => openProposal(done.result_proposal_id)}>Open v{done.result_version}</button>
+          <button className="btn btn-quiet btn-sm" onClick={() => dismiss(done.id)}>Dismiss</button></div>
+      </div>
+    );
+  }
+  if (done && done.status === 'failed') {
+    return (
+      <div className="job-banner job-failed" role="alert">
+        <div><strong>The rewrite didn't finish.</strong> <span className="small">{done.error}</span></div>
+        <button className="btn btn-quiet btn-sm" onClick={() => dismiss(done.id)}>Dismiss</button>
+      </div>
+    );
+  }
+  return null;
+}
+
+function Regenerate({ p, done }) {
+  const { refresh, activeFor } = useJobs();
   const [notes, setNotes] = useState('');
   const [fresh, setFresh] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const running = !!activeFor(p.prospect_id);
+  const start = async () => {
+    setStarting(true);
+    try {
+      const r = await api.regenerateProposal(p.id, { instructions: notes || undefined, fresh_research: fresh });
+      toast(r.existing ? 'Already rewriting this one. Hang tight.' : "Rewriting in the background. You can close this and keep working.");
+      await refresh();
+      done();
+    } catch (e) { toast(e.message); } finally { setStarting(false); }
+  };
   return (
     <div className="confirm">
       <label>What should change? (optional)
@@ -253,11 +312,8 @@ function Regenerate({ p, busy, act, openProposal, done }) {
       </label>
       <label className="check"><input type="checkbox" checked={fresh} onChange={e => setFresh(e.target.checked)} /> Re-research their website and reviews too</label>
       <div className="link-row">
-        <button className="btn" disabled={!!busy} onClick={() => act('regen',
-          () => api.regenerateProposal(p.id, { instructions: notes || undefined, fresh_research: fresh }),
-          (r) => `Version ${r.version} drafted.`,
-          async (r) => { done(); openProposal(r.id); })}>
-          {busy === 'regen' ? 'Writing…' : 'Write new version'}
+        <button className="btn" disabled={starting || running} onClick={start}>
+          {starting ? 'Starting…' : running ? 'Already rewriting…' : 'Write new version'}
         </button>
         <button className="btn btn-quiet" onClick={done}>Cancel</button>
       </div>

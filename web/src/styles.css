@@ -361,6 +361,26 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .gen-note { grid-column: 1 / -1; }
 @media (max-width: 860px) { .generate { grid-template-columns: 1fr; } .gen-controls .btn { flex: 1; } }
 
+.spinner { width: 18px; height: 18px; flex: none; border-radius: 50%; border: 2.5px solid var(--sky-wash); border-top-color: var(--sky); animation: spin .8s linear infinite; display: inline-block; }
+.spinner-sm { width: 11px; height: 11px; border-width: 2px; margin-right: .3rem; vertical-align: -1px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.job-banner { display: flex; gap: .75rem; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; border-radius: var(--radius-s); padding: .75rem 1rem; }
+.job-banner p { margin-top: .2rem; }
+.job-running { background: var(--sky-wash); justify-content: flex-start; }
+.job-done { background: var(--juniper-wash); align-items: center; }
+.job-failed { background: var(--rust-wash); color: var(--rust); align-items: center; }
+.jobs-panel h2 { font-size: 1rem; }
+.job-list { list-style: none; margin: .5rem 0; padding: 0; display: flex; flex-direction: column; gap: .5rem; }
+.job-list li { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.pchip-new { background: var(--ochre); color: #2A1F05; }
+.pchip-working { background: var(--sky-wash); color: var(--sky); }
+.rail-link { position: relative; }
+.rail-badges { margin-left: auto; display: inline-flex; align-items: center; gap: .35rem; }
+.rail-count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--ochre); color: #2A1F05; font-size: .75rem; font-weight: 700; display: inline-grid; place-items: center; font-family: var(--font-num); }
+.rail-working { width: 9px; height: 9px; border-radius: 50%; background: var(--sky); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (max-width: 860px) { .rail-badges { position: absolute; top: 2px; right: 18%; margin: 0; } .rail-count { min-width: 16px; height: 16px; font-size: .65rem; padding: 0 4px; } }
+
 /* ── Notes & toast ─────────────────────────────────────── */
 .error-note { display: flex; justify-content: space-between; align-items: center; gap: 1rem; background: var(--rust-wash); color: var(--rust); border-radius: var(--radius-s); padding: .7rem 1rem; margin-bottom: 1rem; }
 .error-text { color: var(--rust); }

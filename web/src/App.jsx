@@ -10,6 +10,7 @@ import LeadDrawer from './views/LeadDrawer';
 import ProjectDrawer from './views/ProjectDrawer';
 import { Toaster } from './ui';
 import { settings } from './api';
+import { JobsProvider, useJobs } from './jobs';
 
 const ROUTES = [
   { id: 'today',    label: 'Today',    icon: 'M4 12h4l3-8 4 16 3-8h2' },
@@ -48,6 +49,7 @@ export default function App() {
   const shared = { version, bump, openLead, openProject, openProposal };
 
   return (
+    <JobsProvider bump={bump} version={version}>
     <div className="shell">
       <a className="skip" href="#main">Skip to content</a>
       <nav className="rail" aria-label="Main">
@@ -59,6 +61,7 @@ export default function App() {
           <a key={r.id} href={`#/${r.id}`} className={`rail-link ${route === r.id ? 'active' : ''}`} aria-current={route === r.id ? 'page' : undefined}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d={r.icon} /></svg>
             <span>{r.label}</span>
+            {r.id === 'proposals' && <ProposalsBadge />}
           </a>
         ))}
       </nav>
@@ -77,5 +80,18 @@ export default function App() {
       <ProposalDrawer id={proposalId} onClose={() => setProposalId(null)} {...shared} />
       <Toaster />
     </div>
+    </JobsProvider>
+  );
+}
+
+function ProposalsBadge() {
+  const { jobs, unreviewed } = useJobs();
+  const working = jobs.filter(j => ['queued', 'running'].includes(j.status)).length;
+  if (!working && !unreviewed) return null;
+  return (
+    <span className="rail-badges">
+      {working > 0 && <span className="rail-working" title={`${working} drafting in the background`} aria-label={`${working} drafting`} />}
+      {unreviewed > 0 && <span className="rail-count" aria-label={`${unreviewed} new to review`}>{unreviewed}</span>}
+    </span>
   );
 }
