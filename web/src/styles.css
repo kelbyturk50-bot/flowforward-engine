@@ -452,11 +452,12 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   .tally dt { overflow-wrap: anywhere; }
   .tally dd { font-size: clamp(1.15rem, 5.2vw, 1.5rem); }
   .tally small { display: block; font-size: .85rem; }
-  .lead-row { flex-wrap: wrap; gap: 0; }
+  .btn, .btn-sm { min-height: 44px; }
+  .lead-row { flex-wrap: wrap; row-gap: .5rem; }
   .lead-hit { flex: 1 1 100%; flex-wrap: wrap; align-items: center; }
   .lead-hit .lead-main { flex: 1 1 100%; order: -1; }
   .lead-row .lead-name { white-space: normal; overflow: visible; text-overflow: unset; }
-  .lead-actions { margin: -.35rem 0 .7rem 0; flex-wrap: wrap; }
+  .lead-actions { margin: 0 0 .75rem; width: 100%; gap: .5rem; flex-wrap: wrap; }
   .filters { min-width: 0; }
   .filters > * { min-width: 0; max-width: 100%; }
   .filters-inline { display: none; }

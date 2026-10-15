@@ -76,6 +76,18 @@ describe('phone tab bar', () => {
   });
 });
 
+describe('phone today actions', () => {
+  it('keeps +3 days outside the lead row tap target', async () => {
+    useNarrowViewport(true);
+    render(<App />);
+    const snooze = await screen.findByRole('button', { name: '+3 days' });
+    const open = screen.getByRole('button', { name: 'Open Peak Plumbing' });
+    expect(open.contains(snooze)).toBe(false);
+    expect(snooze.closest('.lead-actions')).toBeTruthy();
+    expect(snooze.classList.contains('btn')).toBe(true);
+  });
+});
+
 describe('phone leads', () => {
   it('shows a card with trade, abbreviated revenue, tier, and fit score', async () => {
     useNarrowViewport(true);
