@@ -20,7 +20,7 @@ One repo, two apps.
 | Proposals | `src/proposals` | Research, Claude drafts, Gmail send, one-pagers. |
 | HTTP API | `src/api` | Prospects, projects, focus, runs, proposals, API-key auth. |
 | DB | `src/db` | `client.js`, `migrate.js`, `schema.sql`. |
-| CRM views | `web/src/views` | Today, Leads, Pipeline, Projects, Proposals, Settings, and the lead/proposal/project drawers. |
+| CRM views | `web/src/views` | Today, Leads, Pipeline, Projects, Proposals, Settings, More (phone tab), and the lead/proposal/project drawers. |
 
 `npm start` and Railway both run `node src/server.js`. Do not add a second server entry.
 
@@ -69,7 +69,7 @@ npm run lint    # ESLint (flat config)
 
 The CRM talks to `VITE_API_URL` (see `web/.env.example`) or the URL saved in the browser under Settings. For local UI work, point it at your local API, not production.
 
-`npm test` in `web/` is the CRM suite. It never loads the real `web/src/api.js` and `fetch` throws if a test tries to make a request. The API (`src/`) still has no test script. Do not claim tests passed if you did not run them.
+`npm test` in `web/` is the CRM suite. It never loads the real `web/src/api.js` and `fetch` throws if a test tries to make a request. The API (`src/`) still has no test script. Do not claim tests passed if you did not run them. The revenue-sort allowlist is a plain Node check: `node --test src/api/prospect-sorts.test.js`.
 
 ## Crons and how to turn them off
 

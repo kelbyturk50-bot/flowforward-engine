@@ -8,23 +8,57 @@ import ProposalDrawer from './views/ProposalDrawer';
 import Settings from './views/Settings';
 import LeadDrawer from './views/LeadDrawer';
 import ProjectDrawer from './views/ProjectDrawer';
-import { Toaster } from './ui';
-import { settings } from './api';
+import More from './views/More';
+import { Toaster, isOverdue } from './ui';
+import { api, settings } from './api';
 import { JobsProvider, useJobs } from './jobs';
+import { badgeCount } from './format';
+
+const ICONS = {
+  today: 'M4 12h4l3-8 4 16 3-8h2',
+  leads: 'M4 6h16M4 12h16M4 18h10',
+  proposals: 'M4 6l8 6 8-6M4 6h16v12H4z',
+  pipeline: 'M4 5v14M10 5v10M16 5v6M22 5v3',
+  projects: 'M4 7h16v12H4zM9 7V4h6v3',
+  settings: 'M12 8a4 4 0 100 8 4 4 0 000-8zM12 2v3M12 19v3M2 12h3M19 12h3',
+  more: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
+};
 
 const ROUTES = [
-  { id: 'today',    label: 'Today',    icon: 'M4 12h4l3-8 4 16 3-8h2' },
-  { id: 'leads',    label: 'Leads',    icon: 'M4 6h16M4 12h16M4 18h10' },
-  { id: 'proposals', label: 'Proposals', icon: 'M4 6l8 6 8-6M4 6h16v12H4z' },
-  { id: 'pipeline', label: 'Pipeline', icon: 'M4 5v14M10 5v10M16 5v6M22 5v3' },
-  { id: 'projects', label: 'Projects', icon: 'M4 7h16v12H4zM9 7V4h6v3' },
-  { id: 'settings', label: 'Settings', icon: 'M12 8a4 4 0 100 8 4 4 0 000-8zM12 2v3M12 19v3M2 12h3M19 12h3' },
+  { id: 'today',    label: 'Today',    icon: ICONS.today },
+  { id: 'leads',    label: 'Leads',    icon: ICONS.leads },
+  { id: 'proposals', label: 'Proposals', icon: ICONS.proposals },
+  { id: 'pipeline', label: 'Pipeline', icon: ICONS.pipeline },
+  { id: 'projects', label: 'Projects', icon: ICONS.projects },
+  { id: 'settings', label: 'Settings', icon: ICONS.settings },
 ];
+
+const TABS = [
+  { id: 'today', label: 'Today', icon: ICONS.today },
+  { id: 'leads', label: 'Leads', icon: ICONS.leads },
+  { id: 'pipeline', label: 'Pipeline', icon: ICONS.pipeline },
+  { id: 'proposals', label: 'Proposals', icon: ICONS.proposals },
+  { id: 'more', label: 'More', icon: ICONS.more },
+];
+
+const KNOWN = new Set([...ROUTES.map(r => r.id), 'more']);
 
 const readRoute = () => {
   const r = window.location.hash.replace(/^#\/?/, '').split('?')[0];
-  return ROUTES.some(x => x.id === r) ? r : (settings.apiKey ? 'today' : 'settings');
+  if (KNOWN.has(r)) return r;
+  return settings.apiKey ? 'today' : 'settings';
 };
+
+const tabOn = (id, route) => id === 'more' ? route === 'more' || route === 'projects' : route === id;
+
+function BrandMark() {
+  return (
+    <svg viewBox="0 0 64 64" aria-hidden="true">
+      <path d="M2 44 L20 16 L30 30 L42 12 L62 44 Z" className="brand-peaks" />
+      <path d="M29 30 C24 36 22 42 30 46 C38 50 50 50 62 52 L62 58 C48 58 34 58 25 52 C17 47 21 37 29 30 Z" className="brand-river" />
+    </svg>
+  );
+}
 
 export default function App() {
   const [route, setRoute] = useState(readRoute);
@@ -52,9 +86,10 @@ export default function App() {
     <JobsProvider bump={bump} version={version}>
     <div className="shell">
       <a className="skip" href="#main">Skip to content</a>
+      <MobileHeader route={route} />
       <nav className="rail" aria-label="Main">
         <div className="brand">
-          <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M2 44 L20 16 L30 30 L42 12 L62 44 Z" className="brand-peaks"/><path d="M29 30 C24 36 22 42 30 46 C38 50 50 50 62 52 L62 58 C48 58 34 58 25 52 C17 47 21 37 29 30 Z" className="brand-river"/></svg>
+          <BrandMark />
           <span>Flow<span className="brand-forward">Forward</span></span>
         </div>
         {ROUTES.map(r => (
@@ -65,6 +100,7 @@ export default function App() {
           </a>
         ))}
       </nav>
+      <MobileTabs route={route} version={version} />
 
       <main id="main" className="main">
         {route === 'today'    && <Today {...shared} />}
@@ -72,6 +108,7 @@ export default function App() {
         {route === 'proposals' && <Proposals {...shared} />}
         {route === 'pipeline' && <Pipeline {...shared} />}
         {route === 'projects' && <Projects {...shared} />}
+        {route === 'more'     && <More />}
         {route === 'settings' && <Settings {...shared} authProblem={authProblem} onSaved={() => { setAuthProblem(false); bump(); }} />}
       </main>
 
@@ -82,6 +119,60 @@ export default function App() {
     </div>
     </JobsProvider>
   );
+}
+
+function MobileHeader({ route }) {
+  return (
+    <header className="mobile-bar">
+      <a className="brand brand-mobile" href="#/today">
+        <BrandMark />
+        <span>Flow<span className="brand-forward">Forward</span></span>
+      </a>
+      <a href="#/settings" className={`gear-btn ${route === 'settings' ? 'active' : ''}`} aria-label="Settings" aria-current={route === 'settings' ? 'page' : undefined}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d={ICONS.settings} /></svg>
+      </a>
+    </header>
+  );
+}
+
+function useFocusCounts(version) {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    if (!settings.apiKey) { setData(null); return; }
+    let live = true;
+    api.focus().then(d => { if (live) setData(d); }).catch(() => {});
+    return () => { live = false; };
+  }, [version]);
+  return data;
+}
+
+function MobileTabs({ route, version }) {
+  const { unreviewed } = useJobs();
+  const focus = useFocusCounts(version);
+  const todayN = focus?.followups_due?.length || 0;
+  const moreN = (focus?.task_queue || []).filter(t => isOverdue(t.due_date)).length;
+  const counts = { today: todayN, proposals: unreviewed, more: moreN };
+  const labels = { today: 'follow-ups due', proposals: 'proposals to review', more: 'overdue project tasks' };
+  return (
+    <nav className="tabbar" aria-label="Mobile">
+      {TABS.map(t => {
+        const on = tabOn(t.id, route);
+        return (
+          <a key={t.id} href={`#/${t.id}`} className={`tabbar-link ${on ? 'active' : ''}`} aria-current={on ? 'page' : undefined}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d={t.icon} /></svg>
+            <span>{t.label}</span>
+            {counts[t.id] != null && <TabCount n={counts[t.id]} what={labels[t.id]} />}
+          </a>
+        );
+      })}
+    </nav>
+  );
+}
+
+function TabCount({ n, what }) {
+  const text = badgeCount(n);
+  if (!text) return null;
+  return <span className="tab-badge" aria-label={`${n} ${what}`}>{text}</span>;
 }
 
 function ProposalsBadge() {

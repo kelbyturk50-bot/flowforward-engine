@@ -69,10 +69,55 @@ export function timeAgo(ts) {
   return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+/** True when the viewport is at or under the CRM phone breakpoint. */
+export function useNarrow(query = '(max-width: 860px)') {
+  const get = () => typeof window.matchMedia === 'function' && window.matchMedia(query).matches;
+  const [matches, setMatches] = useState(get);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return undefined;
+    const mq = window.matchMedia(query);
+    const on = () => setMatches(mq.matches);
+    on();
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, [query]);
+  return matches;
+}
+
 export const addDays = (n) => {
   const d = new Date(); d.setDate(d.getDate() + n);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
+
+/** Phone bottom sheet. Escape, the scrim, or Done closes it. */
+export function BottomSheet({ open, onClose, title, children }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    ref.current?.focus();
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div className="sheet-wrap" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="sheet" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} ref={ref}>
+        <div className="sheet-grab" aria-hidden="true" />
+        <header className="sheet-head">
+          <h2>{title}</h2>
+          <button type="button" className="btn btn-quiet btn-sm" onClick={onClose}>Done</button>
+        </header>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 export function Drawer({ open, onClose, children, label, wide }) {
   const ref = useRef(null);

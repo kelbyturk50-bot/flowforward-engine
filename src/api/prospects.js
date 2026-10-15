@@ -6,23 +6,16 @@ const { rescore } = require('../scoring/fit');
 
 const STAGES = ['found', 'contacted', 'responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const CLOSED = ['won', 'lost', 'disqualified'];
-const SORTS = {
-  fit:         'fit_score DESC NULLS LAST, review_count DESC NULLS LAST',
-  recent:      'discovered_at DESC',
-  rating:      'rating DESC NULLS LAST, review_count DESC NULLS LAST',
-  reviews:     'review_count DESC NULLS LAST',
-  next_action: 'next_action_at ASC NULLS LAST, fit_score DESC NULLS LAST',
-  company:     'company ASC',
-  updated:     'updated_at DESC',
-};
+const SORTS = require('./prospect-sorts');
 
 // GET /api/prospects
 //   ?stage= (comma list | open | closed) &industry= &city= &tier= (comma list)
-//   &q= (company search) &min_fit= &has_website=1 &sort=fit|recent|rating|reviews|next_action|company|updated
+//   &q= (company search) &min_fit= &min_value= &has_website=1
+//   &sort=fit|recent|rating|reviews|revenue|next_action|company|updated
 //   &limit= (default 200, max 1000) &offset=
 router.get('/', async (req, res) => {
   try {
-    const { stage, industry, city, tier, q, min_fit, has_website, sort = 'fit' } = req.query;
+    const { stage, industry, city, tier, q, min_fit, min_value, has_website, sort = 'fit' } = req.query;
     const limit  = Math.min(parseInt(req.query.limit || '200', 10) || 200, 1000);
     const offset = parseInt(req.query.offset || '0', 10) || 0;
     const where = []; const params = [];
@@ -40,6 +33,10 @@ router.get('/', async (req, res) => {
       where.push(`(company ILIKE $${i} OR contact_name ILIKE $${i} OR phone ILIKE $${i})`);
     }
     if (min_fit)  add('fit_score >= ?', parseInt(min_fit, 10));
+    if (min_value !== undefined && min_value !== '') {
+      const n = Number(min_value);
+      if (Number.isFinite(n)) add('est_value >= ?', n);
+    }
     if (has_website === '1') where.push('website IS NOT NULL');
 
     const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
