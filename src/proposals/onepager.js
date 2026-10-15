@@ -74,9 +74,21 @@ ol.steps li::before{content:counter(s);font-family:"Barlow Semi Condensed",sans-
 .btn{display:inline-block;padding:13px 22px;border-radius:10px;font-weight:600;text-decoration:none;font-size:1.02rem}
 .btn-main{background:#fff;color:var(--juniper)}.btn-alt{background:transparent;color:#fff;border:1.5px solid rgba(255,255,255,.6)}
 .btn:focus-visible{outline:3px solid var(--ochre);outline-offset:2px}
+.pdf-bar{display:flex;justify-content:flex-end;padding:14px 0 6px}
+.btn-pdf{display:inline-flex;align-items:center;gap:8px;padding:9px 18px;border-radius:9px;font-weight:600;font-size:.9rem;background:var(--surface);color:var(--ink);border:1.5px solid var(--line);cursor:pointer;text-decoration:none;box-shadow:0 2px 8px rgba(30,42,47,.07);transition:box-shadow .15s}
+.btn-pdf:hover{box-shadow:0 4px 14px rgba(30,42,47,.13)}.btn-pdf svg{flex:none}
 footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center}
 @media (max-width:560px){.card{padding:20px}.opp{grid-template-columns:1fr}.num{margin-bottom:-6px}}
-@media print{header.top{background:#fff;color:var(--ink)}.for{color:var(--ink-2)}header.top svg.ridge{display:none}.card{box-shadow:none;break-inside:avoid}}
+@media print{
+  @page{margin:0.6in}
+  body{background:#fff;font-size:14px}
+  header.top{background:#1E2A2F;color:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  header.top svg.ridge{display:none}
+  .card{box-shadow:none;break-inside:avoid;border:1px solid #D5DEDB}
+  .cta{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .pdf-bar{display:none}
+  a[href]::after{content:none}
+}
 </style></head>
 <body>
 <header class="top"><div class="wrap">
@@ -86,6 +98,12 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
 </div>
 <svg class="ridge" viewBox="0 0 1440 70" preserveAspectRatio="none" aria-hidden="true"><path d="M0 70 L0 44 L180 20 L330 46 L520 8 L700 40 L860 18 L1040 48 L1220 14 L1440 38 L1440 70 Z" fill="#F3F6F5"/></svg>
 </header>
+<div class="wrap pdf-bar">
+  <button class="btn-pdf" onclick="window.print()" title="Save as PDF">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Save as PDF
+  </button>
+</div>
 <main class="wrap">
   <section class="card intro">
     ${para(o.intro)}
