@@ -5,9 +5,10 @@ const pool    = require('../db/client');
 const cfg     = require('../proposals/config');
 const { draftProposal, runProposalBatch, getSetting, isRunning } = require('../proposals/draft');
 const send    = require('../proposals/send');
+const jobs    = require('../proposals/jobs');
 
 const LIST_COLS = `pr.id, pr.prospect_id, pr.version, pr.status, pr.slug, pr.to_email, pr.to_name, pr.subject,
-  pr.cost_usd, pr.feedback_rating, pr.created_at, pr.updated_at, pr.sent_at, pr.followup1_due_at, pr.followup1_sent_at,
+  pr.cost_usd, pr.feedback_rating, pr.reviewed_at, pr.created_at, pr.updated_at, pr.sent_at, pr.followup1_due_at, pr.followup1_sent_at,
   pr.followup2_due_at, pr.followup2_sent_at, pr.replied_at, pr.stop_reason, pr.views, pr.last_viewed_at, pr.error,
   pr.analysis->>'fit_verdict' AS fit_verdict, (pr.analysis->>'confidence')::int AS confidence, pr.analysis->>'snapshot' AS snapshot,
   p.company, p.industry, p.city, p.fit_score, p.fit_tier, p.stage, p.phone, p.website`;
@@ -54,6 +55,12 @@ router.get('/summary', async (req, res) => {
                     AND p.industry <> ALL($2) AND (p.website IS NOT NULL OR p.email IS NOT NULL)
                     AND NOT EXISTS (SELECT 1 FROM proposals pr WHERE pr.prospect_id = p.id)`, [cfg.TIERS, cfg.EXCLUDED_INDUSTRIES]),
     ]);
+    const [unreviewed, activeJobs] = await Promise.all([
+      pool.query(`SELECT COUNT(*)::int AS n FROM proposals WHERE status = 'draft' AND reviewed_at IS NULL`),
+      pool.query(`SELECT COUNT(*)::int AS n FROM proposal_jobs WHERE status IN ('queued', 'running')`),
+    ]);
+    counts.unreviewed = unreviewed.rows[0].n;
+    counts.jobs_active = activeJobs.rows[0].n;
     const setup = [];
     if (!cfg.anthropicConfigured()) setup.push('Add ANTHROPIC_API_KEY in Railway Variables so the bot can write drafts.');
     setup.push(...await send.sendReadiness());
@@ -72,6 +79,32 @@ router.get('/summary', async (req, res) => {
     });
   } catch (err) { fail(res, err); }
 });
+
+// Background jobs (single-lead drafts and rewrites)
+router.get('/jobs', async (req, res) => {
+  try {
+    const [list, unreviewed] = await Promise.all([
+      jobs.list({ prospectId: req.query.prospect_id ? parseInt(req.query.prospect_id, 10) : null }),
+      pool.query(`SELECT COUNT(*)::int AS n FROM proposals WHERE status = 'draft' AND reviewed_at IS NULL`),
+    ]);
+    res.json({ jobs: list, unreviewed: unreviewed.rows[0].n });
+  }
+  catch (err) { fail(res, err); }
+});
+router.post('/jobs/:jobId/dismiss', async (req, res) => {
+  try { await jobs.dismiss(parseInt(req.params.jobId, 10)); res.json({ ok: true }); } catch (err) { fail(res, err); }
+});
+
+async function startJob(res, { prospectId, kind, sourceProposalId, instructions, freshResearch }) {
+  if (!cfg.anthropicConfigured()) return res.status(400).json({ error: 'Add ANTHROPIC_API_KEY in Railway Variables first.' });
+  const lead = await pool.query('SELECT id, do_not_contact FROM prospects WHERE id = $1', [prospectId]);
+  if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
+  if (lead.rows[0].do_not_contact) return res.status(409).json({ error: 'This lead asked not to be contacted.' });
+  const out = await pool.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [prospectId]);
+  if (out.rows.length) return res.status(409).json({ error: 'A proposal is already out for this lead. Stop that sequence before writing a new one.' });
+  const { job, existing } = await jobs.enqueue({ prospectId, kind, sourceProposalId, instructions, freshResearch });
+  res.status(202).json({ job, existing });
+}
 
 // Drafting runs
 router.get('/runs', async (req, res) => {
@@ -122,14 +155,13 @@ router.post('/check-inbox', async (req, res) => {
   } catch (err) { fail(res, err); }
 });
 
-// POST /api/proposals { prospect_id, instructions } — draft one on demand (any tier). Takes ~30–90s.
+// POST /api/proposals { prospect_id, instructions } — draft one lead in the background (any tier).
+// Returns 202 with the job; poll GET /api/proposals/jobs.
 router.post('/', async (req, res) => {
   const id = parseInt(req.body?.prospect_id, 10);
   if (!id) return res.status(400).json({ error: 'prospect_id is required' });
-  try {
-    const p = await draftProposal(id, { instructions: req.body?.instructions, trigger: 'manual' });
-    res.status(201).json(withUrl(p));
-  } catch (err) { fail(res, err); }
+  try { await startJob(res, { prospectId: id, kind: 'draft', instructions: req.body?.instructions }); }
+  catch (err) { fail(res, err); }
 });
 
 // GET /api/proposals/:id — full proposal with lead basics and version list
@@ -189,10 +221,19 @@ router.post('/:id/regenerate', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT prospect_id FROM proposals WHERE id = $1', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    const p = await draftProposal(rows[0].prospect_id, {
-      instructions: req.body?.instructions, reuseResearch: !req.body?.fresh_research, trigger: 'manual',
+    await startJob(res, {
+      prospectId: rows[0].prospect_id, kind: 'rewrite', sourceProposalId: parseInt(req.params.id, 10),
+      instructions: req.body?.instructions, freshResearch: !!req.body?.fresh_research,
     });
-    res.status(201).json(withUrl(p));
+  } catch (err) { fail(res, err); }
+});
+
+// POST /api/proposals/:id/seen — opened in the CRM; clears the "New" tag
+router.post('/:id/seen', async (req, res) => {
+  try {
+    await pool.query(`UPDATE proposals SET reviewed_at = COALESCE(reviewed_at, NOW()) WHERE id = $1`, [req.params.id]);
+    await pool.query(`UPDATE proposal_jobs SET dismissed_at = COALESCE(dismissed_at, NOW()) WHERE result_proposal_id = $1`, [req.params.id]);
+    res.json({ ok: true });
   } catch (err) { fail(res, err); }
 });
 

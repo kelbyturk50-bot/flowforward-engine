@@ -89,6 +89,7 @@ async function boot() {
   try {
     await applySchema();
     console.log('[server] ✓ Schema up to date');
+    await require('./proposals/jobs').recover();
     const n = await rescore();
     console.log(`[server] ✓ Fit scores refreshed for ${n} prospects`);
   } catch (err) {

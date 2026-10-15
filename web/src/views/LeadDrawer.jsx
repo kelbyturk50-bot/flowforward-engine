@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
+import { useJobs } from '../jobs';
 import { Drawer, FitBadge, STAGES, Stars, ErrorNote, money, money2, relDate, isOverdue, timeAgo, addDays, telHref, mapsHref, statusLabel, toast, ProposalChip } from '../ui';
 
 const ACT_LABEL = { note: 'Note', call: 'Call', email: 'Email', meeting: 'Meeting', stage_change: 'Stage' };
@@ -200,26 +201,33 @@ function LeadBody({ lead, save, setLead, bump, openProject, openProposal }) {
 }
 
 function ProposalBlock({ lead, bump, openProposal }) {
+  const { activeFor, refresh } = useJobs();
+  const job = activeFor(lead.id);
   const [list, setList] = useState(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let live = true;
     api.proposals({ prospect_id: lead.id }).then(r => live && setList(r.proposals)).catch(() => live && setList([]));
     return () => { live = false; };
-  }, [lead.id]);
+  }, [lead.id, job?.status]);
   const current = list?.find(p => !['superseded'].includes(p.status));
   const draft = async () => {
     setBusy(true);
     try {
-      const p = await api.draftProposal(lead.id);
-      toast(`Proposal drafted for ${lead.company}.`);
-      bump(); openProposal(p.id);
-    } catch (e) { toast(e.message); setBusy(false); }
+      await api.draftProposal(lead.id);
+      toast(`Drafting ${lead.company} in the background. You can close this; it'll show up in Proposals marked New.`);
+      await refresh();
+    } catch (e) { toast(e.message); } finally { setBusy(false); }
   };
   if (!list) return null;
   return (
     <section className="block">
       <h3>Proposal</h3>
+      {job && (
+        <div className="job-banner job-running" role="status"><span className="spinner" aria-hidden="true" />
+          <div><strong>{job.kind === 'rewrite' ? 'Writing a new version…' : 'Drafting…'}</strong>
+            <p className="small">Usually about a minute. You can close this and keep working.</p></div></div>
+      )}
       {current ? (
         <div className="prop-mini">
           <ProposalChip status={current.status} verdict={current.fit_verdict} />
@@ -230,7 +238,7 @@ function ProposalBlock({ lead, bump, openProposal }) {
       ) : (
         <>
           <p className="muted">The bot reads their site, reviews and socials, then drafts an email sequence and a one-page proposal for you to review. Nothing sends until you approve it.</p>
-          <div><button className="btn" onClick={draft} disabled={busy || lead.do_not_contact}>{busy ? 'Researching and writing… (about a minute)' : 'Draft a proposal'}</button></div>
+          {!job && <div><button className="btn" onClick={draft} disabled={busy || lead.do_not_contact}>{busy ? 'Starting…' : 'Draft a proposal'}</button></div>}
           {lead.do_not_contact && <p className="warn-text small">This lead asked not to be contacted.</p>}
         </>
       )}

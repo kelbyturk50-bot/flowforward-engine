@@ -203,3 +203,25 @@ CREATE TABLE IF NOT EXISTS app_settings (
 
 -- Gmail API sending: thread id of the first email so follow-ups land in the same thread
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS thread_id TEXT;
+
+-- Background drafting jobs (single-lead drafts and rewrites) so the CRM doesn't
+-- have to wait on a long request. reviewed_at marks a draft as opened in the CRM.
+CREATE TABLE IF NOT EXISTS proposal_jobs (
+  id                  SERIAL PRIMARY KEY,
+  prospect_id         INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  kind                TEXT NOT NULL DEFAULT 'rewrite',     -- draft | rewrite
+  source_proposal_id  INTEGER REFERENCES proposals(id) ON DELETE SET NULL,
+  instructions        TEXT,
+  fresh_research      BOOLEAN NOT NULL DEFAULT FALSE,
+  status              TEXT NOT NULL DEFAULT 'queued',      -- queued | running | done | failed
+  result_proposal_id  INTEGER REFERENCES proposals(id) ON DELETE SET NULL,
+  error               TEXT,
+  created_at          TIMESTAMPTZ DEFAULT NOW(),
+  started_at          TIMESTAMPTZ,
+  finished_at         TIMESTAMPTZ,
+  dismissed_at        TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_proposal_jobs_status ON proposal_jobs(status, created_at);
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+-- Drafts that existed before this column are treated as already seen
+UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND created_at < '2026-10-15';

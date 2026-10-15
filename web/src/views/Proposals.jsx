@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api';
 import { useAsync, ErrorNote, FitBadge, ProposalChip, money2, relDate, timeAgo, toast } from '../ui';
+import { useJobs, elapsed } from '../jobs';
 
 const TABS = [
   { id: 'review',  label: 'To review', note: 'Drafts the bot wrote. Read, edit, then approve and send.' },
@@ -51,6 +52,9 @@ export default function Proposals({ version, bump, openProposal }) {
 
   const current = TABS.find(t => t.id === tab);
   const rows = list.data?.proposals || [];
+  const { jobs, activeFor, dismiss } = useJobs();
+  const running = jobs.filter(j => ['queued', 'running'].includes(j.status));
+  const failed = jobs.filter(j => j.status === 'failed' && !j.dismissed_at);
 
   return (
     <div className="page">
@@ -96,6 +100,24 @@ export default function Proposals({ version, bump, openProposal }) {
         </div>
       )}
 
+      {(running.length > 0 || failed.length > 0) && (
+        <section className="panel jobs-panel" aria-label="Working in the background" aria-live="polite">
+          <h2>Working in the background</h2>
+          <ul className="job-list">
+            {running.map(j => (
+              <li key={j.id}><span className="spinner" aria-hidden="true" />
+                <button className="linklike" onClick={() => j.source_proposal_id && openProposal(j.source_proposal_id)}>{j.company}</button>
+                <span className="muted small">{j.kind === 'rewrite' ? 'new version' : 'first draft'} · {j.status === 'queued' ? 'waiting its turn' : `running ${elapsed(j.started_at)}`}</span></li>
+            ))}
+            {failed.map(j => (
+              <li key={j.id} className="job-failed-row"><span className="warn-text">Didn't finish:</span> {j.company} <span className="muted small">{j.error}</span>
+                <button className="btn btn-quiet btn-sm" onClick={() => dismiss(j.id)}>Dismiss</button></li>
+            ))}
+          </ul>
+          {running.length > 0 && <p className="muted small">Feel free to leave this page. Finished drafts land in To review marked New.</p>}
+        </section>
+      )}
+
       <div className="tabs" role="tablist" aria-label="Proposal status">
         {TABS.map(t => (
           <button key={t.id} role="tab" aria-selected={tab === t.id} className={`tab ${tab === t.id ? 'active' : ''}`} onClick={() => go(t.id)}>
@@ -130,6 +152,8 @@ export default function Proposals({ version, bump, openProposal }) {
                     {tab !== 'review' && <span className="prop-seq">{sequenceLine(p)}{p.views ? ` · one-pager opened ${p.views}×` : ''}</span>}
                   </span>
                   <span className="prop-side">
+                    {activeFor(p.prospect_id) && <span className="pchip pchip-working"><span className="spinner spinner-sm" aria-hidden="true" />Rewriting…</span>}
+                    {p.status === 'draft' && !p.reviewed_at && <span className="pchip pchip-new">New</span>}
                     <ProposalChip status={p.status} verdict={p.fit_verdict} />
                     {tab === 'review' && p.fit_verdict === 'weak' && <span className="pchip pchip-weak">Weak fit</span>}
                     {p.feedback_rating === 1 && <span aria-label="You liked this">👍</span>}
