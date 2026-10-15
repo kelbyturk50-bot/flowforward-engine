@@ -9,7 +9,7 @@
 require('dotenv').config();
 const pool = require('../db/client');
 const { searchPlaces, normalizePplace } = require('./google-places');
-const { EXCLUDED_INDUSTRIES } = require('../proposals/config');
+const { EXCLUDED_INDUSTRIES } = require('../scoring/config');
 // Industries listed in EXCLUDED_INDUSTRIES (default: Pest Control) aren't searched.
 const INDUSTRIES = require('./industries').filter(i => !EXCLUDED_INDUSTRIES.includes(i.industry));
 const { rescore } = require('../scoring/fit');
@@ -135,4 +135,4 @@ if (require.main === module) {
     .catch(err => { console.error('[bot] Fatal:', err); process.exit(1); });
 }
 
-module.exports = { runDiscovery };
+module.exports = { runDiscovery, INDUSTRIES };

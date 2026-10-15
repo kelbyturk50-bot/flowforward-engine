@@ -8,6 +8,7 @@
 //   Location          10  inside your drive-to market
 //   Franchise        -20  national brands / franchises
 //   Manual boost  ±20     your own adjustment (fit_boost)
+//   Excluded industry      EXCLUDED_INDUSTRIES (default Pest Control) → score 0, tier D
 //
 // Key insight: businesses with 300+ reviews and 4.7+ stars are already systemized.
 // The winnable client has 25–150 reviews (busy but owner still juggling everything)
@@ -91,6 +92,21 @@ function tierFor(score) {
 
 /** Compute fit for one prospect row. Pure function. */
 function computeFit(p) {
+  // Out-of-scope trades cannot rank as a fit. Other factors and fit_boost
+  // do not apply; the row stays in the database and sorts to the bottom.
+  if (cfg.EXCLUDED_INDUSTRIES.includes(p.industry)) {
+    return {
+      fit_score: 0,
+      fit_tier: 'D',
+      fit_reasons: [{
+        label: 'Industry',
+        points: 0,
+        max: 30,
+        detail: `${p.industry} — out of scope`,
+      }],
+    };
+  }
+
   const reasons = [];
   const ind = industryFit(p.industry);
   const indPts = Math.round((ind / 10) * 30);
