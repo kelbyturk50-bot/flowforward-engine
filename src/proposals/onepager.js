@@ -86,8 +86,9 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
   header.top svg.ridge{display:none}
   .card{box-shadow:none;break-inside:avoid;border:1px solid #D5DEDB}
   .cta{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .btn-main{color:var(--juniper)!important}
+  .btn-alt{color:#fff!important}
   .pdf-bar{display:none}
-  a[href]::after{content:none}
 }
 </style></head>
 <body>
@@ -122,10 +123,11 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
   </section>
   <section class="card cta" id="talk">
     <h2>Want to talk it through?</h2>
-    ${para(o.closing || `Reply to my email with any questions, or grab 15 minutes on my calendar. Either way, happy to help.`)}
+    ${para(o.closing || `Grab 15 minutes on my calendar, shoot me an email, or give me a call. Happy to help.`)}
     <div class="btns">
-      <a class="btn btn-main" href="${esc(SENDER.calendly)}" target="_blank" rel="noopener">Book a free 15-minute call</a>
-      <a class="btn btn-alt" href="${esc(mailto)}">Email ${esc(first)}</a>
+      <a class="btn btn-main" href="${esc(SENDER.calendly)}" target="_blank" rel="noopener">📅 Book a free 15-min call — ${esc(SENDER.calendly)}</a>
+      <a class="btn btn-alt" href="${esc(mailto)}">✉️ Email — ${esc(SENDER.email)}</a>
+      ${SENDER.phone ? `<a class="btn btn-alt" href="tel:${esc(SENDER.phone)}">📞 Call — ${esc(SENDER.phone)}</a>` : ''}
     </div>
   </section>
 </main>
