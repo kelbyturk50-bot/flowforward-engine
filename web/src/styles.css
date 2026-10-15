@@ -453,6 +453,17 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   .tally dd { font-size: clamp(1.15rem, 5.2vw, 1.5rem); }
   .tally small { display: block; font-size: .85rem; }
   .btn, .btn-sm { min-height: 44px; }
+  .mini-select { min-height: 44px; padding: 0 .55rem; }
+  .chip { min-height: 44px; display: inline-flex; align-items: center; }
+  .drawer-close { width: 44px; height: 44px; }
+  .head-chips .linklike { display: inline-flex; align-items: center; min-height: 44px; padding: 0 .4rem; }
+  .input { min-height: 44px; }
+  .task-body { min-height: 44px; justify-content: center; }
+  .task input[type="checkbox"], .check input[type="checkbox"] { width: 44px; height: 44px; }
+  .tally a { display: inline-flex; align-items: center; min-height: 44px; }
+  input[type="range"] { min-height: 44px; }
+  .skip { min-height: 44px; }
+  .lead-head { padding-right: 3.25rem; }
   .lead-row { flex-wrap: wrap; row-gap: .5rem; }
   .lead-hit { flex: 1 1 100%; flex-wrap: wrap; align-items: center; }
   .lead-hit .lead-main { flex: 1 1 100%; order: -1; }
