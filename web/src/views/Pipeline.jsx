@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
-import { useAsync, ErrorNote, FitBadge, STAGES, stageLabel, money, relDate, isOverdue, useNarrow, toast } from '../ui';
+import { useAsync, ErrorNote, FitBadge, STAGES, stageLabel, money, relDate, isOverdue, useNarrow, toast, presentError } from '../ui';
 import { compactMoney } from '../format';
 
 const COLUMNS = ['found', 'contacted', 'responded', 'qualified', 'proposal'];
@@ -54,7 +54,7 @@ export default function Pipeline({ version, bump, openLead, openProject }) {
           <p className="muted phone-hint">Tap a stage to filter. Use a card{"'"}s menu to move it. Won starts a project.</p>
         </div>
       </header>
-      <ErrorNote error={error} onRetry={reload} />
+      <ErrorNote error={presentError(error)} onRetry={reload} />
 
       {narrow && <StageChips stage={stage} onPick={setStage} stats={data?.stats} leads={data?.leads} closed={data?.closed} />}
       {narrow && <div className="pipe-list">

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { useAsync, ErrorNote, FitBadge, StageChip, Stars, STAGES, relDate, isOverdue, Drawer, BottomSheet, useNarrow, toast } from '../ui';
+import { useAsync, ErrorNote, FitBadge, StageChip, Stars, STAGES, relDate, isOverdue, Drawer, BottomSheet, useNarrow, toast, presentError } from '../ui';
 import { compactMoney } from '../format';
 
 const PAGE = 100;
@@ -87,7 +87,7 @@ export default function Leads({ version, bump, openLead }) {
         {filtered && <button className="btn btn-quiet" onClick={() => { setQ(''); setF(DEFAULTS); }}>Clear filters</button>}
       </BottomSheet>
 
-      <ErrorNote error={error} onRetry={reload} />
+      <ErrorNote error={presentError(error)} onRetry={reload} />
 
       <div className="table-wrap">
         {narrow && <ul className="lead-cards">

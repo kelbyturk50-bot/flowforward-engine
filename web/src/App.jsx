@@ -20,9 +20,17 @@ const ICONS = {
   proposals: 'M4 6l8 6 8-6M4 6h16v12H4z',
   pipeline: 'M4 5v14M10 5v10M16 5v6M22 5v3',
   projects: 'M4 7h16v12H4zM9 7V4h6v3',
-  settings: 'M12 8a4 4 0 100 8 4 4 0 000-8zM12 2v3M12 19v3M2 12h3M19 12h3',
   more: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
 };
+
+function GearIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
 
 const ROUTES = [
   { id: 'today',    label: 'Today',    icon: ICONS.today },
@@ -30,7 +38,7 @@ const ROUTES = [
   { id: 'proposals', label: 'Proposals', icon: ICONS.proposals },
   { id: 'pipeline', label: 'Pipeline', icon: ICONS.pipeline },
   { id: 'projects', label: 'Projects', icon: ICONS.projects },
-  { id: 'settings', label: 'Settings', icon: ICONS.settings },
+  { id: 'settings', label: 'Settings' },
 ];
 
 const TABS = [
@@ -94,7 +102,7 @@ export default function App() {
         </div>
         {ROUTES.map(r => (
           <a key={r.id} href={`#/${r.id}`} className={`rail-link ${route === r.id ? 'active' : ''}`} aria-current={route === r.id ? 'page' : undefined}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d={r.icon} /></svg>
+            {r.id === 'settings' ? <GearIcon /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d={r.icon} /></svg>}
             <span>{r.label}</span>
             {r.id === 'proposals' && <ProposalsBadge />}
           </a>
@@ -129,7 +137,7 @@ function MobileHeader({ route }) {
         <span>Flow<span className="brand-forward">Forward</span></span>
       </a>
       <a href="#/settings" className={`gear-btn ${route === 'settings' ? 'active' : ''}`} aria-label="Settings" aria-current={route === 'settings' ? 'page' : undefined}>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d={ICONS.settings} /></svg>
+        <GearIcon />
       </a>
     </header>
   );

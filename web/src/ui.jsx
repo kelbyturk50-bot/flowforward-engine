@@ -153,6 +153,13 @@ export function useAsync(fn, deps) {
   return { ...state, reload: () => setTick(t => t + 1) };
 }
 
+/** A 400 from the leads or pipeline list is a bad filter, not a crash. */
+export function presentError(error) {
+  if (!error) return null;
+  if (error.status === 400) return { message: 'Those filters are not valid. Clear them and try again.' };
+  return error;
+}
+
 export function ErrorNote({ error, onRetry }) {
   if (!error) return null;
   return (

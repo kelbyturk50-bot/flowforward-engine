@@ -41,7 +41,10 @@ describe('phone tab bar', () => {
       expect(within(nav).getByRole('link', { name: new RegExp(label) })).toBeInTheDocument();
     }
     expect(within(nav).queryByRole('link', { name: /Settings/ })).not.toBeInTheDocument();
-    expect(screen.getAllByRole('link', { name: 'Settings' }).some((a) => a.className.includes('gear-btn'))).toBe(true);
+    const gear = screen.getAllByRole('link', { name: 'Settings' }).find((a) => a.className.includes('gear-btn'));
+    expect(gear).toBeTruthy();
+    expect(gear).toHaveAttribute('aria-label', 'Settings');
+    expect(gear.querySelector('circle')).not.toBeNull();
   });
 
   it('caps Today and Proposals at 9+ and puts the project count on More', async () => {
@@ -98,6 +101,17 @@ describe('phone leads', () => {
         industry: 'HVAC', min_value: '1000000', sort: 'revenue',
       }));
     });
+  });
+
+  it('explains a rejected filter without leaving the page', async () => {
+    useNarrowViewport(true);
+    const rejected = new Error('bad_request');
+    rejected.status = 400;
+    api.prospects.mockRejectedValue(rejected);
+    render(<Leads {...shared} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Those filters are not valid. Clear them and try again.');
+    expect(screen.getByRole('heading', { name: 'Leads' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });
 });
 

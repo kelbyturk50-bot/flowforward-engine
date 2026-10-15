@@ -118,7 +118,7 @@ textarea.input { resize: vertical; line-height: 1.5; }
                 radial-gradient(circle 4px at 50% 100%, #0000 98%, #000) bottom/100% 51% no-repeat;
 }
 .fit-tier { display: grid; place-items: center; background: var(--fit-c, var(--sand)); color: var(--fit-ink, #fff); }
-.fit-score { display: grid; place-items: center; color: var(--fit-c, var(--sand)); font-variant-numeric: tabular-nums; }
+.fit-score { display: grid; place-items: center; color: var(--ink); font-variant-numeric: tabular-nums; }
 .fit-md { height: 30px; font-size: 1rem; }
 .fit-md .fit-tier { width: 22px; } .fit-md .fit-score { width: 30px; }
 .fit-sm { height: 24px; font-size: .88rem; }
@@ -453,7 +453,9 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   .tally dd { font-size: clamp(1.15rem, 5.2vw, 1.5rem); }
   .tally small { display: block; font-size: .85rem; }
   .lead-row { flex-wrap: wrap; gap: 0; }
-  .lead-hit { flex: 1 1 100%; }
+  .lead-hit { flex: 1 1 100%; flex-wrap: wrap; align-items: center; }
+  .lead-hit .lead-main { flex: 1 1 100%; order: -1; }
+  .lead-row .lead-name { white-space: normal; overflow: visible; text-overflow: unset; }
   .lead-actions { margin: -.35rem 0 .7rem 0; flex-wrap: wrap; }
   .filters { min-width: 0; }
   .filters > * { min-width: 0; max-width: 100%; }
@@ -486,12 +488,8 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   }
   .lead-score {
     flex: none; font-family: var(--font-num); font-weight: 700; font-size: 1.35rem;
-    font-variant-numeric: tabular-nums; color: var(--fit-c, var(--ink-2));
+    font-variant-numeric: tabular-nums; color: var(--ink);
   }
-  .lead-score.fit-A { --fit-c: var(--ochre); }
-  .lead-score.fit-B { --fit-c: var(--juniper); }
-  .lead-score.fit-C { --fit-c: var(--sky); }
-  .lead-score.fit-D { --fit-c: var(--sand); }
 
   .sheet-wrap { position: fixed; inset: 0; z-index: 70; background: rgba(20, 28, 31, .35); display: flex; align-items: flex-end; }
   .sheet {
