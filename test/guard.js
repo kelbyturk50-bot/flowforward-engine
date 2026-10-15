@@ -264,40 +264,107 @@ function isBlockedHost(host) {
   return BLOCKED_HOST_SUFFIXES.some(suffix => hostMatches(normalized, suffix));
 }
 
-function hostOfRequestArgs(args) {
+function isLocalName(value) {
+  const normalized = normalizeHost(value);
+  if (!normalized) return true;
+  if (isSocketPath(normalized)) return true;
+  if (LOCAL_HOSTS.has(normalized)) return true;
+  // Node reports IPv4 loopback on a dual-stack socket as ::ffff:127.0.0.1.
+  if (normalized.startsWith('::ffff:')) return isLocalName(normalized.slice('::ffff:'.length));
+  return false;
+}
+
+// Node's ClientRequest dials `hostname` when both are set, otherwise `host`.
+// https.request(url, options) copies the URL first and then lets options override.
+function mergeRequestOptions(args) {
+  let base = null;
+  let index = 0;
   const first = args[0];
-  if (typeof first === 'string') {
-    try { return new URL(first).hostname; } catch { return ''; }
+  if (typeof first === 'string' || first instanceof URL) {
+    let url;
+    try { url = first instanceof URL ? first : new URL(first); }
+    catch { return null; }
+    base = { protocol: url.protocol, hostname: url.hostname, href: url.href };
+    if (url.port) base.port = url.port;
+    index = 1;
+  } else if (first && typeof first === 'object') {
+    base = { ...first };
+    index = 1;
+  } else {
+    return null;
   }
-  if (first instanceof URL) return first.hostname;
-  if (first && typeof first === 'object') {
-    if (first.hostname) return String(first.hostname);
-    if (typeof first.host === 'string') return String(first.host);
-    if (typeof first.href === 'string') {
-      try { return new URL(first.href).hostname; } catch { return ''; }
-    }
+  const second = args[index];
+  if (second && typeof second === 'object') base = { ...base, ...second };
+  return base;
+}
+
+function dialedHttpHost(options) {
+  if (!options) return '';
+  if (options.hostname) return String(options.hostname);
+  if (typeof options.host === 'string') return String(options.host);
+  if (typeof options.href === 'string') {
+    try { return new URL(options.href).hostname; } catch { return ''; }
   }
   return '';
 }
 
+// HTTP layer: the host Node will actually dial, plus SNI. A local servername
+// must not hide a denylisted hostname that options wrote over the URL.
+function blockedRequestHost(args) {
+  const options = mergeRequestOptions(args);
+  if (!options) return '';
+  const candidates = [dialedHttpHost(options), options.hostname, options.host, options.servername];
+  for (const candidate of candidates) {
+    const normalized = normalizeHost(candidate);
+    if (normalized && isBlockedHost(normalized)) return normalized;
+  }
+  return '';
+}
+
+// A connect name is forbidden when it is on the vendor list or is not loopback.
+// Empty values are ignored. Unix sockets (one leading slash) are local.
+function forbiddenConnectName(value) {
+  const normalized = normalizeHost(value);
+  if (!normalized || isSocketPath(normalized)) return '';
+  if (isBlockedHost(normalized) || !isLocalName(normalized)) return normalized;
+  return '';
+}
+
 // Node's net.connect() calls Socket.prototype.connect with a normalized
-// argument list wrapped in an array: [[{ host, port }, null]]. Read every
-// nested host field so that shape cannot skip the guard.
-function hostOfConnectArgs(args) {
-  const found = [];
+// argument list wrapped in an array: [[{ host, port }, null]]. The dialed
+// target is host, hostname, an IPC path, or an already-connected socket's
+// remote address. servername is only SNI: it is checked too, and it never
+// stands in for the address that is actually dialed.
+function blockedConnectHost(args, socket) {
+  const ranked = [];
+  const add = (kind, value) => {
+    if (typeof value !== 'string' || !value.trim()) return;
+    const forbidden = forbiddenConnectName(value);
+    if (forbidden) ranked.push({ kind, host: forbidden });
+  };
   const visit = (value) => {
-    if (!value) return;
+    if (!value || typeof value !== 'object') return;
     if (Array.isArray(value)) {
       value.forEach(visit);
       return;
     }
-    if (typeof value === 'object') {
-      found.push(value.servername, value.host, value.hostname);
-    }
+    // hostname and host are the dial target. Read them before servername.
+    add('hostname', value.hostname);
+    add('host', typeof value.host === 'string' ? value.host : '');
+    // A port means this is TCP. `path` is then the HTTP path, not an IPC socket.
+    if (typeof value.path === 'string' && !value.port) add('path', value.path);
+    add('servername', value.servername);
+    add('remote', value.remoteAddress);
+    if (value.socket && typeof value.socket === 'object') add('remote', value.socket.remoteAddress);
   };
   args.forEach(visit);
-  if (typeof args[1] === 'string') found.push(args[1]);
-  return found.find(Boolean) || '';
+  if (typeof args[0] === 'string') add('path', args[0]);
+  if (typeof args[1] === 'string') add('host', args[1]);
+  if (socket && typeof socket.remoteAddress === 'string') add('remote', socket.remoteAddress);
+  // Dialed names outrank SNI, so { host: smtp.gmail.com, servername: localhost }
+  // is reported as smtp.gmail.com and not as the local servername.
+  const dialed = ranked.find(item => item.kind !== 'servername');
+  return (dialed || ranked[0] || {}).host || '';
 }
 
 let networkGuardInstalled = false;
@@ -310,13 +377,13 @@ function installNetworkGuard() {
     const originalRequest = mod.request;
     const originalGet = mod.get;
     mod.request = function guardedRequest(...args) {
-      const host = normalizeHost(hostOfRequestArgs(args));
-      if (isBlockedHost(host)) throw new TestNetworkGuardError(host, label);
+      const host = blockedRequestHost(args);
+      if (host) throw new TestNetworkGuardError(host, label);
       return originalRequest.apply(this, args);
     };
     mod.get = function guardedGet(...args) {
-      const host = normalizeHost(hostOfRequestArgs(args));
-      if (isBlockedHost(host)) throw new TestNetworkGuardError(host, label);
+      const host = blockedRequestHost(args);
+      if (host) throw new TestNetworkGuardError(host, label);
       return originalGet.apply(this, args);
     };
   }
@@ -334,9 +401,19 @@ function installNetworkGuard() {
 
   const originalConnect = net.Socket.prototype.connect;
   net.Socket.prototype.connect = function guardedConnect(...args) {
-    const host = normalizeHost(hostOfConnectArgs(args));
-    if (isBlockedHost(host)) throw new TestNetworkGuardError(host, 'socket');
+    const host = blockedConnectHost(args, this);
+    if (host) throw new TestNetworkGuardError(host, 'socket');
     return originalConnect.apply(this, args);
+  };
+
+  // tls.connect({ socket }) upgrades a socket that is already open and does
+  // not call Socket.prototype.connect again. Check that entry too.
+  const tls = require('tls');
+  const originalTlsConnect = tls.connect;
+  tls.connect = function guardedTlsConnect(...args) {
+    const host = blockedConnectHost(args, null);
+    if (host) throw new TestNetworkGuardError(host, 'tls');
+    return originalTlsConnect.apply(this, args);
   };
 }
 

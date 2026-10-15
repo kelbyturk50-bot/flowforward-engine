@@ -87,10 +87,83 @@ describe('network guard', () => {
     assert.throws(
       () => tls.connect({ host: 'smtp.gmail.com', port: 465, servername: 'smtp.gmail.com' }),
       (err) => {
+        assert.ok(err instanceof TestNetworkGuardError);
         assertBlocked(err, 'smtp.gmail.com');
         return true;
       }
     );
+  });
+
+  it('blocks the dialed host when servername is local, before any handshake', async () => {
+    const tls = require('tls');
+    const https = require('https');
+    const nodemailer = require('nodemailer');
+
+    const syncCases = [
+      // Existing variants. The guard throws before Socket.connect dials.
+      () => net.connect({ host: 'smtp.gmail.com', port: 465 }),
+      () => tls.connect({ host: 'smtp.gmail.com', port: 465, servername: 'smtp.gmail.com' }),
+      // servername is SNI only. It must not hide smtp.gmail.com.
+      () => tls.connect({ host: 'smtp.gmail.com', port: 465, servername: 'localhost' }),
+      // Options override the URL host, the same way Node merges https.request.
+      () => https.request('https://127.0.0.1/', {
+        hostname: 'places.googleapis.com',
+        servername: 'localhost',
+      }),
+      // An already-open socket's remote address is a dial target too.
+      () => tls.connect({
+        host: '127.0.0.1',
+        port: 465,
+        servername: 'localhost',
+        socket: { remoteAddress: '172.217.14.109' },
+      }),
+    ];
+    const expectedHosts = [
+      'smtp.gmail.com',
+      'smtp.gmail.com',
+      'smtp.gmail.com',
+      'places.googleapis.com',
+      '172.217.14.109',
+    ];
+    syncCases.forEach((fn, i) => {
+      assert.throws(fn, (err) => {
+        assert.ok(err instanceof TestNetworkGuardError, `case ${i} ${err && err.stack}`);
+        assertBlocked(err, expectedHosts[i]);
+        return true;
+      }, `case ${i} did not throw before connect`);
+    });
+
+    const transport = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: { user: 'test-not-real@example.com', pass: 'test-not-a-real-password' },
+      tls: { servername: 'localhost' },
+      connectionTimeout: 3000,
+      dnsTimeout: 3000,
+    });
+    try {
+      await assert.rejects(
+        () => transport.sendMail({
+          from: 'test-not-real@example.com',
+          to: 'nobody@example.com',
+          subject: 'guard',
+          text: 'guard',
+        }),
+        (err) => {
+          assert.ok(err instanceof TestNetworkGuardError, err && err.stack);
+          const code = err.originalCode || err.code;
+          assert.equal(code, 'TEST_NETWORK_BLOCKED');
+          assert.match(err.message, /network guard/);
+          const refused = (err.message.match(/Refusing to call (\S+) during tests/) || [])[1];
+          assert.ok(refused, err.message);
+          assert.ok(!['localhost', '127.0.0.1', '::1'].includes(refused), refused);
+          return true;
+        }
+      );
+    } finally {
+      transport.close();
+    }
   });
 
   it('blocks maps.googleapis.com and www.googleapis.com', async () => {
