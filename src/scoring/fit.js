@@ -2,12 +2,16 @@
 // business model, with a human-readable breakdown stored in fit_reasons.
 //
 //   Industry fit      30  how much automation leverage the trade has
-//   Business size     25  review volume as a proxy for job volume (sweet spot 75–400)
-//   Reputation        10  Google rating
+//   Business size     25  review volume as a proxy for job volume (sweet spot 25–150)
+//   Reputation        10  Google rating (3.8–4.3 = pain signal = highest score)
 //   Reachability      15  real website + phone
 //   Location          10  inside your drive-to market
 //   Franchise        -20  national brands / franchises
 //   Manual boost  ±20     your own adjustment (fit_boost)
+//
+// Key insight: businesses with 300+ reviews and 4.7+ stars are already systemized.
+// The winnable client has 25–150 reviews (busy but owner still juggling everything)
+// and a 3.8–4.3 rating (good enough to keep getting work, bad enough to feel the pain).
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');
@@ -27,21 +31,24 @@ function sizePoints(reviews) {
   if (n === 0)    return [2,  'No reviews — may be brand new or inactive'];
   if (n < 10)     return [6,  `${n} reviews — very small, budget risk`];
   if (n < 25)     return [14, `${n} reviews — small but established`];
-  if (n < 75)     return [22, `${n} reviews — growing owner-operated shop`];
-  if (n <= 400)   return [25, `${n} reviews — sweet spot: busy, owner still decides`];
-  if (n <= 1000)  return [18, `${n} reviews — larger operation, may have office staff`];
-  if (n <= 2500)  return [10, `${n} reviews — big player, longer sales cycle`];
-  return [4, `${n} reviews — enterprise-scale`];
+  if (n <= 150)   return [25, `${n} reviews — sweet spot: busy, owner still juggling everything`];
+  if (n <= 300)   return [18, `${n} reviews — growing fast, may be adding systems already`];
+  if (n <= 600)   return [11, `${n} reviews — established operation, likely has office staff`];
+  if (n <= 1500)  return [6,  `${n} reviews — big player, longer sales cycle`];
+  return [2, `${n} reviews — enterprise-scale, not a fit`];
 }
 
 function reputationPoints(rating) {
   const r = rating == null ? null : parseFloat(rating);
   if (r == null || Number.isNaN(r)) return [3, 'No rating'];
-  if (r >= 4.6) return [10, `${r}★ — strong reputation`];
-  if (r >= 4.2) return [9,  `${r}★ — good reputation`];
-  if (r >= 3.8) return [7,  `${r}★ — some service issues (automation pitch angle)`];
-  if (r >= 3.0) return [4,  `${r}★ — struggling reviews`];
-  return [2, `${r}★ — poor reviews, risky client`];
+  // 3.8–4.3 is the automation pitch sweet spot: complaints about scheduling/communication
+  // are common, owner knows they have a problem, not yet polished enough to have solved it
+  if (r >= 4.6) return [5,  `${r}★ — near-perfect rating, likely already systemized`];
+  if (r >= 4.3) return [8,  `${r}★ — good reputation, some room to improve`];
+  if (r >= 3.8) return [10, `${r}★ — automation pitch sweet spot: service issues, motivated owner`];
+  if (r >= 3.3) return [6,  `${r}★ — struggling reviews, may be receptive but riskier`];
+  if (r >= 3.0) return [3,  `${r}★ — poor reviews, risky engagement`];
+  return [1, `${r}★ — very poor reviews, not a fit`];
 }
 
 function hostOf(url) {

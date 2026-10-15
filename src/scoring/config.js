@@ -35,7 +35,7 @@ const HOME_STATE = (process.env.FIT_HOME_STATE || 'UT').toUpperCase();
 const FRANCHISE_PATTERNS = [
   'terminix', 'orkin', 'rollins', 'truly nolen', 'aptive', 'ecoshield', 'rentokil', 'abc home',
   'roto-rooter', 'roto rooter', 'mr. rooter', 'mr rooter', 'benjamin franklin plumbing',
-  'one hour heating', 'one hour air', 'aire serv', 'service experts', 'carrier', 'trane', 'lennox',
+  'one hour heating', 'one hour air', 'one hour', 'aire serv', 'service experts', 'carrier', 'trane', 'lennox',
   'mr. electric', 'mr electric', 'mister sparky', 'mosquito joe', 'mosquito squad',
   'trugreen', 'lawn doctor', 'weed man', 'brightview', 'davey tree', 'bartlett tree',
   'merry maids', 'molly maid', 'the maids', 'servpro', 'servicemaster', 'stanley steemer', 'chem-dry',
@@ -46,10 +46,15 @@ const FRANCHISE_PATTERNS = [
 // Generic hosts that mean "no real website".
 const SOCIAL_HOSTS = ['facebook.com', 'instagram.com', 'yelp.com', 'nextdoor.com', 'google.com', 'business.site', 'linktr.ee', 'angi.com', 'homeadvisor.com', 'thumbtack.com'];
 
+// Tier thresholds (fit_score 0–100).
+// A = best fit: owner-operated, busy but not systemized, pain signals in reviews
+// B = solid fit: worth outreach, may need more convincing
+// C = marginal: worth a shot if pipeline is thin
+// D = not a fit: too small, too big, franchise, or out of market
 const TIERS = [
-  { tier: 'A', min: 80 },
-  { tier: 'B', min: 65 },
-  { tier: 'C', min: 50 },
+  { tier: 'A', min: 78 },
+  { tier: 'B', min: 62 },
+  { tier: 'C', min: 47 },
   { tier: 'D', min: 0 },
 ];
 
