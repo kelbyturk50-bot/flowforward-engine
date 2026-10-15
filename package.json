@@ -7,7 +7,8 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "bot": "node src/bot/discover.js",
-    "migrate": "node src/db/migrate.js"
+    "migrate": "node src/db/migrate.js",
+    "test": "node test/run.js"
   },
   "engines": {
     "node": ">=20.18.1"

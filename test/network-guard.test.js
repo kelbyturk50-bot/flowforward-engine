@@ -1,0 +1,97 @@
+require('./preload');
+
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const axios = require('axios');
+const Anthropic = require('@anthropic-ai/sdk');
+const net = require('net');
+const { searchPlaces, _setSearch } = require('../src/bot/google-places');
+const { TestNetworkGuardError } = require('./guard');
+
+function assertBlocked(err, host) {
+  const cause = err && err.cause;
+  const messages = [err && err.message, cause && cause.message].filter(Boolean).join(' | ');
+  const code = (err && err.code) || (cause && cause.code);
+  assert.equal(code, 'TEST_NETWORK_BLOCKED', messages);
+  assert.match(messages, new RegExp(host.replace(/\./g, '\\.')));
+  assert.match(messages, /network guard/);
+}
+
+describe('network guard', () => {
+  it('blocks searchPlaces before any HTTP to places.googleapis.com', async () => {
+    _setSearch(null);
+    process.env.GOOGLE_PLACES_API_KEY = 'test-not-a-real-key';
+    await assert.rejects(
+      () => searchPlaces('HVAC company', 'Provo UT', 1),
+      (err) => {
+        assertBlocked(err, 'places.googleapis.com');
+        assert.equal(err.name, 'TestNetworkGuardError');
+        return true;
+      }
+    );
+  });
+
+  it('blocks the Anthropic SDK before any HTTP to api.anthropic.com', async () => {
+    const client = new Anthropic({ apiKey: 'sk-ant-test-not-real', maxRetries: 0 });
+    await assert.rejects(
+      () => client.messages.create({
+        model: 'claude-sonnet-5-5',
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+      (err) => {
+        assertBlocked(err, 'api.anthropic.com');
+        return true;
+      }
+    );
+  });
+
+  it('blocks Gmail API HTTP and Gmail SMTP sockets', async () => {
+    await assert.rejects(
+      () => axios.get('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+        timeout: 2000,
+        headers: { Authorization: 'Bearer test-not-a-real-token' },
+      }),
+      (err) => {
+        assertBlocked(err, 'gmail.googleapis.com');
+        return true;
+      }
+    );
+
+    await assert.rejects(
+      () => axios.post('https://oauth2.googleapis.com/token', 'grant_type=refresh_token', { timeout: 2000 }),
+      (err) => {
+        assertBlocked(err, 'oauth2.googleapis.com');
+        return true;
+      }
+    );
+
+    assert.throws(
+      () => net.connect({ host: 'smtp.gmail.com', port: 465 }),
+      (err) => {
+        assert.ok(err instanceof TestNetworkGuardError);
+        assertBlocked(err, 'smtp.gmail.com');
+        return true;
+      }
+    );
+
+    assert.throws(
+      () => net.connect(993, 'imap.gmail.com'),
+      (err) => {
+        assertBlocked(err, 'imap.gmail.com');
+        return true;
+      }
+    );
+  });
+
+  it('still allows a connection attempt to localhost', async () => {
+    await assert.rejects(
+      () => fetch('http://127.0.0.1:9/'),
+      (err) => {
+        assert.notEqual(err.code, 'TEST_NETWORK_BLOCKED');
+        assert.doesNotMatch(String(err.message), /network guard/);
+        return true;
+      }
+    );
+  });
+});
