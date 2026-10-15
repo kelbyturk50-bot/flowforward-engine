@@ -12,9 +12,10 @@ const http = require('http');
 const https = require('https');
 const net = require('net');
 
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+// 0.0.0.0 is not loopback (it binds every interface). It is not local.
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 
-// Hosted Postgres domains. Matched against the URL hostname only.
+// Hosted Postgres domains. Matched against every host the URL resolves to.
 const HOSTED_DB_SUFFIXES = [
   'railway.app',
   'railway.internal',
@@ -36,6 +37,8 @@ const HOSTED_DB_SUFFIXES = [
 // Vendors the suite must never call. Matched against the request hostname.
 const BLOCKED_HOST_SUFFIXES = [
   'places.googleapis.com',
+  'maps.googleapis.com',
+  'www.googleapis.com',
   'anthropic.com',
   'gmail.googleapis.com',
   'smtp.gmail.com',
@@ -48,8 +51,13 @@ const LIVE_CREDENTIAL_KEYS = [
   'ANTHROPIC_API_KEY',
   'GOOGLE_CLIENT_ID',
   'GOOGLE_CLIENT_SECRET',
+  'GMAIL_USER',
   'GMAIL_APP_PASSWORD',
 ];
+
+// pg-connection-string is what node-postgres uses. A ?host= query param
+// overrides the hostname in the URL, so checking URL.hostname alone is not enough.
+const parseConnectionString = require('pg-connection-string').parse;
 
 class TestNetworkGuardError extends Error {
   constructor(host, via) {
@@ -67,28 +75,127 @@ function hostMatches(host, suffix) {
 function normalizeHost(host) {
   let h = String(host || '').trim().toLowerCase();
   if (!h) return '';
+  // [::1]:5432 and [2607:f8b0::1] — take the bracketed address and drop the port.
+  // Do this before any ":digits" strip. A naive strip turns ::1 into ":".
   if (h.startsWith('[')) {
     const end = h.indexOf(']');
-    if (end !== -1) h = h.slice(1, end);
+    if (end !== -1) return h.slice(1, end).replace(/\.$/, '');
   }
-  h = h.replace(/:\d+$/, '').replace(/\.$/, '');
-  return h;
+  const colonCount = (h.match(/:/g) || []).length;
+  if (colonCount === 1) h = h.replace(/:\d+$/, '');
+  return h.replace(/\.$/, '');
+}
+
+// libpq allows several hosts, comma-separated. Do not split inside [ipv6].
+function splitHostList(value) {
+  const hosts = [];
+  let current = '';
+  let brackets = 0;
+  for (const ch of String(value || '')) {
+    if (ch === '[') brackets++;
+    else if (ch === ']') brackets = Math.max(0, brackets - 1);
+    else if (ch === ',' && brackets === 0) {
+      if (current.trim()) hosts.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) hosts.push(current.trim());
+  return hosts;
+}
+
+function classifyHost(host) {
+  const normalized = normalizeHost(host);
+  if (!normalized) return { ok: false, host: normalized, reason: 'has no host' };
+  // Absolute path: a Unix socket. It cannot be a remote machine.
+  if (normalized.startsWith('/')) return { ok: true, host: normalized };
+  const hosted = HOSTED_DB_SUFFIXES.find(suffix => hostMatches(normalized, suffix));
+  if (hosted) return { ok: false, host: normalized, reason: `a hosted database (${hosted})` };
+  if (!LOCAL_HOSTS.has(normalized)) return { ok: false, host: normalized, reason: 'not a local host' };
+  return { ok: true, host: normalized };
+}
+
+function queryParams(text) {
+  const q = String(text).indexOf('?');
+  if (q === -1) return null;
+  try {
+    return new URL(text).searchParams;
+  } catch {
+    try {
+      return new URL('http://127.0.0.1/' + text.slice(q)).searchParams;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+// host, hostaddr, and service in the query string override what the URL
+// appears to point at. node-postgres (via pg-connection-string) honors host=.
+// libpq also honors hostaddr= and service=. Refuse the params themselves.
+function hostOverride(text) {
+  const params = queryParams(text);
+  if (params === undefined) return { ok: false, reason: 'not a valid URL' };
+  if (!params) return null;
+  for (const [key, value] of params.entries()) {
+    const name = key.toLowerCase();
+    if (name === 'host' || name === 'hostaddr') {
+      return { ok: false, host: value, reason: `a host override (?${name}=)` };
+    }
+    if (name === 'service') {
+      return { ok: false, host: value, reason: 'a libpq service name (?service=), which can point at any host' };
+    }
+  }
+  return null;
 }
 
 function inspectDatabaseUrl(raw) {
   if (raw == null || String(raw).trim() === '') return { ok: true, unset: true };
-  let hostname;
+  const text = String(raw).trim();
+  const override = hostOverride(text);
+  if (override) return override;
+
+  let parsed;
   try {
-    hostname = new URL(String(raw)).hostname;
+    parsed = parseConnectionString(text);
   } catch {
     return { ok: false, reason: 'not a valid URL' };
   }
-  const host = normalizeHost(hostname);
-  if (!host) return { ok: false, reason: 'has no host' };
-  const hosted = HOSTED_DB_SUFFIXES.find(suffix => hostMatches(host, suffix));
-  if (hosted) return { ok: false, host, reason: `a hosted database (${hosted})` };
-  if (!LOCAL_HOSTS.has(host)) return { ok: false, host, reason: 'not a local host' };
-  return { ok: true, host };
+
+  // The host pg-connection-string actually connects to, after query overrides.
+  const hosts = splitHostList(parsed.host || '');
+  if (!hosts.length) return { ok: true, host: 'localhost', implicit: true };
+  for (const host of hosts) {
+    const verdict = classifyHost(host);
+    if (!verdict.ok) return verdict;
+  }
+  return { ok: true, host: hosts.map(h => normalizeHost(h)).join(',') };
+}
+
+function inspectPgEnv(env) {
+  if (env.PGSERVICE && String(env.PGSERVICE).trim()) {
+    return {
+      ok: false,
+      host: String(env.PGSERVICE).trim(),
+      reason: 'PGSERVICE is set (a service file can point at any host)',
+    };
+  }
+  for (const key of ['PGHOST', 'PGHOSTADDR']) {
+    if (!env[key] || !String(env[key]).trim()) continue;
+    for (const host of splitHostList(env[key])) {
+      const verdict = classifyHost(host);
+      if (!verdict.ok) return { ...verdict, reason: `${key} is ${verdict.reason}` };
+    }
+  }
+  return { ok: true };
+}
+
+function shouldUseProvidedDatabase(url) {
+  const result = inspectDatabaseUrl(url);
+  if (!result.ok || result.unset || result.implicit) return false;
+  let name = '';
+  try { name = parseConnectionString(String(url)).database || ''; } catch { return false; }
+  return name === 'flowforward_test';
 }
 
 function readDotenvDatabaseUrl(file = path.join(process.cwd(), '.env')) {
@@ -109,33 +216,33 @@ function readDotenvDatabaseUrl(file = path.join(process.cwd(), '.env')) {
 }
 
 function formatRefusal(source, result) {
-  const where = result.host ? ` host "${result.host}"` : '';
-  return `Refusing to run tests: ${source} DATABASE_URL${where} is ${result.reason}. `
+  const where = result.host ? ` "${result.host}"` : '';
+  return `Refusing to run tests: ${source}${where} is ${result.reason}. `
     + 'Tests never connect to a non-local or production database. '
-    + 'Unset DATABASE_URL (including in .env) or point it at 127.0.0.1. '
-    + 'npm test starts its own disposable Postgres and will not use that URL.';
+    + 'Unset DATABASE_URL, PGHOST, PGHOSTADDR, and PGSERVICE (including in .env) or point the host at 127.0.0.1. '
+    + 'npm test starts its own disposable Postgres and will not use a hosted URL.';
+}
+
+function refusal(source, result) {
+  const err = new Error(formatRefusal(source, result));
+  err.code = 'TEST_DATABASE_REFUSED';
+  return err;
 }
 
 function assertSafeDatabaseEnv({ allowUnset = false } = {}) {
+  const envResult = inspectPgEnv(process.env);
+  if (!envResult.ok) throw refusal('the environment', envResult);
+
   const sources = [];
-  if (process.env.DATABASE_URL) sources.push(['the environment', process.env.DATABASE_URL]);
+  if (process.env.DATABASE_URL) sources.push(['the environment DATABASE_URL', process.env.DATABASE_URL]);
   const fromFile = readDotenvDatabaseUrl();
-  if (fromFile) sources.push(['.env', fromFile]);
+  if (fromFile) sources.push(['.env DATABASE_URL', fromFile]);
   for (const [source, url] of sources) {
     const result = inspectDatabaseUrl(url);
-    if (!result.ok) {
-      const err = new Error(formatRefusal(source, result));
-      err.code = 'TEST_DATABASE_REFUSED';
-      throw err;
-    }
+    if (!result.ok) throw refusal(source, result);
   }
   if (!allowUnset && !process.env.DATABASE_URL) {
-    const err = new Error(
-      'Refusing to run tests: DATABASE_URL is not set. Run npm test, which starts a disposable Postgres on 127.0.0.1. '
-      + 'Tests will not fall back to a hosted database.'
-    );
-    err.code = 'TEST_DATABASE_REFUSED';
-    throw err;
+    throw refusal('DATABASE_URL', { reason: 'not set. Run npm test, which starts a disposable Postgres on 127.0.0.1' });
   }
 }
 
@@ -229,7 +336,10 @@ function installNetworkGuard() {
 module.exports = {
   LOCAL_HOSTS,
   TestNetworkGuardError,
+  normalizeHost,
   inspectDatabaseUrl,
+  inspectPgEnv,
+  shouldUseProvidedDatabase,
   readDotenvDatabaseUrl,
   assertSafeDatabaseEnv,
   blankLiveCredentials,

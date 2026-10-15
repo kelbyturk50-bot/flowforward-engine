@@ -7,7 +7,12 @@ const BASE = 'https://places.googleapis.com/v1/places:searchText';
 
 // Tests pass a fake search so nothing calls places.googleapis.com.
 let searchOverride = null;
-function _setSearch(fn) { searchOverride = fn; }
+function _setSearch(fn) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_setSearch is only available when NODE_ENV=test');
+  }
+  searchOverride = fn;
+}
 
 // Fields we want back — only request what we use (reduces cost)
 const FIELD_MASK = [

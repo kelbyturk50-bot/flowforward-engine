@@ -93,6 +93,23 @@ describe('network guard', () => {
     );
   });
 
+  it('blocks maps.googleapis.com and www.googleapis.com', async () => {
+    await assert.rejects(
+      () => axios.get('https://maps.googleapis.com/maps/api/place/nearbysearch/json', { timeout: 2000 }),
+      (err) => {
+        assertBlocked(err, 'maps.googleapis.com');
+        return true;
+      }
+    );
+    await assert.rejects(
+      () => axios.get('https://www.googleapis.com/oauth2/v1/userinfo', { timeout: 2000 }),
+      (err) => {
+        assertBlocked(err, 'www.googleapis.com');
+        return true;
+      }
+    );
+  });
+
   it('still allows a connection attempt to localhost', async () => {
     await assert.rejects(
       () => fetch('http://127.0.0.1:9/'),

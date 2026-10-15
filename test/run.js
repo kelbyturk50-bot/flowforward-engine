@@ -1,33 +1,52 @@
 #!/usr/bin/env node
 // npm test
 //
-// Starts a disposable Postgres, applies schema.sql, then runs the suite.
-// Never connects to a DATABASE_URL whose host is not local.
+// Starts a disposable Postgres (or reuses a local flowforward_test URL),
+// applies schema.sql, then runs the suite. Never connects to a hosted database.
+//
+// Node 20 rejects --experimental-test-isolation=process (the process exits 9).
+// Each test file runs in its own process instead, so a pool.end() or an env
+// change in one file cannot leak into the next. That works on Node 20 and 22.
 
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { assertSafeDatabaseEnv, blankLiveCredentials, installNetworkGuard } = require('./guard');
+const {
+  assertSafeDatabaseEnv,
+  blankLiveCredentials,
+  installNetworkGuard,
+  shouldUseProvidedDatabase,
+} = require('./guard');
 const { startDisposablePostgres } = require('./postgres');
 
-function runTests() {
-  const files = fs.readdirSync(__dirname)
+function testFiles() {
+  return fs.readdirSync(__dirname)
     .filter(name => name.endsWith('.test.js'))
     .map(name => path.join(__dirname, name))
     .sort();
+}
+
+function runFile(file) {
   const args = [
     '--require', path.join(__dirname, 'preload.js'),
     '--test',
     '--test-reporter=spec',
-    '--experimental-test-isolation=process',
-    '--test-concurrency=1',
     '--test-timeout=60000',
-    ...files,
+    file,
   ];
   return new Promise(resolve => {
     const child = spawn(process.execPath, args, { stdio: 'inherit', env: process.env });
     child.on('exit', code => resolve(code == null ? 1 : code));
   });
+}
+
+async function runTests() {
+  let code = 0;
+  for (const file of testFiles()) {
+    const one = await runFile(file);
+    if (one !== 0) code = one;
+  }
+  return code;
 }
 
 async function applySchema() {
@@ -41,13 +60,24 @@ async function applySchema() {
   }
 }
 
+function portOf(url) {
+  try { return new URL(url).port || '5432'; } catch { return '5432'; }
+}
+
 async function main() {
-  // Check the caller's URL before replacing it. allowUnset: a missing URL is
-  // normal; a Railway (or other hosted) URL is not.
+  // Check the caller's URL and PGHOST/PGHOSTADDR/PGSERVICE before replacing
+  // them. allowUnset: a missing URL is normal; a hosted URL is not.
   assertSafeDatabaseEnv({ allowUnset: true });
   blankLiveCredentials();
+  delete process.env.PGHOST;
+  delete process.env.PGHOSTADDR;
+  delete process.env.PGSERVICE;
 
-  const db = await startDisposablePostgres();
+  const provided = process.env.DATABASE_URL;
+  const db = provided && shouldUseProvidedDatabase(provided)
+    ? { url: provided, port: portOf(provided), kind: 'provided', async stop() {} }
+    : await startDisposablePostgres();
+
   let code = 1;
   try {
     process.env.DATABASE_URL = db.url;
