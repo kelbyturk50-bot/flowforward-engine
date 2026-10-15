@@ -26,7 +26,7 @@ One repo, two apps.
 
 ## Hard rules
 
-- Work on a branch. Open a pull request. The coding agent that wrote the change never merges. The owning engineer bot (Canyon or Delta) may press merge as flowForward50, but only after an independent fresh-agent review and QA pass (and Security when relevant), and it never counts as one of those passes. The full rule is Change flow step 8 in `docs/PLAYBOOK.md`.
+- Work on a branch. Open a pull request. The coding agent that wrote a change never merges. Merging follows `docs/PLAYBOOK.md` Change flow step 8; never push directly to `main`.
 - Never push to `main`. Never force-push.
 - Never write to the production database or the production API (`https://flowforward-engine-production.up.railway.app`, or whatever `PUBLIC_BASE_URL` / `VITE_API_URL` points at in production). Local work uses a disposable Postgres only.
 - Never change Railway or Vercel project settings, and never change env vars on either host. `.env` is gitignored. `.env.example` and `web/.env.example` are the templates; do not put real secrets in them.
