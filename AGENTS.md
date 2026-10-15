@@ -26,7 +26,7 @@ One repo, two apps.
 
 ## Hard rules
 
-- Work on a branch. Open a pull request. **Kelby merges.** Do not merge your own PR.
+- Work on a branch. Open a pull request. Merge as flowForward50 after proof + fresh-agent review + QA (and Security when relevant) pass; never push directly to main; merging deploys to Railway/Vercel. Do not merge your own PR.
 - Never push to `main`. Never force-push.
 - Never write to the production database or the production API (`https://flowforward-engine-production.up.railway.app`, or whatever `PUBLIC_BASE_URL` / `VITE_API_URL` points at in production). Local work uses a disposable Postgres only.
 - Never change Railway or Vercel project settings, and never change env vars on either host. `.env` is gitignored. `.env.example` and `web/.env.example` are the templates; do not put real secrets in them.
