@@ -980,6 +980,22 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       assert.match(match[0], /test_tag\s*(=|IN\s*\()/i);
     }
 
+    const stopChild = (proc) => new Promise((resolve) => {
+      if (!proc || proc.exitCode != null) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(() => {
+        proc.kill('SIGKILL');
+        resolve();
+      }, 2000);
+      proc.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      proc.kill('SIGTERM');
+    });
+
     let child;
     try {
     await resetDb();
@@ -1063,25 +1079,20 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       let output = '';
       child.stdout.on('data', (buf) => { output += buf.toString('utf8'); });
       child.stderr.on('data', (buf) => { output += buf.toString('utf8'); });
-      const health = await new Promise((resolve, reject) => {
-        const deadline = Date.now() + 20000;
-        const attempt = () => {
-          const req = http.request({
-            method: 'GET', hostname: '127.0.0.1', port, path: '/health',
-          }, (res) => {
-            res.resume();
-            res.on('end', () => resolve(res.statusCode));
-          });
-          req.on('error', () => {
-            if (Date.now() > deadline || (child.exitCode != null)) {
-              reject(new Error(`server did not listen: ${JSON.stringify(output).slice(0, 2000)}`));
-            } else setTimeout(attempt, 100);
-          });
-          req.end();
-        };
-        attempt();
-      });
-      assert.equal(health, 200);
+      const deadline = Date.now() + 20000;
+      let health = 0;
+      let lastError = null;
+      while (Date.now() < deadline && child.exitCode == null) {
+        try {
+          const res = await request(port, 'GET', '/health');
+          health = res.status;
+          break;
+        } catch (err) {
+          lastError = err;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+      assert.equal(health, 200, `server did not listen (${lastError && lastError.message}): ${output}`);
       assert.equal(output.includes('Startup migration/rescore failed'), false, output);
       assert.match(output, /Fit scores refreshed/);
       assert.match(output, /prospect_brands: name check validation failed/);
@@ -1111,16 +1122,10 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
          VALUES ('TEST: Strict Ok', 'https://fixtures.example/ok.png', '[]'::jsonb, 'manual', 'TEST:strict-ok')`
       );
     } finally {
-      if (child && child.exitCode == null) {
-        child.kill('SIGTERM');
-        await new Promise((resolve) => child.once('exit', resolve));
-      }
+      await stopChild(child);
     }
     } finally {
-      if (child && child.exitCode == null) {
-        child.kill('SIGTERM');
-        await new Promise((resolve) => child.once('exit', resolve));
-      }
+      await stopChild(child);
       await pool.query(
         `DELETE FROM prospect_brands
           WHERE test_tag IN ('TEST:legacy-markup', 'TEST:strict-ok', 'TEST:still-markup', 'TEST:http-again')`

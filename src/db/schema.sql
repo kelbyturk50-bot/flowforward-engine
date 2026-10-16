@@ -440,9 +440,9 @@ CREATE TRIGGER prospect_brands_updated_at
 
 -- Do not DROP or re-add prospect_brands_name_test / prospect_brands_logo_https
 -- in this transaction. A validating ADD scans every existing row, and this
--- file has no lock_timeout. A row that was legal at 51c459d would roll the
--- whole boot back. src/db/brand-constraints.sql adds the tightened checks
--- NOT VALID and validates them after this file commits.
+-- file does not set a lock or statement timeout. A row that was legal at
+-- 51c459d would roll the whole boot back. src/db/brand-constraints.sql adds
+-- the tightened checks NOT VALID and validates them after this file commits.
 -- This file does not delete brand rows. A TEST: cleanup, if one is added,
 -- must match test_tag with = or IN (...) and must not use LIKE.
 
