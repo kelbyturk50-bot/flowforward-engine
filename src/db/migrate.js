@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Applies schema.sql to DATABASE_URL, then brand-constraint validation, then
-// the pilot repair. schema.sql is one implicit transaction with no
-// lock_timeout and no statement_timeout. brand-constraints.sql and
-// pilot-schema.sql each run after that commit, in their own transaction.
-// SET LOCAL lock_timeout and statement_timeout apply only there. A brand or
-// pilot failure cannot roll the main schema back. A brand-check failure is
-// logged and does not throw.
+// estimate-constraint validation, then the pilot repair. schema.sql is one
+// implicit transaction with no lock_timeout and no statement_timeout.
+// brand-constraints.sql, estimate-constraints.sql, and pilot-schema.sql each
+// run after that commit, in their own transaction. SET LOCAL lock_timeout
+// and statement_timeout apply only there. A brand, estimate, or pilot
+// failure cannot roll the main schema back. A brand-check or estimate-check
+// failure is logged and does not throw.
 //
 // Run manually: node src/db/migrate.js
 
@@ -60,6 +61,41 @@ async function applyBrandConstraints() {
   return { errors: failed ? [String(failed.message || 'brand constraint validation failed')] : [], notices };
 }
 
+async function applyEstimateConstraints() {
+  const sql = fs.readFileSync(path.join(__dirname, 'estimate-constraints.sql'), 'utf8');
+  const client = await pool.connect();
+  const notices = [];
+  function onNotice(msg) {
+    const text = msg && typeof msg === 'object' ? String(msg.message || '') : String(msg || '');
+    if (text.startsWith('pilot_estimates:')) {
+      notices.push(text);
+      console.warn(`[pilot] ${text}`);
+    }
+  }
+  client.on('notice', onNotice);
+  let failed = null;
+  try {
+    // SET LOCAL applies only until this transaction ends. 5s stops a held
+    // lock on the estimate tables; 15s stops a validation scan that runs too
+    // long. schema.sql has already committed on another connection.
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await client.query("SET LOCAL statement_timeout = '15s'");
+    await client.query(sql);
+    await client.query('COMMIT');
+  } catch (err) {
+    failed = err;
+    await client.query('ROLLBACK').catch(() => {});
+    const message = String(err && err.message || 'estimate constraint validation failed');
+    console.warn(`[pilot] pilot_estimates: constraint transaction failed: ${message}`);
+    notices.push(message);
+  } finally {
+    client.removeListener('notice', onNotice);
+    client.release();
+  }
+  return { errors: failed ? [String(failed.message || 'estimate constraint validation failed')] : [], notices };
+}
+
 async function applyPilotSchema() {
   const sql = fs.readFileSync(path.join(__dirname, 'pilot-schema.sql'), 'utf8');
   const client = await pool.connect();
@@ -111,10 +147,17 @@ async function applyPilotSchema() {
 async function applySchema() {
   await applyMainSchema();
   await applyBrandConstraints();
+  await applyEstimateConstraints();
   return applyPilotSchema();
 }
 
-module.exports = { applySchema, applyMainSchema, applyPilotSchema, applyBrandConstraints };
+module.exports = {
+  applySchema,
+  applyMainSchema,
+  applyPilotSchema,
+  applyBrandConstraints,
+  applyEstimateConstraints,
+};
 
 if (require.main === module) {
   console.log('[migrate] Applying schema...');

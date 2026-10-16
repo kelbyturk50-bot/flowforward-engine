@@ -221,10 +221,10 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | POST | `/api/proposals/:id/demo-token/revoke` | Revoke active demo tokens and set `proposals.demo_revoked_at` so `/p/:slug` will not derive another. Also required when `CRM_API_KEY` or a demo link leaked: rotating the key leaves already-issued links returning 200 until they expire or this revoke runs |
 | GET | `/demo/estimate-recovery/:token` | Synthetic demo JSON. 404 when the master flag is off, or the token is unknown, expired, revoked, or malformed. `X-Robots-Tag: noindex, nofollow`, `Cache-Control: no-store`, per-IP rate limit on the right-most trusted hop |
 | POST | `/demo/estimate-recovery/:token/events` | `{ "type": "demo_view" }` and the other allowlisted step types. Same token, flag, and rate-limit gates |
-| POST | `/api/pilot/estimate-recovery/customers` | Create a pilot shop. `live_send_enabled` stays false. 404 unless `FF_PILOT_ESTIMATE_RECOVERY` is exactly `true` and `CRM_API_KEY` is at least 32 characters. See `docs/pilot-csv-intake.md` |
+| POST | `/api/pilot/estimate-recovery/customers` | Create a pilot shop. `live_send_enabled` stays false. 404 unless `FF_PILOT_ESTIMATE_RECOVERY` is exactly `true` and `CRM_API_KEY` trims to at least 32 non-whitespace characters. See `docs/pilot-csv-intake.md` |
 | POST | `/api/pilot/estimate-recovery/customers/:id/estimates` | CSV of open estimates. Upserts on source estimate id. 404 and no write when the master flag is off |
 | GET | `/api/pilot/estimate-recovery/customers/:id/estimates` | Export that customer's estimates (`?format=csv` for CSV) |
-| DELETE | `/api/pilot/estimate-recovery/customers/:id/estimates` | Delete that customer's estimates. Deleting the customer row cascades |
+| DELETE | `/api/pilot/estimate-recovery/customers/:id/estimates` | Delete that customer's estimates. Deleting the customer row cascades estimates and keeps opt-out rows |
 
 ## Target markets
 

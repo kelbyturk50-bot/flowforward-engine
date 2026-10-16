@@ -14,7 +14,7 @@ const http = require('http');
 const path = require('path');
 const express = require('express');
 
-const { applySchema } = require('../src/db/migrate');
+const { applySchema, applyMainSchema, applyEstimateConstraints } = require('../src/db/migrate');
 const { resetDb, closePool, pool } = require('./fixtures');
 const { MAX_CSV_BYTES, MAX_DATA_ROWS } = require('../src/pilot/estimate-intake');
 const kill = require('../src/pilot/kill-switch');
@@ -551,27 +551,36 @@ describe('pilot csv estimate intake', () => {
     const csv = [
       'estimate_id,first_name,email,job_type',
       'E-OK,=Ada,test+ada@example.com,Coil',
+      'E-ANN,-Ann,test+ann@example.com,Coil',
+      'E-FW,＝Bea,test+bea-fw@example.com,Coil',
       '=E5,Bea,test+bea@example.com,Coil',
       'E-PLUS,Cy,+f@example.com,Coil',
       'E-MINUS,Dee,-e@example.com,Coil',
       'E-JOB,Fay,test+fay@example.com,=cmd|\' /C calc\'!A0',
       'E-HYPER,Gil,test+gil@example.com,-HYPERLINK(1)',
       'E-SUM,Hal,test+hal@example.com,+SUM(1)',
+      'E-FWJOB,Ida,test+ida@example.com,＝1+1',
+      'E-SMJOB,Jo,test+jo@example.com,﹦1',
     ].join('\n');
     const uploaded = await postCsv(id, csv);
     assert.equal(uploaded.status, 200, uploaded.text);
-    assert.equal(uploaded.json.upserted, 1);
+    assert.equal(uploaded.json.upserted, 3);
     const fields = uploaded.json.errors.map((error) => `${error.field}`).sort();
-    assert.deepEqual(fields, ['email', 'email', 'estimate_id', 'job_type', 'job_type', 'job_type']);
+    assert.deepEqual(fields, [
+      'email', 'email', 'estimate_id',
+      'job_type', 'job_type', 'job_type', 'job_type', 'job_type',
+    ]);
     const stored = await pool.query(
       `SELECT source_estimate_id, homeowner_first_name, email, job_type
          FROM pilot_open_estimates WHERE customer_id = $1`,
       [id]
     );
-    assert.equal(stored.rows.length, 1);
-    assert.equal(stored.rows[0].source_estimate_id, 'E-OK');
-    assert.equal(stored.rows[0].homeowner_first_name, 'Ada');
-    assert.equal(stored.rows[0].email, 'test+ada@example.com');
+    assert.equal(stored.rows.length, 3);
+    const byId = Object.fromEntries(stored.rows.map((row) => [row.source_estimate_id, row]));
+    assert.equal(byId['E-OK'].homeowner_first_name, 'Ada');
+    assert.equal(byId['E-OK'].email, 'test+ada@example.com');
+    assert.equal(byId['E-ANN'].homeowner_first_name, 'Ann');
+    assert.equal(byId['E-FW'].homeowner_first_name, 'Bea');
     assert.equal(JSON.stringify(stored.rows).includes('=cmd'), false);
     assert.equal(JSON.stringify(stored.rows).includes('HYPERLINK'), false);
 
@@ -584,8 +593,24 @@ describe('pilot csv estimate intake', () => {
          ($1, 'E-MINUSJ', 'Cy', 'test+minus@example.com', '-HYPERLINK(1)'),
          ($1, 'E-AT', 'Dee', 'test+at@example.com', '@mention'),
          ($1, 'E-TAB', 'Fay', $2, 'Coil'),
-         ($1, 'E-CR', 'Gil', $3, 'Coil')`,
-      [id, '\tuser@example.com', '\ruser@example.com']
+         ($1, 'E-CR', 'Gil', $3, 'Coil'),
+         ($1, 'E-FWEQ', $4, 'test+fweq@example.com', 'Coil'),
+         ($1, 'E-FWPLUS', 'Bea', 'test+fwplus@example.com', $5),
+         ($1, 'E-FWMINUS', 'Cy', 'test+fwminus@example.com', $6),
+         ($1, 'E-FWAT', 'Dee', 'test+fwat@example.com', $7),
+         ($1, 'E-SMALL', 'Fay', 'test+small@example.com', $8),
+         ($1, 'E-LEAD', $9, 'test+lead@example.com', 'Coil')`,
+      [
+        id,
+        '\tuser@example.com',
+        '\ruser@example.com',
+        '＝Ada',
+        '＋Coil',
+        '－x',
+        '＠mention',
+        '﹦1',
+        ' \u3000＝1+1',
+      ]
     );
     const exported = await request('GET', `/api/pilot/estimate-recovery/customers/${id}/estimates?format=csv`, {
       headers: { 'x-api-key': API_KEY },
@@ -597,8 +622,18 @@ describe('pilot csv estimate intake', () => {
     assert.match(exported.text, /"'@mention"/);
     assert.match(exported.text, /"'\tuser@example.com"/);
     assert.match(exported.text, /"'\ruser@example.com"/);
+    assert.match(exported.text, /"'＝Ada"/);
+    assert.match(exported.text, /"'＋Coil"/);
+    assert.match(exported.text, /"'－x"/);
+    assert.match(exported.text, /"'＠mention"/);
+    assert.match(exported.text, /"'﹦1"/);
+    assert.match(exported.text, /"' \u3000＝1\+1"/);
     assert.equal(/(^|,)=Ada(,|\n)/.test(exported.text), false);
     assert.equal(/(^|,)\+SUM/.test(exported.text), false);
+    assert.equal(/(^|,)＝Ada(,|\n)/.test(exported.text), false);
+    assert.equal(/(^|,)＋Coil/.test(exported.text), false);
+    assert.equal(/(^|,)－x/.test(exported.text), false);
+    assert.equal(/(^|,)＠mention/.test(exported.text), false);
     await resetDb();
   });
 
@@ -629,6 +664,16 @@ describe('pilot csv estimate intake', () => {
     );
     assert.deepEqual(stuck.rows.map((row) => row.status), ['opted_out', 'opted_out']);
 
+    const renamed = await postCsv(shop, 'estimate_id,email\nE-4,test+renamed@example.com\n');
+    assert.equal(renamed.status, 200, renamed.text);
+    const renamedRow = await pool.query(
+      `SELECT status, email FROM pilot_open_estimates
+        WHERE customer_id = $1 AND source_estimate_id = 'E-4'`,
+      [shop]
+    );
+    assert.equal(renamedRow.rows[0].status, 'opted_out');
+    assert.equal(renamedRow.rows[0].email, 'test+renamed@example.com');
+
     const removed = await request('DELETE', `/api/pilot/estimate-recovery/customers/${shop}/estimates`, {
       headers: { 'x-api-key': API_KEY },
     });
@@ -641,6 +686,7 @@ describe('pilot csv estimate intake', () => {
     assert.deepEqual(kept.rows.map((row) => row.email), [
       'test+e4@example.com',
       'test+e8@example.com',
+      'test+renamed@example.com',
     ]);
 
     const returned = await postCsv(shop, [
@@ -674,12 +720,39 @@ describe('pilot csv estimate intake', () => {
     );
     assert.equal(otherList.rows[0].n, 0);
 
+    await pool.query(
+      `ALTER TABLE pilot_estimate_suppressions
+         ADD CONSTRAINT pilot_estimate_suppressions_customer_id_fkey
+         FOREIGN KEY (customer_id) REFERENCES pilot_customers(id) ON DELETE CASCADE`
+    );
+    const repaired = await applyEstimateConstraints();
+    assert.equal(repaired.errors.length, 0);
+    const fk = await pool.query(
+      `SELECT conname FROM pg_constraint
+        WHERE conname = 'pilot_estimate_suppressions_customer_id_fkey'`
+    );
+    assert.equal(fk.rows.length, 0);
+
     await pool.query('DELETE FROM pilot_customers WHERE id = $1', [shop]);
-    const gone = await pool.query(
-      'SELECT COUNT(*)::int AS n FROM pilot_estimate_suppressions WHERE customer_id = $1',
+    assert.equal(await estimateCount(shop), 0);
+    const retained = await pool.query(
+      `SELECT email FROM pilot_estimate_suppressions WHERE customer_id = $1 ORDER BY email`,
       [shop]
     );
-    assert.equal(gone.rows[0].n, 0);
+    assert.deepEqual(retained.rows.map((row) => row.email), [
+      'test+e4@example.com',
+      'test+e8@example.com',
+      'test+renamed@example.com',
+    ]);
+    const reborn = await pool.query(
+      `INSERT INTO pilot_customers (name) VALUES ('TEST: Opt Out Shop') RETURNING id`
+    );
+    assert.notEqual(reborn.rows[0].id, shop);
+    const inherited = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM pilot_estimate_suppressions WHERE customer_id = $1',
+      [reborn.rows[0].id]
+    );
+    assert.equal(inherited.rows[0].n, 0);
     await resetDb();
   });
 
@@ -757,6 +830,31 @@ describe('pilot csv estimate intake', () => {
       assert.equal(short.status, 404);
       assert.equal(await customerCount(), 0);
 
+      process.env.CRM_API_KEY = ' '.repeat(32);
+      const spaces = await request('POST', '/api/pilot/estimate-recovery/customers', {
+        headers: { 'x-api-key': API_KEY },
+        body: { name: 'TEST: Spaces Key' },
+      });
+      assert.equal(spaces.status, 404);
+      assert.deepEqual(spaces.json, NOT_FOUND);
+      assert.equal(await customerCount(), 0);
+
+      process.env.CRM_API_KEY = `${'x'.repeat(31)} `;
+      const trailing = await request('POST', '/api/pilot/estimate-recovery/customers', {
+        headers: { 'x-api-key': API_KEY },
+        body: { name: 'TEST: Trailing Space Key' },
+      });
+      assert.equal(trailing.status, 404);
+      assert.equal(await customerCount(), 0);
+
+      process.env.CRM_API_KEY = `  ${'y'.repeat(32)}  `;
+      const trimmed = await request('POST', '/api/pilot/estimate-recovery/customers', {
+        headers: { 'x-api-key': API_KEY },
+        body: { name: 'TEST: Trimmed Key' },
+      });
+      assert.equal(trimmed.status, 201, trimmed.text);
+      await resetDb();
+
       process.env.CRM_API_KEY = '';
       const authPath = require.resolve('../src/api/auth');
       delete require.cache[authPath];
@@ -805,5 +903,109 @@ describe('pilot csv estimate intake', () => {
       require(authPath);
       await resetDb();
     }
+  });
+
+  it('boots when a legacy hostile name is already stored', async () => {
+    const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
+    const repairSql = fs.readFileSync(path.join(__dirname, '../src/db/estimate-constraints.sql'), 'utf8');
+    const migrate = fs.readFileSync(path.join(__dirname, '../src/db/migrate.js'), 'utf8');
+    assert.equal(/DROP\s+CONSTRAINT/i.test(schema), false);
+    assert.equal(/VALIDATE CONSTRAINT/.test(schema), false);
+    assert.match(
+      schema,
+      /ADD CONSTRAINT pilot_open_estimates_name_hostile_check CHECK \([\s\S]*?\) NOT VALID;/
+    );
+    assert.match(
+      schema,
+      /ADD CONSTRAINT pilot_open_estimates_job_hostile_check CHECK \([\s\S]*?\) NOT VALID;/
+    );
+    assert.match(repairSql, /VALIDATE CONSTRAINT pilot_open_estimates_name_hostile_check/);
+    assert.match(repairSql, /VALIDATE CONSTRAINT pilot_open_estimates_job_hostile_check/);
+    assert.match(repairSql, /pilot_estimates: name check validation failed/);
+    assert.match(migrate, /applyEstimateConstraints/);
+    assert.match(migrate, /estimate-constraints\.sql/);
+
+    await resetDb();
+    await pool.query(`
+      ALTER TABLE pilot_open_estimates DROP CONSTRAINT IF EXISTS pilot_open_estimates_name_hostile_check;
+      ALTER TABLE pilot_open_estimates DROP CONSTRAINT IF EXISTS pilot_open_estimates_job_hostile_check;
+      ALTER TABLE pilot_open_estimates DROP CONSTRAINT pilot_open_estimates_name_check;
+      ALTER TABLE pilot_open_estimates ADD CONSTRAINT pilot_open_estimates_name_check CHECK (
+        homeowner_first_name IS NULL OR (
+          char_length(homeowner_first_name) BETWEEN 1 AND 60
+          AND homeowner_first_name !~ '[[:cntrl:]]'
+          AND position('@' IN homeowner_first_name) = 0
+        )
+      );
+      ALTER TABLE pilot_open_estimates DROP CONSTRAINT pilot_open_estimates_job_check;
+      ALTER TABLE pilot_open_estimates ADD CONSTRAINT pilot_open_estimates_job_check CHECK (
+        job_type IS NULL OR (
+          char_length(job_type) BETWEEN 1 AND 80
+          AND job_type !~ '[[:cntrl:]]'
+        )
+      );
+    `);
+    await pool.query('DROP TABLE IF EXISTS pilot_estimate_suppressions');
+
+    const shop = await pool.query(
+      `INSERT INTO pilot_customers (name) VALUES ('TEST: Legacy Shop') RETURNING id`
+    );
+    const legacyName = 'Bob\u202Eevil';
+    await pool.query(
+      `INSERT INTO pilot_open_estimates
+         (customer_id, source_estimate_id, email, homeowner_first_name)
+       VALUES ($1, 'E-LEGACY', 'test+legacy@example.com', $2)`,
+      [shop.rows[0].id, legacyName]
+    );
+
+    await applyMainSchema();
+    const created = await pool.query(
+      `SELECT to_regclass('public.pilot_estimate_suppressions') AS rel`
+    );
+    assert.notEqual(created.rows[0].rel, null);
+    const kept = await pool.query(
+      `SELECT homeowner_first_name FROM pilot_open_estimates
+        WHERE source_estimate_id = 'E-LEGACY'`
+    );
+    assert.equal(kept.rows[0].homeowner_first_name, legacyName);
+
+    const repair = await applyEstimateConstraints();
+    assert.equal(repair.errors.length, 0);
+    const notes = repair.notices.join('\n');
+    assert.match(notes, /name check validation failed/);
+    assert.equal(notes.includes('Bob'), false);
+    assert.equal(notes.includes('\u202E'), false);
+    assert.equal(notes.includes('test+legacy'), false);
+    assert.equal(notes.includes(String(shop.rows[0].id)), false);
+
+    const checks = await pool.query(
+      `SELECT conname, convalidated
+         FROM pg_constraint
+        WHERE conname = 'pilot_open_estimates_name_hostile_check'`
+    );
+    assert.equal(checks.rows.length, 1);
+    assert.equal(checks.rows[0].convalidated, false);
+
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO pilot_open_estimates
+           (customer_id, source_estimate_id, email, homeowner_first_name)
+         VALUES ($1, 'E-NEWBAD', 'test+newbad@example.com', $2)`,
+        [shop.rows[0].id, legacyName]
+      ),
+      (err) => err.code === '23514'
+    );
+
+    await applySchema();
+    const still = await pool.query(
+      `SELECT homeowner_first_name FROM pilot_open_estimates
+        WHERE source_estimate_id = 'E-LEGACY'`
+    );
+    assert.equal(still.rows[0].homeowner_first_name, legacyName);
+    const stillThere = await pool.query(
+      `SELECT to_regclass('public.pilot_estimate_suppressions') AS rel`
+    );
+    assert.notEqual(stillThere.rows[0].rel, null);
+    await resetDb();
   });
 });

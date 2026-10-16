@@ -1,12 +1,13 @@
 // Pilot #1 CSV intake. API key is enforced by the /api mount.
 // Every route is 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly "true"
-// AND CRM_API_KEY is set and at least 32 characters. A short or missing key
-// writes nothing, matching the pilot demo. This file does not send mail.
+// AND CRM_API_KEY trims to at least 32 non-whitespace characters. A short,
+// blank, or missing key writes nothing, matching the pilot demo. This file
+// does not send mail.
 
 const express = require('express');
 const flags = require('../pilot/flags');
 const { globalSendKilled } = require('../pilot/kill-switch');
-const { MAX_CSV_BYTES, parseIntake } = require('../pilot/estimate-intake');
+const { MAX_CSV_BYTES, parseIntake, startsWithFormula } = require('../pilot/estimate-intake');
 const store = require('../pilot/estimates');
 
 const router = express.Router();
@@ -22,13 +23,14 @@ let missingKeyWarned = false;
 
 function pilotKeyReady() {
   const secret = process.env.CRM_API_KEY;
-  if (typeof secret === 'string' && secret.length >= MIN_API_KEY_LENGTH) {
+  const compact = typeof secret === 'string' ? secret.trim().replace(/\s/g, '') : '';
+  if (compact.length >= MIN_API_KEY_LENGTH) {
     missingKeyWarned = false;
     return true;
   }
   if (!missingKeyWarned) {
     missingKeyWarned = true;
-    console.warn('[pilot] CRM_API_KEY must be at least 32 characters — estimate intake stays off.');
+    console.warn('[pilot] CRM_API_KEY must be at least 32 non-whitespace characters — estimate intake stays off.');
   }
   return false;
 }
@@ -97,9 +99,10 @@ function toPublic(row) {
 
 function csvCell(value) {
   let raw = value == null ? '' : String(value);
-  // A leading = + - @ tab or CR is a spreadsheet formula. Prefix an apostrophe
-  // and quote the cell so the mark is part of the value.
-  if (/^[=+\-@\t\r]/.test(raw)) raw = `'${raw}`;
+  // A leading = + - @ tab or CR, or the same mark after spaces, is a
+  // spreadsheet formula. Full-width and small-form leaders count too.
+  // Prefix an apostrophe and quote the cell so the mark is part of the value.
+  if (startsWithFormula(raw)) raw = `'${raw}`;
   if (raw.startsWith("'") || /[",\n\r]/.test(raw)) return `"${raw.replace(/"/g, '""')}"`;
   return raw;
 }

@@ -8,10 +8,20 @@ const MAX_DATA_ROWS = 2000;
 
 const STATUSES = new Set(['open', 'sold', 'lost', 'expired', 'opted_out']);
 
-// Spreadsheet formula triggers, plus tab and CR. Intake rejects these at the
-// start of an estimate id, email, or job type. A leading run is stripped from
-// a first name so the stored value cannot open a formula.
-const FORMULA_LEAD = /^[=+\-@\t\r]/;
+// Spreadsheet formula triggers: ASCII = + - @ tab CR, full-width ＝＋－＠,
+// and small-form ﹦﹢﹣﹫. Intake rejects these at the start of an estimate
+// id, email, or job type. A leading run is stripped from a first name so
+// the stored value cannot open a formula.
+const FORMULA_LEAD = /^[=+\-@\t\r\uFF1D\uFE66\uFF0B\uFE62\uFF0D\uFE63\uFF20\uFE6B]/;
+const FORMULA_LEAD_RUN = /^[=+\-@\t\r\uFF1D\uFE66\uFF0B\uFE62\uFF0D\uFE63\uFF20\uFE6B]+/;
+// Export also treats a trigger after leading spaces (including U+3000) as a
+// formula. Tab and CR are both whitespace and triggers; the class still
+// matches them when the whitespace run backtracks.
+const FORMULA_CELL = /^[\s\u3000]*[=+\-@\t\r\uFF1D\uFE66\uFF0B\uFE62\uFF0D\uFE63\uFF20\uFE6B]/;
+
+function startsWithFormula(value) {
+  return FORMULA_CELL.test(String(value ?? ''));
+}
 
 // C1 controls, bidi overrides and isolates, and zero-width characters.
 // Ordinary newlines are not in this set: a quoted CSV field may contain one,
@@ -70,8 +80,10 @@ function validEmail(value) {
 function validFirstName(value) {
   const raw = String(value || '');
   if (HOSTILE_TEXT.test(raw)) return { ok: false };
-  // Drop a leading formula trigger (= + - @ tab CR) before the name is stored.
-  const name = raw.trim().replace(/^[=+\-@\t\r]+/, '').trim().replace(/\s+/g, ' ');
+  // Drop a leading formula trigger before the name is stored.
+  // "=Ada" and "-Ann" become "Ada" and "Ann". Full-width and small-form
+  // leaders are stripped the same way.
+  const name = raw.trim().replace(FORMULA_LEAD_RUN, '').trim().replace(/\s+/g, ' ');
   if (!name) return { ok: true, value: null };
   if (name.length > 60 || HOSTILE_TEXT.test(name) || /[\u0000-\u001F\u007F]/.test(name) || name.includes('@')) {
     return { ok: false };
@@ -222,4 +234,5 @@ module.exports = {
   MAX_DATA_ROWS,
   STATUSES,
   parseIntake,
+  startsWithFormula,
 };

@@ -108,9 +108,10 @@ const PORT = process.env.PORT || 3000;
 
 async function boot() {
   // schema.sql throws on failure, the same as before the pilot. That catch
-  // logs the startup line and skips rescore. The brand-check step and the
-  // pilot step return reports instead of throwing, so those failures do not
-  // take this path. A brand-check failure is a warning. The server still boots.
+  // logs the startup line and skips rescore. The brand-check step, the
+  // estimate-check step, and the pilot step return reports instead of
+  // throwing, so those failures do not take this path. A brand-check or
+  // estimate-check failure is a warning. The server still boots.
   let mainOk = false;
   try {
     const report = await applySchema();
