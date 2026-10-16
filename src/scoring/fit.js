@@ -33,12 +33,10 @@
 // trade word. Air Conditioning counts. Heating Oil Delivery and Pool
 // Heating do not. A missing cache adds nothing. Plumbing, Plumber, and every
 // other trade are not boosted. A verb negation can sit well before the phrase
-// inside the same clause, including a comma-bounded aside or a sentence
-// adverb from the explicit list (unfortunately, sadly, honestly, and the
-// rest). A comma or dash
-// that opens a later clause does not carry it forward. A bare "no" or
-// "without" negates only with an optional any, a, an, or the between it and
-// the phrase.
+// and may cross a comma. A sentence-initial "Don't" or "Do not" followed
+// directly by a non-offer verb stops at the first comma, semicolon, colon, or
+// dash after that verb. A bare "no" or "without" negates only with an optional
+// any, a, an, or the between it and the phrase.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');

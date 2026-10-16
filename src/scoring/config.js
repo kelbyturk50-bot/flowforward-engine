@@ -72,26 +72,25 @@ const TIER_CAP_FOR = {
 //
 // Text matches are word-boundary matches. "preplacement", "reinstallation",
 // "refinancing", "freeestimate", and "free estimated" do not match.
-// A negated phrase does not count. Verb negations keep a wide window inside
-// the same clause ("we do not offer financing", "we don't offer financing",
-// "not offering installation", and "financing not available" after the phrase).
-// A comma-bounded aside stays in that clause ("we do not offer, at this time,
-// any kind of financing", "we do not, unfortunately, offer financing"). An
-// aside may start with a listed sentence adverb (unfortunately, sadly,
-// regrettably, honestly, currently, typically, usually, clearly, really,
-// presently; frankly ends in ly and is listed too). It is dropped only when
-// the text before it ends in the negator, or the negator plus one offer verb.
-// "Don't wait, family owned, ..." is not dropped. A comma, semicolon, colon,
-// or dash that opens a later clause does not carry the negator forward
-// ("Don't wait, call for a free estimate", "Don't wait - call today for a
-// free estimate", "Don't wait, seriously, call for a free estimate"). "not" followed
-// by "only" is not a verb negation. "no longer" and "no more" are not in that
-// wide window: they negate only when the phrase follows, or after one
-// offer-type verb (offer, provide, accept, do, and their -s/-ing/-ed forms)
-// and an optional any, a, an, or the. A bare "no" or "without" negates only
-// when the phrase comes next, or with just any, a, an, or the in between
-// ("no free estimates", "without any financing"). A curly apostrophe counts
-// (don’t, doesn’t). "no-hassle", "no interest", and "no-cost" are not negations.
+// A negated phrase does not count. Verb negations keep a wide window and may
+// cross a comma, semicolon, or hyphen ("we do not offer financing", "we don't
+// offer financing", "we do not offer, at this time, any kind of financing",
+// "we do not, unfortunately, offer financing", "we do not yet offer, in your
+// area, any kind of financing", and "financing not available" after the phrase).
+// One exception: a sentence-initial "Don't" or "Do not" followed directly by a
+// non-offer verb (wait, settle, sweat, miss out, hesitate, delay, forget,
+// worry, and the same kind of CTA verb — not offer, provide, accept, have,
+// carry, do, or extend) stops at the first comma, semicolon, colon, or dash
+// after that verb ("Don't wait, call for a free estimate", "Don't wait - call
+// today for a free estimate", "Don't wait, seriously, call for a free estimate").
+// "not" followed by "only" is not a verb negation. "no longer" and "no more"
+// are not in that wide window: they negate only when the phrase follows, or
+// after one offer-type verb (offer, provide, accept, do, and their
+// -s/-ing/-ed forms) and an optional any, a, an, or the. A bare "no" or
+// "without" negates only when the phrase comes next, or with just any, a, an,
+// or the in between ("no free estimates", "without any financing"). A curly
+// apostrophe counts (don’t, doesn’t). "no-hassle", "no interest", and
+// "no-cost" are not negations.
 //
 // HVAC only (Scout, PR #51; Gauge on the industry gate). A stored industry
 // that is a non-HVAC trade scores 0 no matter what the company name or

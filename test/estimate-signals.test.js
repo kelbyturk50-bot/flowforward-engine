@@ -619,9 +619,42 @@ describe('F-003 estimate signals', () => {
       ['shouted no estimates', research('NO  FREE ESTIMATES')],
       ['dont offer free estimates', research("We don't offer free estimates")],
       ['unfortunately aside', research('We do not, unfortunately, offer financing')],
-      ['sadly aside', research('We do not offer, sadly, financing')],
       ['clearly aside', research('We do not, clearly, offer financing')],
       ['frankly aside', research('We do not, frankly, offer financing')],
+      ['our financing', research('We do not offer, at this time, our financing')],
+      ['our free estimates', research('We do not offer, at this time, our free estimates')],
+      ['our customers financing', research('We do not offer, at this time, our customers financing')],
+      ['accept our financing', research('We do not accept, at this time, our financing')],
+      ['utah replacement financing', research('We do not offer, in Utah, our replacement financing')],
+      ['yet in your area', research('We do not yet offer, in your area, any kind of financing')],
+      ['yet in utah', research('We do not yet offer, in Utah, any kind of financing')],
+      ['currently at this time', research('We do not currently offer, at this time, any kind of financing')],
+      ['currently offering', research('We are not currently offering, in Utah, any kind of financing')],
+      ['really for now', research('We do not really offer, for now, any kind of financing')],
+      ['unfortunately our financing', research('We do not offer, unfortunately, our financing')],
+      ['sadly our financing', research('We do not offer, sadly, our financing')],
+      ['your free estimate', research('We cannot provide, for now, your free estimate')],
+      ['your financing options', research('We do not offer, for a limited time, your financing options')],
+      ['and will not', research('We do not, and will not, offer financing')],
+      ['and do not estimates', research('We cannot, and do not, offer free estimates')],
+      ['call after aside', research('We do not offer, at this time, call for a free estimate')],
+      ['sorry but have', research("We don't offer, sorry, but we have financing")],
+      ['dangling hyphen', research('We do not -offer financing')],
+      ['dont offer call', research("Don't offer, call for a free estimate")],
+      ['do not provide call', research('Do not provide, call for a free estimate')],
+      ['dont accept our', research("Don't accept, our financing")],
+      ['dont do this call', research("Don't do this, call for a free estimate")],
+      ['dont extend call', research("Don't extend, call for a free estimate")],
+      ['dont have call', research("Don't have, call for a free estimate")],
+      ['dont carry call', research("Don't carry, call for a free estimate")],
+      ['we dont wait', research("We don't wait, call for a free estimate")],
+      ['please dont wait', research("Please don't wait, call for a free estimate")],
+      ['dont yet wait', research("Don't yet wait, call for a free estimate")],
+      ['hesitate without break', research("Don't hesitate to call for a free estimate")],
+      ['do not miss our', research('Do not miss our free estimates')],
+      ['dont wait no break', research("Don't wait call for a free estimate")],
+      ['later dont still negates', research("Don't wait, we don't, call for a free estimate")],
+      ['dont comma without verb', research("Don't, at this time, call for a free estimate")],
       ['comma then negator', research('Sure, we do not offer financing')],
       ['semicolon then negator', research('Never mind; we do not offer financing')],
       ['colon then negator', research('Remember: we do not offer financing')],
@@ -741,13 +774,15 @@ describe('F-003 estimate signals', () => {
     assert.equal(seriously.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
     assert.equal(signalPoints(seriously), 4);
 
-    const newClause = computeFit({
+    // The comma is flush against the phrase, so main's wide window does not
+    // reach it. This stays +3, the same score as main.
+    const sadly = computeFit({
       ...peer,
-      research: research('We do not offer, at this time, call for a free estimate'),
+      research: research('We do not offer, sadly, financing'),
     });
-    assert.equal(newClause.fit_score - plain.fit_score, 4, 'We do not offer, at this time, call for a free estimate');
-    assert.equal(newClause.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
-    assert.equal(signalPoints(newClause), 4);
+    assert.equal(sadly.fit_score - plain.fit_score, 3, 'We do not offer, sadly, financing');
+    assert.equal(sadly.fit_reasons.find(row => row.label === 'Financing').points, 3);
+    assert.equal(signalPoints(sadly), 3);
 
     const sorry = computeFit({
       ...peer,
@@ -757,14 +792,6 @@ describe('F-003 estimate signals', () => {
     assert.equal(sorry.fit_reasons.find(row => row.label === 'Financing').points, 3);
     assert.equal(signalPoints(sorry), 3);
 
-    const sorryBut = computeFit({
-      ...peer,
-      research: research("We don't offer, sorry, but we have financing"),
-    });
-    assert.equal(sorryBut.fit_score - plain.fit_score, 3, "We don't offer, sorry, but we have financing");
-    assert.equal(sorryBut.fit_reasons.find(row => row.label === 'Financing').points, 3);
-    assert.equal(signalPoints(sorryBut), 3);
-
     const callToday = computeFit({
       ...peer,
       research: research("Don't wait, call today, for a free estimate"),
@@ -773,16 +800,33 @@ describe('F-003 estimate signals', () => {
     assert.equal(callToday.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
     assert.equal(signalPoints(callToday), 4);
 
-    const danglingHyphen = computeFit({
-      ...peer,
-      research: research('We do not -offer financing'),
-    });
-    assert.equal(danglingHyphen.fit_score - plain.fit_score, 3, 'We do not -offer financing');
-    assert.equal(danglingHyphen.fit_reasons.find(row => row.label === 'Financing').points, 3);
-    assert.equal(signalPoints(danglingHyphen), 3);
+    const imperativeBreaks = [
+      ["Don't wait; call for a free estimate", 4, 'Free estimate'],
+      ["Don't wait -- call for a free estimate", 4, 'Free estimate'],
+      ["Don't wait: call for a free estimate", 4, 'Free estimate'],
+      ['Do not wait, call for a free estimate', 4, 'Free estimate'],
+      ['Don\u2019t wait, call for a free estimate', 4, 'Free estimate'],
+      ['Don\u2018t wait, call for a free estimate', 4, 'Free estimate'],
+      ["DON'T WAIT, CALL FOR A FREE ESTIMATE", 4, 'Free estimate'],
+      ["Don't miss out, call for a free estimate", 4, 'Free estimate'],
+      ["Don't hesitate, call for a free estimate", 4, 'Free estimate'],
+      ["Don't delay, call for a free estimate", 4, 'Free estimate'],
+      ["Don't forget, call for a free estimate", 4, 'Free estimate'],
+      ["Don't worry, call for a free estimate", 4, 'Free estimate'],
+      ["Don't sweat, call for a free estimate", 4, 'Free estimate'],
+      ['Call now. Don\'t wait, call for a free estimate', 4, 'Free estimate'],
+      ["Don't wait, at this time, our free estimates", 4, 'Free estimate'],
+      ['Don\u2019t wait \u2013 call for a free estimate', 4, 'Free estimate'],
+      ['Don\u2019t wait \u2014 call for a free estimate', 4, 'Free estimate'],
+    ];
+    for (const [text, weight, label] of imperativeBreaks) {
+      const fit = computeFit({ ...peer, research: research(text) });
+      assert.equal(fit.fit_score - plain.fit_score, weight, text);
+      assert.equal(fit.fit_reasons.find(row => row.label === label).points, weight, text);
+      assert.equal(signalPoints(fit), weight, text);
+    }
 
-    // Two-comma copy after a CTA. Main scores these. An aside is not dropped
-    // unless it interrupts the negator itself.
+    // Main already scores these. The imperative cut does not zero them.
     const ctaAsides = [
       ["Don't settle, family owned, free estimates", 4, 'Free estimate'],
       ["Don't settle, family-owned, free estimates", 4, 'Free estimate'],

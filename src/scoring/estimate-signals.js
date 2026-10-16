@@ -18,38 +18,24 @@ const FOLLOW_UP_PROMISE_RE = /\b(?:we(?:'ll|’ll| will)\s+follow\s+up|follow[- 
 const JOB_AD_RE = /\b(?:comfort|sales)\s+(?:advisors?|consultants?)\b|\bcomfort\s+sales\b|\bsales\s+comfort\b/i;
 const SEARCH_ADS_RE = /\blocal\s+services\s+ads?\b|\bgoogle\s+ads\b|\bgoogle\s+local\s+services\b|\blsas?\b/i;
 const SEARCH_ADS_LABEL_RE = /google ads|\blocal services\b|\blsas?\b/i;
-// Apostrophes: straight, U+2019 (don’t), and U+2018. The verb pattern has to
-// cover the whole remaining clause: words are split on whitespace, a hyphen
-// inside a word stays one word ("in-home"), and a comma, semicolon, colon,
-// or dash is not a word gap. "not only" is not a verb negation. "no longer"
-// and "no more" are not in this window. They negate only when the phrase
-// follows, or after one offer-type verb and an optional any/a/an/the. Bare
-// "no" and "without" negate only when the phrase follows immediately, or
-// with just any/a/an/the in between. A comma after "no" ("No, free
-// estimates") is not that gap.
-const VERB_TOKEN = "[^\\s,;:\\u2013\\u2014-]+";
-const VERB_NEGATOR = "do\\s+not|does\\s+not|did\\s+not|is\\s+not|are\\s+not|was\\s+not|were\\s+not|will\\s+not|cannot|don['\\u2019\\u2018]?t|doesn['\\u2019\\u2018]?t|didn['\\u2019\\u2018]?t|isn['\\u2019\\u2018]?t|aren['\\u2019\\u2018]?t|wasn['\\u2019\\u2018]?t|weren['\\u2019\\u2018]?t|won['\\u2019\\u2018]?t|can['\\u2019\\u2018]?t|not(?!\\s+only\\b)|never";
-const NEGATIVE_VERB = new RegExp(
-  `^\\s*(?:${VERB_TOKEN}\\s+)*(?:${VERB_NEGATOR})\\b(?:\\s+${VERB_TOKEN}){0,8}\\s*$`,
-  'i',
-);
-// First word of a comma-bounded aside that stays inside the clause.
-// Sentence adverbs are this list, not every word that ends in ly. "frankly"
-// does end in ly, and it is listed with the other aside openers.
-const ASIDE_START_RE = /^(?:at|in|on|for|of|by|with|from|to|during|after|before|as|about|over|under|within|now|today|frankly|however|still|right|unfortunately|sadly|regrettably|honestly|currently|typically|usually|clearly|really|presently)\b/i;
-// Drop the aside only when it interrupts the negator, or the negator plus
-// one offer verb. "Don't wait, honestly, ..." does not match: "wait" sits
-// between the negator and the comma.
-const ASIDE_HOST_RE = new RegExp(
-  `(?:^|\\s)(?:${VERB_NEGATOR})(?:\\s+(?:offer(?:s|ing|ed)?|provide(?:s|d|ing)?|accept(?:s|ed|ing)?|have|has|carry|carries|do|does))?\\s*$`,
-  'i',
-);
-// A word after that aside which opens a new clause, so the commas stay.
-const NEW_CLAUSE_RE = /^(?:call|contact|click|get|schedule|book|request|ask|visit|come|stop|text|email|reach|talk|phone|try|let|we|you|they|i|he|she|it|our|your|and|but|or|so|then)$/i;
-// Each alternative is one clause break. The verb window sees only the text
-// after the last one, so deleting any alternative lets an earlier negator
-// through on its own.
-const CLAUSE_BREAKS = [',', ';', ':', '\\s+-\\s+', '\\s+--\\s+', '\\u2013', '\\u2014'];
+// Apostrophes: straight, U+2019 (don’t), and U+2018. Verb negations keep a
+// wide window and may cross a comma, semicolon, or hyphen. "not only" is not
+// one of them: the next word after "not" is not "only". "no longer" and "no
+// more" are not in that window. They negate only when the phrase follows, or
+// after one offer-type verb and an optional any/a/an/the. Bare "no" and
+// "without" negate only when the phrase follows immediately, or with just
+// any/a/an/the in between. A comma after "no" ("No, free estimates") is not
+// that gap.
+const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|not(?!\s+only\b)|never)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
+// Sentence-initial "Don't" / "Do not" plus one of these verbs. Cached page
+// text is joined with the title on the line above, so the imperative may
+// also start a line. The first comma, semicolon, colon, or dash after the
+// verb ends that negator's window. Offer verbs are absent on purpose
+// (offer, provide, accept, have, carry, do, extend), so "Don't offer, ..."
+// stays on the wide window above.
+const IMPERATIVE_OPEN_RE = /(?:^|[\n\r])\s*(?:don['\u2019\u2018]?t|do\s+not)\s+/i;
+const IMPERATIVE_VERB_RE = /^(?:wait|settle|sweat|miss(?:\s+out)?|hesitate|delay|forget|worry|overpay|pay|stop|panic|gamble|risk|struggle|postpone|skip|scramble)\b/i;
+const IMPERATIVE_BREAK_RE = /,|;|:|\s+--\s+|\s+-\s+|\u2013|\u2014/;
 const NEGATIVE_NO_MORE = /\bno\s+(?:longer|more)(?:\s+(?:offer(?:s|ing|ed)?|provide(?:s|ing)?|accept(?:s|ing)?|do(?:es)?)\b)?(?:\s+(?:any|a|an|the))?\s+$/i;
 const NEGATIVE_BARE = /\b(?:no|without)(?:\s+(?:any|a|an|the))?\s+$/i;
 // A short window after the phrase: "not available", "unavailable", "none",
@@ -249,50 +235,23 @@ function clauseAfter(text, end) {
   return window;
 }
 
-// Drop a short comma-bounded aside (" , at this time, ") so the verb window
-// still sees one clause. Leave the commas when the next word starts a new
-// clause ("We do not offer, at this time, call for a free estimate").
-function dropSameClauseAsides(window) {
-  return window.replace(/,([^,]{1,48}),/g, (full, inner, offset) => {
-    const trimmed = inner.trim();
-    const words = trimmed.split(/\s+/).filter(Boolean);
-    if (words.length < 1 || words.length > 6) return full;
-    if (!ASIDE_START_RE.test(trimmed)) return full;
-    if (!ASIDE_HOST_RE.test(window.slice(0, offset))) return full;
-    const rest = window.slice(offset + full.length);
-    const next = rest.match(/^\s*([A-Za-z\u2019\u2018']+)/);
-    if (next && NEW_CLAUSE_RE.test(next[1])) return full;
-    return ' ';
-  });
-}
-
-// The clause that contains the phrase. A leftover comma, semicolon, colon,
-// spaced hyphen, double hyphen, en dash, or em dash opens a later clause.
-// Keep the text after the last break, not the first.
-function sameClauseBefore(window) {
-  const text = dropSameClauseAsides(window);
-  const breaks = [...text.matchAll(new RegExp(CLAUSE_BREAKS.join('|'), 'g'))];
-  if (!breaks.length) return text;
-  const last = breaks[breaks.length - 1];
-  return text.slice(last.index + last[0].length);
-}
-
-// "in-home" is one word. A spaced or dangling hyphen is left for the break
-// list, or it blocks the verb window when the break list does not claim it.
-function collapseCompounds(text) {
-  return text.replace(
-    /[a-z0-9'\u2019\u2018]+(?:-[a-z0-9'\u2019\u2018]+)+/gi,
-    (word) => word.replace(/-/g, ''),
-  );
-}
-
-function verbNegates(before) {
-  return NEGATIVE_VERB.test(collapseCompounds(sameClauseBefore(before)));
+// The wide window still applies after this cut. No punctuation, or an offer
+// verb, or a negator that is not sentence-initial, leaves the clause alone.
+function cutImperativeNegation(before) {
+  const open = before.match(IMPERATIVE_OPEN_RE);
+  if (!open) return before;
+  const rest = before.slice(open.index + open[0].length);
+  const verb = rest.match(IMPERATIVE_VERB_RE);
+  if (!verb) return before;
+  const after = rest.slice(verb[0].length);
+  const brk = after.match(IMPERATIVE_BREAK_RE);
+  if (!brk) return before;
+  return after.slice(brk.index + brk[0].length);
 }
 
 function isNegated(text, index, length) {
-  const before = clauseBefore(text, index);
-  if (verbNegates(before)) return true;
+  const before = cutImperativeNegation(clauseBefore(text, index));
+  if (NEGATIVE_VERB.test(before)) return true;
   if (NEGATIVE_NO_MORE.test(before)) return true;
   if (NEGATIVE_BARE.test(before)) return true;
   return NEGATIVE_AFTER.test(clauseAfter(text, index + length));
