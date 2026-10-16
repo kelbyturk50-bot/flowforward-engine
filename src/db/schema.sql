@@ -541,3 +541,132 @@ VALUES
   (1, 'bookkeeping', 'fsm_none', 5, 8, TRUE),
   (1, 'bookkeeping', 'size_sweet', 5, 8, FALSE)
 ON CONFLICT (version, agent, signal) DO NOTHING;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Pilot #1 CSV intake (idempotent — applied on every boot).
+-- Shop row plus open estimates. No free-text notes column. No mailbox token.
+-- Re-uploads upsert on (customer_id, source_estimate_id).
+-- Deleting a customer cascades to that customer's estimates. The opt-out
+-- suppression list has no foreign key, so those rows stay under the old
+-- customer id. Deleting estimates does not clear suppressions.
+-- This file does not UPDATE these tables and does not send mail.
+-- live_send_enabled defaults false. No statement here sets it true.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS pilot_customers (
+  id                 SERIAL PRIMARY KEY,
+  name               TEXT NOT NULL,
+  live_send_enabled  BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT pilot_customers_name_check CHECK (
+    char_length(btrim(name)) BETWEEN 1 AND 120
+    AND name !~ '[[:cntrl:]]'
+  )
+);
+
+ALTER TABLE pilot_customers
+  ADD COLUMN IF NOT EXISTS live_send_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
+DROP TRIGGER IF EXISTS pilot_customers_updated_at ON pilot_customers;
+CREATE TRIGGER pilot_customers_updated_at
+  BEFORE UPDATE ON pilot_customers
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TABLE IF NOT EXISTS pilot_open_estimates (
+  id                    SERIAL PRIMARY KEY,
+  customer_id           INTEGER NOT NULL REFERENCES pilot_customers(id) ON DELETE CASCADE,
+  source_estimate_id    TEXT NOT NULL,
+  homeowner_first_name  TEXT,
+  email                 TEXT NOT NULL,
+  job_type              TEXT,
+  amount                NUMERIC(12,2),
+  estimate_date         DATE,
+  status                TEXT NOT NULL DEFAULT 'open',
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT pilot_open_estimates_source_check CHECK (
+    char_length(source_estimate_id) BETWEEN 1 AND 80
+    AND source_estimate_id !~ '[[:cntrl:][:space:]]'
+  ),
+  CONSTRAINT pilot_open_estimates_name_check CHECK (
+    homeowner_first_name IS NULL OR (
+      char_length(homeowner_first_name) BETWEEN 1 AND 60
+      AND homeowner_first_name !~ U&'[[:cntrl:]\0080-\009F\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
+      AND position('@' IN homeowner_first_name) = 0
+    )
+  ),
+  CONSTRAINT pilot_open_estimates_email_check CHECK (
+    char_length(email) BETWEEN 3 AND 254
+    AND position('@' IN email) > 1
+  ),
+  CONSTRAINT pilot_open_estimates_job_check CHECK (
+    job_type IS NULL OR (
+      char_length(job_type) BETWEEN 1 AND 80
+      AND job_type !~ U&'[[:cntrl:]\0080-\009F\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
+    )
+  ),
+  CONSTRAINT pilot_open_estimates_amount_check CHECK (
+    amount IS NULL OR (amount >= 0 AND amount <= 99999999.99)
+  ),
+  CONSTRAINT pilot_open_estimates_status_check CHECK (
+    status IN ('open', 'sold', 'lost', 'expired', 'opted_out')
+  )
+);
+
+-- Unique key for idempotent re-uploads. One row per shop per source estimate.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_open_estimates_customer_source
+  ON pilot_open_estimates (customer_id, source_estimate_id);
+
+DROP TRIGGER IF EXISTS pilot_open_estimates_updated_at ON pilot_open_estimates;
+CREATE TRIGGER pilot_open_estimates_updated_at
+  BEFORE UPDATE ON pilot_open_estimates
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- CREATE TABLE IF NOT EXISTS does not change a check that an earlier boot
+-- already added. These extra checks close that gap for bidi, zero-width, and
+-- C1 characters. NOT VALID does not scan existing rows, so a legacy hostile
+-- name does not roll this transaction back. Validation runs after commit in
+-- estimate-constraints.sql. This block does not UPDATE rows.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'pilot_open_estimates_name_hostile_check'
+  ) THEN
+    ALTER TABLE pilot_open_estimates
+      ADD CONSTRAINT pilot_open_estimates_name_hostile_check CHECK (
+        homeowner_first_name IS NULL
+        OR homeowner_first_name !~ U&'[[:cntrl:]\0080-\009F\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
+      ) NOT VALID;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'pilot_open_estimates_job_hostile_check'
+  ) THEN
+    ALTER TABLE pilot_open_estimates
+      ADD CONSTRAINT pilot_open_estimates_job_hostile_check CHECK (
+        job_type IS NULL
+        OR job_type !~ U&'[[:cntrl:]\0080-\009F\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
+      ) NOT VALID;
+  END IF;
+END $$;
+
+-- Opt-out emails for one shop. Survives estimate delete, re-upload, and
+-- customer delete. No foreign key: a deleted shop leaves these rows keyed to
+-- the old customer id. A new shop gets a new id and does not inherit them.
+-- Keyed by the normalized (lowercase) email, stored as plaintext.
+-- A keyed HMAC of that email is a follow-up; this file does not hash.
+CREATE TABLE IF NOT EXISTS pilot_estimate_suppressions (
+  id          SERIAL PRIMARY KEY,
+  customer_id INTEGER NOT NULL,
+  email       TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT pilot_estimate_suppressions_email_check CHECK (
+    char_length(email) BETWEEN 3 AND 254
+    AND position('@' IN email) > 1
+    AND email = lower(email)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_estimate_suppressions_customer_email
+  ON pilot_estimate_suppressions (customer_id, email);
