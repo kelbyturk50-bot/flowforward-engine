@@ -1,7 +1,10 @@
 // GET/PUT /api/flags. Mounted after requireApiKey. Does not send mail.
+// GET uses that guard only. PUT also refuses unless CRM_API_KEY passes the
+// same strength check as pilot intake, and it refuses env-only flags.
 
 const express = require('express');
-const { isKnown } = require('../flags/registry');
+const { crmApiKeyReady } = require('./key-ready');
+const { isKnown, isWritable } = require('../flags/registry');
 const { listFlags, setFlag } = require('../flags/resolve');
 
 const router = express.Router();
@@ -12,8 +15,13 @@ router.get('/', async (req, res) => {
 });
 
 router.put('/:name', async (req, res) => {
+  if (!crmApiKeyReady()) {
+    console.log('[flags] put refused; writes disabled');
+    return res.status(503).json({ error: 'writes_disabled' });
+  }
   const name = req.params.name;
   if (!isKnown(name)) return res.status(400).json({ error: 'unknown_flag' });
+  if (!isWritable(name)) return res.status(400).json({ error: 'flag_not_writable' });
   const body = req.body;
   if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.enabled !== 'boolean') {
     return res.status(400).json({ error: 'invalid_body' });

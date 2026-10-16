@@ -55,7 +55,6 @@ async function clearFlags() {
     [[
       'FF_PILOT_ESTIMATE_RECOVERY',
       'FF_PILOT_LINK_ON_ONEPAGER',
-      'FF_PILOT_ESTIMATE_SMS',
     ]]
   );
 }
@@ -63,17 +62,16 @@ async function clearFlags() {
 async function setFlags({ master = false, link = false, sms = false } = {}) {
   process.env.FF_PILOT_ESTIMATE_RECOVERY = '';
   process.env.FF_PILOT_LINK_ON_ONEPAGER = '';
-  process.env.FF_PILOT_ESTIMATE_SMS = '';
+  process.env.FF_PILOT_ESTIMATE_SMS = sms ? 'true' : '';
   await pool.query(
     `UPDATE feature_flags AS f
         SET enabled = v.enabled, updated_at = NOW(), updated_by = 'test'
        FROM (VALUES
          ('FF_PILOT_ESTIMATE_RECOVERY', $1::boolean),
-         ('FF_PILOT_LINK_ON_ONEPAGER', $2::boolean),
-         ('FF_PILOT_ESTIMATE_SMS', $3::boolean)
+         ('FF_PILOT_LINK_ON_ONEPAGER', $2::boolean)
        ) AS v(name, enabled)
       WHERE f.name = v.name`,
-    [master, link, sms]
+    [master, link]
   );
 }
 
@@ -264,7 +262,7 @@ describe('pilot estimate recovery', () => {
       FF_PILOT_LINK_ON_ONEPAGER: false,
       FF_PILOT_ESTIMATE_SMS: false,
     });
-    for (const value of ['1', 'TRUE', 'True', 'yes', ' true', 'true ', 'on', 'true', '0', 'off']) {
+    for (const value of ['1', 'TRUE', 'True', 'yes', ' true', 'true ', 'on', '']) {
       process.env.FF_PILOT_ESTIMATE_RECOVERY = value;
       process.env.FF_PILOT_LINK_ON_ONEPAGER = value;
       process.env.FF_PILOT_ESTIMATE_SMS = value;
@@ -272,16 +270,21 @@ describe('pilot estimate recovery', () => {
       assert.equal(await flags.linkOn(), false, value);
       assert.equal(await flags.smsOn(), false, value);
     }
+    process.env.FF_PILOT_ESTIMATE_SMS = 'true';
+    assert.equal(await flags.smsOn(), true);
+    assert.equal(await flags.masterOn(), false);
     await setFlags({ master: true, link: true, sms: true });
     assert.equal(await flags.masterOn(), true);
     assert.equal(await flags.linkOn(), true);
     assert.equal(await flags.smsOn(), true);
-    process.env.FF_PILOT_ESTIMATE_RECOVERY = 'false';
-    process.env.FF_PILOT_LINK_ON_ONEPAGER = ' FALSE ';
-    process.env.FF_PILOT_ESTIMATE_SMS = 'False';
-    assert.equal(await flags.masterOn(), false);
-    assert.equal(await flags.linkOn(), false);
-    assert.equal(await flags.smsOn(), false);
+    for (const value of ['false', ' FALSE ', 'off', 'OFF', '0', ' 0 ', 'no', ' NO ']) {
+      process.env.FF_PILOT_ESTIMATE_RECOVERY = value;
+      process.env.FF_PILOT_LINK_ON_ONEPAGER = value;
+      process.env.FF_PILOT_ESTIMATE_SMS = value;
+      assert.equal(await flags.masterOn(), false, value);
+      assert.equal(await flags.linkOn(), false, value);
+      assert.equal(await flags.smsOn(), false, value);
+    }
   });
 
   it('returns 404 with no one-pager CTA when the master flag is off', async () => {

@@ -673,6 +673,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_estimate_suppressions_customer_email
 
 -- Server feature flags. Seeded off. A re-boot inserts missing names only.
 -- ON CONFLICT DO NOTHING does not update enabled, updated_at, or updated_by.
+-- FF_PILOT_ESTIMATE_SMS and FF_CAMPAIGN_OPEN_PIXEL are env-only (exactly
+-- "true") and are not seeded. A row left from an older boot is ignored.
 -- FF_PILOT_ESTIMATE_LIVE_SEND stays env-only and is not seeded.
 -- FF_HIDE_WATERMARK is test-only and is not seeded.
 CREATE TABLE IF NOT EXISTS feature_flags (
@@ -695,9 +697,7 @@ INSERT INTO feature_flags (name, enabled)
 VALUES
   ('FF_PILOT_ESTIMATE_RECOVERY', false),
   ('FF_PILOT_LINK_ON_ONEPAGER', false),
-  ('FF_PILOT_ESTIMATE_SMS', false),
   ('FF_PROTOTYPE_GALLERY', false),
   ('FF_CAMPAIGNS', false),
-  ('FF_CAMPAIGN_OPEN_PIXEL', false),
   ('FF_PROTOTYPE_ON_DRAFT', false)
 ON CONFLICT (name) DO NOTHING;

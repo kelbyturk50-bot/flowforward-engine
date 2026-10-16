@@ -69,7 +69,7 @@ app.use('/api/rubric',    require('./api/rubric'));
 app.use('/api/flags',     require('./api/flags'));
 // CSV intake for Pilot #1. 404 unless the master flag is effectively on
 // (database row true, and the env var is not a trimmed case-insensitive
-// "false"). These routes do not send mail.
+// "false", "off", "0", or "no"). These routes do not send mail.
 app.use('/api/pilot/estimate-recovery', require('./api/pilot-estimates'));
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────

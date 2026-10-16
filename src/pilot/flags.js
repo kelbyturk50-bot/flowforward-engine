@@ -1,8 +1,8 @@
-// Pilot #1 feature flags. Evaluation goes through the database resolver.
-// Seeded rows are off. Env is a kill switch only: a trimmed, case-insensitive
-// "false" forces the flag off. Any other value, or an unset variable, uses
-// the database row. Env never forces a flag on. A missing row or a database
-// error is off. Reads are not cached.
+// Pilot #1 feature flags. Reads are not cached.
+// Recovery and the one-pager link are database flags, seeded off. A trimmed
+// case-insensitive "false", "off", "0", or "no" forces the flag off. An empty
+// string or an unset variable uses the row. Env never forces those flags on.
+// SMS is env-only: on only when FF_PILOT_ESTIMATE_SMS is exactly "true".
 
 const { effective } = require('../flags/resolve');
 

@@ -1,20 +1,31 @@
-// Uncached flag resolution. Each read hits the database.
+// Uncached flag resolution. Each database read hits the database.
 //
-// Env is a kill switch only. A trimmed, case-insensitive "false" forces the
-// flag off. Any other value, including "true", or an unset variable, leaves
-// the decision to the database row. Env never forces a flag on.
+// Database flags (source "db"): a trimmed, case-insensitive "false", "off",
+// "0", or "no" forces the flag off. An empty string or an unset variable
+// leaves the decision to the row. Any other value, including "true", also
+// leaves the decision to the row. Env never forces a database flag on.
 // A missing row or a database error is off.
+//
+// Env-only flags (source "env"): SMS and the open pixel. Effective is on
+// only when the env var is exactly "true". A database row is ignored.
 
 const pool = require('../db/client');
-const { NAMES, isKnown } = require('./registry');
+const { DB_NAMES, NAMES, isEnvOnly, isWritable } = require('./registry');
 
 const ACTOR = 'crm';
+const FORCE_OFF = new Set(['false', 'off', '0', 'no']);
 
 function envForcesOff(name) {
   if (!Object.prototype.hasOwnProperty.call(process.env, name)) return false;
   const raw = process.env[name];
   if (raw == null) return false;
-  return String(raw).trim().toLowerCase() === 'false';
+  const folded = String(raw).trim().toLowerCase();
+  if (folded === '') return false;
+  return FORCE_OFF.has(folded);
+}
+
+function envExactlyTrue(name) {
+  return process.env[name] === 'true';
 }
 
 function stamp(value) {
@@ -24,7 +35,7 @@ function stamp(value) {
   return date.toISOString();
 }
 
-function toView(name, row) {
+function dbView(name, row) {
   const envOff = envForcesOff(name);
   const enabled = row ? row.enabled === true : false;
   return {
@@ -34,11 +45,28 @@ function toView(name, row) {
     env_forced_off: envOff,
     updated_at: row ? stamp(row.updated_at) : null,
     updated_by: row && row.updated_by != null && row.updated_by !== '' ? String(row.updated_by) : null,
+    writable: true,
+    source: 'db',
+  };
+}
+
+function envView(name) {
+  const on = envExactlyTrue(name);
+  return {
+    name,
+    enabled: on,
+    effective: on,
+    env_forced_off: false,
+    updated_at: null,
+    updated_by: null,
+    writable: false,
+    source: 'env',
   };
 }
 
 function offView(name) {
-  return toView(name, null);
+  if (isEnvOnly(name)) return envView(name);
+  return dbView(name, null);
 }
 
 async function readRows(names) {
@@ -52,29 +80,36 @@ async function readRows(names) {
 }
 
 async function effective(name) {
-  if (!isKnown(name)) return offView(name);
+  if (isEnvOnly(name)) return envView(name);
+  if (!isWritable(name)) return offView(name);
   try {
     const rows = await readRows([name]);
-    return toView(name, rows[0] || null);
+    return dbView(name, rows[0] || null);
   } catch (err) {
     console.error(`[flags] read failed; flag stays off (${err && err.code ? err.code : 'error'})`);
-    return offView(name);
+    return dbView(name, null);
   }
 }
 
 async function listFlags() {
+  let byName = new Map();
+  let dbOk = true;
   try {
-    const rows = await readRows(NAMES);
-    const byName = new Map(rows.map((row) => [row.name, row]));
-    return NAMES.map((name) => toView(name, byName.get(name) || null));
+    const rows = await readRows(DB_NAMES);
+    byName = new Map(rows.map((row) => [row.name, row]));
   } catch (err) {
-    console.error(`[flags] list failed; flags stay off (${err && err.code ? err.code : 'error'})`);
-    return NAMES.map((name) => offView(name));
+    dbOk = false;
+    console.error(`[flags] list failed; database flags stay off (${err && err.code ? err.code : 'error'})`);
   }
+  return NAMES.map((name) => {
+    if (isEnvOnly(name)) return envView(name);
+    if (!dbOk) return dbView(name, null);
+    return dbView(name, byName.get(name) || null);
+  });
 }
 
 async function setFlag(name, enabled) {
-  if (!isKnown(name)) return null;
+  if (!isWritable(name)) return null;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -100,7 +135,7 @@ async function setFlag(name, enabled) {
       [name, oldValue, enabled, ACTOR]
     );
     await client.query('COMMIT');
-    return toView(name, updated.rows[0]);
+    return dbView(name, updated.rows[0]);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
@@ -112,6 +147,7 @@ async function setFlag(name, enabled) {
 module.exports = {
   ACTOR,
   envForcesOff,
+  envExactlyTrue,
   effective,
   listFlags,
   setFlag,
