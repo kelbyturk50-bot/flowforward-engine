@@ -6,6 +6,12 @@ import { compactMoney } from '../format';
 const PAGE = 100;
 const DEFAULTS = { q: '', stage: 'open', tier: '', industry: '', city: '', sort: 'fit', min_value: '' };
 
+function leadSubtitle(data) {
+  const total = data?.total;
+  if (typeof total !== 'number' || !Number.isFinite(total)) return 'No leads loaded yet';
+  return `${total.toLocaleString()} match, ranked by fit for your business`;
+}
+
 function loadFilters() {
   try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('ff.leadFilters') || '{}') }; } catch { return DEFAULTS; }
 }
@@ -35,7 +41,7 @@ export default function Leads({ version, bump, openLead }) {
       <header className="page-head">
         <div>
           <h1>Leads</h1>
-          <p className="muted">{data ? `${data.total.toLocaleString()} match` : ' '}, ranked by fit for your business</p>
+          <p className="muted">{leadSubtitle(data)}</p>
         </div>
         <button className="btn" onClick={() => setAdding(true)}>Add lead</button>
       </header>

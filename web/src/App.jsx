@@ -10,7 +10,8 @@ import LeadDrawer from './views/LeadDrawer';
 import ProjectDrawer from './views/ProjectDrawer';
 import More from './views/More';
 import { Toaster, isOverdue } from './ui';
-import { api, settings } from './api';
+import { api, currentApiBase, settings } from './api';
+import ApiBanner from './ApiBanner';
 import { JobsProvider, useJobs } from './jobs';
 import { badgeCount } from './format';
 
@@ -89,6 +90,7 @@ export default function App() {
   const openProject = useCallback((id) => { setLeadId(null); setProposalId(null); setProjectId(id); }, []);
   const openProposal = useCallback((id) => { setLeadId(null); setProjectId(null); setProposalId(id); }, []);
   const shared = { version, bump, openLead, openProject, openProposal };
+  const apiConfigured = currentApiBase().configured;
 
   return (
     <JobsProvider bump={bump} version={version}>
@@ -111,6 +113,7 @@ export default function App() {
       <MobileTabs route={route} version={version} />
 
       <main id="main" className="main">
+        <ApiBanner configured={apiConfigured} />
         {route === 'today'    && <Today {...shared} />}
         {route === 'leads'    && <Leads {...shared} />}
         {route === 'proposals' && <Proposals {...shared} />}

@@ -68,9 +68,9 @@ npm test        # Vitest, one shot. Mocks web/src/api.js. See web/README.md
 npm run lint    # ESLint (flat config)
 ```
 
-The CRM talks to `VITE_API_URL` (see `web/.env.example`) or the URL saved in the browser under Settings. For local UI work, point it at your local API, not production.
+The CRM API base is resolved in `web/src/api-base.js`. A Settings-saved URL on that device wins only when it is https, or http for localhost or 127.0.0.1, and it has no username or password. It is stored only when the address was changed. A stored value that fails that check is ignored. Clear the field and save, or choose Reset, to remove it. Otherwise `VITE_API_URL` under the same rule; any other value is ignored. Otherwise dev uses `http://localhost:3000`. Otherwise the production Railway URL is used only for `https:` on the default port (`location.port` is empty, including an explicit `:443`) when the hostname exactly matches a production CRM host listed there. A non-default port such as `:444`, or `http:`, does not match. Any other host, including Vercel previews, shows an error and does not call the API. For local UI work, leave `VITE_API_URL` unset.
 
-`npm test` in `web/` is the CRM suite. It never loads the real `web/src/api.js` and `fetch` throws if a test tries to make a request. Do not claim those tests passed if you did not run them.
+`npm test` in `web/` is the CRM suite. Component tests load `web/src/test/mock-api.js` in place of `web/src/api.js`, and `fetch` throws if one of those tries to make a request. `web/api-resolution.test.js` imports the real client and stubs `fetch`. Do not claim those tests passed if you did not run them.
 
 ## How to run tests
 
