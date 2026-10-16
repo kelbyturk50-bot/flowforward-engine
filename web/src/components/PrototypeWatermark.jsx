@@ -59,9 +59,23 @@ export const RIBBON_STYLE = {
   printColorAdjust: 'exact',
 };
 
-// Color, background, and text-fill stay out of this lock. The stylesheet owns
-// them, and the print rule has to be able to override them. An inline
-// !important color would win over @media print.
+// Inline !important colors beat any author stylesheet, including a more
+// specific !important rule. Print cannot override them from CSS, so the
+// ribbon swaps these values when the page is printing.
+const RIBBON_SCREEN_COLORS = {
+  background: '#1E2A2F',
+  color: '#F3F6F5',
+  '-webkit-text-fill-color': '#F3F6F5',
+  border: '0',
+};
+
+const RIBBON_PRINT_COLORS = {
+  background: '#FFFFFF',
+  color: '#1E2A2F',
+  '-webkit-text-fill-color': '#1E2A2F',
+  border: '2px solid #1E2A2F',
+};
+
 const RIBBON_IMPORTANT = {
   position: 'sticky',
   top: '0',
@@ -171,7 +185,7 @@ export function PrototypeTile() {
 }
 
 export default function PrototypeWatermark() {
-  const ref = useLayoutEffectLock(RIBBON_IMPORTANT);
+  const ref = useRibbonColorLock();
   return (
     <p
       ref={ref}
@@ -191,6 +205,34 @@ function useLayoutEffectLock(declarations) {
   const ref = useRef(null);
   useLayoutEffect(() => {
     lockStyle(ref.current, declarations);
+  });
+  return ref;
+}
+
+// Screen colors stay inline. Print colors replace them while matchMedia('print')
+// matches, and while the browser is in beforeprint. The ribbon stays rendered.
+function useRibbonColorLock() {
+  const ref = useRef(null);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return undefined;
+    lockStyle(node, RIBBON_IMPORTANT);
+    const media = window.matchMedia('print');
+    const apply = (printing) => {
+      lockStyle(node, printing ? RIBBON_PRINT_COLORS : RIBBON_SCREEN_COLORS);
+    };
+    const sync = () => apply(media.matches);
+    const onBeforePrint = () => apply(true);
+    const onAfterPrint = () => apply(media.matches);
+    sync();
+    media.addEventListener('change', sync);
+    window.addEventListener('beforeprint', onBeforePrint);
+    window.addEventListener('afterprint', onAfterPrint);
+    return () => {
+      media.removeEventListener('change', sync);
+      window.removeEventListener('beforeprint', onBeforePrint);
+      window.removeEventListener('afterprint', onAfterPrint);
+    };
   });
   return ref;
 }

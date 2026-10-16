@@ -682,6 +682,11 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
+  html body .prototype-root .prototype-wordmark {
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
 }
 .prototype-toast {
   position: static !important;

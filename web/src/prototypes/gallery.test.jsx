@@ -42,11 +42,13 @@ function expectRibbon(container) {
   expect(ribbon.style.position).toBe('sticky');
   expect(ribbon.style.top).toBe('0px');
   expect(ribbon.getAttribute('role')).toBe('note');
-  expect(ribbon.style.backgroundColor).toBe('');
-  expect(ribbon.style.color).toBe('');
-  expect(ribbon.style.getPropertyPriority('background-color')).toBe('');
-  expect(ribbon.style.getPropertyPriority('color')).toBe('');
-  expect(ribbon.style.getPropertyPriority('-webkit-text-fill-color')).toBe('');
+  expect(ribbon.style.getPropertyPriority('background')).toBe('important');
+  expect(ribbon.style.getPropertyPriority('color')).toBe('important');
+  expect(ribbon.style.getPropertyPriority('-webkit-text-fill-color')).toBe('important');
+  expect(paint(ribbon.style.backgroundColor)).toBe('rgb(30,42,47)');
+  expect(paint(ribbon.style.color)).toBe('rgb(243,246,245)');
+  expect(ribbon.style.display).toBe('block');
+  expect(ribbon.style.visibility).toBe('visible');
   expect(ribbon.style.fontWeight).toBe('600');
   expect(ribbon.style.fontSize).toBe('14px');
   expect(ribbon.style.fontFamily.toLowerCase()).toContain('barlow');
@@ -54,7 +56,8 @@ function expectRibbon(container) {
   expect(ribbon.getAttribute('style')).toContain('safe-area-inset-top');
   expect(ribbon.getAttribute('style')).toContain('32px');
   expect(ribbon.getAttribute('style')).not.toContain('var(');
-  expect(ribbon.getAttribute('style')).not.toContain('background');
+  expect(ribbon.getAttribute('style')).not.toContain('display: none');
+  expect(ribbon.getAttribute('style')).not.toContain('display:none');
   expect(ribbon.style.getPropertyPriority('display')).toBe('important');
   const tile = container.querySelector('[data-prototype-tile]');
   expect(container.querySelector('.prototype-screen').contains(ribbon)).toBe(false);
@@ -246,8 +249,8 @@ describe('prototype gallery', () => {
     expect(branded.contains(mark)).toBe(false);
     expectFooter(container, 'TEST: <script>alert(1)</script>');
     expect(mark.getAttribute('hidden')).toBeNull();
-    expect(mark.style.backgroundColor).toBe('');
-    expect(mark.style.color).toBe('');
+    expect(paint(mark.style.backgroundColor)).toBe('rgb(30,42,47)');
+    expect(paint(mark.style.color)).toBe('rgb(243,246,245)');
     expect(mark.style.display).toBe('block');
     expect(mark.style.visibility).toBe('visible');
     expect(mark.style.opacity).toBe('1');
@@ -318,24 +321,22 @@ describe('prototype gallery', () => {
     }
   });
 
-  it('keeps ribbon slate and paper under a hostile role=note stylesheet', () => {
-    const css = readFileSync(path.join(webRoot, 'src/styles.css'), 'utf8');
-    const sheet = document.createElement('style');
-    sheet.textContent = css.slice(css.indexOf('/* prototype-watermark:'), css.indexOf('/* ── Mobile'));
+  it('locks ribbon colors with inline !important priority', () => {
     const hostile = document.createElement('style');
-    hostile.textContent = '[role=note]{background:#fff;color:#fff}';
-    document.head.append(sheet, hostile);
+    hostile.textContent = [
+      'html body div.prototype-root > p.prototype-ribbon[role=note]{background:#f00 !important;background-color:#f00 !important;color:#f00 !important;-webkit-text-fill-color:#f00 !important}',
+      '#root .prototype-ribbon{background:#f00 !important;color:#f00 !important}',
+      '[role=note]{background:#fff !important;color:#fff !important}',
+    ].join('\n');
+    document.head.appendChild(hostile);
     try {
       const brand = presentBrand({ name: 'TEST: Wasatch Heating', colors: { accent: '#FFFFFF' } });
       const { container } = render(<PrototypeLayout brand={brand}><h1>Color lock</h1></PrototypeLayout>);
-      const mark = container.querySelector('[role=note]');
-      const computed = getComputedStyle(mark);
-      expect(paint(computed.backgroundColor)).toBe('rgb(30,42,47)');
-      expect(paint(computed.color)).toBe('rgb(243,246,245)');
-      const fill = paint(computed.getPropertyValue('-webkit-text-fill-color'));
-      if (fill) expect(fill).toBe('rgb(243,246,245)');
+      const mark = expectRibbon(container);
+      expect(mark.style.getPropertyPriority('background')).toBe('important');
+      expect(mark.style.getPropertyPriority('border')).toBe('important');
+      expect(paint(mark.style.borderTopWidth)).not.toBe('2px');
     } finally {
-      sheet.remove();
       hostile.remove();
     }
   });

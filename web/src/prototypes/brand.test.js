@@ -240,11 +240,25 @@ describe('brand sanitizer', () => {
     for (const selector of ['.prototype-wordmark', '.prototype-brand-name', '.prototype-open', '.demo-btn', '.prototype-cta-link', '.prototype-toast']) {
       expect(print).toContain(selector);
     }
+    expect(print).toMatch(/\.prototype-wordmark\s*\{[^}]*height:\s*auto\s*!important/);
+    expect(print).toMatch(/\.prototype-wordmark\s*\{[^}]*max-height:\s*none\s*!important/);
+    expect(print).toMatch(/\.prototype-wordmark\s*\{[^}]*overflow:\s*visible\s*!important/);
     const source = readFileSync(path.join(webRoot, 'src/components/PrototypeWatermark.jsx'), 'utf8');
-    const lock = source.slice(source.indexOf('const RIBBON_IMPORTANT'), source.indexOf('function lockStyle'));
-    expect(lock).not.toContain('background-color');
-    expect(lock).not.toContain('-webkit-text-fill-color');
-    expect(lock).not.toMatch(/\n {2}color:/);
+    expect(source).toContain("background: '#1E2A2F'");
+    expect(source).toContain("color: '#F3F6F5'");
+    expect(source).toContain("'-webkit-text-fill-color': '#F3F6F5'");
+    expect(source).toContain("background: '#FFFFFF'");
+    expect(source).toContain("color: '#1E2A2F'");
+    expect(source).toContain("'-webkit-text-fill-color': '#1E2A2F'");
+    expect(source).toContain("border: '2px solid #1E2A2F'");
+    expect(source).toContain("matchMedia('print')");
+    expect(source).toContain("addEventListener('change', sync)");
+    expect(source).toContain("addEventListener('beforeprint', onBeforePrint)");
+    expect(source).toContain("addEventListener('afterprint', onAfterPrint)");
+    expect(source).toContain("removeEventListener('change', sync)");
+    expect(source).toContain("removeEventListener('beforeprint', onBeforePrint)");
+    expect(source).toContain("removeEventListener('afterprint', onAfterPrint)");
+    expect(source).not.toMatch(/display:\s*['"]none['"]/);
     expect(css).toContain("%3EPROTOTYPE%3C");
     expect(css).toContain("fill-opacity='0.05'");
     expect(css).toContain('pointer-events: none');
