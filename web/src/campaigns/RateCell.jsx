@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react';
-import { OPENS_CAVEAT, formatRatePercent } from './metrics.js';
+import { useEffect, useRef, useState } from 'react';
+import { OPENS_CAVEAT, formatRatePercent, machineOpenLine } from './metrics.js';
 
 export function OpenInfo() {
   const [open, setOpen] = useState(false);
@@ -11,6 +11,16 @@ export function OpenInfo() {
     if (event?.relatedTarget && event.currentTarget.contains(event.relatedTarget)) return;
     setOpen(false);
   };
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (event) => {
+      if (event.key !== 'Escape') return;
+      pinned.current = false;
+      setOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
 
   return (
     <span className="open-info" onMouseEnter={show} onMouseLeave={hide} onBlur={hide}>
@@ -32,7 +42,14 @@ export function OpenInfo() {
   );
 }
 
-export default function RateCell({ k, d, noun, approximate = false, machineOpens = null }) {
+export default function RateCell({
+  k,
+  d,
+  noun,
+  approximate = false,
+  machineOpens = null,
+  machineOpensIncluded = false,
+}) {
   return (
     <div className="rate-cell">
       <b className="rate-pct">{formatRatePercent(k, d)}</b>
@@ -42,12 +59,9 @@ export default function RateCell({ k, d, noun, approximate = false, machineOpens
         <span className="rate-approx">
           <span className="approx">Approximate</span>
           <OpenInfo />
-        </span>
-      )}
-      {machineOpens != null && (
-        <span className="machine-opens">
-          <span className="machine-opens-label">Machine opens</span>
-          <span className="machine-opens-count">{machineOpens}</span>
+          {machineOpens != null && (
+            <span className="machine-opens">{machineOpenLine(machineOpens, d, machineOpensIncluded)}</span>
+          )}
         </span>
       )}
     </div>

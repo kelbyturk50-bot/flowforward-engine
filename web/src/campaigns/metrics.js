@@ -39,6 +39,10 @@ export function formatRatePercent(k, d) {
   return `${text}%`;
 }
 
+export function machineOpenLine(count, touched, included) {
+  return `${count} of ${touched} machine opens, no reply, ${included ? 'included' : 'excluded'}`;
+}
+
 export function formatCampaignDate(iso) {
   if (!iso) return 'not set';
   const [year, month, day] = String(iso).split('-').map(Number);

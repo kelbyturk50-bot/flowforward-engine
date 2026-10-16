@@ -205,7 +205,7 @@ function CampaignIdentity({ campaign }) {
   );
 }
 
-function HeadlineCells({ campaign, metrics }) {
+function HeadlineCells({ campaign, metrics, includeMachineOpens }) {
   const quiet = untouchedMessage(metrics);
   if (quiet) return <td colSpan={3} className="muted small">{quiet}</td>;
   const email = campaign.channel === 'email';
@@ -222,6 +222,7 @@ function HeadlineCells({ campaign, metrics }) {
               noun="opened, no reply"
               approximate
               machineOpens={metrics.machineOpens}
+              machineOpensIncluded={includeMachineOpens}
             />
           )
           : <span className="muted small">Email only</span>}
@@ -240,7 +241,7 @@ function CampaignRow({ campaign, includeMachineOpens }) {
       <td className="small">{formatCampaignDates(campaign.startDate, campaign.endDate)}</td>
       <td className="camp-num">{metrics.enrolled}</td>
       <td className="camp-num">{metrics.touched}</td>
-      <HeadlineCells campaign={campaign} metrics={metrics} />
+      <HeadlineCells campaign={campaign} metrics={metrics} includeMachineOpens={includeMachineOpens} />
     </tr>
   );
 }
@@ -284,6 +285,7 @@ function CampaignCard({ campaign, includeMachineOpens }) {
                 noun="opened, no reply"
                 approximate
                 machineOpens={metrics.machineOpens}
+                machineOpensIncluded={includeMachineOpens}
               />
             </div>
           )}

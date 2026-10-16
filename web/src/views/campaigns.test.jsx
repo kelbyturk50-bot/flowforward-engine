@@ -40,8 +40,9 @@ describe('campaigns list', () => {
     expect(within(table).getByText('1 of 8 converted')).toBeInTheDocument();
     expect(within(table).getByText('1 of 8 opened, no reply')).toBeInTheDocument();
     expect(within(table).getAllByText('12.5%').length).toBeGreaterThanOrEqual(2);
-    expect(within(table).getByText('Machine opens').parentElement).toHaveTextContent('1');
-    expect(within(table).getAllByText('Approximate').length).toBeGreaterThan(0);
+    const opened = within(table).getByText('1 of 8 opened, no reply').closest('.rate-cell');
+    expect(within(opened).getByText('Approximate')).toBeInTheDocument();
+    expect(within(opened).getByText('1 of 8 machine opens, no reply, excluded')).toBeInTheDocument();
     expect(within(table).getAllByText('Directional (n<30)').length).toBeGreaterThan(0);
     expect(within(cards).getByText('3 of 8 responded')).toBeInTheDocument();
     expect(within(table).getByText(/1 prototype view is tracked/)).toBeInTheDocument();
@@ -55,13 +56,50 @@ describe('campaigns list', () => {
     expect(within(table).getByText('2 of 8 opened, no reply')).toBeInTheDocument();
     expect(within(cards).getByText('2 of 8 opened, no reply')).toBeInTheDocument();
     expect(within(table).getByText('3 of 8 responded')).toBeInTheDocument();
-    expect(within(table).getByText('Machine opens').parentElement).toHaveTextContent('1');
+    expect(within(table).getByText('1 of 8 machine opens, no reply, included')).toBeInTheDocument();
+    expect(within(table).queryByText('1 of 8 machine opens, no reply, excluded')).not.toBeInTheDocument();
     expect(screen.getByText(/Opens: including machine opens/)).toBeInTheDocument();
     expect(localStorage.getItem('ff.campaignMachineOpens')).toBe('1');
 
     await user.click(screen.getAllByRole('button', { name: 'About open counts' })[0]);
     expect(screen.getByRole('tooltip')).toHaveTextContent('Approximate, unreliable (Apple MPP).');
     expect(screen.getByRole('tooltip')).toHaveTextContent('never count toward attribution or conversion');
+  });
+
+  it('counts responded over touched leads and labels opens Approximate', async () => {
+    const partial = {
+      id: 'test-partial',
+      name: 'TEST: Partial-Oct',
+      channel: 'email',
+      status: 'active',
+      startDate: '2026-10-01',
+      endDate: '2026-10-10',
+      leads: [
+        { id: 'a', touches: [{ type: 'sent' }, { type: 'replied', channel: 'email' }] },
+        { id: 'b', touches: [{ type: 'sent' }] },
+        { id: 'c', touches: [{ type: 'prototype_viewed' }] },
+        { id: 'd', touches: [] },
+      ],
+    };
+    render(<Campaigns load={async () => ({ campaigns: [partial] })} />);
+    const table = await screen.findByRole('table', { name: 'Campaigns' });
+    const row = within(table).getByRole('row', { name: /TEST: Partial-Oct/ });
+    expect(within(row).getByText('1 of 2 responded')).toBeInTheDocument();
+    expect(within(row).queryByText('1 of 4 responded')).not.toBeInTheDocument();
+    expect(within(row).getByText('50%')).toBeInTheDocument();
+    const opened = within(row).getByText('0 of 2 opened, no reply').closest('.rate-cell');
+    expect(within(opened).getByText('Approximate')).toBeInTheDocument();
+    expect(within(opened).getByText('0 of 2 machine opens, no reply, excluded')).toBeInTheDocument();
+  });
+
+  it('closes the open-count tooltip with Escape', async () => {
+    const user = userEvent.setup();
+    render(<Campaigns />);
+    expect(await screen.findByRole('heading', { name: 'Campaigns' })).toBeInTheDocument();
+    await user.click(screen.getAllByRole('button', { name: 'About open counts' })[0]);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Approximate, unreliable (Apple MPP).');
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
   });
 
   it('leaves New campaign inert', async () => {

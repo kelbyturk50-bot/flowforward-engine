@@ -769,7 +769,7 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
 .rate-cell { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
 .rate-pct { font-family: var(--font-num); font-size: 1.05rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .rate-of { display: block; font-size: .85rem; color: var(--ink-2); }
-.rate-approx { display: inline-flex; align-items: center; gap: .15rem; margin-top: .15rem; }
+.rate-approx { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .15rem .25rem; margin-top: .15rem; max-width: 16rem; }
 .approx {
   display: inline-block; font-size: .75rem; font-weight: 700; color: #2D5577; background: #E2ECF5;
   border-radius: 4px; padding: .05rem .4rem; vertical-align: middle;
@@ -793,10 +793,9 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
   background: var(--ochre-wash); border-left: 3px solid var(--ochre); padding: .05rem .4rem; border-radius: 3px;
 }
 .machine-opens {
-  display: flex; flex-direction: column; margin-top: .35rem; padding-top: .3rem; border-top: 1px solid var(--line); min-width: 4.5rem;
+  flex: 1 0 100%; margin: 0; padding: 0; border: 0;
+  font-size: .75rem; font-weight: 600; line-height: 1.35; color: #2D5577;
 }
-.machine-opens-label { font-size: .75rem; font-weight: 600; color: var(--ink-2); }
-.machine-opens-count { font-family: var(--font-num); font-weight: 700; font-size: 1.05rem; font-variant-numeric: tabular-nums; }
 .camp-cards { display: none; list-style: none; margin: 0; padding: 0; }
 .camp-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); padding: .9rem; }
 .camp-card-top { display: flex; justify-content: space-between; gap: .5rem; align-items: flex-start; }

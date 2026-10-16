@@ -11,6 +11,7 @@ import {
   formatCampaignDates,
   formatRatePercent,
   headlineMetrics,
+  machineOpenLine,
   onlyTestCampaigns,
   sortCampaigns,
   untouchedMessage,
@@ -50,6 +51,26 @@ describe('campaign headline math', () => {
     expect(sold).toHaveLength(1);
     expect(sold[0].touches.some((touch) => touch.type === 'won')).toBe(false);
     expect(HVAC_OCT.leads.some((lead) => lead.touches.some((touch) => touch.type === 'replied' && touch.channel === 'phone'))).toBe(true);
+  });
+
+  it('uses leads touched as the responded denominator, not every enrolled lead', () => {
+    const campaign = {
+      name: 'TEST: Partial',
+      leads: [
+        { id: 'a', touches: [{ type: 'sent' }, { type: 'replied', channel: 'email' }] },
+        { id: 'b', touches: [{ type: 'sent' }] },
+        { id: 'c', touches: [{ type: 'prototype_viewed' }] },
+        { id: 'd', touches: [] },
+      ],
+    };
+    const metrics = headlineMetrics(campaign);
+    expect(metrics.enrolled).toBe(4);
+    expect(metrics.touched).toBe(2);
+    expect(metrics.responded).toBe(1);
+    expect(formatRatePercent(metrics.responded, metrics.touched)).toBe('50%');
+    expect(formatRatePercent(metrics.responded, metrics.enrolled)).toBe('25%');
+    expect(machineOpenLine(1, metrics.touched, false)).toBe('1 of 2 machine opens, no reply, excluded');
+    expect(machineOpenLine(1, metrics.touched, true)).toBe('1 of 2 machine opens, no reply, included');
   });
 
   it('does not count a prototype view as a touch', () => {

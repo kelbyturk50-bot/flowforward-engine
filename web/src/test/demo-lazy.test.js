@@ -56,6 +56,15 @@ describe('demo code split', () => {
     expect(galleryGate).toMatch(/import\(\s*['"]\.\/GalleryApp\.jsx['"]\s*\)/);
     expect(galleryGate).not.toMatch(/fixture-brand/);
     expect(galleryGate).not.toMatch(/EstimateRecovery/);
+
+    const app = readFileSync(path.join(webRoot, 'src/App.jsx'), 'utf8');
+    expect(app).toMatch(/lazy\(\(\)\s*=>\s*import\(\s*['"]\.\/views\/Campaigns['"]\s*\)\)/);
+    expect(app).not.toMatch(/from ['"]\.\/views\/Campaigns['"]/);
+    expect(app).not.toMatch(/\/api\/campaigns/);
+    expect(app).not.toMatch(/TEST: HVAC-Oct/);
+    const campaignsView = readFileSync(path.join(webRoot, 'src/views/Campaigns.jsx'), 'utf8');
+    expect(campaignsView).toMatch(/from ['"]\.\.\/campaigns\/client['"]/);
+    expect(campaignsView).toMatch(/from ['"]\.\.\/campaigns\/fixture['"]/);
   });
 
   it('keeps the fixture out of the main chunk', () => {
@@ -96,6 +105,12 @@ describe('demo code split', () => {
       expect(entry.text).not.toContain('Is there financing?');
       expect(entry.text).not.toContain('TEST: Wasatch Heating');
       expect(entry.text).not.toContain('PROTOTYPE, not live');
+      expect(entry.text).not.toContain('/api/campaigns');
+      expect(entry.text).not.toContain('TEST: HVAC-Oct');
+      const campaigns = files.find((file) => file.text.includes('/api/campaigns') && file.text.includes('TEST: HVAC-Oct'));
+      expect(campaigns, names.join(', ')).toBeTruthy();
+      expect(campaigns.name).not.toBe(entry.name);
+      expect(html).not.toContain(campaigns.name);
       const fixture = files.find(file => file.text.includes('Example Heating & Air'));
       expect(fixture, names.join(', ')).toBeTruthy();
       expect(fixture.name).not.toBe(entry.name);

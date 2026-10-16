@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import Today from './views/Today';
 import Leads from './views/Leads';
 import Pipeline from './views/Pipeline';
@@ -16,7 +16,8 @@ import { JobsProvider, useJobs } from './jobs';
 import { badgeCount } from './format';
 import { FF_CAMPAIGNS, flagEnabled } from './flags';
 import { moreBadge, railItems, resolveRoute, tabIsOn, tabItems } from './campaigns/nav';
-import Campaigns from './views/Campaigns';
+
+const Campaigns = lazy(() => import('./views/Campaigns'));
 
 function GearIcon() {
   return (
@@ -92,7 +93,11 @@ export default function App() {
         {route === 'leads'    && <Leads {...shared} />}
         {route === 'proposals' && <Proposals {...shared} />}
         {route === 'pipeline' && <Pipeline {...shared} />}
-        {route === 'campaigns' && <Campaigns />}
+        {route === 'campaigns' && (
+          <Suspense fallback={<p className="muted">Loading campaigns…</p>}>
+            <Campaigns />
+          </Suspense>
+        )}
         {route === 'projects' && <Projects {...shared} />}
         {route === 'more'     && <More />}
         {route === 'not-found' && (
