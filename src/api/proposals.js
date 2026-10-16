@@ -419,9 +419,21 @@ router.post('/:id/restore', async (req, res) => {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
-    const { rows } = await db.query(`SELECT * FROM proposals WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    const { rows } = await db.query(
+      `SELECT pr.*, p.company
+         FROM proposals pr
+         JOIN prospects p ON p.id = pr.prospect_id
+        WHERE pr.id = $1
+        FOR UPDATE OF pr`,
+      [req.params.id]
+    );
     const p = rows[0];
     if (!p) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+    // Same refusal as send. Roll back before any status change.
+    if (isPestCompanyName(p.company)) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+    }
     if (!['discarded', 'superseded'].includes(p.status)) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Only discarded or older versions can be restored.' }); }
     const out = await db.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [p.prospect_id]);
     if (out.rows.length) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Another version is already out for this lead.' }); }

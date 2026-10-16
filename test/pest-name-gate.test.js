@@ -5,6 +5,10 @@ require('./preload');
 
 process.env.EXCLUDED_INDUSTRIES = 'Pest Control';
 process.env.CRM_API_KEY = '';
+// Follow-ups send only inside the Denver window. Open it in this process so
+// the skip can be tested at any hour. Set before proposals/config loads.
+process.env.SEND_HOURS = '0,24';
+process.env.SEND_DAYS = '0,1,2,3,4,5,6';
 
 const fs = require('fs');
 const path = require('path');
@@ -28,6 +32,7 @@ const {
 } = require('../src/scoring/industry');
 const { FRANCHISE_PATTERNS } = require('../src/scoring/config');
 const { draftProposal, pickLeads, _setClient } = require('../src/proposals/draft');
+const { sendDueFollowups, _setTransport } = require('../src/proposals/send');
 const { buildProspectListQuery } = require('../src/api/prospect-query');
 const { resetDb, insertProspect, closePool, pool, fakeClaude } = require('./fixtures');
 
@@ -170,6 +175,7 @@ describe('pest company-name gate', { concurrency: false }, () => {
 
   after(async () => {
     _setClient(null);
+    _setTransport(null);
     if (server) await new Promise(resolve => server.close(resolve));
     await closePool();
   });
@@ -452,6 +458,185 @@ describe('pest company-name gate', { concurrency: false }, () => {
     }
   });
 
+  it('refuses send, follow-up, and restore for a pest name and still sends other rows', async () => {
+    await resetDb();
+    const sentMail = [];
+    _setTransport({
+      async sendMail(mail) {
+        sentMail.push(mail);
+        return { messageId: '<pest-gate@localhost>', threadId: 'thr-pest-gate' };
+      },
+    });
+
+    const heating = await insertProspect({
+      google_place_id: 'test-place-send-heating',
+      company: 'Wasatch Heating',
+      industry: 'HVAC',
+      website: null,
+      email: 'test+heating-send@example.com',
+    });
+    const lookalike = await insertProspect({
+      google_place_id: 'test-place-send-pestana',
+      company: 'Pestana Plumbing',
+      industry: 'Plumbing',
+      website: null,
+      email: 'test+pestana-send@example.com',
+    });
+    const clean = await insertProspect({
+      google_place_id: 'test-place-send-clean',
+      company: 'Provo Heating',
+      industry: 'HVAC',
+      website: null,
+      email: 'test+clean-send@example.com',
+    });
+    const restoreLead = await insertProspect({
+      google_place_id: 'test-place-send-restore',
+      company: 'Best Heating',
+      industry: 'HVAC',
+      website: null,
+      email: 'test+restore-send@example.com',
+    });
+
+    async function insertProposal(prospectId, slug, status, extra = {}) {
+      const { rows } = await pool.query(
+        `INSERT INTO proposals (
+           prospect_id, version, status, slug, to_email, to_name, subject, body, followup1, followup2,
+           sent_at, followup1_due_at, message_id
+         ) VALUES (
+           $1, 1, $2, $3, $4, 'Dana', 'A note', 'Hello from the draft.', 'Checking back.', 'Last note.',
+           $5, $6, $7
+         ) RETURNING id`,
+        [
+          prospectId,
+          status,
+          slug,
+          extra.to_email,
+          extra.sent_at || null,
+          extra.followup1_due_at || null,
+          extra.message_id || null,
+        ]
+      );
+      return rows[0].id;
+    }
+
+    const pestDraft = await insertProposal(heating.id, 'wasatch-heating-send', 'draft', {
+      to_email: 'test+pestsend@example.com',
+    });
+    await pool.query(`UPDATE prospects SET company = 'Wasatch Pest Control' WHERE id = $1`, [heating.id]);
+    const lookalikeDraft = await insertProposal(lookalike.id, 'pestana-send', 'draft', {
+      to_email: 'test+pestana-send@example.com',
+    });
+    const pestFollow = await insertProposal(heating.id, 'wasatch-pest-followup', 'sent', {
+      to_email: 'test+pestsend@example.com',
+      sent_at: new Date(),
+      followup1_due_at: new Date(Date.now() - 60 * 60 * 1000),
+      message_id: '<pest-first@localhost>',
+    });
+    const cleanFollow = await insertProposal(clean.id, 'provo-heating-followup', 'sent', {
+      to_email: 'test+clean-fu@example.com',
+      sent_at: new Date(),
+      followup1_due_at: new Date(Date.now() - 60 * 60 * 1000),
+      message_id: '<clean-first@localhost>',
+    });
+    const cleanDiscarded = await insertProposal(restoreLead.id, 'best-heating-discarded', 'discarded', {
+      to_email: 'test+clean-restore@example.com',
+    });
+
+    async function proposalState(id) {
+      const { rows } = await pool.query(
+        `SELECT status, approved_at, sent_at, followup1_sent_at, followup2_sent_at, error, stop_reason, updated_at
+           FROM proposals WHERE id = $1`,
+        [id]
+      );
+      return rows[0];
+    }
+    async function prospectState(id) {
+      const { rows } = await pool.query(
+        `SELECT fit_score, fit_tier, fit_reasons::text AS reasons, stage, updated_at
+           FROM prospects WHERE id = $1`,
+        [id]
+      );
+      return rows[0];
+    }
+    function sameTime(a, b) {
+      if (a == null && b == null) return;
+      assert.equal(new Date(a).toISOString(), new Date(b).toISOString());
+    }
+
+    const pestDraftBefore = await proposalState(pestDraft);
+    const pestLeadBefore = await prospectState(heating.id);
+    const pestFollowBefore = await proposalState(pestFollow);
+
+    const sendRes = await fetch(`${apiBase}/api/proposals/${pestDraft}/send`, { method: 'POST' });
+    const sendJson = await sendRes.json();
+    assert.equal(sendRes.status, 409);
+    assert.deepEqual(sendJson, { error: `${PEST_NAME_REASON}.` });
+    assert.equal(sentMail.length, 0);
+    const pestDraftAfter = await proposalState(pestDraft);
+    assert.equal(pestDraftAfter.status, 'draft');
+    assert.equal(pestDraftAfter.approved_at, null);
+    sameTime(pestDraftAfter.updated_at, pestDraftBefore.updated_at);
+    const pestLeadAfter = await prospectState(heating.id);
+    assert.equal(pestLeadAfter.fit_score, pestLeadBefore.fit_score);
+    assert.equal(pestLeadAfter.fit_tier, pestLeadBefore.fit_tier);
+    assert.equal(pestLeadAfter.reasons, pestLeadBefore.reasons);
+    assert.equal(pestLeadAfter.stage, pestLeadBefore.stage);
+
+    const okSend = await fetch(`${apiBase}/api/proposals/${lookalikeDraft}/send`, { method: 'POST' });
+    const okJson = await okSend.json();
+    assert.equal(okSend.status, 200, JSON.stringify(okJson));
+    assert.equal(okJson.status, 'sent');
+    assert.equal(sentMail.length, 1);
+    assert.equal(sentMail[0].to.address, 'test+pestana-send@example.com');
+
+    const logs = [];
+    const origError = console.error;
+    console.error = (...args) => { logs.push(args.map(String).join(' ')); };
+    let followResult;
+    try {
+      followResult = await sendDueFollowups();
+    } finally {
+      console.error = origError;
+    }
+    assert.equal(followResult.sent, 1);
+    assert.equal(sentMail.length, 2);
+    assert.equal(sentMail.some(mail => mail.to.address === 'test+pestsend@example.com'), false);
+    assert.equal(sentMail[1].to.address, 'test+clean-fu@example.com');
+    const logged = logs.join('\n');
+    assert.match(logged, /skipped follow-up: company name matches pest control/);
+    assert.equal(logged.includes('Wasatch'), false);
+    assert.equal(logged.includes('test+'), false);
+    assert.equal(logged.includes('@'), false);
+
+    const pestFollowAfter = await proposalState(pestFollow);
+    assert.equal(pestFollowAfter.status, 'sent');
+    assert.equal(pestFollowAfter.followup1_sent_at, null);
+    assert.equal(pestFollowAfter.error, null);
+    sameTime(pestFollowAfter.updated_at, pestFollowBefore.updated_at);
+    sameTime(pestFollowAfter.sent_at, pestFollowBefore.sent_at);
+    const cleanFollowAfter = await proposalState(cleanFollow);
+    assert.ok(cleanFollowAfter.followup1_sent_at);
+
+    await pool.query(`UPDATE proposals SET status = 'discarded' WHERE id = $1`, [pestDraft]);
+    const discardedBefore = await proposalState(pestDraft);
+    const restoreRes = await fetch(`${apiBase}/api/proposals/${pestDraft}/restore`, { method: 'POST' });
+    const restoreJson = await restoreRes.json();
+    assert.equal(restoreRes.status, 409);
+    assert.deepEqual(restoreJson, { error: `${PEST_NAME_REASON}.` });
+    const discardedAfter = await proposalState(pestDraft);
+    assert.equal(discardedAfter.status, 'discarded');
+    sameTime(discardedAfter.updated_at, discardedBefore.updated_at);
+    const pestLeadFinal = await prospectState(heating.id);
+    assert.equal(pestLeadFinal.fit_score, pestLeadBefore.fit_score);
+    assert.equal(pestLeadFinal.fit_tier, pestLeadBefore.fit_tier);
+    assert.equal(pestLeadFinal.reasons, pestLeadBefore.reasons);
+
+    const cleanRestore = await fetch(`${apiBase}/api/proposals/${cleanDiscarded}/restore`, { method: 'POST' });
+    const cleanJson = await cleanRestore.json();
+    assert.equal(cleanRestore.status, 200, JSON.stringify(cleanJson));
+    assert.equal(cleanJson.status, 'draft');
+  });
+
   it('count script prints only the number of legacy rows', async () => {
     await resetDb();
     const rows = [
@@ -485,6 +670,7 @@ describe('pest company-name gate', { concurrency: false }, () => {
 
     const script = fs.readFileSync(path.join(__dirname, '../scripts/count-legacy-pest-names.js'), 'utf8');
     assert.match(script, /stdout\.write\(String\(n\)/);
+    assert.match(script, /BEGIN READ ONLY/);
     assert.doesNotMatch(script, /console\.log/);
 
     const result = spawnSync(process.execPath, [path.join(__dirname, '../scripts/count-legacy-pest-names.js')], {
