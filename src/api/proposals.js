@@ -350,25 +350,64 @@ router.post('/:id/mark-sent', async (req, res) => {
   } finally { db.release(); }
 });
 
+// Skip demo columns and token rows that this boot has not created yet.
+// Missing pilot structures are not an error: the draft still discards.
+async function revokeDemoOnDiscard(db, proposalId) {
+  const column = await db.query(
+    `SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'proposals' AND column_name = 'demo_revoked_at'`
+  );
+  if (column.rows.length) {
+    await db.query('UPDATE proposals SET demo_revoked_at = NOW() WHERE id = $1', [proposalId]);
+  }
+  const table = await db.query(
+    `SELECT 1 FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'pilot_tokens'`
+  );
+  if (table.rows.length) {
+    await db.query(
+      `UPDATE pilot_tokens SET revoked_at = NOW()
+        WHERE proposal_id = $1 AND revoked_at IS NULL`,
+      [proposalId]
+    );
+  }
+}
+
 // POST /api/proposals/:id/discard — drop a draft
 router.post('/:id/discard', async (req, res) => {
+  const db = await pool.connect();
   try {
-    const { rows } = await pool.query(`UPDATE proposals SET status = 'discarded', stop_reason = $2 WHERE id = $1 AND status = 'draft' RETURNING *`,
-      [req.params.id, req.body?.reason || 'Discarded by Kelby']);
-    if (!rows.length) return res.status(409).json({ error: 'Only drafts can be discarded.' });
-    await pilotTokens.revokeForProposal(rows[0].id);
-    const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [rows[0].id]);
-    rows[0] = fresh.rows[0] || rows[0];
+    await db.query('BEGIN');
+    const { rows } = await db.query(
+      `UPDATE proposals SET status = 'discarded', stop_reason = $2
+        WHERE id = $1 AND status = 'draft' RETURNING *`,
+      [req.params.id, req.body?.reason || 'Discarded by Kelby']
+    );
+    if (!rows.length) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: 'Only drafts can be discarded.' });
+    }
+    await revokeDemoOnDiscard(db, rows[0].id);
     if (req.body?.disqualify) {
-      const lead = await pool.query(`SELECT stage FROM prospects WHERE id = $1`, [rows[0].prospect_id]);
+      const lead = await db.query('SELECT stage FROM prospects WHERE id = $1', [rows[0].prospect_id]);
       if (lead.rows[0] && lead.rows[0].stage !== 'disqualified') {
-        await pool.query(`UPDATE prospects SET stage = 'disqualified' WHERE id = $1`, [rows[0].prospect_id]);
-        await pool.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'stage_change', $2)`,
-          [rows[0].prospect_id, `${lead.rows[0].stage} → disqualified (from proposal review)`]);
+        await db.query('UPDATE prospects SET stage = \'disqualified\' WHERE id = $1', [rows[0].prospect_id]);
+        await db.query(
+          'INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, \'stage_change\', $2)',
+          [rows[0].prospect_id, `${lead.rows[0].stage} → disqualified (from proposal review)`]
+        );
       }
     }
-    res.json(withUrl(rows[0]));
-  } catch (err) { fail(res, err); }
+    await db.query('COMMIT');
+    const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [rows[0].id]);
+    res.json(withUrl(fresh.rows[0] || rows[0]));
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {});
+    console.error('[proposals] discard failed:', err.message);
+    res.status(500).json({ error: 'Something went wrong.' });
+  } finally {
+    db.release();
+  }
 });
 
 // POST /api/proposals/:id/restore — bring a discarded/flagged version back to review

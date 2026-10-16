@@ -1023,10 +1023,19 @@ describe('pilot estimate recovery', () => {
 
   it('closes the pilot when boot repair is blocked, and repairs a healthy boot', async () => {
     const mainSchema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
-    assert.equal(mainSchema.includes('pilot_tokens'), false);
+    assert.match(mainSchema, /CREATE TABLE IF NOT EXISTS pilot_tokens/);
+    assert.match(mainSchema, /CREATE TABLE IF NOT EXISTS pilot_events/);
+    assert.match(mainSchema, /CREATE TABLE IF NOT EXISTS pilot_boot_errors/);
+    assert.match(mainSchema, /ADD COLUMN IF NOT EXISTS demo_revoked_at/);
+    assert.match(mainSchema, /ADD COLUMN IF NOT EXISTS generation/);
+    assert.match(mainSchema, /ADD COLUMN IF NOT EXISTS derived/);
+    assert.match(mainSchema, /CREATE OR REPLACE FUNCTION pilot_boot_failure/);
+    assert.equal(mainSchema.includes('idx_pilot_tokens_one_active'), false);
     assert.equal(mainSchema.includes('lock_timeout'), false);
     assert.equal(mainSchema.includes('statement_timeout'), false);
     const schema = fs.readFileSync(path.join(__dirname, '../src/db/pilot-schema.sql'), 'utf8');
+    assert.equal(schema.includes('CREATE TABLE'), false);
+    assert.equal(schema.includes('ADD COLUMN'), false);
     const blocks = schema.match(/DO \$\$[\s\S]*?END \$\$;/g) || [];
     const repair = blocks.filter((block) => block.includes('pilot_tokens'));
     assert.ok(repair.length >= 4);
@@ -1038,7 +1047,10 @@ describe('pilot estimate recovery', () => {
     assert.match(repairSql, /revoked_at = COALESCE\(revoked_at, NOW\(\)\)/);
     assert.match(repairSql, /ALTER COLUMN generation SET NOT NULL/);
     assert.match(repairSql, /idx_pilot_tokens_one_active/);
-    assert.match(repairSql, /INSERT INTO pilot_boot_errors/);
+    assert.match(repairSql, /pilot_boot_failure/);
+    assert.equal(repairSql.includes('INSERT INTO pilot_boot_errors'), false);
+    assert.match(repairSql, /'55P03'/);
+    assert.match(repairSql, /'57014'/);
     const legacyBlock = repair.find((block) => block.includes('revoke-legacy'));
     assert.ok(legacyBlock);
     assert.match(legacyBlock, /COALESCE\(generation, 0\)/);
@@ -1089,7 +1101,7 @@ describe('pilot estimate recovery', () => {
     await pool.query(`
       CREATE OR REPLACE FUNCTION ff_test_block_pilot_token_update() RETURNS trigger AS $fn$
       BEGIN
-        RAISE EXCEPTION 'pilot boot update blocked';
+        RAISE EXCEPTION 'pilot boot update blocked ${API_KEY} ${legacyA}';
       END $fn$ LANGUAGE plpgsql;
       CREATE TRIGGER ff_test_block_pilot_token_update
         BEFORE UPDATE ON pilot_tokens
@@ -1099,6 +1111,8 @@ describe('pilot estimate recovery', () => {
       const blocked = await applySchema();
       assert.ok(blocked.errors.some((line) => line.includes('pilot boot update blocked')));
       assert.ok(blocked.errors.some((line) => line.startsWith('unique-active-index:')));
+      assert.ok(blocked.errors.some((line) => /^revoke-legacy: [0-9A-Z]{5}: /.test(line)));
+      assert.ok(blocked.errors.some((line) => line.includes('[redacted]')));
       assert.equal(blocked.errors.some((line) => line.includes(API_KEY)), false);
       assert.equal(blocked.errors.some((line) => line.includes(legacyA)), false);
       const closed = await watchBoot(blocked);
@@ -1612,5 +1626,297 @@ describe('pilot estimate recovery', () => {
       await applySchema();
       tokens._clearCacheForTests();
     }
+  });
+
+  it('discards a draft when pilot structures are missing, without echoing the database', async () => {
+    setFlags({ master: true });
+    const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.220' };
+    const row = await insertProposal(prospect.id, { slug: 'pilot-discard-missing' });
+    const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
+    assert.equal(minted.status, 201);
+    let renamedTable = false;
+    let renamedColumn = false;
+    try {
+      await pool.query('ALTER TABLE pilot_tokens RENAME TO pilot_tokens_hidden');
+      renamedTable = true;
+      await pool.query('ALTER TABLE proposals RENAME COLUMN demo_revoked_at TO demo_revoked_at_hidden');
+      renamedColumn = true;
+      const dropped = await request('POST', `/api/proposals/${row.id}/discard`, { headers: key, body: {} });
+      const leaked = ['does not exist', 'column "', 'relation "', 'pilot_tokens', API_KEY, minted.json.token];
+      for (const fragment of leaked) assert.equal(dropped.text.includes(fragment), false, fragment);
+      const stored = await pool.query(
+        'SELECT status, demo_revoked_at_hidden FROM proposals WHERE id = $1',
+        [row.id]
+      );
+      const fixedError = dropped.status === 500
+        && dropped.json
+        && dropped.json.error === 'Something went wrong.'
+        && Object.keys(dropped.json).length === 1;
+      if (dropped.status === 200) {
+        assert.equal(dropped.json.status, 'discarded');
+        assert.equal(stored.rows[0].status, 'discarded');
+        assert.equal(stored.rows[0].demo_revoked_at_hidden, null);
+      } else {
+        assert.equal(fixedError, true, dropped.text);
+        assert.equal(stored.rows[0].status, 'draft');
+        assert.equal(stored.rows[0].demo_revoked_at_hidden, null);
+      }
+    } finally {
+      if (renamedColumn) {
+        await pool.query('ALTER TABLE proposals RENAME COLUMN demo_revoked_at_hidden TO demo_revoked_at');
+      }
+      if (renamedTable) {
+        await pool.query('ALTER TABLE pilot_tokens_hidden RENAME TO pilot_tokens');
+      }
+      if (renamedTable) {
+        const left = await pool.query(
+          `SELECT COUNT(*)::int AS n FROM pilot_tokens
+            WHERE proposal_id = $1 AND revoked_at IS NULL`,
+          [row.id]
+        );
+        assert.equal(left.rows[0].n, 1);
+      }
+    }
+  });
+
+  it('rolls the discard back when revoking the demo token fails', async () => {
+    setFlags({ master: true });
+    const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.221' };
+    const row = await insertProposal(prospect.id, { slug: 'pilot-discard-rollback' });
+    const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
+    assert.equal(minted.status, 201);
+    const secret = `discard revoke blocked ${API_KEY}`;
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION ff_test_block_discard_revoke() RETURNS trigger AS $fn$
+      BEGIN
+        RAISE EXCEPTION 'discard revoke blocked ${API_KEY}';
+      END
+      $fn$ LANGUAGE plpgsql;
+      CREATE TRIGGER ff_test_block_discard_revoke
+        BEFORE UPDATE ON pilot_tokens
+        FOR EACH ROW EXECUTE FUNCTION ff_test_block_discard_revoke();
+    `);
+    const origError = console.error;
+    const lines = [];
+    console.error = (...args) => {
+      lines.push(args.map((part) => String(part)).join(' '));
+    };
+    try {
+      const dropped = await request('POST', `/api/proposals/${row.id}/discard`, {
+        headers: key,
+        body: { reason: 'TEST: discard rollback' },
+      });
+      assert.equal(dropped.status, 500);
+      assert.deepEqual(dropped.json, { error: 'Something went wrong.' });
+      assert.equal(dropped.text.includes(secret), false);
+      assert.equal(dropped.text.includes(API_KEY), false);
+      assert.equal(dropped.text.includes('pilot_tokens'), false);
+      assert.equal(dropped.text.includes('does not exist'), false);
+      const stored = await pool.query(
+        'SELECT status, stop_reason, demo_revoked_at FROM proposals WHERE id = $1',
+        [row.id]
+      );
+      assert.equal(stored.rows[0].status, 'draft');
+      assert.equal(stored.rows[0].stop_reason, null);
+      assert.equal(stored.rows[0].demo_revoked_at, null);
+      const active = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM pilot_tokens
+          WHERE proposal_id = $1 AND revoked_at IS NULL`,
+        [row.id]
+      );
+      assert.equal(active.rows[0].n, 1);
+      assert.equal(lines.filter((line) => line.includes('[proposals] discard failed') && line.includes(API_KEY)).length, 1);
+      assert.equal(dropped.text.includes('discard revoke blocked'), false);
+    } finally {
+      console.error = origError;
+      await pool.query('DROP TRIGGER IF EXISTS ff_test_block_discard_revoke ON pilot_tokens');
+      await pool.query('DROP FUNCTION IF EXISTS ff_test_block_discard_revoke()');
+    }
+  });
+
+  it('stores a redacted boot error with the step and SQLSTATE', async () => {
+    const token = 'b'.repeat(43);
+    const step = `redact-${'s'.repeat(90)}`;
+    const noise = `boom\u0001\u0007 ${API_KEY} ${token} idx_pilot_tokens_one_active ${'z'.repeat(400)}`;
+    try {
+      await pool.query('SELECT pilot_boot_failure($1, $2, $3)', [step, 'P0001', noise]);
+      await pool.query(
+        'SELECT pilot_boot_failure($1, $2, $3)',
+        ['keep-index-name', '23505', 'could not create unique index idx_pilot_tokens_one_active']
+      );
+      const { rows } = await pool.query(
+        `SELECT step, message, length(message) AS n
+           FROM pilot_boot_errors
+          WHERE step = left($1, 80) OR step = 'keep-index-name'
+          ORDER BY id`,
+        [step]
+      );
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0].step, step.slice(0, 80));
+      assert.equal(rows[0].step.length, 80);
+      assert.match(rows[0].message, /^P0001: /);
+      assert.equal(rows[0].message.includes(API_KEY), false);
+      assert.equal(rows[0].message.includes(token), false);
+      assert.equal(rows[0].message.includes('\u0001'), false);
+      assert.equal(rows[0].message.includes('\u0007'), false);
+      assert.match(rows[0].message, /\[redacted\]/);
+      assert.match(rows[0].message, /idx_pilot_tokens_one_active/);
+      assert.ok(rows[0].n <= 240);
+      assert.equal(rows[0].message.includes('z'.repeat(200)), false);
+      assert.match(rows[1].message, /^23505: /);
+      assert.match(rows[1].message, /idx_pilot_tokens_one_active/);
+    } finally {
+      await pool.query(
+        `DELETE FROM pilot_boot_errors
+          WHERE step = left($1, 80) OR step = 'keep-index-name'`,
+        [step]
+      );
+    }
+  });
+
+  it('keeps the pilot closed until boot checks finish', async () => {
+    const tokensSrc = fs.readFileSync(path.join(__dirname, '../src/pilot/tokens.js'), 'utf8');
+    assert.match(tokensSrc, /let schemaClosed = true/);
+    const serverSrc = fs.readFileSync(path.join(__dirname, '../src/server.js'), 'utf8');
+    const bootSrc = serverSrc.slice(serverSrc.indexOf('async function boot'));
+    const concludeAt = bootSrc.indexOf('concludeSchemaBoot');
+    const closeAt = bootSrc.indexOf('closePilot');
+    const listenAt = bootSrc.indexOf('app.listen');
+    assert.ok(concludeAt > 0 && concludeAt < listenAt);
+    assert.ok(closeAt > 0 && closeAt < listenAt);
+
+    const row = await insertProposal(prospect.id, { slug: 'pilot-closed-until-boot' });
+    const script = `
+const http = require('http');
+const express = require('express');
+const tokens = require('./src/pilot/tokens');
+const { applySchema } = require('./src/db/migrate');
+const { concludeSchemaBoot } = require('./src/pilot/schema');
+const pilotDemo = require('./src/pilot/demo');
+const pool = require('./src/db/client');
+
+function get(port, reqPath) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      method: 'GET', hostname: '127.0.0.1', port, path: reqPath,
+      headers: { 'x-forwarded-for': '203.0.113.230' },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch (err) { json = null; }
+        resolve({
+          status: res.statusCode,
+          text,
+          json,
+          robots: res.headers['x-robots-tag'] || '',
+          cache: res.headers['cache-control'] || '',
+        });
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function main() {
+  const proposalId = Number(process.argv[1]);
+  const prospectId = Number(process.argv[2]);
+  const beforeReady = tokens.pilotReady();
+  const token = tokens.deriveToken(proposalId, 1);
+  if (!token) throw new Error('derive failed');
+  await pool.query(
+    "INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, derived, token_hash, expires_at) VALUES (\$1, \$2, 1, TRUE, \$3, NOW() + interval '14 days')",
+    [proposalId, prospectId, tokens.hashToken(token)]
+  );
+  const app = express();
+  app.set('trust proxy', 1);
+  app.use('/demo/estimate-recovery', pilotDemo.router);
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const path = '/demo/estimate-recovery/' + encodeURIComponent(token);
+  const closed = await get(server.address().port, path);
+  const logs = [];
+  const origLog = console.log;
+  const origError = console.error;
+  console.log = (...args) => { logs.push(args.map((part) => String(part)).join(' ')); };
+  console.error = (...args) => { logs.push(args.map((part) => String(part)).join(' ')); };
+  const result = await concludeSchemaBoot(await applySchema());
+  console.log = origLog;
+  console.error = origError;
+  const opened = await get(server.address().port, path);
+  await pool.query('DELETE FROM pilot_tokens WHERE proposal_id = \$1', [proposalId]);
+  server.close();
+  await pool.end();
+  process.stdout.write(JSON.stringify({
+    beforeReady,
+    closedStatus: closed.status,
+    closedText: closed.text,
+    closedRobots: closed.robots,
+    closedCache: closed.cache,
+    bootOk: result.ok,
+    logs,
+    afterReady: tokens.pilotReady(),
+    openStatus: opened.status,
+    openCompany: opened.json && opened.json.company,
+    openSynthetic: opened.json && opened.json.synthetic,
+  }));
+  process.exit(0);
+}
+
+main().catch(async (err) => {
+  const secret = process.env.CRM_API_KEY || '';
+  let text = String(err && err.message || err);
+  if (secret) text = text.split(secret).join('[redacted]');
+  console.error(text);
+  try { await require('./src/db/client').end(); } catch (ignore) {}
+  process.exit(1);
+});
+`;
+    const child = spawn(process.execPath, ['-e', script, String(row.id), String(prospect.id)], {
+      cwd: path.join(__dirname, '..'),
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        DISABLE_CRON: '1',
+        FF_PILOT_ESTIMATE_RECOVERY: 'true',
+        FF_PILOT_LINK_ON_ONEPAGER: 'true',
+        CRM_API_KEY: API_KEY,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (buf) => { stdout += buf.toString('utf8'); });
+    child.stderr.on('data', (buf) => { stderr += buf.toString('utf8'); });
+    const code = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill('SIGTERM');
+        reject(new Error(`closed-latch child hung: ${stderr.slice(0, 500)}`));
+      }, 20000);
+      child.once('exit', (status) => {
+        clearTimeout(timer);
+        resolve(status);
+      });
+    });
+    assert.equal(code, 0, stderr.slice(0, 500));
+    assert.equal(stderr.includes(API_KEY), false);
+    assert.equal(stdout.includes(API_KEY), false);
+    const report = JSON.parse(stdout);
+    assert.ok(report.logs.some((line) => line.includes('Schema up to date')));
+    assert.equal(report.logs.some((line) => line.includes('schema is not safe')), false);
+    assert.equal(report.beforeReady, false);
+    assert.equal(report.closedStatus, 404);
+    assert.equal(report.closedText, JSON.stringify(NOT_FOUND));
+    assert.equal(report.closedRobots, 'noindex, nofollow');
+    assert.equal(report.closedCache, 'no-store');
+    assert.equal(report.bootOk, true);
+    assert.equal(report.afterReady, true);
+    assert.equal(report.openStatus, 200);
+    assert.equal(report.openCompany, 'Wasatch Heating');
+    assert.equal(report.openSynthetic, true);
+    await pool.query('DELETE FROM pilot_tokens WHERE proposal_id = $1', [row.id]);
   });
 });

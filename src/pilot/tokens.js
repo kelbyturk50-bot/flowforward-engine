@@ -26,6 +26,8 @@
 // stored hash equal to sha256 of the recomputed HMAC. A legacy random token
 // stays null even if its row is still active. If boot finds the pilot schema
 // unsafe, the pilot stays closed until a later boot is clean.
+// The latch starts closed. openPilot runs only after the boot checks pass,
+// so a request cannot use the demo before those invariants are verified.
 
 const crypto = require('crypto');
 const pool = require('../db/client');
@@ -43,7 +45,7 @@ const DUMMY_HASH = crypto.randomBytes(32);
 let derivedKey = null;
 let derivedFrom = null;
 let missingSecretWarned = false;
-let schemaClosed = false;
+let schemaClosed = true;
 
 function ttlMs() {
   const raw = process.env.PILOT_DEMO_TOKEN_TTL_HOURS;
@@ -309,6 +311,7 @@ function _clearCacheForTests() {
   derivedKey = null;
   derivedFrom = null;
   missingSecretWarned = false;
+  // Tests opt back in. A server process stays closed until openPilot().
   schemaClosed = false;
 }
 

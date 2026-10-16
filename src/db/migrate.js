@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Applies schema.sql to DATABASE_URL, then the pilot repair in a second
-// transaction. schema.sql matches the pre-pilot boot: one implicit
-// transaction, no lock_timeout and no statement_timeout. The pilot file
-// runs only after that commit. Its SET LOCAL limits die with its
-// transaction, so a slow statement in schema.sql is not capped and a
+// transaction. schema.sql includes the additive pilot tables and columns.
+// It is still one implicit transaction with no lock_timeout and no
+// statement_timeout. pilot-schema.sql runs only after that commit and is
+// the only place SET LOCAL lock_timeout and statement_timeout apply. A
 // pilot failure cannot roll the main schema back.
 //
 // Run manually: node src/db/migrate.js

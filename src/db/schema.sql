@@ -229,3 +229,153 @@ CREATE INDEX IF NOT EXISTS idx_proposal_jobs_status ON proposal_jobs(status, cre
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
 -- Drafts that existed before this column are treated as already seen
 UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND created_at < '2026-10-15';
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Pilot tables. Additive and idempotent, same transaction as the rest of
+-- this file, with no session timeout. A catalog check runs first so a boot
+-- does not lock pilot_tokens when the table, column, or index is already
+-- there. Data repairs and the unique active index live in pilot-schema.sql.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS demo_revoked_at TIMESTAMPTZ;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'pilot_tokens'
+  ) THEN
+    CREATE TABLE IF NOT EXISTS pilot_tokens (
+      id           SERIAL PRIMARY KEY,
+      proposal_id  INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+      prospect_id  INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+      generation   INTEGER NOT NULL,
+      derived      BOOLEAN NOT NULL DEFAULT FALSE,
+      token_hash   BYTEA NOT NULL UNIQUE,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at   TIMESTAMPTZ NOT NULL,
+      revoked_at   TIMESTAMPTZ
+    );
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'pilot_tokens'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'pilot_tokens'
+       AND a.attname = 'generation' AND a.attnum > 0 AND NOT a.attisdropped
+  ) THEN
+    ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS generation INTEGER;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'pilot_tokens'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'pilot_tokens'
+       AND a.attname = 'derived' AND a.attnum > 0 AND NOT a.attisdropped
+  ) THEN
+    ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS derived BOOLEAN NOT NULL DEFAULT FALSE;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'pilot_tokens'
+       AND a.attname = 'token' AND a.attnum > 0 AND NOT a.attisdropped
+  ) THEN
+    ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS token;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'idx_pilot_tokens_proposal'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS idx_pilot_tokens_proposal ON pilot_tokens(proposal_id);
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS pilot_boot_errors (
+  id         SERIAL PRIMARY KEY,
+  step       TEXT NOT NULL,
+  message    TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Step name stays in its own column. The message is SQLSTATE plus a short
+-- sanitized text: control characters removed, long token-like runs redacted,
+-- then truncated. The raw database error is not stored.
+CREATE OR REPLACE FUNCTION pilot_boot_failure(step text, state text, message text)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  clean text;
+BEGIN
+  clean := regexp_replace(COALESCE(message, ''), '[[:cntrl:]]+', ' ', 'g');
+  clean := regexp_replace(clean, '[A-Za-z0-9_-]{32,}', '[redacted]', 'g');
+  clean := left(btrim(clean), 200);
+  INSERT INTO pilot_boot_errors (step, message)
+  VALUES (left(COALESCE(step, 'pilot'), 80), left(COALESCE(state, 'XX000') || ': ' || clean, 240));
+END;
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'pilot_events'
+  ) THEN
+    CREATE TABLE IF NOT EXISTS pilot_events (
+      id           SERIAL PRIMARY KEY,
+      event_type   TEXT NOT NULL,
+      token_id     INTEGER REFERENCES pilot_tokens(id) ON DELETE CASCADE,
+      proposal_id  INTEGER REFERENCES proposals(id) ON DELETE CASCADE,
+      prospect_id  INTEGER REFERENCES prospects(id) ON DELETE CASCADE,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'idx_pilot_events_proposal'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS idx_pilot_events_proposal ON pilot_events(proposal_id, created_at DESC);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'idx_pilot_events_token'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS idx_pilot_events_token ON pilot_events(token_id);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'pilot_events_type_check'
+  ) THEN
+    ALTER TABLE pilot_events ADD CONSTRAINT pilot_events_type_check
+      CHECK (event_type IN (
+        'demo_view',
+        'step_estimates',
+        'step_preview',
+        'step_reply',
+        'step_recovered',
+        'estimate_recovered'
+      ));
+  END IF;
+END $$;
