@@ -10,7 +10,8 @@
 // Jobber and Housecall Pro are not penalized. A missing or unknown cache
 // is not treated as ServiceTitan, and the penalty never forces tier D.
 // TIER_CAP_FOR then caps ServiceTitan and franchise matches at tier B
-// (ceiling 77) after penalties and fit_boost. See that constant below.
+// (ceiling 77) after penalties, fit_boost, and the F-003 estimate signals.
+// See that constant below. Those signals read prospects.research only.
 //
 // Business model being scored against: AI/workflow-automation consulting for
 // owner-operated home service businesses in Utah. The ideal client is busy
@@ -57,6 +58,71 @@ const TIER_CAP_FOR = {
   servicetitan: 'B',
   franchise: 'B',
 };
+
+// F-003 soft positive signals for Unsold-Estimate Recovery (issue #23).
+// Points are final-score points. computeFit adds them after the 100/90 scale,
+// in the same step as the franchise penalty, the ServiceTitan penalty, and
+// fit_boost. TIER_CAP_FOR still runs after that sum, so a ServiceTitan or
+// franchise lead cannot clear tier B by collecting these points.
+//
+// Evidence is the cached prospects.research object only: page text research
+// already stored, mention booleans research already stored, and signature
+// arrays research already stored. Unknown or missing evidence adds 0. There
+// is no fetch, no new Places query, and no new collector.
+//
+// Text matches are word-boundary matches. "preplacement", "reinstallation",
+// "refinancing", "freeestimate", and "free estimated" do not match.
+//
+// Plumbing is listed in ESTIMATE_SIGNAL_SKIP_INDUSTRIES. Summit's binding
+// condition is no plumbing score change; plumbing stays a playbook and offer
+// bias only. INDUSTRY_FIT.Plumbing stays 9. These points do not retune any
+// industry weight or any tier threshold.
+//
+// replacement (+4). The wedge is an unsold replacement estimate. A shop that
+// says it replaces equipment is selling the high-ticket job the pilot follows
+// up, not a service call. A Utah replacement is the roughly $8k–$18k motion.
+//
+// installation (+3). Installation is the same new-equipment motion. It weighs
+// less than replacement because the word also shows up on small add-on jobs.
+//
+// free_estimate (+4). The phrase "free estimate" means they write estimates,
+// which is the inventory Unsold-Estimate Recovery is for. A cached
+// mentions.free_estimates true also counts: research already recorded it.
+// The word-boundary scan itself requires the two words "free estimate".
+//
+// financing (+3). The word "financing", or a lender signature research already
+// filed (GreenSky, Wisetack, and the other SIGNATURES.financing names), means
+// they sell jobs large enough to finance. Those are the estimates that go
+// cold. An empty or missing signature list is not a penalty.
+//
+// quote_form (+3). A quote or contact form with no follow-up promise in the
+// cached text is the heuristic that estimate requests arrive and then sit.
+// Sources already in the cache: has_contact_form true, a quote_form or
+// contact_form mention, the words "quote form" or "contact form", or a cached
+// page whose path names estimate, quote, or contact. A promise such as
+// "we'll follow up" turns this one signal off. Unknown form means 0.
+//
+// job_ad (+2). A comfort advisor or sales-role job ad means a replacement
+// sales motion. Only when that phrase, or a job_ads / comfort_advisor field,
+// is already in the cache. Generic mentions.hiring (techs, "join our team")
+// is not this signal. No job-board lookup.
+//
+// search_ads (+2). A slight boost. Local Services Ads or search ads mean they
+// buy estimate leads. Counted only from cache: a Google Ads signature in
+// analytics_ads, or the phrases "local services ads", "google ads", or "LSA".
+// Google Analytics, Meta Pixel, and CallRail are not this signal.
+const ESTIMATE_SIGNAL_POINTS = {
+  replacement: 4,
+  installation: 3,
+  free_estimate: 4,
+  financing: 3,
+  quote_form: 3,
+  job_ad: 2,
+  search_ads: 2,
+};
+
+// Case-insensitive industry names that do not receive the points above.
+const ESTIMATE_SIGNAL_SKIP_INDUSTRIES = ['Plumbing'];
 
 // Cities you can meet in person (case-insensitive). Override with env
 // FIT_HOME_CITIES="Saratoga Springs,Lehi,..."
@@ -105,6 +171,7 @@ const EXCLUDED_INDUSTRIES = (process.env.EXCLUDED_INDUSTRIES ?? 'Pest Control')
   .filter(Boolean);
 
 module.exports = {
-  INDUSTRY_FIT, SERVICETITAN_PENALTY, TIER_CAP_FOR, EXCLUDED_INDUSTRIES, HOME_CITIES, HOME_STATE,
+  INDUSTRY_FIT, SERVICETITAN_PENALTY, TIER_CAP_FOR, ESTIMATE_SIGNAL_POINTS,
+  ESTIMATE_SIGNAL_SKIP_INDUSTRIES, EXCLUDED_INDUSTRIES, HOME_CITIES, HOME_STATE,
   FRANCHISE_PATTERNS, SOCIAL_HOSTS, TIERS,
 };

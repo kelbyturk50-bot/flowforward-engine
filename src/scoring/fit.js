@@ -8,23 +8,31 @@
 //   Location          10  inside your drive-to market
 //   Franchise        -20  national brands / franchises
 //   ServiceTitan   −15    only when prospects.fsm_detected says ServiceTitan (no fetch)
+//   Estimate signals      ESTIMATE_SIGNAL_POINTS from cached prospects.research only
+//                         (replacement, installation, free estimate, financing,
+//                         quote/contact form, job ad, search ads). Unknown = 0.
+//                         Plumbing is not boosted. No fetch.
 //   Manual boost  ±20     your own adjustment (fit_boost)
 //   Tier cap             TIER_CAP_FOR: ServiceTitan, and a word-boundary franchise, cannot exceed tier B
+//                         Applied after the estimate signals.
 //   Excluded industry      EXCLUDED_INDUSTRIES (default Pest Control) → score 0, tier D
 //
 // Key insight: businesses with 600+ reviews and 4.7+ stars are already systemized.
 // The winnable client has about 25–200 reviews (a busy 2–15 truck owner-op)
 // and a 3.8–4.3 rating (good enough to keep getting work, bad enough to feel the pain).
 // ServiceTitan is a weaker fit for an owned build. The −15 is soft and does not
-// force tier D. Jobber / Housecall Pro are not penalized. After penalties and
-// fit_boost, ServiceTitan and a word-boundary franchise match are capped at
-// tier B. The −20 still uses a substring match; that is a separate follow-up.
+// force tier D. Jobber / Housecall Pro are not penalized. After penalties,
+// fit_boost, and the cached estimate signals, ServiceTitan and a word-boundary
+// franchise match are capped at tier B. The −20 still uses a substring match;
+// that is a separate follow-up. The estimate signals read prospects.research
+// only. A missing cache adds nothing, and plumbing is not boosted.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');
 const cfg = require('./config');
 const { isExcludedIndustry, normalizeIndustry } = require('./industry');
 const { isFranchise } = require('./prototypes');
+const { estimateSignalAdjustment } = require('./estimate-signals');
 
 const industryDefaults = {};
 for (const { industry, score } of INDUSTRIES) {
@@ -221,17 +229,22 @@ function computeFit(p) {
   const boost = Math.max(-20, Math.min(20, Number(p.fit_boost) || 0));
   if (boost) reasons.push({ label: 'Your boost', points: boost, max: 20, detail: 'Manual adjustment' });
 
+  // Cached research only. 0 when the cache is missing or the industry is plumbing.
+  const [sig, sigReasons] = estimateSignalAdjustment(p);
+  for (const reason of sigReasons) reasons.push(reason);
+
   // Base max is 90; scale to 100 so a perfect lead reads 100.
-  // The tier cap runs after penalties and the boost, including a positive one.
+  // Estimate signals are final-score points, same as the penalties and the boost.
+  // The tier cap runs after all of them, including a positive signal boost.
   // Franchise cap is the picker's word-boundary match, not the −20 substring.
   const base = indPts + sz + rep + rch + loc;
-  const raw = Math.max(0, Math.min(100, Math.round(base * (100 / 90)) + fr + st + boost));
+  const raw = Math.max(0, Math.min(100, Math.round(base * (100 / 90)) + fr + st + boost + sig));
   const franchiseCap = isFranchise(p.company, cfg.FRANCHISE_PATTERNS);
   const score = applyTierCap(raw, reasons, { serviceTitan: st !== 0, franchise: franchiseCap });
   return { fit_score: score, fit_tier: tierFor(score), fit_reasons: reasons };
 }
 
-const RESCORE_COLUMNS = 'id, company, industry, website, phone, city, state, rating, review_count, fit_boost, fsm_detected';
+const RESCORE_COLUMNS = 'id, company, industry, website, phone, city, state, rating, review_count, fit_boost, fsm_detected, research';
 
 /** Recompute and persist fit for all prospects (or a list of ids).
  *  Pure over the selected columns. Does not fetch a homepage or any URL. */
