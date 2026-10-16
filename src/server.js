@@ -56,6 +56,12 @@ app.use('/p', require('./proposals/onepager').router);
 // 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly "true". No mint route.
 app.use('/demo/estimate-recovery', pilotDemo.router);
 
+// Public prototype read (no API key — the token is the credential).
+// Mounted before the API-key guard. Rate limit uses the prototype bucket,
+// separate from the pilot demo. The page at /demo/prototype/<token> is a
+// later UI change; this route is the data read.
+app.use('/api/public/prototypes', require('./prototypes/public').router);
+
 // ─── Routes ───────────────────────────────────────────────────────────────
 app.use('/api', requireApiKey);
 app.use('/api/prospects', require('./api/prospects'));
@@ -64,6 +70,7 @@ app.use('/api/tasks',     tasks);
 app.use('/api/focus',     require('./api/focus'));
 app.use('/api/runs',      require('./api/runs'));
 app.use('/api/proposals', require('./api/proposals'));
+app.use('/api/prototypes', require('./api/prototypes'));
 app.use('/api/brands',    require('./api/brands'));
 app.use('/api/rubric',    require('./api/rubric'));
 // CSV intake for Pilot #1. 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly
