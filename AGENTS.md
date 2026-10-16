@@ -67,9 +67,9 @@ npm test        # Vitest, one shot. Mocks web/src/api.js. See web/README.md
 npm run lint    # ESLint (flat config)
 ```
 
-The CRM talks to `VITE_API_URL` (see `web/.env.example`) or the URL saved in the browser under Settings. For local UI work, point it at your local API, not production.
+The CRM API base is resolved in `web/src/api-base.js`. A Settings-saved URL on that device wins. Otherwise `VITE_API_URL` if the build set it. Otherwise dev uses `http://localhost:3000`. Otherwise the production Railway URL is used only when the page hostname exactly matches a production CRM host listed there. Any other host, including Vercel previews, shows an error and does not call the API. For local UI work, leave `VITE_API_URL` unset.
 
-`npm test` in `web/` is the CRM suite. It never loads the real `web/src/api.js` and `fetch` throws if a test tries to make a request. The API (`src/`) still has no test script. Do not claim tests passed if you did not run them. The revenue-sort allowlist and the prospect list query checks (unknown sort, invalid `min_value`) are plain Node checks: `node --test src/api/prospect-sorts.test.js src/api/prospect-query.test.js`.
+`npm test` in `web/` is the CRM suite. Component tests load `web/src/test/mock-api.js` in place of `web/src/api.js`, and `fetch` throws if one of those tries to make a request. `web/api-resolution.test.js` imports the real client and stubs `fetch`. The API (`src/`) still has no test script. Do not claim tests passed if you did not run them. The revenue-sort allowlist and the prospect list query checks (unknown sort, invalid `min_value`) are plain Node checks: `node --test src/api/prospect-sorts.test.js src/api/prospect-query.test.js`.
 
 ## Crons and how to turn them off
 

@@ -389,6 +389,8 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .sequence li { min-width: min(130px, 100%); max-width: 100%; }
 
 /* ── Notes & toast ─────────────────────────────────────── */
+.api-banner { margin: 0 0 1rem; padding: .9rem 1rem; background: var(--rust-wash); color: var(--rust); border: 1px solid var(--rust); border-radius: var(--radius-s); font-weight: 700; }
+.api-banner p { margin: 0; }
 .error-note { display: flex; justify-content: space-between; align-items: center; gap: 1rem; background: var(--rust-wash); color: var(--rust); border-radius: var(--radius-s); padding: .7rem 1rem; margin-bottom: 1rem; }
 .error-text { color: var(--rust); }
 .ok-note { color: var(--juniper); font-weight: 600; }

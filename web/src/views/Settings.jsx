@@ -42,8 +42,8 @@ export default function Settings({ authProblem, onSaved, version }) {
 
       <form className="panel form" onSubmit={saveAndTest}>
         <h2>Connection</h2>
-        <p className="muted">Saved on this device only. Enter it once on each phone or computer you use.</p>
-        <label>API address<input className="input" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://…up.railway.app" required /></label>
+        <p className="muted">Saved on this device only, and it overrides the default for this site. Nothing is filled in on a preview, so an address is used there only after you type one and save.</p>
+        <label>API address<input className="input" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://…" required /></label>
         <label>API key<input className="input" type="password" value={key} onChange={e => setKey(e.target.value)} autoComplete="off" placeholder="Value of CRM_API_KEY" /></label>
         {status && <p className={status.ok ? 'ok-note' : 'error-text'} role="status">{status.msg}</p>}
         <div className="form-actions"><button className="btn" disabled={busy}>{busy ? 'Checking…' : 'Save and connect'}</button></div>

@@ -1,5 +1,6 @@
 // Thin client for the FlowForward Engine API.
-const DEFAULT_URL = import.meta.env.VITE_API_URL || 'https://flowforward-engine-production.up.railway.app';
+// Base URL rules live in api-base.js.
+import { resolveApiBase, UNCONFIGURED_MESSAGE } from './api-base.js';
 
 function read(key, fallback = '') {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
@@ -8,8 +9,30 @@ function write(key, val) {
   try { val ? localStorage.setItem(key, val) : localStorage.removeItem(key); } catch { /* storage blocked */ }
 }
 
+function liveRuntime() {
+  return {
+    viteApiUrl: import.meta.env.VITE_API_URL,
+    dev: import.meta.env.DEV,
+    prod: import.meta.env.PROD,
+    hostname: typeof window !== 'undefined' ? window.location.hostname : '',
+    savedUrl: read('ff.apiUrl', ''),
+  };
+}
+
+// Tests pass a runtime so production-host rules can run under Vitest,
+// where `import.meta.env.DEV` is always true. The app never calls this.
+let runtimeOverride = null;
+export function _setRuntimeForTests(runtime) {
+  runtimeOverride = runtime;
+}
+
+export function currentApiBase() {
+  const live = liveRuntime();
+  return resolveApiBase(runtimeOverride ? { ...live, ...runtimeOverride } : live);
+}
+
 export const settings = {
-  get apiUrl() { return read('ff.apiUrl', DEFAULT_URL).replace(/\/+$/, ''); },
+  get apiUrl() { return currentApiBase().url; },
   set apiUrl(v) { write('ff.apiUrl', (v || '').trim()); },
   get apiKey() { return read('ff.apiKey'); },
   set apiKey(v) { write('ff.apiKey', (v || '').trim()); },
@@ -20,9 +43,11 @@ export class ApiError extends Error {
 }
 
 async function request(method, path, body) {
+  const base = currentApiBase();
+  if (!base.configured || !base.url) throw new ApiError(UNCONFIGURED_MESSAGE, 0);
   let res;
   try {
-    res = await fetch(settings.apiUrl + path, {
+    res = await fetch(base.url + path, {
       method,
       headers: {
         ...(body ? { 'Content-Type': 'application/json' } : {}),
@@ -31,7 +56,7 @@ async function request(method, path, body) {
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new ApiError(`Can't reach the API at ${settings.apiUrl}. Check the URL in Settings and that Railway is up.`, 0);
+    throw new ApiError(`Can't reach the API at ${base.url}. Check the URL in Settings and that Railway is up.`, 0);
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
