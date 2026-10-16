@@ -1,8 +1,8 @@
 // Shared prototype chrome. The gallery flag can hide the gallery.
 // Nothing in props, flags, query params, or brand data can hide this watermark.
-// Barlow 600 latin stays in this module so the prototype chunk keeps the face
-// even though the CRM entry also self-hosts Barlow. The system font is the fallback.
-import '@fontsource/barlow/latin-600.css';
+// The CRM entry already self-hosts Barlow 600. This chunk-local face is what
+// keeps the prototype CSS pointing at it after Vite dedupes the shared import.
+// The system font is the fallback.
 import '../prototypes/barlow-600.css';
 
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -19,7 +19,7 @@ export const FOOTER_BUSINESS_FALLBACK = 'this business';
 // A bare "TEST:" prefix is not a business name. The wordmark still shows it.
 export function footerBusinessName(name) {
   const raw = String(name ?? '').trim();
-  const rest = raw.replace(/^TEST:\s*/, '').trim();
+  const rest = raw.replace(/^test:\s*/i, '').trim();
   return rest ? raw : FOOTER_BUSINESS_FALLBACK;
 }
 

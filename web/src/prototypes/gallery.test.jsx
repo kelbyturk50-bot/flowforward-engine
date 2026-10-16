@@ -359,14 +359,23 @@ describe('prototype gallery', () => {
 
   it('uses this business in the footer when the name is only TEST:', () => {
     expect(footerBusinessName('TEST: Wasatch Heating')).toBe('TEST: Wasatch Heating');
+    expect(footerBusinessName('test: Wasatch Heating')).toBe('test: Wasatch Heating');
     expect(footerBusinessName('TEST:')).toBe(FOOTER_BUSINESS_FALLBACK);
     expect(footerBusinessName('TEST:   ')).toBe(FOOTER_BUSINESS_FALLBACK);
+    expect(footerBusinessName('test:')).toBe(FOOTER_BUSINESS_FALLBACK);
+    expect(footerBusinessName('Test:')).toBe(FOOTER_BUSINESS_FALLBACK);
+    expect(footerBusinessName('tEsT:   ')).toBe(FOOTER_BUSINESS_FALLBACK);
     const brand = presentBrand({ name: 'TEST:', colors: { accent: '#1F4E79' } });
     const { container } = render(<PrototypeLayout brand={brand}><h1>Bare prefix</h1></PrototypeLayout>);
     expect(container.querySelector('.prototype-wordmark').textContent).toBe('TEST:');
     expect(container.querySelector('.prototype-brand-name span').textContent).toBe('TEST:');
     expect(container.querySelector('.prototype-business').textContent).toBe('this business');
     expect(container.querySelector('.prototype-footer').textContent).not.toMatch(/endorsed by TEST:/);
+    const lower = presentBrand({ name: 'test:', colors: { accent: '#1F4E79' } });
+    const lowerView = render(<PrototypeLayout brand={lower}><h1>Lower prefix</h1></PrototypeLayout>);
+    expect(lowerView.container.querySelector('.prototype-wordmark').textContent).toBe('test:');
+    expect(lowerView.container.querySelector('.prototype-business').textContent).toBe('this business');
+    expect(lowerView.container.querySelector('.prototype-footer').textContent).not.toMatch(/endorsed by test:/i);
     expectRibbon(container);
   });
 

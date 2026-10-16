@@ -1,5 +1,5 @@
-/* Barlow 600 for the prototype chunk. The CRM entry loads the same weight
-   from @fontsource; this face stays with the watermark chunk. */
+/* Barlow 600 for the prototype chunk. The CRM entry loads this weight too.
+   Vite dedupes that shared import into the entry, so this face stays here. */
 @font-face {
   font-family: 'Barlow';
   font-style: normal;
