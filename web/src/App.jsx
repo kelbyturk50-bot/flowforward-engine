@@ -11,6 +11,7 @@ import ProjectDrawer from './views/ProjectDrawer';
 import More from './views/More';
 import { Toaster, isOverdue } from './ui';
 import { api, currentApiBase, settings } from './api';
+import { useLoadFeatureFlags } from './remote-flags';
 import ApiBanner from './ApiBanner';
 import { JobsProvider, useJobs } from './jobs';
 import { badgeCount } from './format';
@@ -76,6 +77,7 @@ export default function App() {
   const [proposalId, setProposalId] = useState(null);
   const [version, setVersion] = useState(0);
   const [authProblem, setAuthProblem] = useState(false);
+  useLoadFeatureFlags();
 
   useEffect(() => {
     const onHash = () => setRoute(readRoute());

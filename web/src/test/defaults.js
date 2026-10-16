@@ -1,3 +1,4 @@
+import { FEATURE_FLAG_CATALOG } from '../flags-contract.js';
 import { api, settings } from './mock-api.js';
 import { contactedLead, discoveryRun, focus, foundLead, project, proposal, summary } from './fixtures.js';
 
@@ -39,6 +40,20 @@ export function installApiDefaults() {
     configured: false,
     redirect_uri: `${TEST_URL}/oauth/google/callback`,
   });
+  api.flags.mockResolvedValue(FEATURE_FLAG_CATALOG.map(({ name }) => ({
+    name,
+    enabled: false,
+    updated_at: null,
+    updated_by: null,
+    env_forced_off: false,
+  })));
+  api.setFlag.mockImplementation(async (name, enabled) => ({
+    name,
+    enabled: enabled === true,
+    updated_at: '2026-10-16T18:00:00.000Z',
+    updated_by: 'test',
+    env_forced_off: false,
+  }));
   api.updateLead.mockResolvedValue(foundLead);
   api.updateTask.mockResolvedValue({});
   api.createLead.mockResolvedValue(foundLead);
