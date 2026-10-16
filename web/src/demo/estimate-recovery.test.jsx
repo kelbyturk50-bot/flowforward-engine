@@ -73,13 +73,35 @@ describe('estimate recovery demo', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('shows not-found for a token that is not base64url of at least 22 characters', () => {
+  it('shows not-found for a token that is not base64url of 22 to 64 characters', () => {
     at(`/?flags=FF_PILOT_ESTIMATE_RECOVERY`);
     const { rerender } = render(<DemoGate token={SHORT} />);
     expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
     rerender(<DemoGate token={'bad+token+padding+aaaa'} />);
     expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
     expect(screen.queryByText(/38,400/)).not.toBeInTheDocument();
+  });
+
+  it('shows the demo for base64url tokens of 22 and 64 characters and not-found outside that range', async () => {
+    at(`/?flags=FF_PILOT_ESTIMATE_RECOVERY`);
+    const cases = [
+      [21, false],
+      [22, true],
+      [64, true],
+      [65, false],
+      [100000, false],
+    ];
+    const { rerender } = render(<DemoGate token={'a'.repeat(21)} />);
+    for (const [length, valid] of cases) {
+      rerender(<DemoGate token={'a'.repeat(length)} />);
+      if (valid) {
+        expect(await screen.findByRole('heading', { name: 'Example Heating & Air: 3 open estimates, $38,400' })).toBeInTheDocument();
+      } else {
+        expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+        expect(screen.queryByText(/38,400/)).not.toBeInTheDocument();
+      }
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('walks the four steps with sample data and zero fetch calls', async () => {
