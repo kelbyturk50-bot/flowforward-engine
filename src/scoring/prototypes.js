@@ -19,26 +19,6 @@ const RV_SLOW = /never (got|received) (a|the|my) (quote|estimate)|slow (to )?quo
 const RV_SCHED = /no[- ]show|hard to schedule|reschedul|showed up late|never showed/i;
 
 const JOBBER_HCP = new Set(['jobber', 'housecall pro']);
-const HOME_STATE_NAMES = { UT: 'UTAH' };
-
-// TODO(scout): docs/PROTOTYPE_PLAY.md line 80 ranks channels as
-// email < FSM integration < telephony. tieRank puts receptionist (3)
-// ahead of scheduling (4), which would recommend a call agent over an
-// FSM agent on a tied score. Scout's ruling is pending. Until then the
-// most conservative choice is used: on an equal score, telephony sorts
-// after email-only and FSM agents, so a tie does not recommend a call
-// agent over a non-phone agent. tieRank still orders agents inside one
-// channel (estimate follow-up stays first).
-const CHANNEL_RANK = {
-  estimate_followup: 0,
-  speed_to_lead: 0,
-  review_requests: 0,
-  maint_renewal: 0,
-  scheduling: 1,
-  dispatch: 1,
-  bookkeeping: 1,
-  receptionist: 2,
-};
 
 function asObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -144,43 +124,31 @@ function isHvac(prospect) {
   return normalizeIndustry(prospect.industry).toLowerCase() === 'hvac';
 }
 
-function nameTokens(value) {
-  return String(value || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function tokensMatch(haystack, needle) {
-  if (!needle.length || needle.length > haystack.length) return false;
-  for (let i = 0; i <= haystack.length - needle.length; i++) {
-    let same = true;
-    for (let j = 0; j < needle.length; j++) {
-      if (haystack[i + j] !== needle[j]) {
-        same = false;
-        break;
-      }
-    }
-    if (same) return true;
-  }
-  return false;
+// Word-boundary match. "trane" matches "Trane Heating" and does not match
+// "Constrane". "carrier" does not match "Carriero".
+function isFranchise(company, patterns) {
+  const name = String(company || '');
+  if (!name.trim()) return false;
+  return (patterns || []).some(pattern => {
+    const body = escapeRegExp(pattern);
+    if (!body) return false;
+    return new RegExp(`\\b${body}\\b`, 'i').test(name);
+  });
 }
 
-// Token sequence or exact name, not a substring. "trane" matches "Trane Heating"
-// and does not match "Constrane". "service experts" still matches as two tokens.
-function isFranchise(company) {
-  const name = nameTokens(company);
-  if (!name.length) return false;
-  return cfg.FRANCHISE_PATTERNS.some(pattern => tokensMatch(name, nameTokens(pattern)));
-}
-
-function outOfState(prospect) {
+// null when the state is in the configured list. 'unknown_state' when the
+// field is missing. 'out_of_state' for any other value.
+function stateStatus(prospect, inState) {
   const raw = String(prospect.state || '').trim();
-  if (!raw) return false;
-  const home = String(cfg.HOME_STATE || 'UT').trim().toUpperCase();
-  const state = raw.toUpperCase();
-  if (state === home) return false;
-  if (HOME_STATE_NAMES[home] === state) return false;
-  const abbrev = Object.keys(HOME_STATE_NAMES).find(key => HOME_STATE_NAMES[key] === home);
-  if (abbrev && state === abbrev) return false;
-  return true;
+  if (!raw) return 'unknown_state';
+  const folded = raw.toLowerCase();
+  const allowed = (inState || []).map(value => String(value).trim().toLowerCase());
+  if (allowed.includes(folded)) return null;
+  return 'out_of_state';
 }
 
 // Spec line 38: read fsm_detected first. Only when that column is absent,
@@ -211,30 +179,37 @@ function isServiceTitan(value) {
   return String(value || '').trim().toLowerCase() === 'servicetitan';
 }
 
-function channelRank(agent) {
-  return Object.hasOwn(CHANNEL_RANK, agent) ? CHANNEL_RANK[agent] : 1;
+function costTierOf(agent, spec) {
+  if (spec && Number.isInteger(spec.costTier)) return spec.costTier;
+  const known = RUBRIC.agents[agent];
+  if (known && Number.isInteger(known.costTier)) return known.costTier;
+  return 3;
 }
 
-function ownItPenalty(agent, fsmValue) {
-  if (agent === 'receptionist' && String(fsmValue || '').trim().toLowerCase() === 'jobber') return 1;
-  return 0;
+function ownItPenalty(agent, fsmValue, bundled) {
+  const key = String(fsmValue || '').trim().toLowerCase();
+  const list = bundled && bundled[key];
+  if (!Array.isArray(list)) return 0;
+  return list.some(name => String(name).toLowerCase() === agent) ? 1 : 0;
 }
 
+// Score, then Scout's order: estimate follow-up, costTier, own-it, tieRank.
 function comparePrototypeRank(a, b) {
   return (b.score - a.score)
-    || (a.channel - b.channel)
-    || (a.tieRank - b.tieRank)
+    || (a.estimateFirst - b.estimateFirst)
+    || (a.costTier - b.costTier)
     || (a.ownIt - b.ownIt)
+    || (a.tieRank - b.tieRank)
     || String(a.agent).localeCompare(String(b.agent));
 }
 
 // HVAC beats plumbing beats the rest when ordering prospects. Industry is
 // constant for one shop, so this does not reorder that shop's agents.
-function beachheadRank(prospect) {
+function beachheadRank(prospect, order = RUBRIC.prospectBeachhead) {
   const industry = normalizeIndustry(prospect && prospect.industry).toLowerCase();
-  if (industry === 'hvac') return 0;
-  if (industry === 'plumbing') return 1;
-  return 2;
+  const list = order || [];
+  const rank = list.findIndex(name => normalizeIndustry(name).toLowerCase() === industry);
+  return rank === -1 ? list.length : rank;
 }
 
 function compareBeachhead(a, b) {
@@ -296,9 +271,12 @@ function emptyResult(disqualified) {
 
 function recommendPrototypes(prospect, rubric = RUBRIC) {
   if (!prospect || typeof prospect !== 'object') return emptyResult('below_min');
-  if (isExcludedIndustry(prospect.industry)) return emptyResult('pest');
-  if (isFranchise(prospect.company)) return emptyResult('franchise');
-  if (outOfState(prospect)) return emptyResult('out_of_state');
+  const disqualify = rubric.disqualify || RUBRIC.disqualify;
+  const bundled = rubric.ownItBundled || RUBRIC.ownItBundled;
+  if (isExcludedIndustry(prospect.industry, disqualify.industries)) return emptyResult('pest');
+  if (isFranchise(prospect.company, disqualify.franchisePatterns)) return emptyResult('franchise');
+  const state = stateStatus(prospect, disqualify.inState);
+  if (state) return emptyResult(state);
 
   const flags = deriveSignals(prospect);
   const gaps = new Set(rubric.gapSignals);
@@ -319,8 +297,9 @@ function recommendPrototypes(prospect, rubric = RUBRIC) {
       agent,
       score,
       tieRank: spec.tieRank,
-      channel: channelRank(agent),
-      ownIt: ownItPenalty(agent, flags.fsmValue),
+      costTier: costTierOf(agent, spec),
+      estimateFirst: agent === 'estimate_followup' ? 0 : 1,
+      ownIt: ownItPenalty(agent, flags.fsmValue, bundled),
       reasons,
     });
   }

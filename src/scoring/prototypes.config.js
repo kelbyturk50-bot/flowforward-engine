@@ -10,14 +10,20 @@
 // quote_form is new-collect and is not scored.
 //
 // Plumbing has no industry points. That is a picker bias only (Summit: no
-// plumbing score tweak). HVAC's points are the beachhead column. Remaining
-// ties are ordered in prototypes.js: channel (email, then FSM, then
-// telephony), then tieRank, then the Jobber own-it penalty.
+// plumbing score tweak). HVAC's place in prospectBeachhead sorts prospects,
+// not agents inside one shop. Agent ties follow Scout's order: estimate
+// follow-up, then costTier (email 1, FSM 2, telephony 3), then ownItBundled,
+// and tieRank only when those are still tied.
 // Bookkeeping is never auto-picked. Pest control and franchise names get no
 // prototype. ServiceTitan shops only get the light prototypes.
 //
 // pickPrototypes reads this table. It does not fetch and it does not change
 // computeFit. Unknown signals add nothing.
+//
+// Pest industries, franchise names, and in-state names live here. They are
+// the same lists fit scoring already uses, plus the full name "Utah".
+
+const { EXCLUDED_INDUSTRIES, FRANCHISE_PATTERNS } = require('./config');
 
 const RUBRIC = {
   version: 1,
@@ -26,6 +32,17 @@ const RUBRIC = {
   maxPicks: 2,
   neverAutoPick: ['bookkeeping'],
   serviceTitanAllow: ['estimate_followup', 'review_requests'],
+  // Queue order for prospects. Not a per-prospect agent tie-break.
+  prospectBeachhead: ['HVAC', 'Plumbing'],
+  disqualify: {
+    industries: EXCLUDED_INDUSTRIES,
+    franchisePatterns: FRANCHISE_PATTERNS,
+    inState: ['UT', 'Utah'],
+  },
+  // Agents an FSM already sells cheaply. ServiceTitan stays on serviceTitanAllow.
+  ownItBundled: {
+    jobber: ['receptionist'],
+  },
   // A gap signal means the shop is missing something the agent would fill.
   gapSignals: [
     'rv_slow_quote',
@@ -42,6 +59,7 @@ const RUBRIC = {
   agents: {
     estimate_followup: {
       tieRank: 1,
+      costTier: 1,
       points: {
         free_estimate: 25,
         financing: 20,
@@ -57,6 +75,7 @@ const RUBRIC = {
     },
     speed_to_lead: {
       tieRank: 2,
+      costTier: 1,
       points: {
         free_estimate: 10,
         financing: 5,
@@ -75,6 +94,7 @@ const RUBRIC = {
     },
     receptionist: {
       tieRank: 3,
+      costTier: 3,
       points: {
         rv_missed_call: 30,
         rv_scheduling: 5,
@@ -89,6 +109,7 @@ const RUBRIC = {
     },
     scheduling: {
       tieRank: 4,
+      costTier: 2,
       points: {
         rv_scheduling: 25,
         no_booking: 25,
@@ -100,6 +121,7 @@ const RUBRIC = {
     },
     review_requests: {
       tieRank: 5,
+      costTier: 1,
       points: {
         no_review_tool: 30,
         small_good_rating: 20,
@@ -110,6 +132,7 @@ const RUBRIC = {
     },
     maint_renewal: {
       tieRank: 6,
+      costTier: 1,
       points: {
         maint_plan: 35,
         fsm_jobber_hcp: 10,
@@ -120,6 +143,7 @@ const RUBRIC = {
     },
     dispatch: {
       tieRank: 7,
+      costTier: 2,
       points: {
         rv_scheduling: 15,
         fsm_none: 10,
@@ -130,6 +154,7 @@ const RUBRIC = {
     },
     bookkeeping: {
       tieRank: 8,
+      costTier: 2,
       points: {
         fsm_none: 5,
         size_sweet: 5,

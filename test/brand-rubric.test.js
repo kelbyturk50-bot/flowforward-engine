@@ -13,6 +13,7 @@ const assert = require('node:assert/strict');
 const { BRAND_FIXTURES } = require('../src/brand/fixtures');
 const { validateBrand } = require('../src/brand/validate');
 const { RUBRIC, rubricRows } = require('../src/scoring/prototypes.config');
+const { FRANCHISE_PATTERNS, EXCLUDED_INDUSTRIES } = require('../src/scoring/config');
 const {
   pickPrototypes,
   recommendPrototypes,
@@ -428,7 +429,9 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     assert.equal(recommendPrototypes(estimateShop({ state: 'Utah' })).disqualified, null);
     assert.equal(topAgent(estimateShop({ state: 'Utah' })), 'estimate_followup');
     assert.equal(topAgent(estimateShop({ state: 'utah' })), 'estimate_followup');
-    assert.equal(topAgent(estimateShop({ state: '' })), 'estimate_followup');
+    assert.equal(recommendPrototypes(estimateShop({ state: '' })).disqualified, 'unknown_state');
+    assert.equal(recommendPrototypes(estimateShop({ state: null })).disqualified, 'unknown_state');
+    assert.deepEqual(pickPrototypes(estimateShop({ state: '   ' })), []);
     assert.equal(beachheadRank({ industry: 'HVAC' }) < beachheadRank({ industry: 'Plumbing' }), true);
     assert.equal(beachheadRank({ industry: 'Plumbing' }) < beachheadRank({ industry: 'Electrical' }), true);
     assert.ok(compareBeachhead(
@@ -482,8 +485,8 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       serviceTitanAllow: ['estimate_followup', 'review_requests'],
       gapSignals: [],
       agents: {
-        speed_to_lead: { tieRank: 2, points: { hvac: 50 } },
-        estimate_followup: { tieRank: 1, points: { hvac: 50 } },
+        speed_to_lead: { tieRank: 1, costTier: 1, points: { hvac: 50 } },
+        estimate_followup: { tieRank: 9, costTier: 1, points: { hvac: 50 } },
       },
     });
     assert.deepEqual(tied.map(row => row.agent), ['estimate_followup', 'speed_to_lead']);
@@ -511,7 +514,7 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     const signalOnly = pickPrototypes(shop({ fsm_detected: null, research: stSignals }));
     assert.deepEqual(signalOnly.map(row => row.agent), ['estimate_followup', 'review_requests']);
 
-    const channelTie = pickPrototypes(shop(), {
+    const costTie = pickPrototypes(shop(), {
       version: 1,
       minScore: 40,
       maxPicks: 2,
@@ -519,21 +522,16 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       serviceTitanAllow: ['estimate_followup', 'review_requests'],
       gapSignals: [],
       agents: {
-        receptionist: { tieRank: 3, points: { hvac: 50 } },
-        scheduling: { tieRank: 4, points: { hvac: 50 } },
+        receptionist: { tieRank: 1, costTier: 3, points: { hvac: 50 } },
+        scheduling: { tieRank: 9, costTier: 2, points: { hvac: 50 } },
       },
     });
-    assert.deepEqual(channelTie.map(row => row.agent), ['scheduling', 'receptionist']);
-    const jobberOwn = comparePrototypeRank(
-      { agent: 'receptionist', score: 50, channel: 2, tieRank: 3, ownIt: 1 },
-      { agent: 'scheduling', score: 50, channel: 2, tieRank: 3, ownIt: 0 },
+    assert.deepEqual(costTie.map(row => row.agent), ['scheduling', 'receptionist']);
+    const tieRankOnly = comparePrototypeRank(
+      { agent: 'speed_to_lead', score: 50, estimateFirst: 1, costTier: 1, ownIt: 0, tieRank: 2 },
+      { agent: 'review_requests', score: 50, estimateFirst: 1, costTier: 1, ownIt: 0, tieRank: 1 },
     );
-    assert.ok(jobberOwn > 0);
-    const sameChannel = comparePrototypeRank(
-      { agent: 'receptionist', score: 50, channel: 2, tieRank: 1, ownIt: 0 },
-      { agent: 'scheduling', score: 50, channel: 2, tieRank: 4, ownIt: 0 },
-    );
-    assert.ok(sameChannel < 0);
+    assert.ok(tieRankOnly > 0);
 
     const books = pickPrototypes(shop(), {
       version: 1,
@@ -570,6 +568,78 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       review_count: 80,
       fit_boost: 0,
     }).fit_score, 97);
+  });
+
+  it('applies Scout tie-breaks and config disqualifiers', () => {
+    const equal = {
+      version: 1,
+      minScore: 40,
+      maxPicks: 2,
+      neverAutoPick: [],
+      serviceTitanAllow: ['estimate_followup', 'review_requests'],
+      gapSignals: [],
+    };
+    const prospects = [
+      { industry: 'Electrical', company: 'TEST: E' },
+      { industry: 'Plumbing', company: 'TEST: P' },
+      { industry: 'HVAC', company: 'TEST: H' },
+    ].sort(compareBeachhead);
+    assert.deepEqual(prospects.map(row => row.industry), ['HVAC', 'Plumbing', 'Electrical']);
+    assert.deepEqual(RUBRIC.prospectBeachhead, ['HVAC', 'Plumbing']);
+
+    const ownIt = pickPrototypes(shop({ fsm_detected: 'Jobber' }), {
+      ...equal,
+      agents: {
+        receptionist: { tieRank: 3, costTier: 2, points: { hvac: 50 } },
+        scheduling: { tieRank: 3, costTier: 2, points: { hvac: 50 } },
+      },
+    });
+    assert.deepEqual(ownIt.map(row => row.agent), ['scheduling', 'receptionist']);
+    const housecall = pickPrototypes(shop({ fsm_detected: 'Housecall Pro' }), {
+      ...equal,
+      agents: {
+        receptionist: { tieRank: 3, costTier: 2, points: { hvac: 50 } },
+        scheduling: { tieRank: 3, costTier: 2, points: { hvac: 50 } },
+      },
+    });
+    assert.deepEqual(housecall.map(row => row.agent), ['receptionist', 'scheduling']);
+    assert.deepEqual(RUBRIC.ownItBundled.jobber, ['receptionist']);
+    assert.equal(RUBRIC.agents.estimate_followup.costTier, 1);
+    assert.equal(RUBRIC.agents.scheduling.costTier, 2);
+    assert.equal(RUBRIC.agents.receptionist.costTier, 3);
+
+    assert.equal(RUBRIC.disqualify.franchisePatterns, FRANCHISE_PATTERNS);
+    assert.equal(RUBRIC.disqualify.industries, EXCLUDED_INDUSTRIES);
+    assert.deepEqual(RUBRIC.disqualify.inState, ['UT', 'Utah']);
+    assert.equal(
+      recommendPrototypes(estimateShop({ company: 'TEST: Carrier Air' })).disqualified,
+      'franchise'
+    );
+    assert.equal(
+      recommendPrototypes(estimateShop({ company: 'Mr. Rooter Plumbing' })).disqualified,
+      'franchise'
+    );
+
+    const moved = {
+      ...RUBRIC,
+      disqualify: {
+        industries: ['Roofing'],
+        franchisePatterns: ['acme'],
+        inState: ['CO', 'Colorado'],
+      },
+    };
+    assert.equal(recommendPrototypes(estimateShop({ industry: 'Roofing' }), moved).disqualified, 'pest');
+    assert.equal(recommendPrototypes(estimateShop({ industry: 'Pest Control', state: 'CO' }), moved).disqualified, null);
+    assert.equal(
+      recommendPrototypes(estimateShop({ company: 'TEST: Acme Heating', state: 'CO' }), moved).disqualified,
+      'franchise'
+    );
+    assert.equal(
+      recommendPrototypes(estimateShop({ company: 'TEST: Trane Heating', state: 'Colorado' }), moved).disqualified,
+      null
+    );
+    assert.equal(recommendPrototypes(estimateShop({ state: 'UT' }), moved).disqualified, 'out_of_state');
+    assert.equal(topAgent(estimateShop({ state: 'colorado' }), moved), 'estimate_followup');
   });
 
   it('seeds TEST fixtures and a rubric table that matches the config', async () => {
@@ -717,6 +787,11 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
         testTag: 'TEST:manual-heating',
       });
       assert.equal(again.status, 409);
+
+      const plainLookup = await request(port, 'POST', '/api/rubric/lookup', { prospectId: plain.id });
+      assert.equal(plainLookup.status, 200);
+      assert.equal(plainLookup.json.prospectId, plain.id);
+      assert.equal(Object.hasOwn(plainLookup.json, 'picks'), true);
 
       const linked = await request(port, 'POST', '/api/brands', {
         name: 'TEST: Plain Shop',

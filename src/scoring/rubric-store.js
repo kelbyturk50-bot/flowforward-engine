@@ -10,7 +10,14 @@ function rubricFromParts(meta, pointRows) {
   for (const row of pointRows) {
     const agent = row.agent;
     const tieRank = Number(row.tie_rank);
-    if (!agents[agent]) agents[agent] = { tieRank, points: {} };
+    const known = RUBRIC.agents[agent] || {};
+    if (!agents[agent]) {
+      agents[agent] = {
+        tieRank,
+        costTier: known.costTier,
+        points: {},
+      };
+    }
     if (agents[agent].tieRank !== tieRank) {
       throw new Error(`rubric tie_rank mismatch for ${agent}`);
     }
@@ -37,6 +44,9 @@ function rubricFromParts(meta, pointRows) {
     gapSignals,
     agents,
     rows,
+    disqualify: RUBRIC.disqualify,
+    ownItBundled: RUBRIC.ownItBundled,
+    prospectBeachhead: RUBRIC.prospectBeachhead,
   };
 }
 
