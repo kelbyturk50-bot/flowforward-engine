@@ -1,5 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import './fonts.js';
 import App from './App';
 import DemoGate from './demo/DemoGate';
 import GalleryGate from './prototypes/GalleryGate';

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import PrototypeWatermark, { ACTION_TOAST, FOOTER_LEAD, WATERMARK_TEXT, liveToast } from '../components/PrototypeWatermark';
+import PrototypeWatermark, { ACTION_TOAST, FOOTER_BUSINESS_FALLBACK, FOOTER_LEAD, footerBusinessName, WATERMARK_TEXT, liveToast } from '../components/PrototypeWatermark';
 import { presentBrand } from './brand';
 import GalleryGate from './GalleryGate';
 import PrototypeLayout from './PrototypeLayout';
@@ -343,6 +343,19 @@ describe('prototype gallery', () => {
     } finally {
       style.remove();
     }
+  });
+
+  it('uses this business in the footer when the name is only TEST:', () => {
+    expect(footerBusinessName('TEST: Wasatch Heating')).toBe('TEST: Wasatch Heating');
+    expect(footerBusinessName('TEST:')).toBe(FOOTER_BUSINESS_FALLBACK);
+    expect(footerBusinessName('TEST:   ')).toBe(FOOTER_BUSINESS_FALLBACK);
+    const brand = presentBrand({ name: 'TEST:', colors: { accent: '#1F4E79' } });
+    const { container } = render(<PrototypeLayout brand={brand}><h1>Bare prefix</h1></PrototypeLayout>);
+    expect(container.querySelector('.prototype-wordmark').textContent).toBe('TEST:');
+    expect(container.querySelector('.prototype-brand-name span').textContent).toBe('TEST:');
+    expect(container.querySelector('.prototype-business').textContent).toBe('this business');
+    expect(container.querySelector('.prototype-footer').textContent).not.toMatch(/endorsed by TEST:/);
+    expectRibbon(container);
   });
 
   it('escapes markup in the business name and still shows the watermark', () => {

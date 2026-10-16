@@ -33,6 +33,15 @@ describe('demo code split', () => {
     expect(main).not.toMatch(/PrototypeWatermark/);
     const watermark = readFileSync(path.join(webRoot, 'src/components/PrototypeWatermark.jsx'), 'utf8');
     const galleryApp = readFileSync(path.join(webRoot, 'src/prototypes/GalleryApp.jsx'), 'utf8');
+    const fonts = readFileSync(path.join(webRoot, 'src/fonts.js'), 'utf8');
+    expect(main).toMatch(/import ['"]\.\/fonts\.js['"]/);
+    expect(fonts).toContain("import '@fontsource/barlow/latin-400.css'");
+    expect(fonts).toContain("import '@fontsource/barlow/latin-500.css'");
+    expect(fonts).toContain("import '@fontsource/barlow/latin-600.css'");
+    expect(fonts).toContain("import '@fontsource/barlow/latin-700.css'");
+    expect(fonts).toContain("import '@fontsource/barlow-semi-condensed/latin-500.css'");
+    expect(fonts).toContain("import '@fontsource/barlow-semi-condensed/latin-600.css'");
+    expect(fonts).toContain("import '@fontsource/barlow-semi-condensed/latin-700.css'");
     expect(watermark).toContain("import '@fontsource/barlow/latin-600.css'");
     expect(galleryApp).not.toContain('fontsource');
     expect(galleryGate).toMatch(/import\(\s*['"]\.\/GalleryApp\.jsx['"]\s*\)/);
@@ -61,9 +70,8 @@ describe('demo code split', () => {
         throw new Error(result.stderr || result.stdout || `vite build exited ${result.status}`);
       }
       const html = readFileSync(path.join(built, 'index.html'), 'utf8');
-      expect(html).toContain('family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600;700');
-      expect(html).toContain('fonts.googleapis.com');
-      expect(html).toContain('fonts.gstatic.com');
+      expect(html).not.toContain('fonts.googleapis.com');
+      expect(html).not.toContain('fonts.gstatic.com');
       const entrySrc = html.match(/src="([^"]+\.js)"/);
       expect(entrySrc).toBeTruthy();
       const entryName = entrySrc[1].split('/').pop();
@@ -92,15 +100,33 @@ describe('demo code split', () => {
       const cssHref = html.match(/href="([^"]+\.css)"/);
       expect(cssHref).toBeTruthy();
       const entryCssName = cssHref[1].split('/').pop();
+      const cssNames = readdirSync(assetDir).filter(name => name.endsWith('.css'));
+      for (const name of cssNames) {
+        const text = readFileSync(path.join(assetDir, name), 'utf8');
+        expect(text, name).not.toContain('fonts.googleapis.com');
+        expect(text, name).not.toContain('fonts.gstatic.com');
+      }
       const entryCss = readFileSync(path.join(assetDir, entryCssName), 'utf8');
-      expect(entryCss).not.toContain('barlow-latin-600');
-      expect(entry.text).not.toContain('barlow-latin-600');
-      const fontCarrier = readdirSync(assetDir)
-        .filter(name => name !== entryCssName && name !== entryName)
-        .map(name => readFileSync(path.join(assetDir, name), 'utf8'))
-        .find(text => text.includes('barlow-latin-600'));
-      expect(fontCarrier).toBeTruthy();
-      expect(readdirSync(assetDir).some(name => name.endsWith('.woff2'))).toBe(true);
+      for (const face of [
+        'barlow-latin-400-normal',
+        'barlow-latin-500-normal',
+        'barlow-latin-600-normal',
+        'barlow-latin-700-normal',
+        'barlow-semi-condensed-latin-500-normal',
+        'barlow-semi-condensed-latin-600-normal',
+        'barlow-semi-condensed-latin-700-normal',
+      ]) {
+        expect(entryCss, face).toContain(face);
+      }
+      expect(entry.text).not.toContain('fonts.googleapis.com');
+      expect(entry.text).not.toContain('fonts.gstatic.com');
+      const prototypeCss = cssNames
+        .filter(name => name !== entryCssName)
+        .map(name => ({ name, text: readFileSync(path.join(assetDir, name), 'utf8') }))
+        .find(file => file.text.includes('barlow-latin-600-normal'));
+      expect(prototypeCss, cssNames.join(', ')).toBeTruthy();
+      expect(readdirSync(assetDir).some(name => name.includes('barlow-latin-600-normal') && name.endsWith('.woff2'))).toBe(true);
+      expect(readdirSync(assetDir).some(name => name.includes('barlow-semi-condensed-latin-600-normal') && name.endsWith('.woff2'))).toBe(true);
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }

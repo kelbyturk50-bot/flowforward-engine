@@ -1,8 +1,9 @@
 // Shared prototype chrome. The gallery flag can hide the gallery.
 // Nothing in props, flags, query params, or brand data can hide this watermark.
-// Barlow 600 latin is loaded with this module, which only the code-split
-// prototype and demo chunks import. The system font is the fallback.
+// Barlow 600 latin stays in this module so the prototype chunk keeps the face
+// even though the CRM entry also self-hosts Barlow. The system font is the fallback.
 import '@fontsource/barlow/latin-600.css';
+import '../prototypes/barlow-600.css';
 
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
@@ -13,6 +14,14 @@ export function liveToast(action) {
   return `In the live version this would ${action}.`;
 }
 export const FOOTER_LEAD = 'Concept by FlowForward, sample data, not affiliated with or endorsed by ';
+export const FOOTER_BUSINESS_FALLBACK = 'this business';
+
+// A bare "TEST:" prefix is not a business name. The wordmark still shows it.
+export function footerBusinessName(name) {
+  const raw = String(name ?? '').trim();
+  const rest = raw.replace(/^TEST:\s*/, '').trim();
+  return rest ? raw : FOOTER_BUSINESS_FALLBACK;
+}
 
 export const WATERMARK_BG = '#1E2A2F';
 export const WATERMARK_FG = '#F3F6F5';
@@ -121,7 +130,7 @@ export function SampleValue({ children }) {
 export function PrototypeFooter({ business }) {
   return (
     <p className="prototype-footer">
-      {FOOTER_LEAD}<span className="prototype-business">{business}</span>.<SampleTag />
+      {FOOTER_LEAD}<span className="prototype-business">{footerBusinessName(business)}</span>.<SampleTag />
     </p>
   );
 }
