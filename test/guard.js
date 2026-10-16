@@ -576,9 +576,20 @@ function chunkPrefix(chunk) {
 }
 
 function assertNoForeignTunnel(chunk) {
-  const match = /^CONNECT\s+(\S+)/i.exec(chunkPrefix(chunk));
-  if (!match) return;
-  const host = connectAuthorityHost(match[1]);
+  const prefix = chunkPrefix(chunk);
+  // GET http://192.0.2.1/ HTTP/1.1, including a leading CRLF and CONNECT https://...
+  const absolute = /^\s*[A-Z]+\s+(https?:\/\/[^\s/]+)/i.exec(prefix);
+  if (absolute) {
+    let host = '';
+    try { host = new URL(absolute[1]).hostname; } catch { host = ''; }
+    if (host && !isLocalName(host)) {
+      throw new TestNetworkGuardError(normalizeHost(host), 'connect-tunnel');
+    }
+  }
+  // CONNECT 192.0.2.1:443, also after a leading CRLF.
+  const tunnel = /^\s*CONNECT\s+(\S+)/i.exec(prefix);
+  if (!tunnel) return;
+  const host = connectAuthorityHost(tunnel[1]);
   if (host && !isLocalName(host)) {
     throw new TestNetworkGuardError(normalizeHost(host), 'connect-tunnel');
   }
@@ -603,30 +614,9 @@ function installTunnelGuard() {
     guardedWrite.__ffGuarded = true;
     proto.write = guardedWrite;
   }
-  const originalWritev = proto.writev;
-  if (typeof originalWritev === 'function' && !originalWritev.__ffGuarded) {
-    function guardedWritev(chunks, cb) {
-      if (Array.isArray(chunks)) {
-        let prefix = '';
-        for (const part of chunks) {
-          const piece = part && typeof part === 'object' && Object.prototype.hasOwnProperty.call(part, 'chunk')
-            ? part.chunk
-            : part;
-          prefix += chunkPrefix(piece);
-          if (prefix.length >= 512) break;
-        }
-        try {
-          assertNoForeignTunnel(prefix);
-        } catch (err) {
-          this.destroy();
-          throw err;
-        }
-      }
-      return originalWritev.call(this, chunks, cb);
-    }
-    guardedWritev.__ffGuarded = true;
-    proto.writev = guardedWritev;
-  }
+  // Socket.prototype.writev is not a function on Node 20 or 22 (the stream
+  // method is _writev). A corked or split write that never passes the whole
+  // request line to write() is out of scope.
 }
 
 function assertConnectPath(opts, via) {

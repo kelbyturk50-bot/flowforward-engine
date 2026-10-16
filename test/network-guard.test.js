@@ -496,12 +496,12 @@ describe('network guard', () => {
     try {
       const child = spawnSync(process.execPath, ['-e', `
         const keys = ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy'];
-        const left = keys.filter((key) => process.env[key]);
+        const left = keys.filter((key) => process.env[key] !== '');
         if (left.length) {
-          console.error(left.join(','));
+          console.error(left.map((key) => key + '=' + JSON.stringify(process.env[key])).join(','));
           process.exit(2);
         }
-        console.log('cleared');
+        console.log('pinned');
       `], {
         encoding: 'utf8',
         timeout: 5000,
@@ -518,7 +518,7 @@ describe('network guard', () => {
         },
       });
       assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
-      assert.match(child.stdout, /cleared/);
+      assert.match(child.stdout, /pinned/);
 
       const calls = [
         () => axios.get('https://192.0.2.1/', {
@@ -571,6 +571,119 @@ describe('network guard', () => {
         if (value == null) delete process.env[key];
         else process.env[key] = value;
       }
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => proxy.close(resolve));
+      await client.destroy();
+    }
+  });
+
+  it('leaves proxy variables empty after dotenv loads a .env', () => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const { spawnSync } = require('child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-proxy-env-'));
+    const keys = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'];
+    try {
+      fs.writeFileSync(path.join(dir, '.env'), keys.map((key) => `${key}=http://192.0.2.1:8080`).join('\n') + '\n');
+      // Same call as src/db/client.js: dotenv.config() with no path, after chdir.
+      const result = spawnSync(process.execPath, ['-e', `
+        const dotenv = require('dotenv');
+        process.chdir(${JSON.stringify(dir)});
+        dotenv.config();
+        const keys = ${JSON.stringify(keys)};
+        for (const key of keys) {
+          if (process.env[key] !== '') {
+            console.error(key + '=' + JSON.stringify(process.env[key]));
+            process.exit(2);
+          }
+        }
+        console.log('empty');
+      `], { encoding: 'utf8', timeout: 5000 });
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.match(result.stdout, /empty/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('blocks an absolute-form proxy request before it is written', async () => {
+    const { spawnSync } = require('child_process');
+    const { Client } = require('undici');
+    let received = '';
+    const sockets = new Set();
+    const proxy = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+      socket.on('data', (buf) => { received += buf.toString('latin1'); });
+      socket.on('end', () => socket.destroy());
+      socket.on('error', () => socket.destroy());
+    });
+    await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+    const port = proxy.address().port;
+    const proxyUrl = `http://127.0.0.1:${port}`;
+    const client = new Client(proxyUrl);
+    // Node's HTTP client writes the request line from a next-tick callback and
+    // does not catch a throw there. A child keeps that uncaughtException out of
+    // this test while the guard still fires before any absolute-form bytes.
+    function blockedChild(script) {
+      const result = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 5000 });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.notEqual(result.status, 0, output);
+      assert.match(output, /192\.0\.2\.1/);
+      assert.match(output, /connect-tunnel/);
+    }
+    try {
+      blockedChild(`
+        const axios = require('axios');
+        axios.get('http://192.0.2.1/', {
+          proxy: { protocol: 'http', host: '127.0.0.1', port: ${port} },
+          timeout: 1000,
+        }).catch(() => {});
+        setTimeout(() => {}, 300);
+      `);
+      blockedChild(`
+        process.env.HTTP_PROXY = ${JSON.stringify(proxyUrl)};
+        const axios = require('axios');
+        axios.get('http://192.0.2.1/', { timeout: 1000 }).catch(() => {});
+        setTimeout(() => {}, 300);
+      `);
+      blockedChild(`
+        const http = require('http');
+        const req = http.request({
+          hostname: '127.0.0.1',
+          port: ${port},
+          method: 'GET',
+          path: 'http://192.0.2.1/',
+        });
+        req.on('error', () => {});
+        req.end();
+        setTimeout(() => {}, 300);
+      `);
+
+      const undiciErr = await captureGuard(() => client.request({ path: 'http://192.0.2.1/', method: 'GET' }));
+      assertGuard(undiciErr, '192.0.2.1');
+      assert.match(guardError(undiciErr).message, /connect-tunnel/);
+
+      const raw = await captureGuard(() => {
+        const socket = net.connect(port, '127.0.0.1');
+        socket.on('error', () => {});
+        try {
+          socket.write('\r\nCONNECT 192.0.2.1:443 HTTP/1.1\r\nHost: 192.0.2.1:443\r\n\r\n');
+        } catch (err) {
+          socket.destroy();
+          throw err;
+        }
+        return socket;
+      });
+      assertGuard(raw, '192.0.2.1');
+      assert.match(guardError(raw).message, /connect-tunnel/);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.doesNotMatch(received, /192\.0\.2\.1/);
+    } finally {
+      process.env.HTTP_PROXY = '';
+      process.env.http_proxy = '';
       for (const socket of sockets) socket.destroy();
       await new Promise((resolve) => proxy.close(resolve));
       await client.destroy();
