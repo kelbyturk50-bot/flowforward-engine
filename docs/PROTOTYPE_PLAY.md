@@ -75,7 +75,15 @@ Positive points add up. A signal that is unknown adds nothing. "Gap" means the s
 | Industry = HVAC | +10 | +5 | +5 | +5 | +5 | +10 | +5 | |
 
 ### Tie-breaks (in order)
-1. **HVAC beachhead bias.** HVAC beats plumbing, and plumbing beats the rest. This is a picker bias only, not a fit-score change (Summit: no plumbing score tweak).
+These numbered rules are authoritative and apply in order. `tieRank` is only the final fallback after rules 1–4 are still tied. Each agent type carries `costTier` (1 email-only, 2 needs FSM integration, 3 needs telephony). Rule 1 sorts **prospects** (queue and gallery priority), because industry is fixed within one prospect. Rules 2–4 pick among agent types for a single prospect. Own-it fit comes from a per-FSM config list of agents the FSM already bundles cheaply (starting with Jobber → receptionist).
+
+**Input rules:** `fsm_detected` wins, and research signals are used only when it's empty. A state of `Utah` or `UT` (any case) counts as Utah, and a missing state parks the lead as unknown. Franchise names use word-boundary matching. Pest, franchise and out-of-state rules live in config.
+
+**Cost tier per agent:** estimate follow-up 1, speed-to-lead 1, review requests 1, scheduling 2, maintenance-plan renewal 2, dispatch 2, bookkeeping 2 (needs an accounting-system integration, not an FSM; the same tier by cost), receptionist 3.
+
+**Unknown state:** no prototype. The lead is parked until its state is known, matching the out-of-state park rule. #46 must match.
+
+1. **HVAC beachhead bias.** HVAC beats plumbing, and plumbing beats the rest. This sorts prospects (queue and gallery priority) and is not a fit-score change (Summit: no plumbing score tweak).
 2. **Estimate follow-up wins ties.** It is Pilot #1 and the only rung with an `estimate_recovered` proof path.
 3. **Cheapest to make real:** email-only beats needing an FSM integration, which beats needing telephony (#12 is blocked).
 4. **Own-it fit:** prefer agents the FSM does not already include cheaply (e.g. Jobber Receptionist at $29/mo makes receptionist a weak own-it pitch for Jobber shops).
@@ -97,8 +105,11 @@ Positive points add up. A signal that is unknown adds nothing. "Gap" means the s
   "rules": { "cacheOnly": true, "httpOnScorePath": 0, "newPlacesQueries": 0, "unknownSignal": 0, "maxPicks": 2, "minScore": 40 },
   "disqualify": [
     { "if": "industry == 'Pest Control'", "reason": "out of GTM" },
-    { "if": "franchise", "reason": "corporate systems; weak buyer" }
+    { "if": "franchise", "reason": "corporate systems; weak buyer" },
+    { "if": "state not in ['Utah','UT'] (case-insensitive)", "action": "park", "reason": "out of state until Utah proof gate" },
+    { "if": "state missing", "action": "park", "reason": "unknown state" }
   ],
+  "ownItWeak": { "Jobber": ["receptionist"] },
   "restrict": [
     { "if": "fsm == 'ServiceTitan'", "allow": ["estimate_followup", "review_requests"] }
   ],
@@ -120,14 +131,14 @@ Positive points add up. A signal that is unknown adds nothing. "Gap" means the s
     "quote_form":      { "status": "new-collect", "note": "needs research.js flag; separate spec" }
   },
   "agents": {
-    "estimate_followup": { "free_estimate": 25, "financing": 20, "rv_slow_quote": 25, "contact_form_only": 5, "maint_plan": 5, "fsm_jobber_hcp": 10, "fsm_none": 5, "size_sweet": 10, "size_big": 5, "hvac": 10, "tieRank": 1 },
-    "speed_to_lead":     { "free_estimate": 10, "financing": 5, "rv_slow_quote": 10, "rv_missed_call": 15, "no_booking": 10, "contact_form_only": 25, "no_chat": 15, "closed_after_hours": 5, "fsm_jobber_hcp": 5, "fsm_none": 5, "size_sweet": 10, "size_big": 5, "hvac": 5, "tieRank": 2 },
-    "receptionist":      { "rv_missed_call": 30, "rv_scheduling": 5, "no_booking": 5, "no_chat": 10, "closed_after_hours": 20, "fsm_none": 5, "size_sweet": 10, "size_big": 10, "hvac": 5, "tieRank": 3 },
-    "scheduling":        { "rv_scheduling": 25, "no_booking": 25, "contact_form_only": 10, "fsm_none": 10, "size_sweet": 10, "hvac": 5, "tieRank": 4 },
-    "review_requests":   { "no_review_tool": 30, "small_good_rating": 20, "fsm_jobber_hcp": 5, "size_sweet": 10, "hvac": 5, "tieRank": 5 },
-    "maint_renewal":     { "maint_plan": 35, "fsm_jobber_hcp": 10, "size_sweet": 10, "size_big": 10, "hvac": 10, "tieRank": 6 },
-    "dispatch":          { "rv_scheduling": 15, "fsm_none": 10, "size_sweet": 5, "size_big": 15, "hvac": 5, "tieRank": 7 },
-    "bookkeeping":       { "fsm_none": 5, "size_sweet": 5, "tieRank": 8 }
+    "estimate_followup": { "free_estimate": 25, "financing": 20, "rv_slow_quote": 25, "contact_form_only": 5, "maint_plan": 5, "fsm_jobber_hcp": 10, "fsm_none": 5, "size_sweet": 10, "size_big": 5, "hvac": 10, "costTier": 1, "tieRank": 1 },
+    "speed_to_lead":     { "free_estimate": 10, "financing": 5, "rv_slow_quote": 10, "rv_missed_call": 15, "no_booking": 10, "contact_form_only": 25, "no_chat": 15, "closed_after_hours": 5, "fsm_jobber_hcp": 5, "fsm_none": 5, "size_sweet": 10, "size_big": 5, "hvac": 5, "costTier": 1, "tieRank": 2 },
+    "receptionist":      { "rv_missed_call": 30, "rv_scheduling": 5, "no_booking": 5, "no_chat": 10, "closed_after_hours": 20, "fsm_none": 5, "size_sweet": 10, "size_big": 10, "hvac": 5, "costTier": 3, "tieRank": 3 },
+    "scheduling":        { "rv_scheduling": 25, "no_booking": 25, "contact_form_only": 10, "fsm_none": 10, "size_sweet": 10, "hvac": 5, "costTier": 2, "tieRank": 4 },
+    "review_requests":   { "no_review_tool": 30, "small_good_rating": 20, "fsm_jobber_hcp": 5, "size_sweet": 10, "hvac": 5, "costTier": 1, "tieRank": 5 },
+    "maint_renewal":     { "maint_plan": 35, "fsm_jobber_hcp": 10, "size_sweet": 10, "size_big": 10, "hvac": 10, "costTier": 2, "tieRank": 6 },
+    "dispatch":          { "rv_scheduling": 15, "fsm_none": 10, "size_sweet": 5, "size_big": 15, "hvac": 5, "costTier": 2, "tieRank": 7 },
+    "bookkeeping":       { "fsm_none": 5, "size_sweet": 5, "costTier": 2, "tieRank": 8 }
   }
 }
 ```
