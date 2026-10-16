@@ -1,6 +1,7 @@
 // F-003 cache reader. Points and GTM rationale live in src/scoring/config.js
 // (ESTIMATE_SIGNAL_POINTS). This module only decides whether each cached
-// signal is present. It does not fetch. Points apply only to an HVAC lead.
+// signal is present. It does not fetch. Points apply only to an HVAC lead:
+// a stored non-HVAC industry scores 0 even when the name or category matches.
 
 const cfg = require('./config');
 const { normalizeIndustry } = require('./industry');
@@ -17,9 +18,16 @@ const FOLLOW_UP_PROMISE_RE = /\b(?:we(?:'ll|’ll| will)\s+follow\s+up|follow[- 
 const JOB_AD_RE = /\b(?:comfort|sales)\s+(?:advisors?|consultants?)\b|\bcomfort\s+sales\b|\bsales\s+comfort\b/i;
 const SEARCH_ADS_RE = /\blocal\s+services\s+ads?\b|\bgoogle\s+ads\b|\bgoogle\s+local\s+services\b|\blsas?\b/i;
 const SEARCH_ADS_LABEL_RE = /google ads|\blocal services\b|\blsas?\b/i;
-// A negation in the words just before a phrase. "not only" is excluded by the
-// lookahead. "no-cost" fails this shape because the hyphen is not a space.
-const NEGATIVE_TAIL = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don'?t|doesn'?t|didn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|won'?t|can'?t|no|not|never|without)\b(?:\s+(?!only\b)[a-z0-9'’-]+){0,4}\s*$/i;
+// Apostrophes: straight, U+2019 (don’t), and U+2018. The general pattern has
+// no "not only" lookahead, and a hyphen is a separator, so "not only …" and
+// "no-cost" / "no cost" match as negations unless the exceptions in isNegated
+// return first.
+const NEGATIVE_BEFORE = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|no|not|never|without)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
+// A short window after the phrase: "not available", "unavailable", "none",
+// or a bare "no" / "no." The bare "no" does not match "no obligation".
+const NEGATIVE_AFTER = /^[\s,;:?!-]*(?:(?:are|is|was|were)\s+)?(?:\bnot\s+available\b|\bunavailable\b|\bnone\b|\bno(?=\s*[.!?]|[\s]*$))/i;
+const NOT_HVAC_TRADE_RE = /\b(?:heating\s+oil|pool\s+heating)\b/i;
+const AIR_CONDITIONING_RE = /\bair\s+conditioning\b/i;
 
 const REASONS = {
   replacement: {
@@ -79,25 +87,34 @@ function fieldText(value) {
   return String(value);
 }
 
-// Industry or category HVAC, or heating / cooling / HVAC / AC / furnace on a
-// word boundary in the industry, category, or company name. Page text is not
-// an identity field: a landscaper that mentions a furnace on its site is
-// still a landscaper.
-function isHvacLead(prospect) {
+function foldIdentity(value) {
+  return String(value || '')
+    .trim()
+    .replace(/-+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+// HVAC, "Air Conditioning", or a combination that says heating, cooling, HVAC,
+// AC, or furnace. "Heating Oil Delivery" and "Pool Heating" are not HVAC.
+// Page text is not an identity field.
+function identityIsHvac(value) {
+  const folded = foldIdentity(value);
+  if (!folded) return false;
+  if (NOT_HVAC_TRADE_RE.test(folded)) return false;
+  if (AIR_CONDITIONING_RE.test(folded)) return true;
+  if (normalizeIndustry(folded).toLowerCase() === 'hvac') return true;
   const re = hvacWordRe();
-  const chunks = [
-    fieldText(prospect.industry),
-    fieldText(prospect.category),
-    fieldText(prospect.categories),
-    fieldText(prospect.company),
-  ];
-  for (const chunk of chunks) {
-    const trimmed = chunk.trim();
-    if (!trimmed) continue;
-    if (normalizeIndustry(trimmed).toLowerCase() === 'hvac') return true;
-    if (re && re.test(trimmed)) return true;
-  }
-  return false;
+  return Boolean(re && re.test(folded));
+}
+
+// A stored non-HVAC industry is 0 no matter what the company name or category
+// says. Name and category are read only when the industry is empty.
+function isHvacLead(prospect) {
+  const industry = fieldText(prospect.industry).trim();
+  if (industry) return identityIsHvac(industry);
+  return [prospect.category, prospect.categories, prospect.company]
+    .some(value => identityIsHvac(fieldText(value)));
 }
 
 function signalsOf(research) {
@@ -184,11 +201,22 @@ function clauseBefore(text, index) {
   return window;
 }
 
-function isNegated(text, index) {
-  const window = clauseBefore(text, index);
-  if (/\bnot\s+only(?:\s+\S+){0,4}\s*$/i.test(window)) return false;
-  if (/\bno[-\s]+cost\s*$/i.test(window)) return false;
-  return NEGATIVE_TAIL.test(window);
+// Stop at . or ! and keep that mark, so "no." is visible and the next sentence
+// is not. ? and : stay, so "free estimates? no." and "Financing: none" do too.
+function clauseAfter(text, end) {
+  let window = text.slice(end, end + 48);
+  const stop = window.search(/[.!]/);
+  if (stop !== -1) window = window.slice(0, stop + 1);
+  return window;
+}
+
+function isNegated(text, index, length) {
+  const before = clauseBefore(text, index);
+  // Early returns are load-bearing. NEGATIVE_BEFORE matches both phrases.
+  if (/\bnot\s+only(?:\s+\S+){0,4}\s*$/i.test(before)) return false;
+  if (/\bno[-\s]+cost\s*$/i.test(before)) return false;
+  if (NEGATIVE_BEFORE.test(before)) return true;
+  return NEGATIVE_AFTER.test(clauseAfter(text, index + length));
 }
 
 function matchesAffirmative(text, re) {
@@ -197,7 +225,7 @@ function matchesAffirmative(text, re) {
   const global = new RegExp(re.source, flags);
   let match;
   while ((match = global.exec(text)) !== null) {
-    if (!isNegated(text, match.index)) return true;
+    if (!isNegated(text, match.index, match[0].length)) return true;
     if (match[0].length === 0) global.lastIndex += 1;
   }
   return false;

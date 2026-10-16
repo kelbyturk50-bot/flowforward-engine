@@ -72,14 +72,23 @@ const TIER_CAP_FOR = {
 //
 // Text matches are word-boundary matches. "preplacement", "reinstallation",
 // "refinancing", "freeestimate", and "free estimated" do not match.
-// A negated phrase does not count: "no free estimates", "we do not offer
-// financing", "we don't offer financing", and "not offering installation".
-// "not only" and "no-cost" / "no cost" financing are not negations.
+// A negated phrase does not count. The negation can sit before the phrase
+// ("no free estimates", "we do not offer financing", "we don't offer
+// financing", "not offering installation") or in a short window after it
+// ("financing not available", "free estimates are not available",
+// "financing: none", "free estimates? no."). A curly apostrophe counts
+// (don’t, doesn’t). Commas and a short clause may sit between the negation
+// and the phrase. "not only" and "no-cost" / "no cost" financing are not
+// negations. "no obligation" is not a negation of the phrase before it.
 //
-// HVAC only (Scout, PR #51). The points apply when industry or category is
-// HVAC, or when industry, category, or the company name says heating, cooling,
-// HVAC, AC, or furnace on a word boundary (ESTIMATE_SIGNAL_HVAC_WORDS).
-// "Plumbing & Heating" counts. "Plumber" and "Plumbing" alone do not.
+// HVAC only (Scout, PR #51; Gauge on the industry gate). A stored industry
+// that is a non-HVAC trade scores 0 no matter what the company name or
+// category says. Name and category are read only when the industry is empty.
+// An industry counts when it is HVAC, "Air Conditioning" (or
+// "air-conditioning"), or a combination that says heating, cooling, HVAC,
+// AC, or furnace on a word boundary ("Plumbing & Heating", "Heating &
+// Cooling", "Heating and Air", "HVAC & Plumbing"). "Heating Oil Delivery"
+// and "Pool Heating" are not HVAC. "Plumber" and "Plumbing" alone are not.
 // Landscaping and every other trade get no points, so a non-beachhead shop
 // does not enter tier A on these signals. Summit's binding condition is still
 // no plumbing score change. INDUSTRY_FIT.Plumbing stays 9. These points do
@@ -129,9 +138,12 @@ const ESTIMATE_SIGNAL_POINTS = {
   search_ads: 2,
 };
 
-// Case-insensitive words that mark an HVAC lead on industry, category, or
-// company. "ac" is the whole word, so "face" and "Plumbing" do not match.
-// "a/c" is the slashed form of the same word.
+// Case-insensitive words that mark an HVAC industry, or — only when that
+// industry is empty — an HVAC category or company name. "ac" is the whole
+// word, so "face" and "Plumbing" do not match. "a/c" is the slashed form.
+// "Air Conditioning" is mapped separately. "Heating Oil Delivery" and
+// "Pool Heating" are blocked before this list, so "heating" does not make
+// them HVAC.
 const ESTIMATE_SIGNAL_HVAC_WORDS = ['hvac', 'heating', 'cooling', 'furnace', 'ac', 'a/c'];
 
 // Cities you can meet in person (case-insensitive). Override with env

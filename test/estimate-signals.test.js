@@ -413,15 +413,15 @@ describe('F-003 estimate signals', () => {
     assert.equal(signalPoints(plumber), 0);
     assert.equal(plumber.fit_score, plumberPlain.fit_score);
 
-    const named = computeFit({
+    const namedRow = {
       ...peer,
       company: 'Plumbing & Heating',
       industry: 'Plumbing',
-      research: replacementResearch(),
-    });
-    const namedPlain = computeFit({ ...peer, company: 'Plumbing & Heating', industry: 'Plumbing' });
-    assert.equal(signalPoints(named), 21);
-    assert.equal(named.fit_score, namedPlain.fit_score + 21);
+      category: 'HVAC',
+    };
+    const named = computeFit({ ...namedRow, research: replacementResearch() });
+    assert.equal(signalPoints(named), 0);
+    assert.equal(named.fit_score, computeFit(namedRow).fit_score);
 
     const labeled = computeFit({
       ...peer,
@@ -438,7 +438,7 @@ describe('F-003 estimate signals', () => {
       category: 'HVAC',
       research: replacementResearch(),
     });
-    assert.equal(signalPoints(byCategory), 21);
+    assert.equal(signalPoints(byCategory), 0);
 
     const electrical = computeFit({
       ...peer,
@@ -447,6 +447,90 @@ describe('F-003 estimate signals', () => {
       research: replacementResearch(),
     });
     assert.equal(signalPoints(electrical), 0);
+  });
+
+  it('uses the stored industry before the company name or category', () => {
+    const neutral = { ...peer, company: 'City Services' };
+    const hvacIndustries = [
+      'HVAC', 'hvac', ' HVAC ', 'Heating', 'heating & cooling', 'Heating & Cooling',
+      'Plumbing & Heating', 'HVAC & Plumbing', 'Heating and Air', 'AC', 'A/C',
+      'Air Conditioning', 'air-conditioning',
+    ];
+    for (const industry of hvacIndustries) {
+      const fit = computeFit({ ...neutral, industry, research: replacementResearch() });
+      assert.equal(signalPoints(fit), 21, industry);
+    }
+
+    const blocked = [
+      'Face Painting', 'A.C. Painting', 'Plumbing', 'plumbing', ' PLUMBING ',
+      'Plumber', 'Landscaping', 'Electrical', 'Roofing', 'Pool',
+      'Heating Oil Delivery', 'Pool Heating',
+    ];
+    for (const industry of blocked) {
+      const fit = computeFit({
+        ...peer,
+        company: 'AC Cooling Heating',
+        category: 'HVAC',
+        industry,
+        research: replacementResearch(),
+      });
+      assert.equal(signalPoints(fit), 0, industry);
+    }
+
+    for (const industry of [null, '']) {
+      const fit = computeFit({
+        ...neutral,
+        industry,
+        category: 'Landscaping',
+        research: replacementResearch(),
+      });
+      assert.equal(signalPoints(fit), 0, String(industry));
+    }
+
+    const nameWins = [
+      ['AC Lawn Care', 'Landscaping'],
+      ['Cooling Shade Trees', 'Landscaping'],
+      ['AC/DC Electric', 'Electrical'],
+    ];
+    for (const [company, industry] of nameWins) {
+      const row = { ...peer, company, industry, category: 'HVAC' };
+      const fit = computeFit({ ...row, research: replacementResearch() });
+      assert.equal(signalPoints(fit), 0, company);
+      assert.equal(fit.fit_score, computeFit(row).fit_score, company);
+    }
+
+    const lawnCategory = computeFit({
+      ...peer,
+      company: 'Denver Lawns',
+      industry: 'Landscaping',
+      category: 'HVAC',
+      research: replacementResearch(),
+    });
+    assert.equal(signalPoints(lawnCategory), 0);
+
+    const emptyName = computeFit({
+      ...neutral,
+      industry: '',
+      company: 'Cooling Shade Trees',
+      research: replacementResearch(),
+    });
+    assert.equal(signalPoints(emptyName), 21);
+
+    const emptyCategory = computeFit({
+      ...neutral,
+      industry: '',
+      category: 'HVAC',
+      research: replacementResearch(),
+    });
+    assert.equal(signalPoints(emptyCategory), 21);
+
+    const emptyCombo = computeFit({
+      ...neutral,
+      industry: null,
+      categories: ['Heating and Air'],
+      research: replacementResearch(),
+    });
+    assert.equal(signalPoints(emptyCombo), 21);
   });
 
   it('gives landscaping with every signal no boost and keeps it at or below 77/B', () => {
@@ -492,6 +576,22 @@ describe('F-003 estimate signals', () => {
         signals: { mentions: { free_estimates: true } },
         site: { pages: [{ url: 'https://shop.example/', title: 'Home', text: 'No free estimates' }], signals: {} },
       }],
+      ['financing not available', research('Financing not available.')],
+      ['estimates are not available', research('Free estimates are not available.')],
+      ['curly dont', research('We don\u2019t offer free estimates.')],
+      ['curly doesnt', research('This doesn\u2019t include financing.')],
+      ['comma clause', research('We do not offer, at this time, any kind of financing')],
+      ['financing none', research('Financing: none')],
+      ['estimates question no', research('free estimates? no.')],
+      ['financing unavailable', research('Financing unavailable.')],
+      ['never replacement', research('We never do replacement')],
+      ['without financing', research('Pay without financing today')],
+      ['cannot installation', research('We cannot offer installation')],
+      ['shouted no estimates', research('NO  FREE ESTIMATES')],
+      ['financing mention after', {
+        signals: { mentions: { financing: true } },
+        site: { pages: [{ url: 'https://shop.example/', title: 'Home', text: 'Financing not available.' }], signals: {} },
+      }],
     ];
     for (const [name, cache] of negated) {
       const fit = computeFit({ ...peer, research: cache });
@@ -515,9 +615,25 @@ describe('F-003 estimate signals', () => {
     assert.equal(notOnly.fit_reasons.find(row => row.label === 'Installation').points, 3);
     assert.equal(notOnly.fit_reasons.find(row => row.label === 'Replacement').points, 4);
 
-    const noCost = computeFit({ ...peer, research: research('Ask about no-cost financing and no cost financing.') });
-    assert.equal(noCost.fit_score - plain.fit_score, 3);
-    assert.equal(noCost.fit_reasons.find(row => row.label === 'Financing').points, 3);
+    const hyphenCost = computeFit({ ...peer, research: research('Ask about no-cost financing.') });
+    assert.equal(hyphenCost.fit_score - plain.fit_score, 3);
+    assert.equal(hyphenCost.fit_reasons.find(row => row.label === 'Financing').points, 3);
+
+    const spacedCost = computeFit({ ...peer, research: research('Ask about no cost financing.') });
+    assert.equal(spacedCost.fit_score - plain.fit_score, 3);
+    assert.equal(spacedCost.fit_reasons.find(row => row.label === 'Financing').points, 3);
+
+    const available = computeFit({ ...peer, research: research('Financing available') });
+    assert.equal(available.fit_score - plain.fit_score, 3);
+    assert.equal(available.fit_reasons.find(row => row.label === 'Financing').points, 3);
+
+    const nonetheless = computeFit({ ...peer, research: research('Financing nonetheless is offered') });
+    assert.equal(nonetheless.fit_reasons.find(row => row.label === 'Financing').points, 3);
+
+    const obligation = computeFit({ ...peer, research: research('Free estimates, no obligation') });
+    assert.equal(obligation.fit_score - plain.fit_score, 4);
+    assert.equal(obligation.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
+    assert.equal(signalPoints(obligation), 4);
 
     const afterSentence = computeFit({
       ...peer,
@@ -525,6 +641,12 @@ describe('F-003 estimate signals', () => {
     });
     assert.equal(afterSentence.fit_reasons.find(row => row.label === 'Financing').points, 3);
     assert.equal(afterSentence.fit_reasons.find(row => row.label === 'Replacement').points, 4);
+
+    const lender = computeFit({
+      ...peer,
+      research: research('We do not offer financing.', { signals: { financing: ['GreenSky'] } }),
+    });
+    assert.equal(lender.fit_reasons.find(row => row.label === 'Financing').points, 3);
   });
 
   it('still penalizes ServiceTitan and caps it after the new boost', () => {
