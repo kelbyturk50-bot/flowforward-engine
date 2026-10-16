@@ -8,6 +8,16 @@ const MAX_DATA_ROWS = 2000;
 
 const STATUSES = new Set(['open', 'sold', 'lost', 'expired', 'opted_out']);
 
+// Spreadsheet formula triggers, plus tab and CR. Intake rejects these at the
+// start of an estimate id, email, or job type. A leading run is stripped from
+// a first name so the stored value cannot open a formula.
+const FORMULA_LEAD = /^[=+\-@\t\r]/;
+
+// C1 controls, bidi overrides and isolates, and zero-width characters.
+// Ordinary newlines are not in this set: a quoted CSV field may contain one,
+// and it is collapsed to a space before the value is stored.
+const HOSTILE_TEXT = /[\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
+
 const HEADER_ALIASES = {
   estimate_id: 'estimateId',
   source_estimate_id: 'estimateId',
@@ -36,13 +46,15 @@ function cell(cells, index, field) {
 
 function validEstimateId(value) {
   const id = String(value || '').trim();
+  if (FORMULA_LEAD.test(id)) return null;
   if (id.length < 1 || id.length > 80) return null;
-  if (/[\u0000-\u001F\u007F\s]/.test(id)) return null;
+  if (/[\u0000-\u001F\u007F\s]/.test(id) || HOSTILE_TEXT.test(id)) return null;
   return id;
 }
 
 function validEmail(value) {
   const email = String(value || '').trim().toLowerCase();
+  if (FORMULA_LEAD.test(email)) return null;
   if (email.length < 3 || email.length > 254) return null;
   if (email.includes('..')) return null;
   if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(email)) return null;
@@ -51,22 +63,29 @@ function validEmail(value) {
   const domain = email.slice(at + 1);
   if (!local || local.length > 64 || local.startsWith('.') || local.endsWith('.')) return null;
   if (!domain || domain.startsWith('.') || domain.endsWith('.') || domain.startsWith('-')) return null;
+  if (HOSTILE_TEXT.test(email)) return null;
   return email;
 }
 
 function validFirstName(value) {
-  const name = String(value || '').trim().replace(/\s+/g, ' ');
+  const raw = String(value || '');
+  if (HOSTILE_TEXT.test(raw)) return { ok: false };
+  // Drop a leading formula trigger (= + - @ tab CR) before the name is stored.
+  const name = raw.trim().replace(/^[=+\-@\t\r]+/, '').trim().replace(/\s+/g, ' ');
   if (!name) return { ok: true, value: null };
-  if (name.length > 60 || /[\u0000-\u001F\u007F]/.test(name) || name.includes('@')) {
+  if (name.length > 60 || HOSTILE_TEXT.test(name) || /[\u0000-\u001F\u007F]/.test(name) || name.includes('@')) {
     return { ok: false };
   }
   return { ok: true, value: name };
 }
 
 function validJobType(value) {
-  const job = String(value || '').trim().replace(/\s+/g, ' ');
+  const raw = String(value || '');
+  if (HOSTILE_TEXT.test(raw)) return { ok: false };
+  const job = raw.trim().replace(/\s+/g, ' ');
   if (!job) return { ok: true, value: null };
-  if (job.length > 80 || /[\u0000-\u001F\u007F]/.test(job)) return { ok: false };
+  if (FORMULA_LEAD.test(job)) return { ok: false };
+  if (job.length > 80 || HOSTILE_TEXT.test(job) || /[\u0000-\u001F\u007F]/.test(job)) return { ok: false };
   return { ok: true, value: job };
 }
 

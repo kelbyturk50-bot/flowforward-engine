@@ -1,6 +1,7 @@
 // Pilot #1 CSV intake. API key is enforced by the /api mount.
-// FF_PILOT_ESTIMATE_RECOVERY must be exactly "true" or every route is 404
-// and this file does not query. It does not send mail or accept forwarded mail.
+// Every route is 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly "true"
+// AND CRM_API_KEY is set and at least 32 characters. A short or missing key
+// writes nothing, matching the pilot demo. This file does not send mail.
 
 const express = require('express');
 const flags = require('../pilot/flags');
@@ -15,6 +16,22 @@ const csvBody = express.text({
 });
 
 const NOT_FOUND = { error: 'Not found' };
+const MIN_API_KEY_LENGTH = 32;
+
+let missingKeyWarned = false;
+
+function pilotKeyReady() {
+  const secret = process.env.CRM_API_KEY;
+  if (typeof secret === 'string' && secret.length >= MIN_API_KEY_LENGTH) {
+    missingKeyWarned = false;
+    return true;
+  }
+  if (!missingKeyWarned) {
+    missingKeyWarned = true;
+    console.warn('[pilot] CRM_API_KEY must be at least 32 characters — estimate intake stays off.');
+  }
+  return false;
+}
 
 function sendJson(res, status, body) {
   res.set('Cache-Control', 'no-store');
@@ -26,7 +43,7 @@ function closed(res) {
 }
 
 router.use((req, res, next) => {
-  if (!flags.masterOn()) return closed(res);
+  if (!flags.masterOn() || !pilotKeyReady()) return closed(res);
   return next();
 });
 
@@ -43,11 +60,13 @@ function validName(value) {
   return name;
 }
 
-function wantsLiveSend(body) {
+function liveSendRejected(body) {
   if (!body || typeof body !== 'object') return false;
-  const camel = body.liveSendEnabled;
-  const snake = body.live_send_enabled;
-  return camel === true || camel === 'true' || snake === true || snake === 'true';
+  for (const key of ['liveSendEnabled', 'live_send_enabled']) {
+    if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
+    if (body[key] !== false) return true;
+  }
+  return false;
 }
 
 function readCsv(req) {
@@ -77,8 +96,11 @@ function toPublic(row) {
 }
 
 function csvCell(value) {
-  const raw = value == null ? '' : String(value);
-  if (/[",\n\r]/.test(raw)) return `"${raw.replace(/"/g, '""')}"`;
+  let raw = value == null ? '' : String(value);
+  // A leading = + - @ tab or CR is a spreadsheet formula. Prefix an apostrophe
+  // and quote the cell so the mark is part of the value.
+  if (/^[=+\-@\t\r]/.test(raw)) raw = `'${raw}`;
+  if (raw.startsWith("'") || /[",\n\r]/.test(raw)) return `"${raw.replace(/"/g, '""')}"`;
   return raw;
 }
 
@@ -107,7 +129,7 @@ function toCsv(rows) {
 
 router.post('/customers', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  if (wantsLiveSend(body)) {
+  if (liveSendRejected(body)) {
     return sendJson(res, 400, {
       error: 'live_send_locked',
       message: 'live_send_enabled stays off',

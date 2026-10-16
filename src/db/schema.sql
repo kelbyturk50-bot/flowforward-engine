@@ -546,7 +546,8 @@ ON CONFLICT (version, agent, signal) DO NOTHING;
 -- Pilot #1 CSV intake (idempotent — applied on every boot).
 -- Shop row plus open estimates. No free-text notes column. No mailbox token.
 -- Re-uploads upsert on (customer_id, source_estimate_id).
--- Deleting a customer cascades to that customer's estimates.
+-- Deleting a customer cascades to that customer's estimates and to the
+-- opt-out suppression list. Deleting estimates does not clear suppressions.
 -- This file does not UPDATE these tables and does not send mail.
 -- live_send_enabled defaults false. No statement here sets it true.
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -590,7 +591,7 @@ CREATE TABLE IF NOT EXISTS pilot_open_estimates (
   CONSTRAINT pilot_open_estimates_name_check CHECK (
     homeowner_first_name IS NULL OR (
       char_length(homeowner_first_name) BETWEEN 1 AND 60
-      AND homeowner_first_name !~ '[[:cntrl:]]'
+      AND homeowner_first_name !~ U&'[[:cntrl:]\0080-\009F\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
       AND position('@' IN homeowner_first_name) = 0
     )
   ),
@@ -601,7 +602,7 @@ CREATE TABLE IF NOT EXISTS pilot_open_estimates (
   CONSTRAINT pilot_open_estimates_job_check CHECK (
     job_type IS NULL OR (
       char_length(job_type) BETWEEN 1 AND 80
-      AND job_type !~ '[[:cntrl:]]'
+      AND job_type !~ U&'[[:cntrl:]\0080-\009F\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
     )
   ),
   CONSTRAINT pilot_open_estimates_amount_check CHECK (
@@ -620,3 +621,46 @@ DROP TRIGGER IF EXISTS pilot_open_estimates_updated_at ON pilot_open_estimates;
 CREATE TRIGGER pilot_open_estimates_updated_at
   BEFORE UPDATE ON pilot_open_estimates
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- CREATE TABLE IF NOT EXISTS does not change a check that an earlier boot
+-- already added. These extra checks close that gap for bidi, zero-width, and
+-- C1 characters. They do not UPDATE rows. A row that fails them fails boot.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'pilot_open_estimates_name_hostile_check'
+  ) THEN
+    ALTER TABLE pilot_open_estimates
+      ADD CONSTRAINT pilot_open_estimates_name_hostile_check CHECK (
+        homeowner_first_name IS NULL
+        OR homeowner_first_name !~ U&'[[:cntrl:]\0080-\009F\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
+      );
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'pilot_open_estimates_job_hostile_check'
+  ) THEN
+    ALTER TABLE pilot_open_estimates
+      ADD CONSTRAINT pilot_open_estimates_job_hostile_check CHECK (
+        job_type IS NULL
+        OR job_type !~ U&'[[:cntrl:]\0080-\009F\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
+      );
+  END IF;
+END $$;
+
+-- Opt-out emails for one shop. Survives estimate delete and re-upload.
+-- Deleting the customer cascades. Keyed by the normalized (lowercase) email.
+CREATE TABLE IF NOT EXISTS pilot_estimate_suppressions (
+  id          SERIAL PRIMARY KEY,
+  customer_id INTEGER NOT NULL REFERENCES pilot_customers(id) ON DELETE CASCADE,
+  email       TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT pilot_estimate_suppressions_email_check CHECK (
+    char_length(email) BETWEEN 3 AND 254
+    AND position('@' IN email) > 1
+    AND email = lower(email)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_estimate_suppressions_customer_email
+  ON pilot_estimate_suppressions (customer_id, email);

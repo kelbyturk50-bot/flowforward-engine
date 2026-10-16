@@ -33,7 +33,7 @@ function flagOn() {
   process.env.FF_PILOT_ESTIMATE_RECOVERY = 'true';
 }
 
-function request(method, reqPath, { headers = {}, body, rawBody } = {}) {
+function request(method, reqPath, { headers = {}, body, rawBody, port } = {}) {
   return new Promise((resolve, reject) => {
     const payload = rawBody != null
       ? (Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody))
@@ -41,7 +41,7 @@ function request(method, reqPath, { headers = {}, body, rawBody } = {}) {
     const req = http.request({
       method,
       hostname: '127.0.0.1',
-      port: server.address().port,
+      port: port || server.address().port,
       path: reqPath,
       headers: {
         ...(payload && rawBody == null ? { 'content-type': 'application/json' } : {}),
@@ -304,7 +304,26 @@ describe('pilot csv estimate intake', () => {
       body: { name: 'TEST: Enable Sends', live_send_enabled: 'true' },
     });
     assert.equal(snake.status, 400);
+    for (const value of [1, '1', 'TRUE', 'yes', 'false', {}, [true]]) {
+      const bad = await request('POST', '/api/pilot/estimate-recovery/customers', {
+        headers: { 'x-api-key': API_KEY },
+        body: { name: 'TEST: Bad Live Send', liveSendEnabled: value },
+      });
+      assert.equal(bad.status, 400, JSON.stringify(value));
+      assert.equal(bad.json.error, 'live_send_locked');
+    }
+    const stringFalse = await request('POST', '/api/pilot/estimate-recovery/customers', {
+      headers: { 'x-api-key': API_KEY },
+      body: { name: 'TEST: Bad Live Send', live_send_enabled: 'false' },
+    });
+    assert.equal(stringFalse.status, 400);
     assert.equal(await customerCount(), 0);
+    const explicit = await request('POST', '/api/pilot/estimate-recovery/customers', {
+      headers: { 'x-api-key': API_KEY },
+      body: { name: 'TEST: Explicit Off', liveSendEnabled: false },
+    });
+    assert.equal(explicit.status, 201, explicit.text);
+    assert.equal(explicit.json.liveSendEnabled, false);
     const id = await createShop();
     const row = await pool.query('SELECT live_send_enabled FROM pilot_customers WHERE id = $1', [id]);
     assert.equal(row.rows[0].live_send_enabled, false);
@@ -467,7 +486,7 @@ describe('pilot csv estimate intake', () => {
     const second = await createShop('TEST: Keep Shop');
     await postCsv(first, [
       'estimate_id,first_name,email,amount,status',
-      'E-100,=Ada,test+ada@example.com,4200.50,open',
+      'E-100,Ada,test+ada@example.com,4200.50,open',
       'E-200,Bea,test+bea@example.com,,lost',
     ].join('\n'));
     await postCsv(second, 'estimate_id,email\nE-100,test+keep@example.com\n');
@@ -478,7 +497,7 @@ describe('pilot csv estimate intake', () => {
     assert.equal(exported.status, 200, exported.text);
     assert.equal(exported.headers['cache-control'], 'no-store');
     assert.deepEqual(exported.json.estimates.map((row) => row.sourceEstimateId), ['E-100', 'E-200']);
-    assert.equal(exported.json.estimates[0].firstName, '=Ada');
+    assert.equal(exported.json.estimates[0].firstName, 'Ada');
     assert.equal(exported.json.estimates[0].email, 'test+ada@example.com');
     assert.equal(exported.json.estimates[0].amount, '4200.50');
     assert.equal(exported.json.estimates[1].amount, null);
@@ -492,7 +511,7 @@ describe('pilot csv estimate intake', () => {
     assert.match(bearer.headers['content-type'], /text\/csv/);
     assert.match(bearer.headers['content-disposition'], new RegExp(`estimates-${first}\\.csv`));
     assert.match(bearer.text, /estimate_id,first_name,email/);
-    assert.match(bearer.text, /,=Ada,/);
+    assert.match(bearer.text, /,Ada,/);
     assert.equal(bearer.text.includes('test+keep@example.com'), false);
 
     const replay = await postCsv(first, bearer.text);
@@ -504,7 +523,7 @@ describe('pilot csv estimate intake', () => {
         WHERE customer_id = $1 AND source_estimate_id = 'E-100'`,
       [first]
     );
-    assert.equal(replayed.rows[0].homeowner_first_name, '=Ada');
+    assert.equal(replayed.rows[0].homeowner_first_name, 'Ada');
 
     const removed = await request('DELETE', `/api/pilot/estimate-recovery/customers/${first}/estimates`, {
       headers: { 'x-api-key': API_KEY },
@@ -524,5 +543,267 @@ describe('pilot csv estimate intake', () => {
     assert.equal(again.json.deleted, 0);
     assert.equal(await estimateCount(second), 1);
     await resetDb();
+  });
+
+  it('prefixes spreadsheet formulas on export and rejects them on intake', async () => {
+    flagOn();
+    const id = await createShop('TEST: Formula Shop');
+    const csv = [
+      'estimate_id,first_name,email,job_type',
+      'E-OK,=Ada,test+ada@example.com,Coil',
+      '=E5,Bea,test+bea@example.com,Coil',
+      'E-PLUS,Cy,+f@example.com,Coil',
+      'E-MINUS,Dee,-e@example.com,Coil',
+      'E-JOB,Fay,test+fay@example.com,=cmd|\' /C calc\'!A0',
+      'E-HYPER,Gil,test+gil@example.com,-HYPERLINK(1)',
+      'E-SUM,Hal,test+hal@example.com,+SUM(1)',
+    ].join('\n');
+    const uploaded = await postCsv(id, csv);
+    assert.equal(uploaded.status, 200, uploaded.text);
+    assert.equal(uploaded.json.upserted, 1);
+    const fields = uploaded.json.errors.map((error) => `${error.field}`).sort();
+    assert.deepEqual(fields, ['email', 'email', 'estimate_id', 'job_type', 'job_type', 'job_type']);
+    const stored = await pool.query(
+      `SELECT source_estimate_id, homeowner_first_name, email, job_type
+         FROM pilot_open_estimates WHERE customer_id = $1`,
+      [id]
+    );
+    assert.equal(stored.rows.length, 1);
+    assert.equal(stored.rows[0].source_estimate_id, 'E-OK');
+    assert.equal(stored.rows[0].homeowner_first_name, 'Ada');
+    assert.equal(stored.rows[0].email, 'test+ada@example.com');
+    assert.equal(JSON.stringify(stored.rows).includes('=cmd'), false);
+    assert.equal(JSON.stringify(stored.rows).includes('HYPERLINK'), false);
+
+    await pool.query(
+      `INSERT INTO pilot_open_estimates
+         (customer_id, source_estimate_id, homeowner_first_name, email, job_type)
+       VALUES
+         ($1, 'E-NAME', '=Ada', 'test+name@example.com', 'Coil'),
+         ($1, 'E-PLUSJ', 'Bea', 'test+plus@example.com', '+SUM(1)'),
+         ($1, 'E-MINUSJ', 'Cy', 'test+minus@example.com', '-HYPERLINK(1)'),
+         ($1, 'E-AT', 'Dee', 'test+at@example.com', '@mention'),
+         ($1, 'E-TAB', 'Fay', $2, 'Coil'),
+         ($1, 'E-CR', 'Gil', $3, 'Coil')`,
+      [id, '\tuser@example.com', '\ruser@example.com']
+    );
+    const exported = await request('GET', `/api/pilot/estimate-recovery/customers/${id}/estimates?format=csv`, {
+      headers: { 'x-api-key': API_KEY },
+    });
+    assert.equal(exported.status, 200, exported.text);
+    assert.match(exported.text, /"'=Ada"/);
+    assert.match(exported.text, /"'\+SUM\(1\)"/);
+    assert.match(exported.text, /"'-HYPERLINK\(1\)"/);
+    assert.match(exported.text, /"'@mention"/);
+    assert.match(exported.text, /"'\tuser@example.com"/);
+    assert.match(exported.text, /"'\ruser@example.com"/);
+    assert.equal(/(^|,)=Ada(,|\n)/.test(exported.text), false);
+    assert.equal(/(^|,)\+SUM/.test(exported.text), false);
+    await resetDb();
+  });
+
+  it('keeps opted_out across re-upload and estimate delete', async () => {
+    flagOn();
+    const shop = await createShop('TEST: Opt Out Shop');
+    const other = await createShop('TEST: Other Shop');
+    const first = await postCsv(shop, [
+      'estimate_id,first_name,email,status',
+      'E-4,Ada,test+e4@example.com,opted_out',
+      'E-8,Bea,test+e8@example.com,opted_out',
+      'E-1,Cy,test+open@example.com,open',
+    ].join('\n'));
+    assert.equal(first.status, 200, first.text);
+    assert.equal(first.json.upserted, 3);
+
+    const again = await postCsv(shop, [
+      'estimate_id,email',
+      'E-4,test+e4@example.com',
+      'E-8,test+e8@example.com',
+    ].join('\n'));
+    assert.equal(again.status, 200, again.text);
+    const stuck = await pool.query(
+      `SELECT source_estimate_id, status FROM pilot_open_estimates
+        WHERE customer_id = $1 AND source_estimate_id IN ('E-4', 'E-8')
+        ORDER BY source_estimate_id`,
+      [shop]
+    );
+    assert.deepEqual(stuck.rows.map((row) => row.status), ['opted_out', 'opted_out']);
+
+    const removed = await request('DELETE', `/api/pilot/estimate-recovery/customers/${shop}/estimates`, {
+      headers: { 'x-api-key': API_KEY },
+    });
+    assert.equal(removed.json.deleted, 3);
+    assert.equal(await estimateCount(shop), 0);
+    const kept = await pool.query(
+      `SELECT email FROM pilot_estimate_suppressions WHERE customer_id = $1 ORDER BY email`,
+      [shop]
+    );
+    assert.deepEqual(kept.rows.map((row) => row.email), [
+      'test+e4@example.com',
+      'test+e8@example.com',
+    ]);
+
+    const returned = await postCsv(shop, [
+      'estimate_id,email,status',
+      'E-9,test+e4@example.com,open',
+      'E-10,test+e8@example.com,sold',
+      'E-11,test+fresh@example.com,open',
+    ].join('\n'));
+    assert.equal(returned.status, 200, returned.text);
+    const after = await pool.query(
+      `SELECT source_estimate_id, status FROM pilot_open_estimates
+        WHERE customer_id = $1 ORDER BY source_estimate_id`,
+      [shop]
+    );
+    assert.deepEqual(after.rows.map((row) => [row.source_estimate_id, row.status]), [
+      ['E-10', 'opted_out'],
+      ['E-11', 'open'],
+      ['E-9', 'opted_out'],
+    ]);
+
+    const elsewhere = await postCsv(other, 'estimate_id,email,status\nE-4,test+e4@example.com,open\n');
+    assert.equal(elsewhere.status, 200, elsewhere.text);
+    const otherRow = await pool.query(
+      `SELECT status FROM pilot_open_estimates WHERE customer_id = $1 AND source_estimate_id = 'E-4'`,
+      [other]
+    );
+    assert.equal(otherRow.rows[0].status, 'open');
+    const otherList = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM pilot_estimate_suppressions WHERE customer_id = $1',
+      [other]
+    );
+    assert.equal(otherList.rows[0].n, 0);
+
+    await pool.query('DELETE FROM pilot_customers WHERE id = $1', [shop]);
+    const gone = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM pilot_estimate_suppressions WHERE customer_id = $1',
+      [shop]
+    );
+    assert.equal(gone.rows[0].n, 0);
+    await resetDb();
+  });
+
+  it('rejects bidi, zero-width, and C1 characters in names and job types', async () => {
+    flagOn();
+    const id = await createShop('TEST: Bidi Shop');
+    const csv = [
+      'estimate_id,first_name,email,job_type',
+      `E-1,Bob\u202Eevil,test+bidi@example.com,Coil`,
+      `E-2,Ada,test+zw@example.com,Coil\u200B`,
+      `E-3,Cy,test+c1@example.com,Furnace\u0085`,
+      `E-4,Fay\u2066,test+iso@example.com,Coil`,
+      `E-5,Gil\uFEFF,test+bom@example.com,Coil`,
+      'E-6,Hal,test+ok@example.com,Coil',
+    ].join('\n');
+    const uploaded = await postCsv(id, csv);
+    assert.equal(uploaded.status, 200, uploaded.text);
+    assert.equal(uploaded.json.upserted, 1);
+    assert.deepEqual(
+      uploaded.json.errors.map((error) => `${error.row}:${error.field}`).sort(),
+      ['2:first_name', '3:job_type', '4:job_type', '5:first_name', '6:first_name']
+    );
+    const names = await pool.query(
+      'SELECT source_estimate_id, homeowner_first_name FROM pilot_open_estimates WHERE customer_id = $1',
+      [id]
+    );
+    assert.equal(names.rows.length, 1);
+    assert.equal(names.rows[0].source_estimate_id, 'E-6');
+    assert.equal(names.rows[0].homeowner_first_name, 'Hal');
+
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO pilot_open_estimates (customer_id, source_estimate_id, email, homeowner_first_name)
+         VALUES ($1, 'E-BAD', 'test+bad@example.com', $2)`,
+        [id, 'Bob\u202E']
+      ),
+      (err) => err.code === '23514'
+    );
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO pilot_open_estimates (customer_id, source_estimate_id, email, job_type)
+         VALUES ($1, 'E-JOB', 'test+job@example.com', $2)`,
+        [id, 'Coil\u200B']
+      ),
+      (err) => err.code === '23514'
+    );
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO pilot_open_estimates (customer_id, source_estimate_id, email, job_type)
+         VALUES ($1, 'E-C1', 'test+c1b@example.com', $2)`,
+        [id, 'Coil\u0080']
+      ),
+      (err) => err.code === '23514'
+    );
+    await resetDb();
+  });
+
+  it('returns 404 and writes nothing when CRM_API_KEY is missing or shorter than 32 characters', async () => {
+    const previous = process.env.CRM_API_KEY;
+    try {
+      flagOn();
+      process.env.CRM_API_KEY = '';
+      const missing = await request('POST', '/api/pilot/estimate-recovery/customers', {
+        headers: { 'x-api-key': API_KEY },
+        body: { name: 'TEST: Missing Key' },
+      });
+      assert.equal(missing.status, 404);
+      assert.deepEqual(missing.json, NOT_FOUND);
+
+      process.env.CRM_API_KEY = 'x'.repeat(31);
+      const short = await request('POST', '/api/pilot/estimate-recovery/customers', {
+        headers: { 'x-api-key': API_KEY },
+        body: { name: 'TEST: Short Key' },
+      });
+      assert.equal(short.status, 404);
+      assert.equal(await customerCount(), 0);
+
+      process.env.CRM_API_KEY = '';
+      const authPath = require.resolve('../src/api/auth');
+      delete require.cache[authPath];
+      const openAuth = require(authPath);
+      const app = express();
+      app.use(express.json({ limit: '1mb' }));
+      app.use('/api', openAuth);
+      app.use('/api/pilot/estimate-recovery', require('../src/api/pilot-estimates'));
+      const extra = http.createServer(app);
+      await new Promise((resolve) => extra.listen(0, '127.0.0.1', resolve));
+      try {
+        const port = extra.address().port;
+        const shop = await pool.query(
+          `INSERT INTO pilot_customers (name) VALUES ('TEST: Unlocked Shop') RETURNING id`
+        );
+        await pool.query(
+          `INSERT INTO pilot_open_estimates (customer_id, source_estimate_id, email)
+           VALUES ($1, 'E-KEEP', 'test+keep@example.com')`,
+          [shop.rows[0].id]
+        );
+        const csv = 'estimate_id,email\nE-NEW,test+new@example.com\n';
+        const created = await request('POST', '/api/pilot/estimate-recovery/customers', {
+          port,
+          body: { name: 'TEST: No Key Shop' },
+        });
+        const posted = await request('POST', `/api/pilot/estimate-recovery/customers/${shop.rows[0].id}/estimates`, {
+          port,
+          rawBody: csv,
+          headers: { 'content-type': 'text/csv' },
+        });
+        const listed = await request('GET', `/api/pilot/estimate-recovery/customers/${shop.rows[0].id}/estimates`, { port });
+        const removed = await request('DELETE', `/api/pilot/estimate-recovery/customers/${shop.rows[0].id}/estimates`, { port });
+        for (const res of [created, posted, listed, removed]) {
+          assert.equal(res.status, 404);
+          assert.deepEqual(res.json, NOT_FOUND);
+        }
+        assert.equal(await customerCount(), 1);
+        assert.equal(await estimateCount(shop.rows[0].id), 1);
+      } finally {
+        await new Promise((resolve) => extra.close(resolve));
+      }
+    } finally {
+      process.env.CRM_API_KEY = previous;
+      const authPath = require.resolve('../src/api/auth');
+      delete require.cache[authPath];
+      require(authPath);
+      await resetDb();
+    }
   });
 });

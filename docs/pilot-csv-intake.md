@@ -4,15 +4,15 @@ This slice stores open estimates from a CSV for one shop. It does not send email
 
 ## Flag and auth
 
-`FF_PILOT_ESTIMATE_RECOVERY` must be the exact string `true`. Otherwise every route under `/api/pilot/estimate-recovery` returns **404** and writes nothing.
+`FF_PILOT_ESTIMATE_RECOVERY` must be the exact string `true`, and `CRM_API_KEY` must be set and at least 32 characters. Otherwise every route under `/api/pilot/estimate-recovery` returns **404** and writes nothing. A missing key does not leave the routes open.
 
-When `CRM_API_KEY` is set, the routes require `x-api-key` (a `Bearer` token is also accepted). A missing or wrong key is **401** and writes nothing.
+When that key is set, the routes also require `x-api-key` (a `Bearer` token is also accepted). A missing or wrong key is **401** and writes nothing.
 
 ## Customer
 
 `POST /api/pilot/estimate-recovery/customers` with `{ "name": "Shop name" }` creates the shop row.
 
-`live_send_enabled` is stored `false`. A body that sets `liveSendEnabled` or `live_send_enabled` to true is **400** and does not insert. No route in this slice turns the column on.
+`live_send_enabled` is stored `false`. If `liveSendEnabled` or `live_send_enabled` is present, the only accepted value is boolean `false`. Anything else, including `true`, `"true"`, `1`, or `"false"`, is **400** and does not insert. No route in this slice turns the column on.
 
 ## CSV columns
 
@@ -22,10 +22,10 @@ Send `Content-Type: text/csv`, or JSON `{ "csv": "..." }`.
 
 | Column | Required | Stored as | Notes |
 |---|---|---|---|
-| `estimate_id` | yes | `source_estimate_id` | Source id. Unique with the customer. A re-upload updates that row. |
-| `email` | yes | `email` | Must be a valid email. Stored lowercase. |
-| `first_name` | no | `homeowner_first_name` | First name only. 60 characters. |
-| `job_type` | no | `job_type` | Short label. 80 characters. |
+| `estimate_id` | yes | `source_estimate_id` | Source id. Unique with the customer. A re-upload updates that row. A value that starts with `=`, `+`, `-`, `@`, tab, or CR is rejected. |
+| `email` | yes | `email` | Must be a valid email. Stored lowercase. A value that starts with `=`, `+`, `-`, `@`, tab, or CR is rejected. |
+| `first_name` | no | `homeowner_first_name` | First name only. 60 characters. A leading `=`, `+`, `-`, `@`, tab, or CR is stripped before storage. Bidi, zero-width, and C1 controls are rejected. |
+| `job_type` | no | `job_type` | Short label. 80 characters. A value that starts with `=`, `+`, `-`, `@`, tab, or CR is rejected. Bidi, zero-width, and C1 controls are rejected. |
 | `amount` | no | `amount` | `4200.50`. No `$` or commas. |
 | `estimate_date` | no | `estimate_date` | `YYYY-MM-DD`. |
 | `status` | no | `status` | `open` (default), `sold`, `lost`, `expired`, `opted_out`. |
@@ -40,15 +40,23 @@ The response is a per-row report. Valid rows are upserted. Invalid rows are list
 
 `GET /api/pilot/estimate-recovery/customers/:customerId/estimates` returns JSON for that customer only: source estimate id, first name, email, job type, amount, estimate date, status, and timestamps.
 
-`?format=csv` returns those same fields as CSV (`Content-Disposition: attachment`). The file can be posted back; timestamps are ignored on intake.
+`?format=csv` returns those same fields as CSV (`Content-Disposition: attachment`). A value whose first character is `=`, `+`, `-`, `@`, tab, or CR is prefixed with `'` and quoted, so a spreadsheet does not treat it as a formula. The file can be posted back; timestamps are ignored on intake. The leading `'` is stored if that file is uploaded again.
 
 ## Retention and delete
 
 `DELETE /api/pilot/estimate-recovery/customers/:customerId/estimates` deletes every estimate row for that customer and returns the count. The shop row stays, with `live_send_enabled` still false. A second delete returns `deleted: 0`.
 
-`pilot_open_estimates.customer_id` references `pilot_customers` with `ON DELETE CASCADE`. Deleting the shop row deletes that shop's estimates.
+`pilot_open_estimates.customer_id` references `pilot_customers` with `ON DELETE CASCADE`. Deleting the shop row deletes that shop's estimates and that shop's opt-out list.
 
 Stored homeowner fields are only the columns above. There is no notes, phone, last name, or address column.
+
+## Opt-out (CAN-SPAM)
+
+`status=opted_out` sticks. A later upload of the same estimate id does not move that row back to `open`, `sold`, `lost`, or `expired`, even when the new file omits status (the file default is `open`).
+
+The normalized email is also written to `pilot_estimate_suppressions`, keyed by `(customer_id, email)`. That list survives both a re-upload and `DELETE` of the estimates. Uploading that email again, on the same estimate id or a new one, is stored as `opted_out`. Another shop's copy of the same email is not suppressed.
+
+Deleting the customer row cascades the list. This slice does not send, so the list is the record a later send must honor: no automated email to a suppressed address, and an opt-out is not cleared by a CRM re-import.
 
 ## Kill switch
 
