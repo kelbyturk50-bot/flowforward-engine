@@ -38,6 +38,7 @@ const DUMMY_HASH = crypto.randomBytes(32);
 let derivedKey = null;
 let derivedFrom = null;
 let missingSecretWarned = false;
+let schemaClosed = false;
 
 function ttlMs() {
   const raw = process.env.PILOT_DEMO_TOKEN_TTL_HOURS;
@@ -54,7 +55,16 @@ function serverSecret() {
   return secret;
 }
 
+function closePilot() {
+  schemaClosed = true;
+}
+
+function openPilot() {
+  schemaClosed = false;
+}
+
 function pilotReady() {
+  if (schemaClosed) return false;
   if (serverSecret()) {
     missingSecretWarned = false;
     return true;
@@ -145,6 +155,13 @@ async function resolveToken(raw) {
   if (row.proposal_status === 'discarded') return null;
   if (row.demo_revoked_at) return null;
   if (new Date(row.expires_at).getTime() <= Date.now()) return null;
+  const siblings = await pool.query(
+    `SELECT COUNT(*)::int AS n
+       FROM pilot_tokens
+      WHERE proposal_id = $1 AND revoked_at IS NULL`,
+    [row.proposal_id]
+  );
+  if (Number(siblings.rows[0].n) > 1) return null;
   return {
     id: row.id,
     proposal_id: Number(row.proposal_id),
@@ -252,17 +269,16 @@ async function demoHrefForProposal(req, proposalId) {
   if (blockedProposal(gateRow.rows[0])) return '';
 
   const active = await pool.query(
-    `SELECT generation, token_hash
+    `SELECT generation, token_hash, expires_at
        FROM pilot_tokens
       WHERE proposal_id = $1
         AND revoked_at IS NULL
-        AND expires_at > NOW()
-      ORDER BY generation DESC
-      LIMIT 1`,
+      ORDER BY generation DESC`,
     [id]
   );
+  if (active.rows.length !== 1) return '';
   const row = active.rows[0];
-  if (!row) return '';
+  if (new Date(row.expires_at).getTime() <= Date.now()) return '';
   const token = deriveToken(id, row.generation);
   if (!token) return '';
   const stored = Buffer.from(row.token_hash);
@@ -277,6 +293,7 @@ function _clearCacheForTests() {
   derivedKey = null;
   derivedFrom = null;
   missingSecretWarned = false;
+  schemaClosed = false;
 }
 
 module.exports = {
@@ -286,6 +303,8 @@ module.exports = {
   hashToken,
   deriveToken,
   pilotReady,
+  closePilot,
+  openPilot,
   publicDemoPath,
   resolveToken,
   mintForProposal,

@@ -244,10 +244,14 @@ UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND crea
 -- every active row except the newest id) and generation is backfilled to 0
 -- before it is set NOT NULL and the unique partial index is created.
 -- Generation 0 is only that backfill; live tokens start at 1.
--- Each repair step is its own DO block. A caught error is a warning and does
--- not abort this file: schema.sql runs as one statement, and an uncaught
--- error would roll the token-column drop and the generation add back too.
--- After the first successful boot the updates match zero rows.
+-- Each repair step is its own DO block. A caught error does not abort this
+-- file: schema.sql runs as one statement, and an uncaught error would roll
+-- the token-column drop and the generation add back too. The handler writes
+-- the error into pilot_boot_errors (and raises a warning) so the server can
+-- read it after the transaction commits. Boot then checks the index,
+-- generation, and active-row invariants in JavaScript and closes the pilot
+-- when any of them fail. After the first successful boot the updates match
+-- zero rows and pilot_boot_errors is empty.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS demo_revoked_at TIMESTAMPTZ;
@@ -265,17 +269,37 @@ CREATE TABLE IF NOT EXISTS pilot_tokens (
 ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS generation INTEGER;
 ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS token;
 
+-- Repair failures from this boot only. Cleared at the start of every boot.
+CREATE TABLE IF NOT EXISTS pilot_boot_errors (
+  id         SERIAL PRIMARY KEY,
+  step       TEXT NOT NULL,
+  message    TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+DELETE FROM pilot_boot_errors;
+
 DO $$
+DECLARE
+  err text;
 BEGIN
   UPDATE pilot_tokens
      SET revoked_at = NOW()
    WHERE generation IS NULL
      AND revoked_at IS NULL;
 EXCEPTION WHEN OTHERS THEN
-  RAISE WARNING 'pilot_tokens: revoke null-generation rows failed: %', SQLERRM;
+  err := SQLERRM;
+  BEGIN
+    INSERT INTO pilot_boot_errors (step, message)
+    VALUES ('revoke-null-generation', err);
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
+  RAISE WARNING 'pilot_tokens: revoke null-generation rows failed: %', err;
 END $$;
 
 DO $$
+DECLARE
+  err text;
 BEGIN
   UPDATE pilot_tokens t
      SET revoked_at = NOW()
@@ -287,34 +311,68 @@ BEGIN
           AND n.id > t.id
      );
 EXCEPTION WHEN OTHERS THEN
-  RAISE WARNING 'pilot_tokens: revoke duplicate active rows failed: %', SQLERRM;
+  err := SQLERRM;
+  BEGIN
+    INSERT INTO pilot_boot_errors (step, message)
+    VALUES ('revoke-duplicate-active', err);
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
+  RAISE WARNING 'pilot_tokens: revoke duplicate active rows failed: %', err;
 END $$;
 
 DO $$
+DECLARE
+  err text;
 BEGIN
   UPDATE pilot_tokens
      SET generation = 0
    WHERE generation IS NULL;
 EXCEPTION WHEN OTHERS THEN
-  RAISE WARNING 'pilot_tokens: backfill generation failed: %', SQLERRM;
+  err := SQLERRM;
+  BEGIN
+    INSERT INTO pilot_boot_errors (step, message)
+    VALUES ('backfill-generation', err);
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
+  RAISE WARNING 'pilot_tokens: backfill generation failed: %', err;
 END $$;
 
 DO $$
+DECLARE
+  err text;
 BEGIN
   ALTER TABLE pilot_tokens ALTER COLUMN generation SET NOT NULL;
 EXCEPTION WHEN OTHERS THEN
-  RAISE WARNING 'pilot_tokens: generation NOT NULL failed: %', SQLERRM;
+  err := SQLERRM;
+  BEGIN
+    INSERT INTO pilot_boot_errors (step, message)
+    VALUES ('generation-not-null', err);
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
+  RAISE WARNING 'pilot_tokens: generation NOT NULL failed: %', err;
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_pilot_tokens_proposal ON pilot_tokens(proposal_id);
 
 DO $$
+DECLARE
+  err text;
 BEGIN
   CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_tokens_one_active
     ON pilot_tokens (proposal_id)
     WHERE revoked_at IS NULL;
 EXCEPTION WHEN OTHERS THEN
-  RAISE WARNING 'pilot_tokens: unique active index failed: %', SQLERRM;
+  err := SQLERRM;
+  BEGIN
+    INSERT INTO pilot_boot_errors (step, message)
+    VALUES ('unique-active-index', err);
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
+  RAISE WARNING 'pilot_tokens: unique active index failed: %', err;
 END $$;
 
 CREATE TABLE IF NOT EXISTS pilot_events (

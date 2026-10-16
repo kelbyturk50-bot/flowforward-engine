@@ -1,0 +1,106 @@
+// Checks the pilot tables after schema.sql has committed.
+// schema.sql swallows a repair error so the rest of the file still applies.
+// Those errors are written to pilot_boot_errors. This module reads them and
+// the catalog. A failure closes the pilot; the rest of the API keeps serving.
+
+const pool = require('../db/client');
+const tokens = require('./tokens');
+
+function redact(text) {
+  let out = String(text == null ? '' : text);
+  const secret = process.env.CRM_API_KEY;
+  if (typeof secret === 'string' && secret.length > 0) out = out.split(secret).join('[redacted]');
+  return out;
+}
+
+async function readPilotSchemaStatus() {
+  const failures = [];
+  try {
+    const index = await pool.query(
+      `SELECT i.indisunique, i.indisvalid, i.indisready
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE n.nspname = 'public'
+          AND c.relname = 'idx_pilot_tokens_one_active'`
+    );
+    if (!index.rows.length) {
+      failures.push('idx_pilot_tokens_one_active is missing');
+    } else {
+      const row = index.rows[0];
+      if (row.indisunique !== true) failures.push('idx_pilot_tokens_one_active is not unique');
+      if (row.indisvalid !== true) failures.push('idx_pilot_tokens_one_active is not valid');
+      if (row.indisready !== true) failures.push('idx_pilot_tokens_one_active is not ready');
+    }
+  } catch (err) {
+    failures.push(`idx_pilot_tokens_one_active check failed: ${err.message}`);
+  }
+
+  try {
+    const column = await pool.query(
+      `SELECT a.attnotnull
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname = 'pilot_tokens'
+          AND a.attname = 'generation'
+          AND a.attnum > 0
+          AND NOT a.attisdropped`
+    );
+    if (!column.rows.length) failures.push('pilot_tokens.generation is missing');
+    else if (column.rows[0].attnotnull !== true) failures.push('pilot_tokens.generation is nullable');
+  } catch (err) {
+    failures.push(`pilot_tokens.generation check failed: ${err.message}`);
+  }
+
+  try {
+    const duplicates = await pool.query(
+      `SELECT COUNT(*)::int AS proposals
+         FROM (
+           SELECT proposal_id
+             FROM pilot_tokens
+            WHERE revoked_at IS NULL
+            GROUP BY proposal_id
+           HAVING COUNT(*) > 1
+         ) d`
+    );
+    const proposals = Number(duplicates.rows[0].proposals);
+    if (proposals > 0) {
+      failures.push(`${proposals} proposals have more than one active demo token`);
+    }
+  } catch (err) {
+    failures.push(`active demo token check failed: ${err.message}`);
+  }
+
+  return { ok: failures.length === 0, failures };
+}
+
+function collectFailures(report, status) {
+  const failures = [...(status.failures || [])];
+  for (const item of (report && report.errors) || []) failures.push(item);
+  const joined = failures.join('\n');
+  for (const note of (report && report.notices) || []) {
+    if (note && !joined.includes(note)) failures.push(note);
+  }
+  return failures.map(redact).filter(Boolean);
+}
+
+async function concludeSchemaBoot(report) {
+  const status = await readPilotSchemaStatus();
+  const failures = collectFailures(report, status);
+  if (failures.length) {
+    const detail = failures.join('; ').slice(0, 2000);
+    tokens.closePilot();
+    console.error(`[pilot] schema is not safe — the estimate-recovery demo stays off. ${detail}`);
+    return { ok: false, failures };
+  }
+  tokens.openPilot();
+  console.log('[server] ✓ Schema up to date');
+  return { ok: true, failures: [] };
+}
+
+module.exports = {
+  readPilotSchemaStatus,
+  concludeSchemaBoot,
+};

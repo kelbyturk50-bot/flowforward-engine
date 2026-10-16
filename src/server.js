@@ -4,6 +4,8 @@ const cors    = require('cors');
 const cron    = require('node-cron');
 
 const { applySchema } = require('./db/migrate');
+const { concludeSchemaBoot } = require('./pilot/schema');
+const pilotTokens = require('./pilot/tokens');
 const { rescore }     = require('./scoring/fit');
 const requireApiKey   = require('./api/auth');
 const { projects, tasks } = require('./api/projects');
@@ -101,13 +103,21 @@ const PORT = process.env.PORT || 3000;
 
 async function boot() {
   try {
-    await applySchema();
-    console.log('[server] ✓ Schema up to date');
+    const report = await applySchema();
+    await concludeSchemaBoot(report);
+  } catch (err) {
+    // Keep serving /health so Railway doesn't crash-loop. A thrown migration
+    // closes the pilot; the schema-check failure path logs its own error and
+    // does not say the schema is up to date.
+    pilotTokens.closePilot();
+    console.error('[server] ✗ Startup migration/rescore failed:', err.message);
+    console.error('[pilot] schema is not safe — the estimate-recovery demo stays off.');
+  }
+  try {
     await require('./proposals/jobs').recover();
     const n = await rescore();
     console.log(`[server] ✓ Fit scores refreshed for ${n} prospects`);
   } catch (err) {
-    // Keep serving /health so Railway doesn't crash-loop; errors show in logs.
     console.error('[server] ✗ Startup migration/rescore failed:', err.message);
   }
   app.listen(PORT, () => {

@@ -18,6 +18,7 @@ const path = require('path');
 const express = require('express');
 
 const { applySchema } = require('../src/db/migrate');
+const { concludeSchemaBoot } = require('../src/pilot/schema');
 const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
 const flags = require('../src/pilot/flags');
 const { EVENT_TYPES } = require('../src/pilot/events');
@@ -1019,7 +1020,7 @@ describe('pilot estimate recovery', () => {
     }
   });
 
-  it('repairs duplicate active rows and null generations without rolling back boot', async () => {
+  it('closes the pilot when boot repair is blocked, and repairs a healthy boot', async () => {
     const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
     const blocks = schema.match(/DO \$\$[\s\S]*?END \$\$;/g) || [];
     const repair = blocks.filter((block) => block.includes('pilot_tokens'));
@@ -1030,20 +1031,49 @@ describe('pilot estimate recovery', () => {
     assert.match(repairSql, /SET generation = 0/);
     assert.match(repairSql, /ALTER COLUMN generation SET NOT NULL/);
     assert.match(repairSql, /idx_pilot_tokens_one_active/);
+    assert.match(repairSql, /INSERT INTO pilot_boot_errors/);
     for (const block of repair) assert.match(block, /EXCEPTION WHEN OTHERS/);
+
+    async function watchBoot(report) {
+      const errors = [];
+      const logs = [];
+      const origError = console.error;
+      const origLog = console.log;
+      console.error = (...args) => {
+        errors.push(args.map((part) => String(part)).join(' '));
+      };
+      console.log = (...args) => {
+        logs.push(args.map((part) => String(part)).join(' '));
+      };
+      try {
+        const result = await concludeSchemaBoot(report);
+        return { result, errors, logs };
+      } finally {
+        console.error = origError;
+        console.log = origLog;
+      }
+    }
+
+    const beforeBreak = await watchBoot(await applySchema());
+    assert.equal(beforeBreak.result.ok, true);
+    assert.equal(tokens.pilotReady(), true);
+    assert.ok(beforeBreak.logs.some((line) => line.includes('Schema up to date')));
+    assert.equal(beforeBreak.errors.some((line) => line.includes('schema is not safe')), false);
 
     const row = await insertProposal(prospect.id, { slug: 'pilot-boot-repair' });
     const hash = () => crypto.randomBytes(32);
+    const legacyA = 'a'.repeat(43);
+    const legacyB = 'b'.repeat(43);
     await pool.query('DROP INDEX IF EXISTS idx_pilot_tokens_one_active');
     await pool.query('ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS generation');
     await pool.query('ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS token TEXT');
     await pool.query(
       `INSERT INTO pilot_tokens (proposal_id, prospect_id, token_hash, expires_at, revoked_at, token)
        VALUES
-         ($1, $2, $3, NOW() + interval '14 days', NULL, 'raw-legacy-token-one'),
-         ($1, $2, $4, NOW() + interval '14 days', NULL, 'raw-legacy-token-two'),
+         ($1, $2, $3, NOW() + interval '14 days', NULL, $6),
+         ($1, $2, $4, NOW() + interval '14 days', NULL, $7),
          ($1, $2, $5, NOW() + interval '14 days', NOW(), 'raw-legacy-token-revoked')`,
-      [row.id, prospect.id, hash(), hash(), hash()]
+      [row.id, prospect.id, tokens.hashToken(legacyA), tokens.hashToken(legacyB), hash(), legacyA, legacyB]
     );
     await pool.query(`
       CREATE OR REPLACE FUNCTION ff_test_block_pilot_token_update() RETURNS trigger AS $fn$
@@ -1055,7 +1085,21 @@ describe('pilot estimate recovery', () => {
         FOR EACH ROW EXECUTE FUNCTION ff_test_block_pilot_token_update();
     `);
     try {
-      await applySchema();
+      const blocked = await applySchema();
+      assert.ok(blocked.errors.some((line) => line.includes('pilot boot update blocked')));
+      assert.ok(blocked.errors.some((line) => line.startsWith('unique-active-index:')));
+      assert.equal(blocked.errors.some((line) => line.includes(API_KEY)), false);
+      assert.equal(blocked.errors.some((line) => line.includes(legacyA)), false);
+      const closed = await watchBoot(blocked);
+      assert.equal(closed.result.ok, false);
+      assert.ok(closed.errors.some((line) => line.includes('[pilot]') && line.includes('schema is not safe')));
+      assert.ok(closed.errors.some((line) => line.includes('idx_pilot_tokens_one_active is missing')));
+      assert.ok(closed.errors.some((line) => line.includes('pilot_tokens.generation is nullable')));
+      assert.ok(closed.errors.some((line) => line.includes('more than one active demo token')));
+      assert.equal(closed.logs.some((line) => line.includes('Schema up to date')), false);
+      assert.equal(closed.errors.some((line) => line.includes(API_KEY)), false);
+      assert.equal(closed.errors.some((line) => line.includes(legacyA)), false);
+      assert.equal(tokens.pilotReady(), false);
       const during = await pool.query(
         `SELECT column_name, is_nullable
            FROM information_schema.columns
@@ -1076,10 +1120,54 @@ describe('pilot estimate recovery', () => {
       );
       assert.equal(stillActive.rows[0].n, 2);
 
+      setFlags({ master: true, link: true });
+      const quietPage = await request('GET', '/p/pilot-boot-repair', {
+        headers: { 'x-forwarded-for': '203.0.113.183' },
+      });
+      assert.equal(quietPage.status, 200);
+      assert.equal(ctaHref(quietPage.text), '');
+      const quietDemo = await request('GET', `/demo/estimate-recovery/${legacyA}`, {
+        headers: { 'x-forwarded-for': '203.0.113.184' },
+      });
+      assertClosed(quietDemo);
+      const quietMint = await request('POST', `/api/proposals/${row.id}/demo-token`, {
+        headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.185' },
+      });
+      assert.equal(quietMint.status, 404);
+      assert.deepEqual(quietMint.json, NOT_FOUND);
+      const rest = await request('GET', '/api/proposals?view=review', {
+        headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.186' },
+      });
+      assert.equal(rest.status, 200);
+      assert.ok(Array.isArray(rest.json.proposals));
+      assert.ok(rest.json.proposals.some((item) => item.slug === 'pilot-boot-repair'));
+
+      tokens.openPilot();
+      assert.equal(tokens.pilotReady(), true);
+      assert.equal(await tokens.resolveToken(legacyA), null);
+      assert.equal(await tokens.resolveToken(legacyB), null);
+      const dupPage = await request('GET', '/p/pilot-boot-repair', {
+        headers: { 'x-forwarded-for': '203.0.113.187' },
+      });
+      assert.equal(dupPage.status, 200);
+      assert.equal(ctaHref(dupPage.text), '');
+      const dupDemo = await request('GET', `/demo/estimate-recovery/${legacyB}`, {
+        headers: { 'x-forwarded-for': '203.0.113.188' },
+      });
+      assertClosed(dupDemo);
+      tokens.closePilot();
+
       await pool.query('DROP TRIGGER ff_test_block_pilot_token_update ON pilot_tokens');
       await pool.query('DROP FUNCTION ff_test_block_pilot_token_update()');
-      await applySchema();
-      await applySchema();
+      const repaired = await watchBoot(await applySchema());
+      assert.equal(repaired.result.ok, true);
+      assert.equal(tokens.pilotReady(), true);
+      assert.ok(repaired.logs.some((line) => line.includes('Schema up to date')));
+      assert.equal(repaired.errors.some((line) => line.includes('schema is not safe')), false);
+      const second = await applySchema();
+      assert.deepEqual(second.errors, []);
+      const again = await watchBoot(second);
+      assert.equal(again.result.ok, true);
 
       const after = await pool.query(
         `SELECT column_name, is_nullable
@@ -1153,6 +1241,7 @@ describe('pilot estimate recovery', () => {
       await pool.query('DROP TRIGGER IF EXISTS ff_test_block_pilot_token_update ON pilot_tokens');
       await pool.query('DROP FUNCTION IF EXISTS ff_test_block_pilot_token_update()');
       await applySchema();
+      tokens._clearCacheForTests();
     }
   });
 });

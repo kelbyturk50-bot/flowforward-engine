@@ -10,7 +10,29 @@ const pool = require('./client');
 
 async function applySchema() {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-  await pool.query(sql);
+  const client = await pool.connect();
+  const notices = [];
+  function onNotice(msg) {
+    const text = msg && typeof msg === 'object' ? String(msg.message || '') : String(msg || '');
+    if (text.startsWith('pilot_tokens:')) notices.push(text);
+  }
+  client.on('notice', onNotice);
+  try {
+    await client.query(sql);
+  } finally {
+    client.removeListener('notice', onNotice);
+    client.release();
+  }
+  let errors = [];
+  try {
+    const stored = await pool.query(
+      'SELECT step, message FROM pilot_boot_errors ORDER BY id'
+    );
+    errors = stored.rows.map((row) => `${row.step}: ${row.message}`);
+  } catch (err) {
+    errors = [`pilot_boot_errors: ${err.message}`];
+  }
+  return { errors, notices };
 }
 
 module.exports = { applySchema };
@@ -18,7 +40,15 @@ module.exports = { applySchema };
 if (require.main === module) {
   console.log('[migrate] Applying schema...');
   applySchema()
-    .then(() => console.log('[migrate] ✓ Schema applied successfully'))
+    .then(async (report) => {
+      const { concludeSchemaBoot } = require('../pilot/schema');
+      const result = await concludeSchemaBoot(report);
+      if (!result.ok) {
+        process.exitCode = 1;
+        return;
+      }
+      console.log('[migrate] ✓ Schema applied successfully');
+    })
     .catch(err => { console.error('[migrate] ✗ Error:', err.message); process.exitCode = 1; })
     .finally(() => pool.end());
 }
