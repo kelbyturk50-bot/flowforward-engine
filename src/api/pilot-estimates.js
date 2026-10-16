@@ -1,5 +1,6 @@
 // Pilot #1 CSV intake. API key is enforced by the /api mount.
-// Every route is 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly "true"
+// Every route is 404 unless FF_PILOT_ESTIMATE_RECOVERY is effectively on
+// (database row true, env not a trimmed case-insensitive "false")
 // AND CRM_API_KEY trims to at least 32 non-whitespace characters. A short,
 // blank, or missing key writes nothing, matching the pilot demo. This file
 // does not send mail.
@@ -44,8 +45,15 @@ function closed(res) {
   return sendJson(res, 404, NOT_FOUND);
 }
 
-router.use((req, res, next) => {
-  if (!flags.masterOn() || !pilotKeyReady()) return closed(res);
+router.use(async (req, res, next) => {
+  let on = false;
+  try {
+    on = await flags.masterOn();
+  } catch (err) {
+    console.error('[pilot] flag read failed');
+    on = false;
+  }
+  if (!on || !pilotKeyReady()) return closed(res);
   return next();
 });
 

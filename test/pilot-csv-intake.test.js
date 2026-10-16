@@ -24,13 +24,23 @@ const NOT_FOUND = { error: 'Not found' };
 
 let server;
 
-function clearFlags() {
+async function clearFlags() {
   process.env.FF_PILOT_ESTIMATE_RECOVERY = '';
   process.env.FF_PILOT_ESTIMATE_LIVE_SEND = '';
+  await pool.query(
+    `UPDATE feature_flags
+        SET enabled = false, updated_at = NULL, updated_by = NULL
+      WHERE name = 'FF_PILOT_ESTIMATE_RECOVERY'`
+  );
 }
 
-function flagOn() {
-  process.env.FF_PILOT_ESTIMATE_RECOVERY = 'true';
+async function flagOn() {
+  process.env.FF_PILOT_ESTIMATE_RECOVERY = '';
+  await pool.query(
+    `UPDATE feature_flags
+        SET enabled = true, updated_at = NOW(), updated_by = 'test'
+      WHERE name = 'FF_PILOT_ESTIMATE_RECOVERY'`
+  );
 }
 
 function request(method, reqPath, { headers = {}, body, rawBody, port } = {}) {
@@ -81,7 +91,7 @@ async function customerCount() {
 }
 
 async function createShop(name = 'TEST: Wasatch Heating') {
-  flagOn();
+  await flagOn();
   const res = await request('POST', '/api/pilot/estimate-recovery/customers', {
     headers: { 'x-api-key': API_KEY },
     body: { name },
@@ -125,8 +135,8 @@ describe('pilot csv estimate intake', () => {
     await closePool();
   });
 
-  afterEach(() => {
-    clearFlags();
+  afterEach(async () => {
+    await clearFlags();
   });
 
   it('stores the minimum columns, a unique customer/estimate key, and cascade delete', async () => {
@@ -188,8 +198,8 @@ describe('pilot csv estimate intake', () => {
     await resetDb();
   });
 
-  it('keeps the global kill engaged unless the env value is exactly true', () => {
-    clearFlags();
+  it('keeps the global kill engaged unless the env value is exactly true', async () => {
+    await clearFlags();
     assert.equal(kill.globalSendKilled(), true);
     assert.equal(kill.customerSendAllowed(true), false);
     for (const value of ['1', 'TRUE', 'True', 'yes', ' true', 'true ', 'off', 'false']) {
@@ -212,7 +222,7 @@ describe('pilot csv estimate intake', () => {
   });
 
   it('returns 404 and writes nothing when the master flag is off', async () => {
-    clearFlags();
+    await clearFlags();
     const csv = 'estimate_id,email\nE-9,test+off@example.com\n';
     const post = await request('POST', '/api/pilot/estimate-recovery/customers/1/estimates', {
       rawBody: csv,
@@ -238,7 +248,7 @@ describe('pilot csv estimate intake', () => {
        VALUES ($1, 'E-KEEP', 'test+keep@example.com')`,
       [shop.rows[0].id]
     );
-    clearFlags();
+    await clearFlags();
     const remove = await request('DELETE', `/api/pilot/estimate-recovery/customers/${shop.rows[0].id}/estimates`, {
       headers: { 'x-api-key': API_KEY },
     });
@@ -259,7 +269,7 @@ describe('pilot csv estimate intake', () => {
   });
 
   it('requires the API key and does not write without it', async () => {
-    flagOn();
+    await flagOn();
     const shop = await pool.query(
       `INSERT INTO pilot_customers (name) VALUES ('TEST: Auth Shop') RETURNING id`
     );
@@ -292,7 +302,7 @@ describe('pilot csv estimate intake', () => {
   });
 
   it('refuses to turn live send on', async () => {
-    flagOn();
+    await flagOn();
     const blocked = await request('POST', '/api/pilot/estimate-recovery/customers', {
       headers: { 'x-api-key': API_KEY },
       body: { name: 'TEST: Enable Sends', liveSendEnabled: true },
@@ -331,7 +341,7 @@ describe('pilot csv estimate intake', () => {
   });
 
   it('reports per-row validation errors and stores only valid rows', async () => {
-    flagOn();
+    await flagOn();
     const id = await createShop();
     const longJob = 'J'.repeat(81);
     const longName = 'N'.repeat(61);
@@ -380,7 +390,7 @@ describe('pilot csv estimate intake', () => {
   });
 
   it('rejects a file that is missing columns, too large, or too long without writing', async () => {
-    flagOn();
+    await flagOn();
     const id = await createShop();
     const missing = await postCsv(id, 'first_name,job_type\nAda,Coil\n');
     assert.equal(missing.status, 400);
@@ -409,7 +419,7 @@ describe('pilot csv estimate intake', () => {
   });
 
   it('upserts the same source estimate id and keeps another customer separate', async () => {
-    flagOn();
+    await flagOn();
     const first = await createShop('TEST: Wasatch Heating');
     const second = await createShop('TEST: Other Heating');
     const initial = [
@@ -481,7 +491,7 @@ describe('pilot csv estimate intake', () => {
   });
 
   it('exports one customer and deletes only that customer\'s estimates', async () => {
-    flagOn();
+    await flagOn();
     const first = await createShop('TEST: Export Shop');
     const second = await createShop('TEST: Keep Shop');
     await postCsv(first, [
@@ -546,7 +556,7 @@ describe('pilot csv estimate intake', () => {
   });
 
   it('prefixes spreadsheet formulas on export and rejects them on intake', async () => {
-    flagOn();
+    await flagOn();
     const id = await createShop('TEST: Formula Shop');
     const csv = [
       'estimate_id,first_name,email,job_type',
@@ -638,7 +648,7 @@ describe('pilot csv estimate intake', () => {
   });
 
   it('keeps opted_out across re-upload and estimate delete', async () => {
-    flagOn();
+    await flagOn();
     const shop = await createShop('TEST: Opt Out Shop');
     const other = await createShop('TEST: Other Shop');
     const first = await postCsv(shop, [
@@ -757,7 +767,7 @@ describe('pilot csv estimate intake', () => {
   });
 
   it('rejects bidi, zero-width, and C1 characters in names and job types', async () => {
-    flagOn();
+    await flagOn();
     const id = await createShop('TEST: Bidi Shop');
     const csv = [
       'estimate_id,first_name,email,job_type',
@@ -813,7 +823,7 @@ describe('pilot csv estimate intake', () => {
   it('returns 404 and writes nothing when CRM_API_KEY is missing or shorter than 32 characters', async () => {
     const previous = process.env.CRM_API_KEY;
     try {
-      flagOn();
+      await flagOn();
       process.env.CRM_API_KEY = '';
       const missing = await request('POST', '/api/pilot/estimate-recovery/customers', {
         headers: { 'x-api-key': API_KEY },

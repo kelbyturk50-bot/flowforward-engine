@@ -1,6 +1,10 @@
-// Pilot #1 feature flags. Every flag is OFF unless the env var is exactly
-// the string "true". "1", "TRUE", "yes", and an empty value stay off.
-// Do not cache these: tests and a process restart must see the current env.
+// Pilot #1 feature flags. Evaluation goes through the database resolver.
+// Seeded rows are off. Env is a kill switch only: a trimmed, case-insensitive
+// "false" forces the flag off. Any other value, or an unset variable, uses
+// the database row. Env never forces a flag on. A missing row or a database
+// error is off. Reads are not cached.
+
+const { effective } = require('../flags/resolve');
 
 const FF_PILOT_ESTIMATE_RECOVERY = 'FF_PILOT_ESTIMATE_RECOVERY';
 const FF_PILOT_LINK_ON_ONEPAGER = 'FF_PILOT_LINK_ON_ONEPAGER';
@@ -12,16 +16,15 @@ const NAMES = Object.freeze([
   FF_PILOT_ESTIMATE_SMS,
 ]);
 
-function isOn(name) {
-  return process.env[name] === 'true';
+async function isOn(name) {
+  const view = await effective(name);
+  return view.effective === true;
 }
 
-function flags() {
-  return {
-    [FF_PILOT_ESTIMATE_RECOVERY]: isOn(FF_PILOT_ESTIMATE_RECOVERY),
-    [FF_PILOT_LINK_ON_ONEPAGER]: isOn(FF_PILOT_LINK_ON_ONEPAGER),
-    [FF_PILOT_ESTIMATE_SMS]: isOn(FF_PILOT_ESTIMATE_SMS),
-  };
+async function flags() {
+  const out = {};
+  for (const name of NAMES) out[name] = await isOn(name);
+  return out;
 }
 
 function masterOn() { return isOn(FF_PILOT_ESTIMATE_RECOVERY); }

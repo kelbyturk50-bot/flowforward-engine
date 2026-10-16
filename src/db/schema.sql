@@ -670,3 +670,34 @@ CREATE TABLE IF NOT EXISTS pilot_estimate_suppressions (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_estimate_suppressions_customer_email
   ON pilot_estimate_suppressions (customer_id, email);
+
+-- Server feature flags. Seeded off. A re-boot inserts missing names only.
+-- ON CONFLICT DO NOTHING does not update enabled, updated_at, or updated_by.
+-- FF_PILOT_ESTIMATE_LIVE_SEND stays env-only and is not seeded.
+-- FF_HIDE_WATERMARK is test-only and is not seeded.
+CREATE TABLE IF NOT EXISTS feature_flags (
+  name       TEXT PRIMARY KEY,
+  enabled    BOOLEAN NOT NULL DEFAULT false,
+  updated_at TIMESTAMPTZ,
+  updated_by TEXT
+);
+
+CREATE TABLE IF NOT EXISTS feature_flag_audit (
+  id         SERIAL PRIMARY KEY,
+  flag       TEXT,
+  old_value  BOOLEAN,
+  new_value  BOOLEAN,
+  actor      TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO feature_flags (name, enabled)
+VALUES
+  ('FF_PILOT_ESTIMATE_RECOVERY', false),
+  ('FF_PILOT_LINK_ON_ONEPAGER', false),
+  ('FF_PILOT_ESTIMATE_SMS', false),
+  ('FF_PROTOTYPE_GALLERY', false),
+  ('FF_CAMPAIGNS', false),
+  ('FF_CAMPAIGN_OPEN_PIXEL', false),
+  ('FF_PROTOTYPE_ON_DRAFT', false)
+ON CONFLICT (name) DO NOTHING;

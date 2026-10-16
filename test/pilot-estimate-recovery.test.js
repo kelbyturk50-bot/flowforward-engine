@@ -44,16 +44,37 @@ let prospect;
 let proposal;
 const calls = { send: 0, draft: 0, places: 0, gmail: 0, approve: 0 };
 
-function clearFlags() {
+async function clearFlags() {
   process.env.FF_PILOT_ESTIMATE_RECOVERY = '';
   process.env.FF_PILOT_LINK_ON_ONEPAGER = '';
   process.env.FF_PILOT_ESTIMATE_SMS = '';
+  await pool.query(
+    `UPDATE feature_flags
+        SET enabled = false, updated_at = NULL, updated_by = NULL
+      WHERE name = ANY($1::text[])`,
+    [[
+      'FF_PILOT_ESTIMATE_RECOVERY',
+      'FF_PILOT_LINK_ON_ONEPAGER',
+      'FF_PILOT_ESTIMATE_SMS',
+    ]]
+  );
 }
 
-function setFlags({ master = false, link = false, sms = false } = {}) {
-  process.env.FF_PILOT_ESTIMATE_RECOVERY = master ? 'true' : '';
-  process.env.FF_PILOT_LINK_ON_ONEPAGER = link ? 'true' : '';
-  process.env.FF_PILOT_ESTIMATE_SMS = sms ? 'true' : '';
+async function setFlags({ master = false, link = false, sms = false } = {}) {
+  process.env.FF_PILOT_ESTIMATE_RECOVERY = '';
+  process.env.FF_PILOT_LINK_ON_ONEPAGER = '';
+  process.env.FF_PILOT_ESTIMATE_SMS = '';
+  await pool.query(
+    `UPDATE feature_flags AS f
+        SET enabled = v.enabled, updated_at = NOW(), updated_by = 'test'
+       FROM (VALUES
+         ('FF_PILOT_ESTIMATE_RECOVERY', $1::boolean),
+         ('FF_PILOT_LINK_ON_ONEPAGER', $2::boolean),
+         ('FF_PILOT_ESTIMATE_SMS', $3::boolean)
+       ) AS v(name, enabled)
+      WHERE f.name = v.name`,
+    [master, link, sms]
+  );
 }
 
 function request(method, reqPath, { headers = {}, body, rawBody, port } = {}) {
@@ -225,8 +246,8 @@ describe('pilot estimate recovery', () => {
     await closePool();
   });
 
-  afterEach(() => {
-    clearFlags();
+  afterEach(async () => {
+    await clearFlags();
     delete process.env.PILOT_DEMO_RATE_MAX;
     delete process.env.PILOT_DEMO_RATE_WINDOW_MS;
     process.env.PILOT_DEMO_RATE_MAX = '';
@@ -236,29 +257,35 @@ describe('pilot estimate recovery', () => {
     tokens._clearCacheForTests();
   });
 
-  it('keeps every pilot flag off unless the env value is exactly true', () => {
-    clearFlags();
-    assert.deepEqual(flags.flags(), {
+  it('keeps every pilot flag off unless the database row is on and env is not a kill switch', async () => {
+    await clearFlags();
+    assert.deepEqual(await flags.flags(), {
       FF_PILOT_ESTIMATE_RECOVERY: false,
       FF_PILOT_LINK_ON_ONEPAGER: false,
       FF_PILOT_ESTIMATE_SMS: false,
     });
-    for (const value of ['1', 'TRUE', 'True', 'yes', ' true', 'true ', 'on']) {
+    for (const value of ['1', 'TRUE', 'True', 'yes', ' true', 'true ', 'on', 'true', '0', 'off']) {
       process.env.FF_PILOT_ESTIMATE_RECOVERY = value;
       process.env.FF_PILOT_LINK_ON_ONEPAGER = value;
       process.env.FF_PILOT_ESTIMATE_SMS = value;
-      assert.equal(flags.masterOn(), false, value);
-      assert.equal(flags.linkOn(), false, value);
-      assert.equal(flags.smsOn(), false, value);
+      assert.equal(await flags.masterOn(), false, value);
+      assert.equal(await flags.linkOn(), false, value);
+      assert.equal(await flags.smsOn(), false, value);
     }
-    setFlags({ master: true, link: true, sms: true });
-    assert.equal(flags.masterOn(), true);
-    assert.equal(flags.linkOn(), true);
-    assert.equal(flags.smsOn(), true);
+    await setFlags({ master: true, link: true, sms: true });
+    assert.equal(await flags.masterOn(), true);
+    assert.equal(await flags.linkOn(), true);
+    assert.equal(await flags.smsOn(), true);
+    process.env.FF_PILOT_ESTIMATE_RECOVERY = 'false';
+    process.env.FF_PILOT_LINK_ON_ONEPAGER = ' FALSE ';
+    process.env.FF_PILOT_ESTIMATE_SMS = 'False';
+    assert.equal(await flags.masterOn(), false);
+    assert.equal(await flags.linkOn(), false);
+    assert.equal(await flags.smsOn(), false);
   });
 
   it('returns 404 with no one-pager CTA when the master flag is off', async () => {
-    clearFlags();
+    await clearFlags();
     const page = await request('GET', '/p/pilot-wasatch-heating');
     assert.equal(page.status, 200);
     assert.equal(page.text.includes('Try a live demo'), false);
@@ -278,13 +305,13 @@ describe('pilot estimate recovery', () => {
   });
 
   it('hides the CTA when only one of the two link flags is on', async () => {
-    setFlags({ master: true, link: false });
+    await setFlags({ master: true, link: false });
     const masterOnly = await request('GET', '/p/pilot-wasatch-heating');
     assert.equal(masterOnly.status, 200);
     assert.equal(masterOnly.text.includes('Try a live demo'), false);
 
-    clearFlags();
-    setFlags({ master: false, link: true });
+    await clearFlags();
+    await setFlags({ master: false, link: true });
     const linkOnly = await request('GET', '/p/pilot-wasatch-heating');
     assert.equal(linkOnly.status, 200);
     assert.equal(linkOnly.text.includes('Try a live demo'), false);
@@ -296,7 +323,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('mints a 32-byte HMAC token, looks it up by hash, and serves the synthetic payload', async () => {
-    setFlags({ master: true, link: true });
+    await setFlags({ master: true, link: true });
     const minted = await request('POST', `/api/proposals/${proposal.id}/demo-token`, {
       headers: { 'x-api-key': API_KEY },
     });
@@ -389,7 +416,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('uses one 404 for a bad, unknown, expired, or revoked token', async () => {
-    setFlags({ master: true });
+    await setFlags({ master: true });
     const minted = await request('POST', `/api/proposals/${proposal.id}/demo-token`, {
       headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.20' },
     });
@@ -445,7 +472,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('rate limits each IP and keeps noindex on 429', async () => {
-    setFlags({ master: true });
+    await setFlags({ master: true });
     process.env.PILOT_DEMO_RATE_MAX = '2';
     process.env.PILOT_DEMO_RATE_WINDOW_MS = '60000';
     _resetForTests();
@@ -475,7 +502,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('records allowlisted events only, with join ids and no free-text columns', async () => {
-    setFlags({ master: true, sms: true });
+    await setFlags({ master: true, sms: true });
     const minted = await request('POST', `/api/proposals/${proposal.id}/demo-token`, {
       headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.40' },
     });
@@ -542,7 +569,7 @@ describe('pilot estimate recovery', () => {
 
     const demo = await request('GET', minted.json.path, { headers: ip });
     assert.equal(demo.json.timeline.some((step) => step.kind === 'sms'), false);
-    assert.equal(flags.smsOn(), true);
+    assert.equal(await flags.smsOn(), true);
 
     const lead = await pool.query('SELECT stage FROM prospects WHERE id = $1', [prospect.id]);
     const saved = await pool.query('SELECT status, sent_at FROM proposals WHERE id = $1', [proposal.id]);
@@ -552,7 +579,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('does not mint on a public route and requires the API key', async () => {
-    setFlags({ master: true, link: true });
+    await setFlags({ master: true, link: true });
     const open = await request('POST', '/demo/estimate-recovery', {
       headers: { 'x-forwarded-for': '203.0.113.50' },
       body: { proposal_id: proposal.id },
@@ -570,7 +597,7 @@ describe('pilot estimate recovery', () => {
     });
     assert.equal(wrong.status, 401);
 
-    clearFlags();
+    await clearFlags();
     const flagged = await request('POST', `/api/proposals/${proposal.id}/demo-token`, {
       headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.50' },
     });
@@ -578,7 +605,7 @@ describe('pilot estimate recovery', () => {
     assert.deepEqual(flagged.json, NOT_FOUND);
 
     const other = await insertProposal(prospect.id, { status: 'discarded', slug: 'pilot-discarded' });
-    setFlags({ master: true });
+    await setFlags({ master: true });
     const discarded = await request('POST', `/api/proposals/${other.id}/demo-token`, {
       headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.50' },
     });
@@ -607,7 +634,7 @@ describe('pilot estimate recovery', () => {
     assert.match(tokenSrc, /timingSafeEqual/);
     assert.doesNotMatch(tokenSrc, /randomBytes\(TOKEN_BYTES\)/);
 
-    setFlags({ master: true, link: true, sms: true });
+    await setFlags({ master: true, link: true, sms: true });
     const before = { ...calls };
     const page = await request('GET', '/p/pilot-wasatch-heating', {
       headers: { 'x-forwarded-for': '203.0.113.60' },
@@ -634,7 +661,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('returns a generic message when mint or revoke throws', async () => {
-    setFlags({ master: true });
+    await setFlags({ master: true });
     const secret = 'pilot-secret-db-detail-9f3c';
     const origMint = tokens.mintForProposal;
     const origRevoke = tokens.revokeForProposal;
@@ -668,7 +695,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('closes a discarded proposal token and still revokes it', async () => {
-    setFlags({ master: true });
+    await setFlags({ master: true });
     const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.71' };
     const live = await insertProposal(prospect.id, { slug: 'pilot-discard-live' });
     const minted = await request('POST', `/api/proposals/${live.id}/demo-token`, { headers: key });
@@ -746,7 +773,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('recomputes the same token across cold renders and rotates on mint', async () => {
-    setFlags({ master: true, link: true });
+    await setFlags({ master: true, link: true });
     const row = await insertProposal(prospect.id, { slug: 'pilot-stable-link' });
     const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.80' };
     const first = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
@@ -812,7 +839,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('does not mint again on twenty cold one-pager views after revoke', async () => {
-    setFlags({ master: true, link: true });
+    await setFlags({ master: true, link: true });
     const row = await insertProposal(prospect.id, { slug: 'pilot-revoke-sticks' });
     const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.90' };
     const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
@@ -848,11 +875,11 @@ describe('pilot estimate recovery', () => {
   });
 
   it('matches the closed 404 shape for a flags-off response and a 429', async () => {
-    clearFlags();
+    await clearFlags();
     const off = await request('GET', '/demo/estimate-recovery/demo-example-heating-air', {
       headers: { 'x-forwarded-for': '203.0.113.120' },
     });
-    setFlags({ master: true });
+    await setFlags({ master: true });
     const missing = await request('GET', `/demo/estimate-recovery/${'d'.repeat(22)}`, {
       headers: { 'x-forwarded-for': '203.0.113.121' },
     });
@@ -882,7 +909,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('stamps noindex and no-store on an oversized demo body', async () => {
-    clearFlags();
+    await clearFlags();
     const body = Buffer.alloc(1024 * 1024 + 64, 0x61);
     const res = await request('POST', '/demo/estimate-recovery/demo-example-heating-air/events', {
       headers: { 'x-forwarded-for': '203.0.113.130' },
@@ -910,7 +937,7 @@ describe('pilot estimate recovery', () => {
     assert.equal(clientIp(trusted), '10.0.0.8');
     app.set('trust proxy', 1);
 
-    setFlags({ master: true });
+    await setFlags({ master: true });
     process.env.PILOT_DEMO_RATE_MAX = '1';
     process.env.PILOT_DEMO_RATE_WINDOW_MS = '60000';
     _resetForTests();
@@ -941,7 +968,7 @@ describe('pilot estimate recovery', () => {
     try {
       process.env.CRM_API_KEY = '';
       tokens._clearCacheForTests();
-      setFlags({ master: true, link: true });
+      await setFlags({ master: true, link: true });
       const row = await insertProposal(prospect.id, { slug: 'pilot-no-secret' });
       const before = await pool.query('SELECT COUNT(*)::int AS n FROM pilot_tokens');
       const page = await request('GET', '/p/pilot-no-secret', {
@@ -991,7 +1018,7 @@ describe('pilot estimate recovery', () => {
       process.env.CRM_API_KEY = short;
       tokens._clearCacheForTests();
       assert.equal(tokens.pilotReady(), false);
-      setFlags({ master: true, link: true });
+      await setFlags({ master: true, link: true });
       const row = await insertProposal(prospect.id, { slug: 'pilot-short-secret' });
       const before = await pool.query('SELECT COUNT(*)::int AS n FROM pilot_tokens');
       const page = await request('GET', '/p/pilot-short-secret', {
@@ -1145,7 +1172,7 @@ describe('pilot estimate recovery', () => {
       );
       assert.equal(stillActive.rows[0].n, 2);
 
-      setFlags({ master: true, link: true });
+      await setFlags({ master: true, link: true });
       const quietPage = await request('GET', '/p/pilot-boot-repair', {
         headers: { 'x-forwarded-for': '203.0.113.183' },
       });
@@ -1244,7 +1271,7 @@ describe('pilot estimate recovery', () => {
       assert.equal(Number(active.rows[0].id), Number(newer.rows[0].id));
       assert.equal(Number(active.rows[0].generation), 2);
 
-      setFlags({ master: true, link: true });
+      await setFlags({ master: true, link: true });
       const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, {
         headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.180' },
       });
@@ -1316,7 +1343,7 @@ describe('pilot estimate recovery', () => {
         FOR EACH ROW EXECUTE FUNCTION ff_test_block_revoke_only();
     `);
     try {
-      setFlags({ master: true, link: true });
+      await setFlags({ master: true, link: true });
       const first = await watchBoot(await applySchema());
       assert.equal(first.result.ok, false);
       assert.ok(first.errors.some((line) => line.includes('revoke blocked')));
@@ -1400,7 +1427,7 @@ describe('pilot estimate recovery', () => {
     assert.match(migrateSrc, /SET LOCAL lock_timeout = '5s'/);
     assert.match(migrateSrc, /SET LOCAL statement_timeout = '15s'/);
 
-    setFlags({ master: true, link: true });
+    await setFlags({ master: true, link: true });
     await pool.query(`UPDATE prospects SET stage = 'vetted' WHERE id = $1`, [prospect.id]);
     const row = await insertProposal(prospect.id, { slug: 'pilot-lock-boot' });
     const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, {
@@ -1629,7 +1656,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('discards a draft when pilot structures are missing, without echoing the database', async () => {
-    setFlags({ master: true });
+    await setFlags({ master: true });
     const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.220' };
     const row = await insertProposal(prospect.id, { slug: 'pilot-discard-missing' });
     const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
@@ -1680,7 +1707,7 @@ describe('pilot estimate recovery', () => {
   });
 
   it('rolls the discard back when revoking the demo token fails', async () => {
-    setFlags({ master: true });
+    await setFlags({ master: true });
     const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.221' };
     const row = await insertProposal(prospect.id, { slug: 'pilot-discard-rollback' });
     const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
@@ -1785,6 +1812,7 @@ describe('pilot estimate recovery', () => {
     assert.ok(concludeAt > 0 && concludeAt < listenAt);
     assert.ok(closeAt > 0 && closeAt < listenAt);
 
+    await setFlags({ master: true, link: true });
     const row = await insertProposal(prospect.id, { slug: 'pilot-closed-until-boot' });
     const script = `
 const http = require('http');
