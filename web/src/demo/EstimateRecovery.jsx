@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ACTION_TOAST, SampleValue, liveToast, usePrototypeChrome, usePrototypeNotify } from '../components/PrototypeWatermark';
 import { readCompanyOverride } from '../flags';
 import { getDemo } from './getDemo';
 
@@ -31,11 +32,47 @@ function downloadJson(filename, text) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+export function EstimateRecoveryFlow({ demo }) {
+  const chrome = usePrototypeChrome();
+  const [step, setStep] = useState(1);
+  const [approved, setApproved] = useState(false);
+  const steps = chrome
+    ? STEPS.map(item => (item.id === 4 ? { ...item, label: 'Summary' } : item))
+    : STEPS;
+
+  return (
+    <div className="demo-wrap" data-step={step}>
+      <p className="demo-banner" role="note">
+        Sample walkthrough for <SampleValue>{demo.company}</SampleValue>. The jobs and amounts are fictional. Nothing on this page is sent.
+      </p>
+      <ol className="demo-steps" aria-label="Demo progress">
+        {steps.map(item => (
+          <li key={item.id} aria-current={item.id === step ? 'step' : undefined}>{item.id} {item.label}</li>
+        ))}
+      </ol>
+      {step === 1 && <Landing demo={demo} onSend={() => setStep(2)} />}
+      {step === 2 && <Timeline demo={demo} onNext={() => setStep(3)} />}
+      {step === 3 && (
+        <Reply
+          demo={demo}
+          approved={approved}
+          onApprove={() => setApproved(true)}
+          onNext={() => setStep(4)}
+        />
+      )}
+      {step === 4 && (
+        <Summary
+          demo={demo}
+          onRestart={() => { setApproved(false); setStep(1); }}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function EstimateRecovery({ token }) {
   const [demo, setDemo] = useState(null);
   const [failed, setFailed] = useState(false);
-  const [step, setStep] = useState(1);
-  const [approved, setApproved] = useState(false);
 
   useEffect(() => {
     const company = readCompanyOverride();
@@ -70,58 +107,77 @@ export default function EstimateRecovery({ token }) {
   }
 
   return (
-    <main className="demo" data-step={step}>
-      <div className="demo-wrap">
-        <p className="demo-banner" role="note">
-          Sample walkthrough for {demo.company}. The jobs and amounts are fictional. Nothing on this page is sent.
-        </p>
-        <ol className="demo-steps" aria-label="Demo progress">
-          {STEPS.map(item => (
-            <li key={item.id} aria-current={item.id === step ? 'step' : undefined}>{item.id} {item.label}</li>
-          ))}
-        </ol>
-        {step === 1 && <Landing demo={demo} onSend={() => setStep(2)} />}
-        {step === 2 && <Timeline demo={demo} onNext={() => setStep(3)} />}
-        {step === 3 && (
-          <Reply
-            demo={demo}
-            approved={approved}
-            onApprove={() => setApproved(true)}
-            onNext={() => setStep(4)}
-          />
-        )}
-        {step === 4 && (
-          <Summary
-            demo={demo}
-            onRestart={() => { setApproved(false); setStep(1); }}
-          />
-        )}
-      </div>
+    <main className="demo">
+      <EstimateRecoveryFlow demo={demo} />
     </main>
   );
 }
 
+function prototypeTouches(company) {
+  return [
+    {
+      id: 'day1',
+      when: 'Day 1',
+      kind: 'email',
+      title: 'Thanks for asking',
+      subject: `Thanks from ${company}`,
+      body: `This note would leave the ${company} mailbox. It is a preview on this page.`,
+    },
+    {
+      id: 'day4',
+      when: 'Day 4',
+      kind: 'email',
+      title: 'Still open',
+      subject: 'Your estimate is still open',
+      body: `${company} would cover timing and what the price includes. This preview does not send it.`,
+    },
+    {
+      id: 'day8',
+      when: 'Day 8',
+      kind: 'task',
+      title: 'Reminder to you',
+      subject: 'Reminder to you: call',
+      body: `A task for the owner at ${company}. No call is placed.`,
+    },
+    {
+      id: 'day12',
+      when: 'Day 12',
+      kind: 'email',
+      stopped: true,
+      title: 'Sequence stopped',
+      subject: 'Not sent',
+      body: 'They replied, so this email stays unsent.',
+    },
+  ];
+}
+
 function Landing({ demo, onSend }) {
+  const notify = usePrototypeNotify();
+  const chrome = usePrototypeChrome();
   const furnace = demo.estimates.find(item => item.options);
   return (
     <section aria-labelledby="demo-step-title">
       <p className="demo-kicker">Step 1 of 4</p>
-      <h1 id="demo-step-title">{demo.company}: {demo.openCount} open estimates, {formatDollars(demo.openTotal)}</h1>
+      <h1 id="demo-step-title">
+        <SampleValue>{demo.company}</SampleValue>: <SampleValue>{demo.openCount}</SampleValue> open estimates, <SampleValue>{formatDollars(demo.openTotal)}</SampleValue>
+      </h1>
       <p className="muted demo-lead">
-        Three fictional open jobs. Send estimate plays the follow-up as previews on this page. No email, text, or call goes out.
+        {chrome
+          ? 'Three fictional open jobs. Send estimate plays mailbox previews on this page. These would be emails from the owner. Nothing is sent.'
+          : 'Three fictional open jobs. Send estimate plays the follow-up as previews on this page. No email, text, or call goes out.'}
       </p>
       <ul className="demo-estimates">
         {demo.estimates.map(item => (
           <li key={item.id}>
             <div className="demo-est-head">
-              <span>{item.name}</span>
-              <span className="demo-money">{formatDollars(item.amount)}</span>
+              <span><SampleValue>{item.name}</SampleValue></span>
+              <span className="demo-money"><SampleValue>{formatDollars(item.amount)}</SampleValue></span>
             </div>
             {item.options && (
               <ul className="demo-options">
                 {item.options.map(option => (
                   <li key={option.tier} className={option.amount === item.amount ? 'is-open' : undefined}>
-                    {option.tier} {formatDollars(option.amount)}
+                    <SampleValue>{option.tier} {formatDollars(option.amount)}</SampleValue>
                   </li>
                 ))}
               </ul>
@@ -131,16 +187,23 @@ function Landing({ demo, onSend }) {
       </ul>
       {furnace && (
         <p className="muted small">
-          The furnace job shows Good, Better, and Best. The open amount is the Better option, so the three jobs total {formatDollars(demo.openTotal)}.
+          The furnace job shows Good, Better, and Best. The open amount is the Better option, so the three jobs total <SampleValue>{formatDollars(demo.openTotal)}</SampleValue>.
         </p>
       )}
-      <button type="button" className="demo-btn" onClick={onSend}>Send estimate</button>
+      <button type="button" className="demo-btn" onClick={() => { notify?.(ACTION_TOAST); onSend(); }}>Send estimate</button>
     </section>
   );
 }
 
+function touchKind(kind, chrome) {
+  if (kind === 'stopped') return 'Stopped';
+  if (kind === 'task') return chrome ? 'Reminder to you' : 'Owner task';
+  return chrome ? 'Email from your mailbox' : 'Email preview';
+}
+
 function Timeline({ demo, onNext }) {
-  const items = demo.timeline;
+  const chrome = usePrototypeChrome();
+  const items = chrome ? prototypeTouches(demo.company) : demo.timeline;
   const [count, setCount] = useState(() => (prefersReducedMotion() ? items.length : 1));
 
   useEffect(() => {
@@ -153,23 +216,29 @@ function Timeline({ demo, onNext }) {
 
   return (
     <section aria-labelledby="demo-step-title">
-      <p className="demo-kicker">Step 2 of 4 · {demo.company}</p>
+      <p className="demo-kicker">Step 2 of 4 · <SampleValue>{demo.company}</SampleValue></p>
       <h1 id="demo-step-title">Preview — nothing is sent</h1>
       <p className="muted demo-lead">
-        Email previews branded for {demo.company}. The day 5 card is an owner task, not a message to the homeowner.
+        {chrome
+          ? <>Emails from the <SampleValue>{demo.company}</SampleValue> mailbox. They stop when the customer replies. The call card is a reminder to you, not a call that goes out.</>
+          : <>Email previews branded for <SampleValue>{demo.company}</SampleValue>. The day 5 card is an owner task, not a message to the homeowner.</>}
       </p>
       <p role="status" className="demo-status">{done ? 'Preview finished. Nothing was sent.' : 'Playing the preview…'}</p>
       <ol className="demo-timeline" aria-label="Email previews">
         {items.slice(0, count).map(item => (
-          <li key={item.id} className={`demo-mail demo-mail-${item.kind}`}>
+          <li key={item.id} className={`demo-mail demo-mail-${item.kind}${item.stopped ? ' demo-mail-stopped' : ''}`}>
             <div className="demo-mail-top">
-              <span className="demo-when">{item.when}</span>
-              <span className="demo-kind">{item.kind === 'task' ? 'Owner task' : 'Email preview'}</span>
+              <span className="demo-when"><SampleValue>{item.when}</SampleValue></span>
+              <span className="demo-kind">{touchKind(item.kind, chrome)}{item.stopped ? ' · Stopped' : ''}</span>
             </div>
-            <h2>{item.title}</h2>
-            <p className="demo-from">{item.kind === 'task' ? `Task for ${demo.company}` : `From ${demo.company}`}</p>
-            <p className="demo-subject">Subject: {item.subject}</p>
-            <p>{item.body}</p>
+            <h2><SampleValue>{item.title}</SampleValue></h2>
+            <p className="demo-from">
+              {item.stopped
+                ? 'Not sent'
+                : <>{item.kind === 'task' ? 'Task for ' : 'From '}<SampleValue>{demo.company}</SampleValue></>}
+            </p>
+            <p className="demo-subject">Subject: <SampleValue>{item.subject}</SampleValue></p>
+            <p><SampleValue>{item.body}</SampleValue></p>
           </li>
         ))}
       </ol>
@@ -179,21 +248,30 @@ function Timeline({ demo, onNext }) {
 }
 
 function Reply({ demo, approved, onApprove, onNext }) {
+  const notify = usePrototypeNotify();
+  const chrome = usePrototypeChrome();
   const furnace = demo.estimates.find(item => item.id === 'furnace');
   return (
     <section aria-labelledby="demo-step-title">
-      <p className="demo-kicker">Step 3 of 4 · {demo.company}</p>
-      <h1 id="demo-step-title">{demo.reply.question}</h1>
+      <p className="demo-kicker">Step 3 of 4 · <SampleValue>{demo.company}</SampleValue></p>
+      <h1 id="demo-step-title"><SampleValue>{demo.reply.question}</SampleValue></h1>
       <p className="muted demo-lead">A simulated homeowner reply. The answer below is a draft waiting for the owner.</p>
-      <blockquote className="demo-quote">{demo.reply.question}</blockquote>
+      {chrome && (
+        <p className="demo-stopped" role="status">Sequence stopped. They replied, so the Day 12 email does not send.</p>
+      )}
+      <blockquote className="demo-quote"><SampleValue>{demo.reply.question}</SampleValue></blockquote>
       <article className="demo-draft" aria-label="Drafted answer">
         <h2>Draft awaiting owner approval</h2>
-        <p>{demo.reply.draft}</p>
+        <p><SampleValue>{demo.reply.draft}</SampleValue></p>
       </article>
-      {!approved && <button type="button" className="demo-btn" onClick={onApprove}>Approve reply</button>}
+      {!approved && (
+        <button type="button" className="demo-btn" onClick={() => { notify?.(liveToast('send the reply')); onApprove(); }}>
+          Approve reply
+        </button>
+      )}
       {approved && (
         <div className="demo-approved-block" role="status">
-          <p className="demo-est-name">{furnace?.name}</p>
+          <p className="demo-est-name"><SampleValue>{furnace?.name}</SampleValue></p>
           <p className="demo-approved">Approved → schedule install</p>
           <p className="muted small">Approving updates this demo only. The reply was not sent.</p>
           <button type="button" className="demo-btn" onClick={onNext}>See the owner summary</button>
@@ -204,24 +282,36 @@ function Reply({ demo, approved, onApprove, onNext }) {
 }
 
 function Summary({ demo, onRestart }) {
+  const notify = usePrototypeNotify();
+  const chrome = usePrototypeChrome();
   const onExport = () => {
+    if (notify) {
+      notify(liveToast('keep the file on this device'));
+      return;
+    }
     import('./fixture.js').then(({ serializeDemo }) => {
       downloadJson('estimate-recovery-demo.json', serializeDemo(demo));
     });
   };
   return (
     <section aria-labelledby="demo-step-title">
-      <p className="demo-kicker">Step 4 of 4 · {demo.company}</p>
-      <h1 id="demo-step-title">Recovered: {formatDollars(demo.recovered)}. You own this workflow.</h1>
+      <p className="demo-kicker">Step 4 of 4 · <SampleValue>{demo.company}</SampleValue></p>
+      <h1 id="demo-step-title">
+        {chrome
+          ? 'Sample job. You own this workflow.'
+          : <>Recovered: <SampleValue>{formatDollars(demo.recovered)}</SampleValue>. You own this workflow.</>}
+      </h1>
       <p className="muted demo-lead">
-        That amount is the Better furnace option from the sample list. This page did not contact anyone, and the export stays on this device.
+        {chrome
+          ? 'These are sample prices. Nothing here is a recovered-revenue claim, and this page did not contact anyone.'
+          : 'That amount is the Better furnace option from the sample list. This page did not contact anyone, and the export stays on this device.'}
       </p>
       <ul className="demo-estimates">
         {demo.estimates.map(item => (
           <li key={item.id}>
             <div className="demo-est-head">
-              <span>{item.name}</span>
-              <span className="demo-money">{formatDollars(item.amount)}</span>
+              <span><SampleValue>{item.name}</SampleValue></span>
+              <span className="demo-money"><SampleValue>{formatDollars(item.amount)}</SampleValue></span>
             </div>
             {item.id === 'furnace' && <p className="demo-approved">Approved → schedule install</p>}
           </li>

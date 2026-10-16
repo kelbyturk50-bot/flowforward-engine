@@ -1,0 +1,10 @@
+/* Barlow 600 for the prototype chunk. The CRM entry loads this weight too.
+   Vite dedupes that shared import into the entry, so this face stays here. */
+@font-face {
+  font-family: 'Barlow';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url('../../node_modules/@fontsource/barlow/files/barlow-latin-600-normal.woff2') format('woff2'),
+       url('../../node_modules/@fontsource/barlow/files/barlow-latin-600-normal.woff') format('woff');
+}

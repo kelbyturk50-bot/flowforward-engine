@@ -13,17 +13,20 @@ import { PRODUCTION_HOSTS } from './api-base.js';
 export const FF_PILOT_ESTIMATE_RECOVERY = 'FF_PILOT_ESTIMATE_RECOVERY';
 export const FF_PILOT_LINK_ON_ONEPAGER = 'FF_PILOT_LINK_ON_ONEPAGER';
 export const FF_PILOT_ESTIMATE_SMS = 'FF_PILOT_ESTIMATE_SMS';
+export const FF_PROTOTYPE_GALLERY = 'FF_PROTOTYPE_GALLERY';
 
 export const PILOT_FLAG_NAMES = Object.freeze([
   FF_PILOT_ESTIMATE_RECOVERY,
   FF_PILOT_LINK_ON_ONEPAGER,
   FF_PILOT_ESTIMATE_SMS,
+  FF_PROTOTYPE_GALLERY,
 ]);
 
 const DEFAULTS = Object.freeze({
   [FF_PILOT_ESTIMATE_RECOVERY]: false,
   [FF_PILOT_LINK_ON_ONEPAGER]: false,
   [FF_PILOT_ESTIMATE_SMS]: false,
+  [FF_PROTOTYPE_GALLERY]: false,
 });
 
 // Fully anchored. An extra label, a suffix, or a prefix does not match.
@@ -68,11 +71,9 @@ function splitFlags(raw) {
 
 function namedFlags(names) {
   const on = new Set(names.filter(name => Object.prototype.hasOwnProperty.call(DEFAULTS, name)));
-  return {
-    [FF_PILOT_ESTIMATE_RECOVERY]: on.has(FF_PILOT_ESTIMATE_RECOVERY),
-    [FF_PILOT_LINK_ON_ONEPAGER]: on.has(FF_PILOT_LINK_ON_ONEPAGER),
-    [FF_PILOT_ESTIMATE_SMS]: on.has(FF_PILOT_ESTIMATE_SMS),
-  };
+  const flags = {};
+  for (const name of PILOT_FLAG_NAMES) flags[name] = on.has(name);
+  return flags;
 }
 
 function writeStored(storage, value) {

@@ -22,5 +22,6 @@ describe('CRM vercel.json', () => {
       { source: '/privacy', destination: '/privacy.html' },
       { source: '/(.*)', destination: '/index.html' },
     ]);
+    expect('/demo/gallery/demo-test-wasatch-heating/estimate-follow-up'.startsWith('/demo/')).toBe(true);
   });
 });

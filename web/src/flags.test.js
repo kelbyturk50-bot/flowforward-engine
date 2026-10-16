@@ -4,6 +4,7 @@ import {
   FF_PILOT_ESTIMATE_RECOVERY,
   FF_PILOT_ESTIMATE_SMS,
   FF_PILOT_LINK_ON_ONEPAGER,
+  FF_PROTOTYPE_GALLERY,
   FLAG_STORAGE_KEY,
   PREVIEW_HOST_PATTERN,
   flagOverrideAllowed,
@@ -15,10 +16,11 @@ const ALL_OFF = {
   [FF_PILOT_ESTIMATE_RECOVERY]: false,
   [FF_PILOT_LINK_ON_ONEPAGER]: false,
   [FF_PILOT_ESTIMATE_SMS]: false,
+  [FF_PROTOTYPE_GALLERY]: false,
 };
 
 const PREVIEW = 'flowforward-engine-x-turk11.vercel.app';
-const ALL_FLAGS = `${FF_PILOT_ESTIMATE_RECOVERY},${FF_PILOT_LINK_ON_ONEPAGER},${FF_PILOT_ESTIMATE_SMS}`;
+const ALL_FLAGS = `${FF_PILOT_ESTIMATE_RECOVERY},${FF_PILOT_LINK_ON_ONEPAGER},${FF_PILOT_ESTIMATE_SMS},${FF_PROTOTYPE_GALLERY}`;
 
 function mem(initial = {}) {
   const data = { ...initial };
@@ -99,6 +101,7 @@ describe('pilot flags', () => {
       [FF_PILOT_ESTIMATE_RECOVERY]: true,
       [FF_PILOT_LINK_ON_ONEPAGER]: true,
       [FF_PILOT_ESTIMATE_SMS]: false,
+      [FF_PROTOTYPE_GALLERY]: false,
     });
     expect(storage.getItem(FLAG_STORAGE_KEY)).toBe(`${FF_PILOT_ESTIMATE_RECOVERY},${FF_PILOT_LINK_ON_ONEPAGER}`);
     expect(flagsAt(`https://${PREVIEW}/demo/estimate-recovery/demo-example-heating-air`, { storage })).toEqual(on);
@@ -144,5 +147,28 @@ describe('pilot flags', () => {
       location: loc(`https://${PREVIEW}/?company=${'A'.repeat(120)}`),
       env: { DEV: false },
     })).toHaveLength(80);
+  });
+
+  it('keeps FF_PROTOTYPE_GALLERY off on production hosts even with ?flags= set', () => {
+    for (const hostname of PRODUCTION_HOSTS) {
+      const href = `https://${hostname}/demo/gallery/demo-test-wasatch-heating?flags=${FF_PROTOTYPE_GALLERY}`;
+      expect(flagsAt(href, { env: { DEV: true } })[FF_PROTOTYPE_GALLERY]).toBe(false);
+      expect(flagsAt(href, { env: { DEV: false } })).toEqual(ALL_OFF);
+      expect(flagOverrideAllowed(loc(href), { DEV: true })).toBe(false);
+      expect(flagOverrideAllowed(loc(href), { DEV: false })).toBe(false);
+    }
+    const gitMain = 'flowforward-engine-git-main-turk11.vercel.app';
+    expect(PREVIEW_HOST_PATTERN.test(gitMain)).toBe(true);
+    expect(flagsAt(`https://${gitMain}/?flags=${FF_PROTOTYPE_GALLERY}`, { env: { DEV: true } })[FF_PROTOTYPE_GALLERY]).toBe(false);
+  });
+
+  it('turns FF_PROTOTYPE_GALLERY on only for a preview host or dev localhost', () => {
+    expect(flagsAt(`https://${PREVIEW}/?flags=${FF_PROTOTYPE_GALLERY}`)[FF_PROTOTYPE_GALLERY]).toBe(true);
+    expect(flagsAt(`http://${PREVIEW}/?flags=${FF_PROTOTYPE_GALLERY}`)[FF_PROTOTYPE_GALLERY]).toBe(false);
+    expect(flagsAt(`https://${PREVIEW}:444/?flags=${FF_PROTOTYPE_GALLERY}`)[FF_PROTOTYPE_GALLERY]).toBe(false);
+    const dev = 'http://localhost:5173/?flags=FF_PROTOTYPE_GALLERY';
+    expect(flagsAt(dev, { env: { DEV: true } })[FF_PROTOTYPE_GALLERY]).toBe(true);
+    expect(flagsAt(dev, { env: { DEV: false } })[FF_PROTOTYPE_GALLERY]).toBe(false);
+    expect(flagsAt('http://127.0.0.1:5173/?flags=FF_PROTOTYPE_GALLERY', { env: { DEV: true } })[FF_PROTOTYPE_GALLERY]).toBe(false);
   });
 });
