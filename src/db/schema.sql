@@ -128,6 +128,12 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS do_not_contact BOOLEAN NOT NULL DEFAULT FALSE; -- opted out / bounced
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS researched_at  TIMESTAMPTZ;
+-- Archive flag. NULL archived_at means the lead is still in the working set.
+-- Boot adds the columns and does not set them. The row update is an explicit
+-- script, not a statement in this file.
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS archived_at    TIMESTAMPTZ;
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS archive_reason TEXT;
+CREATE INDEX IF NOT EXISTS idx_prospects_archived ON prospects(archived_at) WHERE archived_at IS NOT NULL;
 -- Field-service software cached by proposal research. NULL = unknown, so fit
 -- scoring applies no ServiceTitan penalty or tier cap. Only the value
 -- ServiceTitan is penalized (−15) and capped at tier B. computeFit / rescore

@@ -11,6 +11,7 @@ const nodemailer = require('nodemailer');
 const pool = require('../db/client');
 const cfg  = require('./config');
 const { appendCompanyPestExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
+const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 
 const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
@@ -112,7 +113,7 @@ const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(x || '');
 /** Approve a draft and send the first email now. */
 async function approveAndSend(proposalId) {
   const { rows } = await pool.query(
-    `SELECT pr.*, p.company, p.stage, p.do_not_contact FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`,
+    `SELECT pr.*, p.company, p.stage, p.do_not_contact, p.archived_at FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`,
     [proposalId]);
   const p = rows[0];
   if (!p) throw Object.assign(new Error('Proposal not found'), { status: 404 });
@@ -120,6 +121,9 @@ async function approveAndSend(proposalId) {
   // UPDATE and before mailer() is called.
   if (isPestCompanyName(p.company)) {
     throw Object.assign(new Error(`${PEST_NAME_REASON}.`), { status: 409 });
+  }
+  if (isArchivedLead(p)) {
+    throw Object.assign(new Error(`${ARCHIVED_LEAD_REASON}.`), { status: 409 });
   }
 
   const problems = await sendReadiness();
@@ -189,11 +193,12 @@ async function sendDueFollowups() {
   const params = [];
   const nameSql = appendCompanyPestExclusion(params);
   const { rows } = await pool.query(
-    `SELECT pr.*, p.company, p.stage, p.do_not_contact FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+    `SELECT pr.*, p.company, p.stage, p.do_not_contact, p.archived_at FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
       WHERE pr.status = 'sent' AND (
             (pr.followup1_sent_at IS NULL AND pr.followup1_due_at <= NOW()) OR
             (pr.followup1_sent_at IS NOT NULL AND pr.followup2_sent_at IS NULL AND pr.followup2_due_at <= NOW()))
         AND ${nameSql}
+        AND p.archived_at IS NULL
       ORDER BY pr.sent_at LIMIT 25`,
     params);
   let sent = 0;
@@ -203,6 +208,10 @@ async function sendDueFollowups() {
     // address, or id.
     if (isPestCompanyName(p.company)) {
       console.error('[send] skipped follow-up: company name matches pest control');
+      continue;
+    }
+    if (isArchivedLead(p)) {
+      console.error('[send] skipped follow-up: lead is archived');
       continue;
     }
     if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {

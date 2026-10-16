@@ -49,13 +49,13 @@ router.get('/', async (req, res) => {
 router.get('/stats', async (req, res) => {
   try {
     const [byStage, byTier, byIndustry, totals] = await Promise.all([
-      pool.query(`SELECT stage, COUNT(*)::int AS n, COALESCE(SUM(est_value),0)::float AS value FROM prospects GROUP BY stage`),
-      pool.query(`SELECT fit_tier AS tier, COUNT(*)::int AS n FROM prospects WHERE stage <> ALL($1) GROUP BY fit_tier`, [CLOSED]),
-      pool.query(`SELECT industry, COUNT(*)::int AS n, ROUND(AVG(fit_score))::int AS avg_fit FROM prospects GROUP BY industry ORDER BY n DESC`),
+      pool.query(`SELECT stage, COUNT(*)::int AS n, COALESCE(SUM(est_value),0)::float AS value FROM prospects WHERE archived_at IS NULL GROUP BY stage`),
+      pool.query(`SELECT fit_tier AS tier, COUNT(*)::int AS n FROM prospects WHERE stage <> ALL($1) AND archived_at IS NULL GROUP BY fit_tier`, [CLOSED]),
+      pool.query(`SELECT industry, COUNT(*)::int AS n, ROUND(AVG(fit_score))::int AS avg_fit FROM prospects WHERE archived_at IS NULL GROUP BY industry ORDER BY n DESC`),
       pool.query(`SELECT COUNT(*)::int AS total,
                          COUNT(*) FILTER (WHERE discovered_at > NOW() - INTERVAL '24 hours')::int AS last_24h,
                          COUNT(*) FILTER (WHERE discovered_at > NOW() - INTERVAL '7 days')::int  AS last_7d
-                    FROM prospects`),
+                    FROM prospects WHERE archived_at IS NULL`),
     ]);
     res.json({
       ...totals.rows[0],
