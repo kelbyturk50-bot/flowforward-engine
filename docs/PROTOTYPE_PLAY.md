@@ -79,11 +79,11 @@ These numbered rules are authoritative and apply in order. `tieRank` is only the
 
 **Input rules:** `fsm_detected` wins, and research signals are used only when it's empty. A state of `Utah` or `UT` (any case) counts as Utah, and a missing state parks the lead as unknown. Franchise names use word-boundary matching. Pest, franchise and out-of-state rules live in config.
 
-**Cost tier per agent:** estimate follow-up 1, speed-to-lead 1, review requests 1, scheduling 2, maintenance-plan renewal 2, dispatch 2, bookkeeping 2 (needs an accounting integration), receptionist 3.
+**Cost tier per agent:** estimate follow-up 1, speed-to-lead 1, review requests 1, scheduling 2, maintenance-plan renewal 2, dispatch 2, bookkeeping 2 (needs an accounting-system integration, not an FSM; the same tier by cost), receptionist 3.
 
 **Unknown state:** no prototype. The lead is parked until its state is known, matching the out-of-state park rule. #46 must match.
 
-1. **HVAC beachhead bias.** HVAC beats plumbing, and plumbing beats the rest. This is a picker bias only, not a fit-score change (Summit: no plumbing score tweak).
+1. **HVAC beachhead bias.** HVAC beats plumbing, and plumbing beats the rest. This sorts prospects (queue and gallery priority) and is not a fit-score change (Summit: no plumbing score tweak).
 2. **Estimate follow-up wins ties.** It is Pilot #1 and the only rung with an `estimate_recovered` proof path.
 3. **Cheapest to make real:** email-only beats needing an FSM integration, which beats needing telephony (#12 is blocked).
 4. **Own-it fit:** prefer agents the FSM does not already include cheaply (e.g. Jobber Receptionist at $29/mo makes receptionist a weak own-it pitch for Jobber shops).
@@ -105,8 +105,11 @@ These numbered rules are authoritative and apply in order. `tieRank` is only the
   "rules": { "cacheOnly": true, "httpOnScorePath": 0, "newPlacesQueries": 0, "unknownSignal": 0, "maxPicks": 2, "minScore": 40 },
   "disqualify": [
     { "if": "industry == 'Pest Control'", "reason": "out of GTM" },
-    { "if": "franchise", "reason": "corporate systems; weak buyer" }
+    { "if": "franchise", "reason": "corporate systems; weak buyer" },
+    { "if": "state not in ['Utah','UT'] (case-insensitive)", "action": "park", "reason": "out of state until Utah proof gate" },
+    { "if": "state missing", "action": "park", "reason": "unknown state" }
   ],
+  "ownItWeak": { "Jobber": ["receptionist"] },
   "restrict": [
     { "if": "fsm == 'ServiceTitan'", "allow": ["estimate_followup", "review_requests"] }
   ],
