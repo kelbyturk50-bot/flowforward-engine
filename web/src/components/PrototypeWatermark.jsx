@@ -146,6 +146,8 @@ const TILE_IMPORTANT = {
   'background-image': TILE_IMAGE,
   'background-size': '168px 96px',
   'background-repeat': 'repeat',
+  '-webkit-print-color-adjust': 'exact',
+  'print-color-adjust': 'exact',
 };
 
 export function PrototypeTile() {
@@ -164,6 +166,8 @@ export function PrototypeTile() {
         backgroundImage: TILE_IMAGE,
         backgroundSize: '168px 96px',
         backgroundRepeat: 'repeat',
+        WebkitPrintColorAdjust: 'exact',
+        printColorAdjust: 'exact',
       }}
     />
   );

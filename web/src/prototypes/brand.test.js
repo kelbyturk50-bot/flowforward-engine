@@ -170,5 +170,8 @@ describe('brand sanitizer', () => {
     expect(css).toContain("%3EPROTOTYPE%3C");
     expect(css).toContain("fill-opacity='0.05'");
     expect(css).toContain('pointer-events: none');
+    const tile = css.slice(css.indexOf('.prototype-tile {'), css.indexOf('.prototype-foreground'));
+    expect(tile).toContain('-webkit-print-color-adjust: exact');
+    expect(tile).toContain('print-color-adjust: exact');
   });
 });

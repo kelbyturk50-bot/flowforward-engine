@@ -486,6 +486,8 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='168' height='96'%3E%3Ctext x='6' y='58' fill='%231E2A2F' fill-opacity='0.05' font-family='sans-serif' font-size='15' font-weight='700' transform='rotate(-30 84 48)'%3EPROTOTYPE%3C/text%3E%3C/svg%3E");
   background-size: 168px 96px;
   background-repeat: repeat;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
 }
 .prototype-foreground { position: relative; z-index: 2; }
 .prototype-frame { min-width: 0; }
