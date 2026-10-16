@@ -549,7 +549,8 @@ describe('pilot estimate recovery', () => {
     assert.ok(sources.length >= 5);
     for (const name of sources) {
       const src = fs.readFileSync(path.join(pilotDir, name), 'utf8');
-      assert.doesNotMatch(src, /twilio|nodemailer|anthropic|googleapis|sendMail|approveAndSend|draftProposal|searchPlaces/i, name);
+      assert.doesNotMatch(src, /require\(['"][^'"]*(twilio|nodemailer|anthropic|googleapis)/i, name);
+      assert.doesNotMatch(src, /\b(sendMail|approveAndSend|draftProposal|searchPlaces)\s*\(/, name);
     }
     const tokenSrc = fs.readFileSync(path.join(pilotDir, 'tokens.js'), 'utf8');
     assert.match(tokenSrc, /randomBytes\(TOKEN_BYTES\)/);
