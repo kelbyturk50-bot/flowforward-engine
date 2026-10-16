@@ -20,7 +20,7 @@ const sweetSpot = {
 describe('scoring', () => {
   it('scores a sweet-spot owner-operated HVAC lead as tier A', () => {
     const fit = computeFit(sweetSpot);
-    assert.equal(fit.fit_score, 97);
+    assert.equal(fit.fit_score, 100);
     assert.equal(fit.fit_tier, 'A');
     assert.equal(fit.fit_reasons.find(r => r.label === 'Size').points, 25);
     assert.equal(fit.fit_reasons.find(r => r.label === 'Reputation').points, 10);
@@ -29,8 +29,8 @@ describe('scoring', () => {
 
   it('penalizes a national brand', () => {
     const fit = computeFit({ ...sweetSpot, company: 'Terminix of Provo' });
-    assert.equal(fit.fit_score, 77);
-    assert.equal(fit.fit_tier, 'B');
+    assert.equal(fit.fit_score, 80);
+    assert.equal(fit.fit_tier, 'A');
     assert.equal(fit.fit_reasons.find(r => r.label === 'Franchise').points, -20);
   });
 
@@ -45,7 +45,7 @@ describe('scoring', () => {
       rating: null,
       review_count: 0,
     });
-    assert.equal(fit.fit_score, 24);
+    assert.equal(fit.fit_score, 14);
     assert.equal(fit.fit_tier, 'D');
   });
 
@@ -69,9 +69,9 @@ describe('scoring', () => {
         'SELECT fit_score, fit_tier, fit_reasons FROM prospects WHERE id = $1',
         [row.id]
       );
-      assert.equal(rows[0].fit_score, 97);
+      assert.equal(rows[0].fit_score, 100);
       assert.equal(rows[0].fit_tier, 'A');
-      assert.ok(rows[0].fit_reasons.some(r => r.label === 'Industry' && r.points === 27));
+      assert.ok(rows[0].fit_reasons.some(r => r.label === 'Industry' && r.points === 30));
     });
   });
 });

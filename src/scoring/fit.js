@@ -1,18 +1,21 @@
 // Fit scoring — ranks each lead 0–100 on how well it matches the consulting
 // business model, with a human-readable breakdown stored in fit_reasons.
 //
-//   Industry fit      30  how much automation leverage the trade has
-//   Business size     25  review volume as a proxy for job volume (sweet spot 25–150)
+//   Industry fit      30  how much automation leverage the trade has (HVAC 10, plumbing 9)
+//   Business size     25  review volume as a 2–15 truck proxy (max at 25–200 reviews)
 //   Reputation        10  Google rating (3.8–4.3 = pain signal = highest score)
 //   Reachability      15  real website + phone
 //   Location          10  inside your drive-to market
 //   Franchise        -20  national brands / franchises
+//   ServiceTitan   −15    only when prospects.fsm_detected says ServiceTitan (no fetch)
 //   Manual boost  ±20     your own adjustment (fit_boost)
 //   Excluded industry      EXCLUDED_INDUSTRIES (default Pest Control) → score 0, tier D
 //
-// Key insight: businesses with 300+ reviews and 4.7+ stars are already systemized.
-// The winnable client has 25–150 reviews (busy but owner still juggling everything)
+// Key insight: businesses with 600+ reviews and 4.7+ stars are already systemized.
+// The winnable client has about 25–200 reviews (a busy 2–15 truck owner-op)
 // and a 3.8–4.3 rating (good enough to keep getting work, bad enough to feel the pain).
+// ServiceTitan is a weaker fit for an owned build. The penalty is soft: tier
+// still comes from the numeric score, and Jobber / Housecall Pro are not penalized.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');
@@ -28,14 +31,27 @@ function industryFit(industry) {
   return cfg.INDUSTRY_FIT[industry] ?? industryDefaults[industry] ?? 5;
 }
 
+// Rough proxy (tunable): shops with ~25–200 Google reviews ≈ busy 2–15 truck
+// owner-ops; <10 too thin; >600 likely past the sweet spot / more systemized.
+// There is no truck-count field. Points are out of 25.
+//
+//   reviews     pts   tone
+//   0           2     low — brand new / inactive
+//   1–9         6     low — too small / budget risk
+//   10–24      14     mid — small but established
+//   25–200     25     max — 2–15 truck sweet spot (was 25–150)
+//   201–400    18     mid-high — growing; may be adding systems
+//   401–600    11     mid — likely office staff / >15 trucks
+//   601–1500    6     low — big player
+//   >1500       2     minimal — enterprise
 function sizePoints(reviews) {
   const n = Number(reviews) || 0;
   if (n === 0)    return [2,  'No reviews — may be brand new or inactive'];
   if (n < 10)     return [6,  `${n} reviews — very small, budget risk`];
   if (n < 25)     return [14, `${n} reviews — small but established`];
-  if (n <= 150)   return [25, `${n} reviews — sweet spot: busy, owner still juggling everything`];
-  if (n <= 300)   return [18, `${n} reviews — growing fast, may be adding systems already`];
-  if (n <= 600)   return [11, `${n} reviews — established operation, likely has office staff`];
+  if (n <= 200)   return [25, `${n} reviews — sweet spot: about 2–15 trucks, owner still juggling everything`];
+  if (n <= 400)   return [18, `${n} reviews — growing; may be adding systems already`];
+  if (n <= 600)   return [11, `${n} reviews — likely office staff or more than 15 trucks`];
   if (n <= 1500)  return [6,  `${n} reviews — big player, longer sales cycle`];
   return [2, `${n} reviews — enterprise-scale, not a fit`];
 }
@@ -87,6 +103,18 @@ function franchisePenalty(company) {
   return hit ? [-20, `Looks like a national brand/franchise ("${hit}")`] : [0, null];
 }
 
+// Reads the cached research column only. Null, blank, Jobber, Housecall Pro,
+// and any other value are not ServiceTitan. Does not fetch.
+const ST_REASON = 'ServiceTitan detected — weaker fit for owned build';
+
+function serviceTitanPenalty(fsmDetected) {
+  if (fsmDetected == null) return [0, null];
+  const name = String(fsmDetected).trim().toLowerCase();
+  if (!name || name === 'none') return [0, null];
+  if (name === 'servicetitan') return [cfg.SERVICETITAN_PENALTY, ST_REASON];
+  return [0, null];
+}
+
 function tierFor(score) {
   return cfg.TIERS.find(t => score >= t.min).tier;
 }
@@ -131,20 +159,27 @@ function computeFit(p) {
   const [fr, frD] = franchisePenalty(p.company);
   if (fr) reasons.push({ label: 'Franchise', points: fr, max: 0, detail: frD });
 
+  // Soft penalty. Tier still follows the numeric score; this does not force D.
+  const [st, stD] = serviceTitanPenalty(p.fsm_detected);
+  if (st) reasons.push({ label: 'ServiceTitan', points: st, max: 0, detail: stD });
+
   const boost = Math.max(-20, Math.min(20, Number(p.fit_boost) || 0));
   if (boost) reasons.push({ label: 'Your boost', points: boost, max: 20, detail: 'Manual adjustment' });
 
   // Base max is 90; scale to 100 so a perfect lead reads 100.
   const base = indPts + sz + rep + rch + loc;
-  const score = Math.max(0, Math.min(100, Math.round(base * (100 / 90)) + fr + boost));
+  const score = Math.max(0, Math.min(100, Math.round(base * (100 / 90)) + fr + st + boost));
   return { fit_score: score, fit_tier: tierFor(score), fit_reasons: reasons };
 }
 
-/** Recompute and persist fit for all prospects (or a list of ids). */
+const RESCORE_COLUMNS = 'id, company, industry, website, phone, city, state, rating, review_count, fit_boost, fsm_detected';
+
+/** Recompute and persist fit for all prospects (or a list of ids).
+ *  Pure over the selected columns. Does not fetch a homepage or any URL. */
 async function rescore(ids = null) {
   const { rows } = ids
-    ? await pool.query('SELECT id, company, industry, website, phone, city, state, rating, review_count, fit_boost FROM prospects WHERE id = ANY($1::int[])', [ids])
-    : await pool.query('SELECT id, company, industry, website, phone, city, state, rating, review_count, fit_boost FROM prospects');
+    ? await pool.query(`SELECT ${RESCORE_COLUMNS} FROM prospects WHERE id = ANY($1::int[])`, [ids])
+    : await pool.query(`SELECT ${RESCORE_COLUMNS} FROM prospects`);
   if (!rows.length) return 0;
 
   const idArr = [], scoreArr = [], tierArr = [], reasonArr = [];
@@ -163,4 +198,4 @@ async function rescore(ids = null) {
   return rows.length;
 }
 
-module.exports = { computeFit, rescore };
+module.exports = { computeFit, rescore, sizePoints, ST_REASON };

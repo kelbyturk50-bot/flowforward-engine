@@ -128,6 +128,10 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS do_not_contact BOOLEAN NOT NULL DEFAULT FALSE; -- opted out / bounced
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS researched_at  TIMESTAMPTZ;
+-- Field-service software cached by proposal research. NULL = unknown, so fit
+-- scoring applies no ServiceTitan penalty. Only the value ServiceTitan is
+-- penalized. computeFit / rescore read this column and do not fetch.
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS fsm_detected TEXT;
 
 -- One row per generated version. Regenerating creates a new version and marks
 -- the previous draft 'superseded'. Human edits land on the same row; the AI's

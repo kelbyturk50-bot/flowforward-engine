@@ -6,6 +6,9 @@ const axios   = require('axios');
 const cheerio = require('cheerio');
 const { MAX_SITE_PAGES, FETCH_REVIEWS } = require('./config');
 const { SOCIAL_HOSTS } = require('../scoring/config');
+const {
+  SERVICETITAN_RE, SERVICETITAN_SCHEDULER_RE, ST_FSM_LABEL, ST_SCHEDULER_LABEL,
+} = require('./servicetitan');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36';
 const PAGE_TEXT_LIMIT  = 4000;   // chars kept per page
@@ -20,7 +23,7 @@ const PAGE_HINTS = [
 // Fingerprints in page HTML (scripts, iframes, links) → what they already run
 const SIGNATURES = {
   field_service_software: {
-    'ServiceTitan': /servicetitan/i, 'Housecall Pro': /housecallpro|housecall pro/i, 'Jobber': /getjobber|jobber\.com/i,
+    [ST_FSM_LABEL]: SERVICETITAN_RE, 'Housecall Pro': /housecallpro|housecall pro/i, 'Jobber': /getjobber|jobber\.com/i,
     'Workiz': /workiz/i, 'FieldEdge': /fieldedge/i, 'Service Fusion': /servicefusion/i, 'ServiceM8': /servicem8/i,
     'GorillaDesk': /gorilladesk/i, 'Markate': /markate/i, 'Kickserv': /kickserv/i, 'JobNimbus': /jobnimbus/i,
     'AccuLynx': /acculynx/i, 'LMN': /golmn|lmn\.com/i, 'Aspire': /youraspire/i,
@@ -28,7 +31,7 @@ const SIGNATURES = {
   online_booking: {
     'Calendly': /calendly\.com/i, 'Acuity': /acuityscheduling/i, 'Setmore': /setmore/i, 'Square Appointments': /squareup\.com\/appointments/i,
     'Housecall Pro booking': /book\.housecallpro|housecallpro\.com\/book/i, 'Jobber requests': /clienthub\.getjobber|jobber.*request/i,
-    'ServiceTitan scheduler': /scheduler\.servicetitan|st-scheduler/i, 'Schedule Engine': /scheduleengine/i,
+    [ST_SCHEDULER_LABEL]: SERVICETITAN_SCHEDULER_RE, 'Schedule Engine': /scheduleengine/i,
   },
   chat_or_text_widget: {
     'Podium': /podium/i, 'Birdeye': /birdeye/i, 'Tawk.to': /tawk\.to/i, 'Intercom': /intercom/i, 'Drift': /drift\.com|js\.driftt/i,

@@ -8,6 +8,8 @@ const pool      = require('../db/client');
 const cfg       = require('./config');
 const { appendIndustryExclusion } = require('../scoring/industry');
 const { researchLead } = require('./research');
+const { fsmDetectedFromResearch } = require('./servicetitan');
+const { rescore } = require('../scoring/fit');
 const { systemPrompt, userPrompt, SUBMIT_TOOL } = require('./prompt');
 
 let client = null;
@@ -170,12 +172,17 @@ async function draftProposal(prospectId, opts = {}) {
     );
 
     // Fill in contact details the lead is missing; never overwrite what Kelby typed.
+    // fsm_detected is the ServiceTitan cache. null means this payload had no
+    // site object, so the previous cache is kept. 'none' means research ran
+    // and did not see a field-service fingerprint.
+    const fsmDetected = fsmDetectedFromResearch(research);
     await db.query(
       `UPDATE prospects SET researched_at = NOW(),
+              fsm_detected = COALESCE($4, fsm_detected),
               email = COALESCE(NULLIF(email, ''), $2),
               contact_name = COALESCE(NULLIF(contact_name, ''), NULLIF($3, ''))
         WHERE id = $1`,
-      [lead.id, toEmail, analysis.owner_name]
+      [lead.id, toEmail, analysis.owner_name, fsmDetected]
     );
     await db.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'note', $2)`,
       [lead.id, `Proposal v${version} drafted by the bot ($${cost.toFixed(2)})${disqualify ? ` and flagged not a fit: ${analysis.fit_reason}` : ''}.`]);
@@ -185,6 +192,8 @@ async function draftProposal(prospectId, opts = {}) {
         [lead.id, `${lead.stage} → disqualified (proposal bot)`]);
     }
     await db.query('COMMIT');
+    // Score from the cache just written. rescore does not fetch.
+    await rescore([lead.id]);
     return ins.rows[0];
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
