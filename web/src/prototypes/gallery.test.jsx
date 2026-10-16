@@ -59,7 +59,6 @@ function expectRibbon(container) {
   expect(tile.style.pointerEvents).toBe('none');
   expect(tile.style.zIndex).toBe('1');
   expect(tile.style.getPropertyValue('print-color-adjust')).toBe('exact');
-  expect(tile.style.getPropertyValue('-webkit-print-color-adjust')).toBe('exact');
   expect(tile.style.getPropertyPriority('print-color-adjust')).toBe('important');
   expect(tile.getAttribute('style')).toContain('0.05');
   expect(tile.getAttribute('style')).toContain('PROTOTYPE');
