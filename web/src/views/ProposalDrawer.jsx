@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
+import { TryLiveDemoLink } from '../demo/DemoLinks';
 import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, relDate, timeAgo, toast, Stars } from '../ui';
 import { useJobs, elapsed } from '../jobs';
 
@@ -78,12 +79,14 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <button className="btn btn-quiet" disabled={!!busy} onClick={() => setConfirmingManual(m => !m)}>Mark as manually sent…</button>
           <button className="btn btn-quiet" disabled={!!busy || rewriting} onClick={() => setRegen(r => !r)}>{rewriting ? 'Rewriting…' : 'Rewrite…'}</button>
           <a className="btn btn-quiet" href={`${p.onepager_url}?preview=1`} target="_blank" rel="noreferrer">Preview one-pager</a>
+          <TryLiveDemoLink className="btn btn-quiet" />
           <span className="spacer" />
           <button className="btn btn-quiet" disabled={!!busy} onClick={() => act('discard', () => api.discardProposal(p.id), 'Draft discarded.')}>Discard</button>
           <button className="btn btn-danger" disabled={!!busy} onClick={() => act('nf', () => api.discardProposal(p.id, { disqualify: true, reason: 'Not a fit (Kelby)' }), 'Marked not a fit.')}>Not a fit</button>
         </>}
         {p.status === 'sent' && <>
           <a className="btn btn-quiet" href={p.onepager_url} target="_blank" rel="noreferrer">Open one-pager</a>
+          <TryLiveDemoLink className="btn btn-quiet" />
           <button className="btn btn-quiet" disabled={!!busy} onClick={() => act('replied', () => api.repliedProposal(p.id, 'They got in touch another way'), 'Marked replied. Follow-ups stopped.')}>They replied another way</button>
           <button className="btn btn-danger" disabled={!!busy} onClick={() => act('stop', () => api.stopProposal(p.id), 'Follow-ups stopped.')}>Stop follow-ups</button>
         </>}

@@ -9,5 +9,7 @@ vi.stubGlobal('fetch', () => {
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  sessionStorage.clear();
+  window.history.pushState({}, '', '/');
   window.location.hash = '';
 });
