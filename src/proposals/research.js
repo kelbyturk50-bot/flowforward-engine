@@ -4,6 +4,7 @@
 
 const axios   = require('axios');
 const cheerio = require('cheerio');
+const { safeFetch } = require('../net/safeFetch');
 const { MAX_SITE_PAGES, FETCH_REVIEWS } = require('./config');
 const { SOCIAL_HOSTS } = require('../scoring/config');
 const {
@@ -81,14 +82,20 @@ function normalizeUrl(u) {
 const isSocialOnly = (u) => { const h = hostOf(u); return SOCIAL_HOSTS.some(s => h === s || h.endsWith('.' + s)); };
 
 async function fetchHtml(url) {
-  const res = await axios.get(url, {
-    timeout: 12000, maxRedirects: 5, maxContentLength: 3_000_000, responseType: 'text',
+  // safeFetch allows only http(s) on ports 80 and 443, vets every DNS answer,
+  // pins the connection to that address, and follows at most 5 redirects.
+  // 12s covers the whole fetch. The body is cut off at 3MB.
+  const res = await safeFetch(url, {
+    timeoutMs: 12000,
+    maxBytes: 3_000_000,
+    maxRedirects: 5,
     headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9' },
-    validateStatus: s => s < 400,
   });
+  if (res.status >= 400) throw new Error(`status ${res.status}`);
   const type = String(res.headers['content-type'] || '');
   if (type && !type.includes('html')) throw new Error(`not html (${type})`);
-  return { html: String(res.data || ''), finalUrl: res.request?.res?.responseUrl || url };
+  const html = Buffer.isBuffer(res.body) ? res.body.toString('utf8') : String(res.body || '');
+  return { html, finalUrl: res.finalUrl || url };
 }
 
 function pageText($) {
