@@ -1,6 +1,6 @@
 // Public pilot routes. No API key: the unguessable token is the credential.
 // There is no mint route here. Minting lives on the authenticated proposal
-// API and, only when the proposal has not been revoked, on the one-pager render.
+// API. The one-pager only recomputes a token that was already minted.
 //
 // Master flag off, or an unknown / expired / revoked / malformed token:
 // the same 404. These handlers do not send mail or call Places, Anthropic,
@@ -9,7 +9,7 @@
 const express = require('express');
 const flags = require('./flags');
 const { clientIp, consume } = require('./rate-limit');
-const { resolveToken } = require('./tokens');
+const { resolveToken, pilotReady } = require('./tokens');
 const { buildDemo } = require('./payload');
 const { isEventType, recordEvent } = require('./events');
 const pool = require('../db/client');
@@ -50,7 +50,7 @@ router.use((req, res, next) => {
     res.set('Retry-After', String(hit.retryAfter));
     return sendJson(res, 429, { error: 'Too many requests' });
   }
-  if (!flags.masterOn()) return notFound(res);
+  if (!flags.masterOn() || !pilotReady()) return notFound(res);
   next();
 });
 

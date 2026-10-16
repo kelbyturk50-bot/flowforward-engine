@@ -97,7 +97,7 @@ async function tokenStats(proposalId) {
 }
 
 const HASH_ONLY_COLUMNS = [
-  'created_at', 'expires_at', 'id', 'proposal_id', 'prospect_id', 'revoked_at', 'token_hash',
+  'created_at', 'expires_at', 'generation', 'id', 'proposal_id', 'prospect_id', 'revoked_at', 'token_hash',
 ];
 
 async function assertHashOnly(proposalId, rawTokens) {
@@ -293,38 +293,28 @@ describe('pilot estimate recovery', () => {
     assert.equal(rows[0].n, 0);
   });
 
-  it('mints a 16-byte token, looks it up by hash, and serves the synthetic payload', async () => {
+  it('mints a 32-byte HMAC token, looks it up by hash, and serves the synthetic payload', async () => {
     setFlags({ master: true, link: true });
-    const sizes = [];
-    const original = crypto.randomBytes;
-    crypto.randomBytes = function randomBytes(size, ...rest) {
-      sizes.push(size);
-      return original.call(this, size, ...rest);
-    };
-    let minted;
-    try {
-      minted = await request('POST', `/api/proposals/${proposal.id}/demo-token`, {
-        headers: { 'x-api-key': API_KEY },
-      });
-    } finally {
-      crypto.randomBytes = original;
-    }
+    const minted = await request('POST', `/api/proposals/${proposal.id}/demo-token`, {
+      headers: { 'x-api-key': API_KEY },
+    });
 
     assert.equal(minted.status, 201);
     assert.equal(minted.headers['cache-control'], 'no-store');
     assert.equal(typeof minted.json.token, 'string');
-    assert.match(minted.json.token, /^[A-Za-z0-9_-]{22}$/);
-    assert.equal(Buffer.from(minted.json.token, 'base64url').length, 16);
-    assert.ok(sizes.some((n) => n >= 16));
+    assert.equal(minted.json.token, tokens.deriveToken(proposal.id, 1));
+    assert.match(minted.json.token, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(Buffer.from(minted.json.token, 'base64url').length, 32);
     assert.equal(minted.json.path, `/demo/estimate-recovery/${minted.json.token}`);
     assert.equal(JSON.stringify(minted.json).includes(PROSPECT_EMAIL), false);
 
     const stored = await pool.query(
-      `SELECT id, proposal_id, prospect_id, token_hash, expires_at, revoked_at
+      `SELECT id, proposal_id, prospect_id, generation, token_hash, expires_at, revoked_at
          FROM pilot_tokens WHERE proposal_id = $1 AND revoked_at IS NULL`,
       [proposal.id]
     );
     assert.equal(stored.rows.length, 1);
+    assert.equal(Number(stored.rows[0].generation), 1);
     const hash = crypto.createHash('sha256').update(minted.json.token, 'utf8').digest();
     assert.ok(Buffer.from(stored.rows[0].token_hash).equals(hash));
     assert.equal(stored.rows[0].revoked_at, null);
@@ -608,8 +598,12 @@ describe('pilot estimate recovery', () => {
       assert.doesNotMatch(src, /\b(sendMail|approveAndSend|draftProposal|searchPlaces)\s*\(/, name);
     }
     const tokenSrc = fs.readFileSync(path.join(pilotDir, 'tokens.js'), 'utf8');
-    assert.match(tokenSrc, /randomBytes\(TOKEN_BYTES\)/);
+    assert.match(tokenSrc, /hkdfSync\(/);
+    assert.match(tokenSrc, /createHmac\(/);
+    assert.match(tokenSrc, /ff-pilot-demo/);
+    assert.match(tokenSrc, /pilot-demo:v1/);
     assert.match(tokenSrc, /timingSafeEqual/);
+    assert.doesNotMatch(tokenSrc, /randomBytes\(TOKEN_BYTES\)/);
 
     setFlags({ master: true, link: true, sms: true });
     const before = { ...calls };
@@ -749,50 +743,70 @@ describe('pilot estimate recovery', () => {
     assertClosed(stillClosed);
   });
 
-  it('mints one replacement when the one-pager cache is cold', async () => {
+  it('recomputes the same token across cold renders and rotates on mint', async () => {
     setFlags({ master: true, link: true });
-    const row = await insertProposal(prospect.id, { slug: 'pilot-one-active' });
+    const row = await insertProposal(prospect.id, { slug: 'pilot-stable-link' });
     const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.80' };
     const first = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
     assert.equal(first.status, 201);
-    tokens._clearCacheForTests();
+    assert.equal(first.json.token, tokens.deriveToken(row.id, 1));
+    const before = await tokenStats(row.id);
+    assert.equal(before.active, 1);
+    assert.equal(before.n, 1);
 
-    const page = await request('GET', '/p/pilot-one-active', {
+    const index = await pool.query(
+      `SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_pilot_tokens_one_active'`
+    );
+    assert.match(index.rows[0].indexdef, /UNIQUE/);
+    assert.match(index.rows[0].indexdef, /revoked_at IS NULL/);
+    await assert.rejects(
+      () => pool.query(
+        `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, token_hash, expires_at)
+         VALUES ($1, $2, 99, $3, NOW() + INTERVAL '1 day')`,
+        [row.id, prospect.id, crypto.randomBytes(32)]
+      ),
+      /idx_pilot_tokens_one_active|duplicate key/
+    );
+    assert.deepEqual(await tokenStats(row.id), before);
+
+    for (let i = 0; i < 50; i += 1) {
+      tokens._clearCacheForTests();
+      const page = await request('GET', '/p/pilot-stable-link', {
+        headers: { 'x-forwarded-for': `198.51.100.${(i % 50) + 1}` },
+      });
+      assert.equal(page.status, 200, `view ${i}`);
+      assert.equal(tokenFromPath(ctaHref(page.text)), first.json.token, `token ${i}`);
+    }
+    assert.deepEqual(await tokenStats(row.id), before);
+    await assertHashOnly(row.id, first.json.token);
+    const still = await request('GET', first.json.path, {
       headers: { 'x-forwarded-for': '203.0.113.81' },
     });
-    assert.equal(page.status, 200);
-    const href = ctaHref(page.text);
-    const fresh = tokenFromPath(href);
-    assert.ok(fresh);
-    assert.notEqual(fresh, first.json.token);
-    const active = await tokenStats(row.id);
-    assert.equal(active.active, 1);
-    await assertHashOnly(row.id, [first.json.token, fresh]);
+    assert.equal(still.status, 200);
+    assert.equal(still.json.company, 'Wasatch Heating');
 
+    const rotated = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
+    assert.equal(rotated.status, 201);
+    assert.equal(rotated.json.token, tokens.deriveToken(row.id, 2));
+    assert.notEqual(rotated.json.token, first.json.token);
+    const after = await tokenStats(row.id);
+    assert.equal(after.active, 1);
+    assert.equal(after.n, 2);
+    await assertHashOnly(row.id, [first.json.token, rotated.json.token]);
     const old = await request('GET', first.json.path, {
       headers: { 'x-forwarded-for': '203.0.113.82' },
     });
     assertClosed(old);
-    const current = await request('GET', href, {
+    const neu = await request('GET', rotated.json.path, {
       headers: { 'x-forwarded-for': '203.0.113.82' },
     });
-    assert.equal(current.status, 200);
-    assert.equal(current.json.company, 'Wasatch Heating');
-
-    const again = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
-    assert.equal(again.status, 201);
-    assert.notEqual(again.json.token, fresh);
-    const stillOne = await tokenStats(row.id);
-    assert.equal(stillOne.active, 1);
-    await assertHashOnly(row.id, [first.json.token, fresh, again.json.token]);
-    const replaced = await request('GET', href, {
+    assert.equal(neu.status, 200);
+    tokens._clearCacheForTests();
+    const page = await request('GET', '/p/pilot-stable-link', {
       headers: { 'x-forwarded-for': '203.0.113.83' },
     });
-    assertClosed(replaced);
-    const newest = await request('GET', again.json.path, {
-      headers: { 'x-forwarded-for': '203.0.113.83' },
-    });
-    assert.equal(newest.status, 200);
+    assert.equal(tokenFromPath(ctaHref(page.text)), rotated.json.token);
+    assert.equal((await tokenStats(row.id)).n, 2);
   });
 
   it('does not mint again on twenty cold one-pager views after revoke', async () => {
@@ -913,5 +927,44 @@ describe('pilot estimate recovery', () => {
     assert.equal(sameClient.headers['x-robots-tag'], 'noindex, nofollow');
     assert.equal(sameClient.headers['cache-control'], 'no-store');
     assertClosed(otherClient);
+  });
+
+  it('stays closed when CRM_API_KEY is missing', async () => {
+    const saved = process.env.CRM_API_KEY;
+    const origWarn = console.warn;
+    const lines = [];
+    console.warn = (...args) => {
+      lines.push(args.map((part) => String(part)).join(' '));
+    };
+    try {
+      process.env.CRM_API_KEY = '';
+      tokens._clearCacheForTests();
+      setFlags({ master: true, link: true });
+      const row = await insertProposal(prospect.id, { slug: 'pilot-no-secret' });
+      const before = await pool.query('SELECT COUNT(*)::int AS n FROM pilot_tokens');
+      const page = await request('GET', '/p/pilot-no-secret', {
+        headers: { 'x-forwarded-for': '203.0.113.150' },
+      });
+      assert.equal(page.status, 200);
+      assert.equal(page.text.includes('Try a live demo'), false);
+      assert.equal(page.text.includes('data-pilot'), false);
+      const demo = await request('GET', `/demo/estimate-recovery/${'a'.repeat(43)}`, {
+        headers: { 'x-forwarded-for': '203.0.113.151' },
+      });
+      assertClosed(demo);
+      const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, {
+        headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.152' },
+      });
+      assert.equal(minted.status, 404);
+      assert.deepEqual(minted.json, NOT_FOUND);
+      const after = await pool.query('SELECT COUNT(*)::int AS n FROM pilot_tokens');
+      assert.equal(after.rows[0].n, before.rows[0].n);
+      assert.ok(lines.some((line) => line.includes('CRM_API_KEY') && line.includes('[pilot]')));
+      assert.equal(lines.some((line) => line.includes(saved)), false);
+    } finally {
+      console.warn = origWarn;
+      process.env.CRM_API_KEY = saved;
+      tokens._clearCacheForTests();
+    }
   });
 });

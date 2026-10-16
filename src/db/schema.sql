@@ -233,10 +233,10 @@ UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND crea
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Pilot #1: unsold-estimate recovery demo (idempotent — applied on boot)
 -- Public lookup uses the SHA-256 hash. The raw token is not a column.
--- DROP COLUMN removes it on databases that stored one. A cold /p/:slug
--- mints a new token and revokes the previous active row. It does not mint
--- when proposals.demo_revoked_at is set, discarded proposals included.
--- An authenticated mint clears demo_revoked_at and replaces the active token.
+-- DROP COLUMN removes it on databases that stored one. generation is the
+-- HMAC input; /p/:slug recomputes the token and does not insert a row.
+-- One active (unrevoked) row per proposal. Authenticated mint bumps
+-- generation. demo_revoked_at blocks derivation, discarded proposals included.
 -- Events store an allowlisted type, timestamps, and join ids only.
 -- ═══════════════════════════════════════════════════════════════════════════
 
@@ -246,13 +246,18 @@ CREATE TABLE IF NOT EXISTS pilot_tokens (
   id           SERIAL PRIMARY KEY,
   proposal_id  INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
   prospect_id  INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  generation   INTEGER NOT NULL,
   token_hash   BYTEA NOT NULL UNIQUE,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at   TIMESTAMPTZ NOT NULL,
   revoked_at   TIMESTAMPTZ
 );
+ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS generation INTEGER;
 ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS token;
 CREATE INDEX IF NOT EXISTS idx_pilot_tokens_proposal ON pilot_tokens(proposal_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_tokens_one_active
+  ON pilot_tokens (proposal_id)
+  WHERE revoked_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS pilot_events (
   id           SERIAL PRIMARY KEY,

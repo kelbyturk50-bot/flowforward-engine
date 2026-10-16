@@ -1,32 +1,38 @@
 // Demo tokens for the unsold-estimate recovery pilot.
 //
-// The raw token is 16 bytes from crypto.randomBytes, encoded as unpadded
-// base64url (22 characters). Public lookup hashes the presented token and
-// compares with crypto.timingSafeEqual, including a dummy compare when no
-// row matches, so the compare itself does not branch on secret length.
-// Only the SHA-256 hash is stored. The raw token lives in this process's
-// memory after a mint, so a warm one-pager can render the same link. A cold
-// cache mints a new token and revokes the previous active row. There is no
-// token column on pilot_tokens or on proposals.
+// The token is the full 32-byte HMAC-SHA256 of
+// `pilot-demo:v1:${proposal_id}:${generation}`, unpadded base64url.
+// The HMAC key is HKDF-SHA256 over CRM_API_KEY with info `ff-pilot-demo`.
+// CRM_API_KEY is the API's own shared secret. No new env var is required.
+// When that secret is missing, the pilot stays closed: no one-pager CTA,
+// and the public demo routes return the same 404 as a flag that is off.
+//
+// The database stores the SHA-256 hash, the proposal, the generation, and
+// timestamps. It does not store the raw token. A /p/:slug render recomputes
+// the token from the active generation and does not insert a row, so a
+// restart or another instance produces the same link. An authenticated mint
+// bumps the generation and revokes the previous active row.
 //
 // proposals.demo_revoked_at sticks after revoke, including when the proposal
-// is discarded. Anonymous /p/:slug renders do not mint while it is set.
-// Unknown, expired, revoked, discarded, and malformed tokens all come back
-// as null — callers return one 404.
+// is discarded. While it is set, nothing is derived and nothing is minted
+// from a page view. Unknown, expired, revoked, discarded, and malformed
+// tokens all come back as null — callers return one 404.
 
 const crypto = require('crypto');
 const pool = require('../db/client');
 const flags = require('./flags');
-const { clientIp, consume } = require('./rate-limit');
 
-const TOKEN_BYTES = 16;
+const TOKEN_BYTES = 32;
 const TOKEN_RE = /^[A-Za-z0-9_-]{22,64}$/;
 const DEFAULT_TTL_HOURS = 24 * 14;
-
-// Process-local copy so a warm one-pager does not read the token row again.
-const cache = new Map();
+const HKDF_INFO = 'ff-pilot-demo';
+const TOKEN_LABEL = 'pilot-demo:v1';
 
 const DUMMY_HASH = crypto.randomBytes(32);
+
+let derivedKey = null;
+let derivedFrom = null;
+let missingSecretWarned = false;
 
 function ttlMs() {
   const raw = process.env.PILOT_DEMO_TOKEN_TTL_HOURS;
@@ -35,6 +41,48 @@ function ttlMs() {
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_TTL_HOURS * 3600 * 1000;
   const hours = Math.min(n, 24 * 365);
   return hours * 3600 * 1000;
+}
+
+function serverSecret() {
+  const secret = process.env.CRM_API_KEY;
+  if (typeof secret !== 'string' || secret.length === 0) return '';
+  return secret;
+}
+
+function pilotReady() {
+  if (serverSecret()) {
+    missingSecretWarned = false;
+    return true;
+  }
+  if (!missingSecretWarned) {
+    missingSecretWarned = true;
+    console.warn('[pilot] CRM_API_KEY is not set — the estimate-recovery demo stays off.');
+  }
+  return false;
+}
+
+function macKey() {
+  const secret = serverSecret();
+  if (!secret) return null;
+  if (derivedKey && derivedFrom === secret) return derivedKey;
+  derivedKey = Buffer.from(crypto.hkdfSync(
+    'sha256',
+    Buffer.from(secret, 'utf8'),
+    Buffer.alloc(0),
+    Buffer.from(HKDF_INFO, 'utf8'),
+    TOKEN_BYTES
+  ));
+  derivedFrom = secret;
+  return derivedKey;
+}
+
+function deriveToken(proposalId, generation) {
+  const key = macKey();
+  const id = Number(proposalId);
+  const gen = Number(generation);
+  if (!key || !Number.isInteger(id) || id < 1 || !Number.isInteger(gen) || gen < 1) return null;
+  const message = `${TOKEN_LABEL}:${id}:${gen}`;
+  return crypto.createHmac('sha256', key).update(message, 'utf8').digest().toString('base64url');
 }
 
 function hashToken(token) {
@@ -71,6 +119,7 @@ function blockedProposal(proposal) {
 }
 
 async function resolveToken(raw) {
+  if (!pilotReady()) return null;
   const wellFormed = typeof raw === 'string' && TOKEN_RE.test(raw);
   const computed = wellFormed ? hashToken(raw) : DUMMY_HASH;
   const { rows } = await pool.query(
@@ -98,15 +147,8 @@ async function resolveToken(raw) {
   };
 }
 
-async function remember(proposalId, token, expiresAt) {
-  cache.set(Number(proposalId), {
-    token,
-    expiresAt: new Date(expiresAt).getTime(),
-  });
-}
-
-async function mintForProposal(proposalId, options = {}) {
-  const fromOnePager = options.fromOnePager === true;
+async function mintForProposal(proposalId) {
+  if (!pilotReady()) return null;
   const id = Number(proposalId);
   if (!Number.isInteger(id) || id < 1) return null;
 
@@ -114,7 +156,7 @@ async function mintForProposal(proposalId, options = {}) {
   try {
     await db.query('BEGIN');
     const { rows } = await db.query(
-      `SELECT id, prospect_id, status, demo_revoked_at FROM proposals WHERE id = $1 FOR UPDATE`,
+      `SELECT id, prospect_id, status FROM proposals WHERE id = $1 FOR UPDATE`,
       [id]
     );
     const proposal = rows[0];
@@ -122,41 +164,39 @@ async function mintForProposal(proposalId, options = {}) {
       await db.query('ROLLBACK');
       return null;
     }
-    if (fromOnePager && proposal.demo_revoked_at) {
-      await db.query('ROLLBACK');
-      return null;
-    }
-
-    const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
-    if (Buffer.from(token, 'base64url').length < TOKEN_BYTES) {
+    const next = await db.query(
+      `SELECT COALESCE(MAX(generation), 0) + 1 AS generation
+         FROM pilot_tokens WHERE proposal_id = $1`,
+      [proposal.id]
+    );
+    const generation = Number(next.rows[0].generation);
+    const token = deriveToken(proposal.id, generation);
+    if (!token || Buffer.from(token, 'base64url').length < 16) {
       throw new Error('Demo token was shorter than 16 bytes');
     }
     const expiresAt = new Date(Date.now() + ttlMs());
     const tokenHash = hashToken(token);
-    // One live token per proposal. A cold one-pager mints again; the previous link stops working.
     await db.query(
       `UPDATE pilot_tokens SET revoked_at = NOW()
         WHERE proposal_id = $1 AND revoked_at IS NULL`,
       [proposal.id]
     );
-    if (!fromOnePager) {
-      await db.query(
-        `UPDATE proposals SET demo_revoked_at = NULL WHERE id = $1 AND demo_revoked_at IS NOT NULL`,
-        [proposal.id]
-      );
-    }
+    await db.query(
+      `UPDATE proposals SET demo_revoked_at = NULL WHERE id = $1 AND demo_revoked_at IS NOT NULL`,
+      [proposal.id]
+    );
     const inserted = await db.query(
-      `INSERT INTO pilot_tokens (proposal_id, prospect_id, token_hash, expires_at)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, expires_at`,
-      [proposal.id, proposal.prospect_id, tokenHash, expiresAt]
+      `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, token_hash, expires_at)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, expires_at, generation`,
+      [proposal.id, proposal.prospect_id, generation, tokenHash, expiresAt]
     );
     await db.query('COMMIT');
-    await remember(proposal.id, token, expiresAt);
     return {
       id: inserted.rows[0].id,
       token,
       expires_at: inserted.rows[0].expires_at,
+      generation: Number(inserted.rows[0].generation),
       proposal_id: Number(proposal.id),
       prospect_id: Number(proposal.prospect_id),
     };
@@ -186,7 +226,6 @@ async function revokeForProposal(proposalId) {
       [id]
     );
     await db.query('COMMIT');
-    cache.delete(id);
     return rowCount;
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
@@ -197,7 +236,7 @@ async function revokeForProposal(proposalId) {
 }
 
 async function demoHrefForProposal(req, proposalId) {
-  if (!flags.masterOn() || !flags.linkOn()) return '';
+  if (!flags.masterOn() || !flags.linkOn() || !pilotReady()) return '';
   const id = Number(proposalId);
   if (!Number.isInteger(id) || id < 1) return '';
 
@@ -207,31 +246,41 @@ async function demoHrefForProposal(req, proposalId) {
   );
   if (blockedProposal(gateRow.rows[0])) return '';
 
-  const cached = cache.get(id);
-  if (cached && cached.expiresAt > Date.now()) {
-    const row = await resolveToken(cached.token);
-    if (row && row.proposal_id === id) return publicDemoPath(cached.token);
-    cache.delete(id);
-  }
-
-  const gate = consume(clientIp(req), 'mint');
-  if (gate.limited) return '';
-  const minted = await mintForProposal(id, { fromOnePager: true });
-  if (!minted) return '';
-  return publicDemoPath(minted.token);
+  const active = await pool.query(
+    `SELECT generation, token_hash
+       FROM pilot_tokens
+      WHERE proposal_id = $1
+        AND revoked_at IS NULL
+        AND expires_at > NOW()
+      ORDER BY generation DESC
+      LIMIT 1`,
+    [id]
+  );
+  const row = active.rows[0];
+  if (!row) return '';
+  const token = deriveToken(id, row.generation);
+  if (!token) return '';
+  const stored = Buffer.from(row.token_hash);
+  if (!hashesEqual(stored, hashToken(token))) return '';
+  return publicDemoPath(token);
 }
 
 function _clearCacheForTests() {
   if (process.env.NODE_ENV !== 'test') {
     throw new Error('_clearCacheForTests is only available when NODE_ENV=test');
   }
-  cache.clear();
+  derivedKey = null;
+  derivedFrom = null;
+  missingSecretWarned = false;
 }
 
 module.exports = {
   TOKEN_BYTES,
   TOKEN_RE,
+  HKDF_INFO,
   hashToken,
+  deriveToken,
+  pilotReady,
   publicDemoPath,
   resolveToken,
   mintForProposal,
