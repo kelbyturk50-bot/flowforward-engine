@@ -463,6 +463,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   .tally a { display: inline-flex; align-items: center; min-height: 44px; }
   input[type="range"] { min-height: 44px; }
   .skip { min-height: 44px; }
+  .preview summary, .raw summary { display: flex; align-items: center; min-height: 44px; }
   .lead-head { padding-right: 3.25rem; }
   .lead-row { flex-wrap: wrap; row-gap: .5rem; }
   .lead-hit { flex: 1 1 100%; flex-wrap: wrap; align-items: center; }
