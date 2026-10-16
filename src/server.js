@@ -10,6 +10,9 @@ const { projects, tasks } = require('./api/projects');
 
 const app = express();
 
+// Railway is one reverse proxy. The pilot demo rate limit keys off req.ip.
+app.set('trust proxy', 1);
+
 // CORS — restrict to your frontend(s) with CORS_ORIGINS="https://your-app.vercel.app,http://localhost:5173".
 // Unset = allow any origin (the API key still guards access).
 const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -39,6 +42,10 @@ ${back ? `<p><a href="${esc(back)}" style="color:#2F6B57;font-weight:600">Back t
 
 // Public one-page proposals (no API key — the slug is unguessable)
 app.use('/p', require('./proposals/onepager').router);
+
+// Public pilot demo (no API key — the token is the credential).
+// 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly "true". No mint route.
+app.use('/demo/estimate-recovery', require('./pilot/demo').router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
 app.use('/api', requireApiKey);

@@ -4,6 +4,7 @@
 const express = require('express');
 const pool    = require('../db/client');
 const { SENDER } = require('./config');
+const { demoHrefForProposal } = require('../pilot/tokens');
 
 const router = express.Router();
 
@@ -20,8 +21,9 @@ const ICONS = {
 };
 const bareUrl = (u) => String(u || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
 
-function renderPage(p, lead) {
+function renderPage(p, lead, options = {}) {
   const o = p.onepager || {};
+  const demoHref = options.demoHref || '';
   const first = SENDER.name.split(' ')[0];
   const mailto = `mailto:${SENDER.email}?subject=${encodeURIComponent(`Re: ideas for ${lead.company}`)}`;
   const obs = (o.observations || []).map(x => `<li><h3>${esc(x.title)}</h3><p>${esc(x.detail)}</p></li>`).join('');
@@ -146,6 +148,7 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
       <a class="btn btn-main" href="${esc(SENDER.calendly)}" target="_blank" rel="noopener">${ICONS.calendar}Book a free 15-minute call</a>
       <a class="btn btn-alt" href="${esc(mailto)}">${ICONS.mail}Email ${esc(first)}</a>
       ${SENDER.phone ? `<a class="btn btn-alt" href="tel:${esc(SENDER.phone.replace(/[^\d+]/g, ''))}">${ICONS.phone}Call ${esc(first)}</a>` : ''}
+      ${demoHref ? `<a class="btn btn-alt" data-pilot="estimate-recovery" href="${esc(demoHref)}">Try a live demo</a>` : ''}
     </div>
     <div class="print-contact">
       <a class="pc-item" href="${esc(SENDER.calendly)}"><span class="pc-ico">${ICONS.calendar}</span><span class="pc-text"><span class="pc-lbl">Book a free call</span><span class="pc-val">${esc(bareUrl(SENDER.calendly))}</span></span></a>
@@ -168,8 +171,9 @@ router.get('/:slug', async (req, res) => {
     if (!preview && p.sent_at && !BOT_UA.test(req.get('user-agent') || '')) {
       pool.query(`UPDATE proposals SET views = views + 1, last_viewed_at = NOW() WHERE id = $1`, [p.id]).catch(() => {});
     }
+    const demoHref = await demoHrefForProposal(req, p.id);
     res.set('Cache-Control', 'no-store').set('X-Robots-Tag', 'noindex, nofollow');
-    res.type('html').send(renderPage(p, { company: p.company, city: p.city }));
+    res.type('html').send(renderPage(p, { company: p.company, city: p.city }, { demoHref }));
   } catch (err) {
     res.status(500).type('text').send('Something went wrong.');
   }

@@ -229,3 +229,48 @@ CREATE INDEX IF NOT EXISTS idx_proposal_jobs_status ON proposal_jobs(status, cre
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
 -- Drafts that existed before this column are treated as already seen
 UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND created_at < '2026-10-15';
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Pilot #1: unsold-estimate recovery demo (idempotent — applied on boot)
+-- Tokens are stored as a SHA-256 hash. The raw token is not a column.
+-- Events store an allowlisted type, timestamps, and join ids only.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS pilot_tokens (
+  id           SERIAL PRIMARY KEY,
+  proposal_id  INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+  prospect_id  INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  token_hash   BYTEA NOT NULL UNIQUE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at   TIMESTAMPTZ NOT NULL,
+  revoked_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_pilot_tokens_proposal ON pilot_tokens(proposal_id);
+
+CREATE TABLE IF NOT EXISTS pilot_events (
+  id           SERIAL PRIMARY KEY,
+  event_type   TEXT NOT NULL,
+  token_id     INTEGER REFERENCES pilot_tokens(id) ON DELETE CASCADE,
+  proposal_id  INTEGER REFERENCES proposals(id) ON DELETE CASCADE,
+  prospect_id  INTEGER REFERENCES prospects(id) ON DELETE CASCADE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_pilot_events_proposal ON pilot_events(proposal_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pilot_events_token ON pilot_events(token_id);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'pilot_events_type_check'
+  ) THEN
+    ALTER TABLE pilot_events ADD CONSTRAINT pilot_events_type_check
+      CHECK (event_type IN (
+        'demo_view',
+        'step_estimates',
+        'step_preview',
+        'step_reply',
+        'step_recovered',
+        'estimate_recovered'
+      ));
+  END IF;
+END $$;

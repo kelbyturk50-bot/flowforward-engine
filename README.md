@@ -180,6 +180,12 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | `SEND_DAILY_LIMIT` | no | `20` emails/day including follow-ups |
 | `FOLLOWUP_DAYS` | no | `3,10` |
 | `SEND_HOURS` / `SEND_DAYS` | no | `8,17` / `1,2,3,4,5` |
+| `FF_PILOT_ESTIMATE_RECOVERY` | no | Master switch for the unsold-estimate demo. Off unless exactly `true` |
+| `FF_PILOT_LINK_ON_ONEPAGER` | no | Shows "Try a live demo" on `/p/:slug`. Off unless exactly `true` |
+| `FF_PILOT_ESTIMATE_SMS` | no | SMS touches. Off unless exactly `true`. v1 does not send SMS |
+| `PILOT_DEMO_RATE_MAX` / `PILOT_DEMO_RATE_WINDOW_MS` | no | `60` requests / `60000` ms per IP on public demo routes |
+| `PILOT_DEMO_TOKEN_TTL_HOURS` | no | `336` (14 days) |
+| `PILOT_DEMO_BASE_URL` | no | Optional origin for the one-pager demo link. Unset = relative path |
 
 ### Gmail setup (one time, ~15 minutes)
 1. [console.cloud.google.com](https://console.cloud.google.com) → create a project (e.g. "FlowForward").
@@ -206,7 +212,11 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | POST | `/api/proposals/check-inbox` | Check replies + send due follow-ups now |
 | GET/POST | `/api/proposals/gmail/status` · `/gmail/connect` · `/gmail/disconnect` | Gmail connection |
 | GET | `/oauth/google/callback` | Google sign-in return (public) |
-| GET | `/p/:slug` | Public one-pager (`?preview=1` doesn't count a view) |
+| GET | `/p/:slug` | Public one-pager (`?preview=1` doesn't count a view). "Try a live demo" only when both pilot flags above are `true` and a token exists |
+| POST | `/api/proposals/:id/demo-token` | Mint a demo token (API key). 404 when the master flag is off. No public mint route |
+| POST | `/api/proposals/:id/demo-token/revoke` | Revoke active demo tokens for that proposal |
+| GET | `/demo/estimate-recovery/:token` | Synthetic demo JSON. 404 when the master flag is off, or the token is unknown, expired, revoked, or malformed. `X-Robots-Tag: noindex, nofollow`, `Cache-Control: no-store`, per-IP rate limit |
+| POST | `/demo/estimate-recovery/:token/events` | `{ "type": "demo_view" }` and the other allowlisted step types. Same token, flag, and rate-limit gates |
 
 ## Target markets
 

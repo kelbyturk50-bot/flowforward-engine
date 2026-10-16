@@ -112,7 +112,8 @@ Set `NODE_ENV=test` or `DISABLE_CRON=1` for any local server. A sender tick can 
 
 - When `CRM_API_KEY` is set, every `/api/*` route requires the `x-api-key` header (a `Bearer` token in `Authorization` is also accepted). Missing or wrong key returns 401.
 - When `CRM_API_KEY` is unset, `/api` is open and the server logs a warning. Do not rely on that. Do not turn the key off in production.
-- Public, no key: `GET /health`, `GET /p/:slug` (one-pager), `GET /oauth/google/callback`.
+- Public, no key: `GET /health`, `GET /p/:slug` (one-pager), `GET /oauth/google/callback`, and the pilot demo routes under `/demo/estimate-recovery/:token`.
+- Pilot flags `FF_PILOT_ESTIMATE_RECOVERY`, `FF_PILOT_LINK_ON_ONEPAGER`, and `FF_PILOT_ESTIMATE_SMS` are off unless the env var is exactly `true`. With the master flag off, every pilot route is 404 and the one-pager has no demo CTA. Demo tokens are minted only from `POST /api/proposals/:id/demo-token` (API key) or while rendering `/p/:slug` when both the master and link flags are on. There is no public mint route.
 
 `CORS_ORIGINS` (comma-separated) limits browser origins. Unset means any origin; the API key still guards `/api`.
 

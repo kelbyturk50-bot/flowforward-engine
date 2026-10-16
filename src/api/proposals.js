@@ -7,6 +7,8 @@ const { appendIndustryExclusion } = require('../scoring/industry');
 const { draftProposal, runProposalBatch, getSetting, isRunning } = require('../proposals/draft');
 const send    = require('../proposals/send');
 const jobs    = require('../proposals/jobs');
+const pilotFlags = require('../pilot/flags');
+const pilotTokens = require('../pilot/tokens');
 
 const LIST_COLS = `pr.id, pr.prospect_id, pr.version, pr.status, pr.slug, pr.to_email, pr.to_name, pr.subject,
   pr.cost_usd, pr.feedback_rating, pr.reviewed_at, pr.created_at, pr.updated_at, pr.sent_at, pr.followup1_due_at, pr.followup1_sent_at,
@@ -165,6 +167,45 @@ router.post('/', async (req, res) => {
   if (!id) return res.status(400).json({ error: 'prospect_id is required' });
   try { await startJob(res, { prospectId: id, kind: 'draft', instructions: req.body?.instructions }); }
   catch (err) { fail(res, err); }
+});
+
+function pilotProposalId(req) {
+  const raw = String(req.params.id || '');
+  if (!/^\d+$/.test(raw)) return null;
+  const id = Number(raw);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+// POST /api/proposals/:id/demo-token — mint a demo token. API key required.
+// Not a public route. 404 when the master pilot flag is off or the proposal is missing.
+router.post('/:id/demo-token', async (req, res) => {
+  if (!pilotFlags.masterOn()) return res.status(404).json({ error: 'Not found' });
+  const id = pilotProposalId(req);
+  if (!id) return res.status(404).json({ error: 'Not found' });
+  try {
+    const minted = await pilotTokens.mintForProposal(id);
+    if (!minted) return res.status(404).json({ error: 'Not found' });
+    res.set('Cache-Control', 'no-store');
+    res.status(201).json({
+      token: minted.token,
+      expires_at: minted.expires_at,
+      path: pilotTokens.publicDemoPath(minted.token),
+    });
+  } catch (err) { fail(res, err); }
+});
+
+// POST /api/proposals/:id/demo-token/revoke — revoke active demo tokens for this proposal.
+router.post('/:id/demo-token/revoke', async (req, res) => {
+  if (!pilotFlags.masterOn()) return res.status(404).json({ error: 'Not found' });
+  const id = pilotProposalId(req);
+  if (!id) return res.status(404).json({ error: 'Not found' });
+  try {
+    const found = await pool.query('SELECT id FROM proposals WHERE id = $1 AND status <> \'discarded\'', [id]);
+    if (!found.rows.length) return res.status(404).json({ error: 'Not found' });
+    await pilotTokens.revokeForProposal(id);
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true });
+  } catch (err) { fail(res, err); }
 });
 
 // GET /api/proposals/:id — full proposal with lead basics and version list
