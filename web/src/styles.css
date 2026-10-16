@@ -408,6 +408,63 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
+/* ── Estimate-recovery demo ────────────────────────────── */
+.demo, .not-found { min-height: 100vh; width: 100%; max-width: 100%; overflow-x: clip; background: var(--paper); color: var(--ink); }
+.demo { padding: 1rem 1rem calc(1.5rem + env(safe-area-inset-bottom)); }
+.demo-wrap, .not-found-card { width: 100%; max-width: 40rem; min-width: 0; margin: 0 auto; }
+.not-found { display: grid; place-items: center; padding: 1.5rem 1rem; }
+.not-found h1, .demo h1, .demo h2, .demo p, .demo li { overflow-wrap: anywhere; }
+.demo h1 { font-size: clamp(1.45rem, 6.2vw, 2.15rem); margin-bottom: .6rem; }
+.demo h2 { font-size: 1.05rem; margin: .15rem 0 .35rem; }
+.demo-loading { padding: 2rem 0; }
+.demo-banner, .demo-draft, .demo-quote, .demo-mail, .demo-approved-block {
+  min-width: 0; max-width: 100%;
+}
+.demo-banner {
+  background: var(--ochre-wash); border-radius: 12px; padding: .8rem .9rem; margin: 0 0 1rem;
+}
+.demo-kicker { font-family: var(--font-num); letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); font-size: .78rem; margin-bottom: .35rem; }
+.demo-lead { margin-bottom: 1rem; }
+.demo-steps { display: flex; flex-wrap: wrap; gap: .4rem; list-style: none; margin: 0 0 1rem; padding: 0; }
+.demo-steps li {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 .75rem; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--surface); font-size: .85rem; font-weight: 600;
+}
+.demo-steps li[aria-current="step"] { background: var(--juniper); border-color: var(--juniper); color: var(--juniper-ink); }
+.demo-estimates { list-style: none; margin: 0 0 1rem; padding: 0; display: grid; gap: .6rem; }
+.demo-estimates > li, .demo-mail, .demo-draft, .demo-quote, .demo-approved-block {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: .85rem .9rem;
+}
+.demo-est-head { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; flex-wrap: wrap; }
+.demo-money { font-family: var(--font-num); font-weight: 700; font-variant-numeric: tabular-nums; font-size: 1.15rem; }
+.demo-options { display: flex; flex-wrap: wrap; gap: .4rem; list-style: none; margin: .7rem 0 0; padding: 0; }
+.demo-options li {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 .75rem; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--paper); font-size: .92rem;
+}
+.demo-options li.is-open { border-color: var(--juniper); background: var(--juniper-wash); font-weight: 600; }
+.demo-btn {
+  display: flex; align-items: center; justify-content: center; width: 100%; min-height: 48px; margin-top: .75rem;
+  padding: .7rem 1rem; border-radius: 10px; border: 1px solid var(--juniper); background: var(--juniper);
+  color: var(--juniper-ink); font-weight: 600; cursor: pointer; text-align: center;
+}
+.demo-btn:disabled { opacity: .55; cursor: default; }
+.demo-btn-quiet { background: transparent; color: var(--ink); border-color: var(--line); }
+.demo-status { font-weight: 600; margin-bottom: .7rem; }
+.demo-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: .6rem; }
+.demo-mail-top, .demo-from, .demo-subject { display: flex; justify-content: space-between; gap: .5rem; flex-wrap: wrap; }
+.demo-when, .demo-kind { font-family: var(--font-num); font-size: .78rem; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); }
+.demo-mail-task { border-color: var(--ochre); }
+.demo-from, .demo-subject { display: block; color: var(--ink-2); font-size: .92rem; margin-bottom: .35rem; }
+.demo-quote { margin: 0 0 .75rem; }
+.demo-approved { margin: .45rem 0 0; font-weight: 700; color: var(--juniper); }
+.not-found .btn { min-height: 48px; margin-top: 1rem; }
+@media (min-width: 800px) {
+  .demo-wrap { max-width: 52rem; }
+  .demo-estimates { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .demo-estimates > li:first-child { grid-column: 1 / -1; }
+}
+
 /* ── Mobile ────────────────────────────────────────────── */
 @media (max-width: 860px) {
   body { overflow-x: clip; }
