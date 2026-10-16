@@ -61,8 +61,9 @@ describe('demo code split', () => {
         throw new Error(result.stderr || result.stdout || `vite build exited ${result.status}`);
       }
       const html = readFileSync(path.join(built, 'index.html'), 'utf8');
-      expect(html).not.toContain('fonts.googleapis.com');
-      expect(html).not.toContain('fonts.gstatic.com');
+      expect(html).toContain('family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600;700');
+      expect(html).toContain('fonts.googleapis.com');
+      expect(html).toContain('fonts.gstatic.com');
       const entrySrc = html.match(/src="([^"]+\.js)"/);
       expect(entrySrc).toBeTruthy();
       const entryName = entrySrc[1].split('/').pop();

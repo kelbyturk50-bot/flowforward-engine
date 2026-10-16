@@ -28,8 +28,16 @@ function stripControls(value) {
   }).join('');
 }
 
+function isBidiOrZeroWidth(code) {
+  if (code >= 0x202A && code <= 0x202E) return true;
+  if (code >= 0x2066 && code <= 0x2069) return true;
+  if (code === 0x200E || code === 0x200F || code === 0x061C) return true;
+  return code === 0x200B || code === 0x200C || code === 0x200D || code === 0x2060 || code === 0xFEFF || code === 0x180E;
+}
+
 export function sanitizeName(value) {
-  return stripControls(value).trim().slice(0, BRAND_NAME_MAX);
+  const visible = Array.from(stripControls(value)).filter((ch) => !isBidiOrZeroWidth(ch.codePointAt(0))).join('');
+  return visible.trim().slice(0, BRAND_NAME_MAX);
 }
 
 export function normalizeHex(value) {

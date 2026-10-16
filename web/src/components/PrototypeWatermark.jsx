@@ -49,6 +49,8 @@ export const RIBBON_STYLE = {
   fontSize: '14px',
   fontWeight: 600,
   lineHeight: 1.3,
+  WebkitPrintColorAdjust: 'exact',
+  printColorAdjust: 'exact',
 };
 
 const RIBBON_IMPORTANT = {
@@ -79,6 +81,8 @@ const RIBBON_IMPORTANT = {
   'font-size': '14px',
   'font-weight': '600',
   'line-height': '1.3',
+  '-webkit-print-color-adjust': 'exact',
+  'print-color-adjust': 'exact',
 };
 
 function lockStyle(node, declarations) {

@@ -2,6 +2,8 @@
 // on /demo/:path* covers them. Token shape matches the estimate-recovery demo
 // (22–64 base64url characters, at least 16 bytes). Link expiry is the
 // issuer's job; this static preview uses one fixed synthetic token.
+// The gallery token or route is not access control. A matching token only
+// selects this preview; it does not authenticate a caller or hide the page.
 
 import { isDemoToken } from '../demo/token';
 

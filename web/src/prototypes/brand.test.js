@@ -17,6 +17,7 @@ import {
   pickOnAccent,
   presentBrand,
   sanitizeLogoUrl,
+  sanitizeName,
 } from './brand';
 import { HOSTILE_BRAND, NAVY_BRAND, TEST_BRAND, YELLOW_BRAND } from './fixture-brand';
 
@@ -127,6 +128,17 @@ describe('brand sanitizer', () => {
     expect(pickOnAccent('#14213D')).toBe('#FFFFFF');
   });
 
+  it('strips bidi overrides and zero-width characters from names', () => {
+    expect(sanitizeName('TEST: \u202ECedar\u202C Lane')).toBe('TEST: Cedar Lane');
+    expect(sanitizeName('\u202A\u202B\u202C\u202D\u202ETEST: Shop')).toBe('TEST: Shop');
+    expect(sanitizeName('\u2066\u2067\u2068\u2069TEST: Shop')).toBe('TEST: Shop');
+    expect(sanitizeName('TEST:\u200E \u200FShop\u061C')).toBe('TEST: Shop');
+    expect(sanitizeName('TE\u200BST:\u200C \u200DWa\u2060satch\uFEFF\u180E')).toBe('TEST: Wasatch');
+    expect(sanitizeName('\u202E\u200B\u200C')).toBe('');
+    expect(presentBrand({ name: 'TEST: \u202EHeating\u200B' }).name).toBe('TEST: Heating');
+    expect(presentBrand({ name: '\u202E\u200B' }).name).toBe(FALLBACK_NAME);
+  });
+
   it('chooses a logo plate from local color only', () => {
     expect(chooseLogoPlate('#1F4E79')).toBe('none');
     expect(chooseLogoPlate('#F5E050')).toBe('slate');
@@ -152,6 +164,9 @@ describe('brand sanitizer', () => {
     expect(block).toContain('visibility: visible !important');
     expect(block).not.toMatch(/var\s*\(/);
     expect(block).not.toContain(JUNIPER_ACCENT);
+    expect(block).toContain('-webkit-print-color-adjust: exact');
+    expect(block).toContain('print-color-adjust: exact');
+    expect(block).toContain('border: 2px solid #1E2A2F');
     expect(css).toContain("%3EPROTOTYPE%3C");
     expect(css).toContain("fill-opacity='0.05'");
     expect(css).toContain('pointer-events: none');
