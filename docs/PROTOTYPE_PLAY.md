@@ -166,7 +166,7 @@ Why this sits at the low end of the market: it is a beachhead for 2–15-truck o
 2. **"Jobber/HCP already sends quote reminders."** Jobber sends up to two automatic reminders, and custom sequences need Grow. This runs 3–4 touches from your own mailbox, stops when they reply, and tells you which estimates came back.
 3. **"I don't want AI talking to my customers."** It drafts in your voice, from your email, on a schedule you approve. You can turn it off with one switch. Nothing goes out by SMS unless you set that up later.
 4. **"What if I stop paying?"** You own the accounts and data. Export anytime, no termination fee.
-5. **"Too expensive."** A Utah replacement install averages ~$18.5K. Shops like yours often have a few stalled estimates a month, and if even one came back, it could cover the cost. No promises. The audit shows your real numbers first.
+5. **"Too expensive."** A Utah replacement install averages ~$18.5K. Many shops have some open estimates that never got a follow-up, and if even one came back, it could cover the cost. No promises. The audit shows your real numbers first.
 6. **"I'm too busy to set it up."** Setup is a CSV or forwarding your estimate emails. About an hour of your time.
 7. **"Will it spam people or hurt my reviews?"** Max 3–4 touches, stops on reply, and every message comes from you.
 8. **"Where did this branding come from?"** It's just your company name and colors, entered by hand. Nothing was pulled from your site, and it's a private link only you have. We take it down the moment you ask.
