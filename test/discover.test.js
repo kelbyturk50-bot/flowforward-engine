@@ -83,7 +83,7 @@ describe('discovery upsert', () => {
     assert.equal(rows[0].website, 'https://wasatchheating.example');
     assert.equal(rows[0].industry, 'HVAC');
     assert.equal(rows[0].stage, 'found');
-    assert.equal(rows[0].fit_score, 97);
+    assert.equal(rows[0].fit_score, 100);
     assert.equal(rows[0].fit_tier, 'A');
 
     const second = await runDiscovery();

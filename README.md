@@ -107,14 +107,15 @@ Every lead gets a 0–100 fit score and an A–D tier, recomputed on boot, after
 | Factor | Points | Logic |
 |---|---|---|
 | Industry | 30 | Automation leverage per trade (`src/scoring/config.js`) |
-| Size | 25 | Review count as a job-volume proxy; sweet spot 75–400 |
+| Size | 25 | Review count as a 2–15 truck proxy; max points at 25–200 reviews |
 | Reputation | 10 | Google rating |
 | Reachability | 15 | Real website + phone (social-only pages score lower) |
 | Location | 10 | In your drive-to cities (`FIT_HOME_CITIES`) |
 | Franchise | −20 | National brands / franchises |
+| ServiceTitan | −15 | Only when proposal research cached ServiceTitan on the lead (`fsm_detected`). Not a hard exclusion. Jobber and Housecall Pro are not penalized. |
 | Your boost | ±20 | Manual adjustment per lead |
 
-Tiers: A ≥ 80, B ≥ 65, C ≥ 50, D below. Tune everything in `src/scoring/config.js`, then hit "Re-rank all leads" in Settings.
+Tiers: A ≥ 78, B ≥ 62, C ≥ 47, D below. Tune everything in `src/scoring/config.js`, then hit "Re-rank all leads" in Settings.
 
 ## CRM frontend (`web/`)
 
@@ -215,7 +216,7 @@ Default: Utah County + Salt Lake Valley
 
 ## Industries tracked
 
-20 search queries across: HVAC, Roofing, Landscaping, Plumbing, Electrical, Cleaning, Painting, Gutters, Windows, General Contractors. Pest control is out of scope.
+16 search queries. HVAC (6) and plumbing (4) are the majority. One query each for electrical, roofing, landscaping, cleaning, painting, and general contractors. Gutters and windows are not searched. Pest control is out of scope.
 
 Edit `src/bot/industries.js` to add or remove.
 

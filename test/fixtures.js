@@ -40,13 +40,14 @@ async function insertProspect(overrides = {}) {
   const { rows } = await pool.query(
     `INSERT INTO prospects
        (google_place_id, company, industry, phone, website, address, city, state, zip,
-        rating, review_count, score, source, stage, email, contact_name)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        rating, review_count, score, source, stage, email, contact_name, fsm_detected)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
      RETURNING *`,
     [
       row.google_place_id, row.company, row.industry, row.phone, row.website, row.address,
       row.city, row.state, row.zip, row.rating, row.review_count, row.score, row.source, row.stage,
       row.email || null, row.contact_name || null,
+      row.fsm_detected === undefined ? null : row.fsm_detected,
     ]
   );
   return rows[0];

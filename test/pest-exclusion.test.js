@@ -200,8 +200,8 @@ describe('pest control exclusion', { concurrency: false }, () => {
   it('maps pest synonyms to Pest Control and keeps lookalike names', () => {
     assert.deepEqual(EXCLUDED_INDUSTRIES, ['Pest Control']);
     assert.equal(Object.hasOwn(INDUSTRY_FIT, 'Pest Control'), false);
-    assert.equal(INDUSTRY_FIT.HVAC, 9);
-    assert.equal(INDUSTRY_FIT.Plumbing, 8);
+    assert.equal(INDUSTRY_FIT.HVAC, 10);
+    assert.equal(INDUSTRY_FIT.Plumbing, 9);
 
     for (const name of FALSE_POSITIVE_NAMES) {
       assert.equal(isPestText(name), false, name);
@@ -239,9 +239,9 @@ describe('pest control exclusion', { concurrency: false }, () => {
       website: 'https://wasatchheating.example',
       fit_boost: 0,
     });
-    assert.equal(hvac.fit_score, 97);
+    assert.equal(hvac.fit_score, 100);
     assert.equal(hvac.fit_tier, 'A');
-    assert.equal(hvac.fit_reasons.find(r => r.label === 'Industry').points, 27);
+    assert.equal(hvac.fit_reasons.find(r => r.label === 'Industry').points, 30);
 
     const plumbing = computeFit({
       ...sweetSpot,
@@ -251,7 +251,7 @@ describe('pest control exclusion', { concurrency: false }, () => {
       phone: '(801) 555-0140',
       fit_boost: 0,
     });
-    assert.equal(plumbing.fit_score, 93);
+    assert.equal(plumbing.fit_score, 97);
     assert.equal(plumbing.fit_tier, 'A');
   });
 
@@ -287,7 +287,7 @@ describe('pest control exclusion', { concurrency: false }, () => {
     const hvac = kept('test-place-wasatch-heating');
     assert.equal(hvac.company, 'Wasatch Heating');
     assert.equal(hvac.industry, 'HVAC');
-    assert.equal(hvac.fit_score, 97);
+    assert.equal(hvac.fit_score, 100);
     assert.equal(hvac.fit_tier, 'A');
 
     for (const [id, company] of [
@@ -298,21 +298,21 @@ describe('pest control exclusion', { concurrency: false }, () => {
       const row = kept(id);
       assert.equal(row.company, company);
       assert.equal(row.industry, 'HVAC');
-      assert.equal(row.fit_score, 97);
+      assert.equal(row.fit_score, 100);
       assert.equal(row.fit_tier, 'A');
     }
 
     const plumbing = kept('test-place-provo-plumbing');
     assert.equal(plumbing.company, 'Provo Plumbing');
     assert.equal(plumbing.industry, 'Plumbing');
-    assert.equal(plumbing.fit_score, 93);
+    assert.equal(plumbing.fit_score, 97);
     assert.equal(plumbing.fit_tier, 'A');
 
     const builder = kept('test-place-summit-builders');
     assert.equal(builder.company, 'Summit Builders');
     assert.equal(builder.industry, 'Construction');
-    assert.equal(builder.fit_score, 87);
-    assert.equal(builder.fit_tier, 'A');
+    assert.equal(builder.fit_score, 77);
+    assert.equal(builder.fit_tier, 'B');
   });
 
   it('pickLeads skips pest synonyms and keeps other home services', async () => {
@@ -381,13 +381,13 @@ describe('pest control exclusion', { concurrency: false }, () => {
     }));
     assert.equal(hvac.status, 201);
     assert.equal(hvac.json.industry, 'HVAC');
-    assert.equal(hvac.json.fit_score, 97);
+    assert.equal(hvac.json.fit_score, 100);
     assert.equal(hvac.json.fit_tier, 'A');
 
     const lookalikes = [
-      ['Pestana Plumbing', 'Plumbing', 93],
-      ['Compest', 'HVAC', 97],
-      ['Best Heating', 'HVAC', 97],
+      ['Pestana Plumbing', 'Plumbing', 97],
+      ['Compest', 'HVAC', 100],
+      ['Best Heating', 'HVAC', 100],
     ];
     for (const [company, industry, score] of lookalikes) {
       const created = await send('POST', '/api/prospects', leadBody({ company, industry }));
