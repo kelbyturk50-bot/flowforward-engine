@@ -3,7 +3,18 @@
 **Status:** Product spec. Summit's team builds. Scout owns selection, positioning, and build order.
 **Locked GTM (unchanged):** residential HVAC with 2–15 trucks, not on ServiceTitan, in Utah first. Plumbing is secondary. Pest control is out. Kelby is the only one who contacts prospects, by his own email and phone. Bots never contact anyone. No cold SMS. The customer owns the workflow, data, and accounts (export anytime, no termination fee). Pilot #1 wedge is **Unsold-Estimate Recovery** (#21/#22). Kill rule and proof gate: see `flowforward-wedge-reopen.md`.
 
-**What it is:** a private, clickable prototype of a FlowForward agent in the prospect's brand, running on synthetic data. Every screen carries a watermark: **"Prototype — we can make this real fast."** Kelby shows it in his own-name demo. It is the top rung of the offer ladder, not a product.
+**What it is:** a private, clickable prototype of a FlowForward agent in the prospect's brand, running on synthetic data. Every screen carries the watermark **"PROTOTYPE, not live. FlowForward can make this real in days."** It is baked into the render, so neither the viewer nor the prospect can remove or hide it. Kelby shows it in his own-name demo. It is the top rung of the offer ladder, not a product.
+
+### Builder guardrails (binding for Summit's team)
+- **Nothing real goes out.** No real email, SMS, or calls from any prototype screen. No Twilio.
+- **No live calls from the generator.** No live discovery runs, and no Places, Anthropic, or Gmail calls. Inputs are cached prospect data plus fixtures.
+- **Logos in v1 come only from fixtures or manual entry.** Fetching a logo or brand assets from a prospect's site is gated on the SSRF fix (#30) plus Warden review. **Working default until Kelby decides:** company name and colors only, with no scraped logo before first contact.
+- **Flag:** `FF_PROTOTYPE_GALLERY` gates every prototype route and generator. It defaults to **OFF in prod**.
+- **No Railway or Vercel setting or env changes.**
+- **Tagged test data only,** per the pre-prod policy. Prototype rows and events are tagged, cleaned up after, and the proof is posted on the PR.
+- **Links expire after 14 days** (decided by Summit).
+- **No ROI or close-rate promises,** anywhere: copy, demo, or proposal. Use conditional wording ("could", "shops like yours often").
+- Builds follow branch → PR → gates (see PLAYBOOK): Ochre reviews UI, and Warden reviews the logo fetch and token/link auth.
 
 ---
 
@@ -30,14 +41,14 @@
 | `maint_plan` | Maintenance plan/club page or language | `mentions.maintenance_plan` | Cache |
 | `emergency_247` | 24/7 / after-hours claim | `mentions.emergency_24_7` | Cache |
 | `hours` | Weekday hours (closed evenings/weekends) | `research.place.hours` (only if already cached) | Cache (when researched) |
-| `review_count`, `rating` | Size proxy and reputation | prospect row | Cache |
+| `review_count`, `rating` | Size proxy and reputation (sweet spot 25–200, per F-002) | prospect row | Cache |
 | `franchise` | National brand name match | `FRANCHISE_PATTERNS` on `company` | Cache |
 | `rv_missed_call` | Review text mentions "no answer / voicemail / couldn't reach / never called back" | regex over cached `research.reviews[].text` (≤5) | New-derived |
 | `rv_slow_quote` | Review text mentions "slow quote / never got the estimate / never followed up" | same | New-derived |
 | `rv_scheduling` | Review text mentions "hard to schedule / no-show / late / rescheduled" | same | New-derived |
 | `contact_form_only` | Has form/email but no booking, chat, or FSM portal | derived from the rows above | New-derived |
 | `quote_form` | Dedicated estimate/quote request page | page hints already crawled (`/estimate|quote/`); needs a flag written at research time | New-collect |
-| `truck_count` | Fleet size | not observable cheaply. Use `review_count` as the proxy (25–150 is the sweet spot) | Not collected (proxy only) |
+| `truck_count` | Fleet size | not observable cheaply. Use `review_count` as the proxy (25–200 is the sweet spot, per F-002) | Not collected (proxy only) |
 
 ### Points per agent type (0–100 after clamp)
 
@@ -59,8 +70,8 @@ Positive points add up. A signal that is unknown adds nothing. "Gap" means the s
 | `maint_plan` | +5 | | | | | +35 | | |
 | `fsm` ∈ {Jobber, Housecall Pro} | +10 | +5 | | | +5 | +10 | | |
 | `fsm` = none detected | +5 | +5 | +5 | +10 | | | +10 | +5 |
-| `review_count` 25–150 | +10 | +10 | +10 | +10 | +10 | +10 | +5 | +5 |
-| `review_count` > 150 | +5 | +5 | +10 | | | +10 | +15 | |
+| `review_count` 25–200 | +10 | +10 | +10 | +10 | +10 | +10 | +5 | +5 |
+| `review_count` > 200 | +5 | +5 | +10 | | | +10 | +15 | |
 | Industry = HVAC | +10 | +5 | +5 | +5 | +5 | +10 | +5 | |
 
 ### Tie-breaks (in order)
@@ -71,9 +82,9 @@ Positive points add up. A signal that is unknown adds nothing. "Gap" means the s
 
 ### Disqualifiers and caps
 - **Pest control:** no prototype (out of GTM).
-- **Franchise name match:** no prototype.
+- **Franchise name match:** no prototype. **This is intentional for v1 (Scout).** Franchises run on corporate systems and make weak buyers. It is stricter than F-004's tier-B cap on purpose: a lead can still be scored, but it gets no prototype.
 - **ServiceTitan detected:** only *light* prototypes (estimate follow-up summary view, review requests). No receptionist, scheduling, or dispatch, because ST already sells those natively. Tracked with the F-004 tier-B cap.
-- **Score < 40 on every agent type:** no prototype. Kelby's call only.
+- **Score < 40 on every agent type** (`minScore: 40`): no prototype. This is a hard floor with no manual override.
 - **Bookkeeping:** never auto-picked. It is offered only when the prospect asks for it in a live conversation.
 - **Out of state:** park until the Utah proof gate is met.
 - Pick **at most 2** prototypes per prospect. The top one is the demo; the second is a "next step" mention.
@@ -130,15 +141,16 @@ Positive points add up. A signal that is unknown adds nothing. "Gap" means the s
 ### Narrative (Kelby, own name)
 > "I built what your follow-up would look like if it ran itself, in your brand, on fake data. It's a prototype, it says so on every screen. If you like it, we make it real in a couple of weeks, on your email and your accounts. You own it. Walk away anytime and take everything with you."
 
-The lead is the **outcome** (one recovered $17–18.5K replacement pays for the build many times over; see the wedge memo §2), not the AI.
+The lead is the **outcome**, not the AI. Utah replacement installs average about $18.5K (wedge memo §2), so if even one stalled estimate is recovered, it could cover the build. Never promise that it will.
 
 ### Offer ladder
 1. **Free branded prototype.** Private link, synthetic data, watermark. Shown live by Kelby.
-2. **Paid MVP build.** One agent, real data, the customer's own mailbox/accounts (#22 scope, Warden review, kill switches, Kelby approves any paid inbox).
+2. **Paid MVP build.** One agent, real data, the customer's own mailbox/accounts (#22 scope; intake is CSV-only by default; Warden review, kill switches, Kelby approves any paid inbox).
 3. **Hosting and maintenance plan.** Monitoring, fixes, small changes. Monthly, cancel anytime, export included.
 4. **Consulting.** Hourly or a small block, for the next workflow or an audit.
 
-### Pricing anchors: **PROPOSED, for Kelby to set** (hypotheses, not decisions)
+### Pricing anchors: **PENDING KELBY (not blocking)**
+The proposed ranges below are the working defaults until Kelby sets them. They are guesses, not decisions. Whether the first build gets a case-study discount is still open.
 
 | Rung | Proposed anchor | Market evidence (public, mostly vendor or agency blogs, so treat as directional) |
 |---|---|---|
@@ -154,10 +166,10 @@ Why this sits at the low end of the market: it is a beachhead for 2–15-truck o
 2. **"Jobber/HCP already sends quote reminders."** Jobber sends up to two automatic reminders, and custom sequences need Grow. This runs 3–4 touches from your own mailbox, stops when they reply, and tells you which estimates came back.
 3. **"I don't want AI talking to my customers."** It drafts in your voice, from your email, on a schedule you approve. You can turn it off with one switch. Nothing goes out by SMS unless you set that up later.
 4. **"What if I stop paying?"** You own the accounts and data. Export anytime, no termination fee.
-5. **"Too expensive."** One recovered replacement (Utah average ~$18.5K install) covers years of it.
+5. **"Too expensive."** A Utah replacement install averages ~$18.5K. Shops like yours often have a few stalled estimates a month, and if even one came back, it could cover the cost. No promises. The audit shows your real numbers first.
 6. **"I'm too busy to set it up."** Setup is a CSV or forwarding your estimate emails. About an hour of your time.
 7. **"Will it spam people or hurt my reviews?"** Max 3–4 touches, stops on reply, and every message comes from you.
-8. **"How did you get my logo?"** From your public site, used only in this private link that only you have. We take it down the moment you ask.
+8. **"Where did this branding come from?"** It's just your company name and colors, entered by hand. Nothing was pulled from your site, and it's a private link only you have. We take it down the moment you ask.
 9. **"We already have an office manager."** It's her follow-up list, worked automatically. She handles the replies, not the chasing.
 10. **"I'm on ServiceTitan."** ST has its own unsold-estimate agent. Use it. We'd only add value at the edges.
 
@@ -165,11 +177,12 @@ Why this sits at the low end of the market: it is a beachhead for 2–15-truck o
 `prototype_generated`, `prototype_link_issued`, `prototype_viewed` (token id, agent_type, screen), `prototype_cta_clicked` (cta enum), `prototype_takedown_requested`, `call_booked`, `audit_completed` (open_estimates_bucket enum), `mvp_proposed`, `mvp_sold` (agent_type, price_band enum), `mvp_live`, `estimate_recovered` (amount_band enum), `hosting_started`, `hosting_cancelled`, `consulting_booked`. Funnel to watch: viewed → cta → call_booked → mvp_sold.
 
 ### Ethics line (non-negotiable; every prototype)
-- A visible **"Prototype — we can make this real fast"** watermark on every screen, including in screenshots.
-- `noindex,nofollow`, plus robots disallow. Tokenized links (≥16 random bytes, per wedge memo rules), rate-limited, expiring.
+- The watermark **"PROTOTYPE, not live. FlowForward can make this real in days."** appears on every screen, including in screenshots. It is baked into the render and can't be removed.
+- `noindex,nofollow`, plus robots disallow. Tokenized links (≥16 random bytes, per wedge memo rules), rate-limited, expiring after 14 days.
 - Never imply they are a client. No "trusted by" or client lists using their name.
 - No fake reviews or testimonials, and no made-up customer quotes.
-- Their logo and brand appear **only** in the private prototype shown to them, never in our marketing.
+- **No ROI or close-rate promises.** Use conditional wording only.
+- Their name, colors, and (once allowed) logo appear **only** in the private prototype shown to them, never in our marketing.
 - **Synthetic data only.** No real customer names, phone numbers, or addresses, even if public.
 - Take it down on request, the same day. Log `prototype_takedown_requested`.
 - Bots generate prototypes. Only Kelby shares the link.
@@ -187,7 +200,9 @@ Why this sits at the low end of the market: it is a beachhead for 2–15-truck o
 7. **Dispatch.** The pain belongs to bigger shops and the money already goes to the FSM. It's hard to demo honestly on synthetic data.
 8. **Bookkeeping: LOW.** High trust and accuracy risk (money, taxes, the CPA relationship), no observable public signal, needs access to sensitive financial accounts, and it's off-wedge. Offer it only when asked.
 
-## Open questions for Kelby
-- Set the three price anchors (and decide whether the first build is discounted for a case study).
-- OK to use a prospect's public logo in a private prototype at all, or text-only branding (company name + colors) until he has spoken to them once?
-- Link expiry default (proposed 14 days).
+## Decisions and pending items
+- **Decided (Summit):** links expire after 14 days.
+- **Decided:** #22 intake stays CSV-only by default.
+- **Decided (Scout):** franchises get no prototype in v1. Hard floor at minScore 40, no override.
+- **PENDING KELBY (not blocking):** the price anchors (the proposed ranges stay as working defaults; the case-study discount is still open).
+- **PENDING KELBY (not blocking):** whether a prospect's public logo can be used at all. Until he decides: company name and colors only, and any logo fetch stays gated on #30 + Warden.
