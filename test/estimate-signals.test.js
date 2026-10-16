@@ -618,6 +618,19 @@ describe('F-003 estimate signals', () => {
       ['cannot installation', research('We cannot offer installation')],
       ['shouted no estimates', research('NO  FREE ESTIMATES')],
       ['dont offer free estimates', research("We don't offer free estimates")],
+      ['unfortunately aside', research('We do not, unfortunately, offer financing')],
+      ['sadly aside', research('We do not offer, sadly, financing')],
+      ['clearly aside', research('We do not, clearly, offer financing')],
+      ['frankly aside', research('We do not, frankly, offer financing')],
+      ['comma then negator', research('Sure, we do not offer financing')],
+      ['semicolon then negator', research('Never mind; we do not offer financing')],
+      ['colon then negator', research('Remember: we do not offer financing')],
+      ['hyphen then negator', research('Wait - we do not offer financing')],
+      ['double hyphen then negator', research('Wait -- we do not offer financing')],
+      ['en dash then negator', research('Wait \u2013 we do not offer financing')],
+      ['em dash then negator', research('Wait \u2014 we do not offer financing')],
+      ['last break wins', research('Remember, please; we do not offer financing')],
+      ['compound hyphen', research('We do not offer in-home financing')],
       ['financing mention after', {
         signals: { mentions: { financing: true } },
         site: { pages: [{ url: 'https://shop.example/', title: 'Home', text: 'Financing not available.' }], signals: {} },
@@ -719,6 +732,46 @@ describe('F-003 estimate signals', () => {
     assert.equal(dontWaitDash.fit_score - plain.fit_score, 4, "Don't wait - call today for a free estimate");
     assert.equal(dontWaitDash.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
     assert.equal(signalPoints(dontWaitDash), 4);
+
+    const seriously = computeFit({
+      ...peer,
+      research: research("Don't wait, seriously, call for a free estimate"),
+    });
+    assert.equal(seriously.fit_score - plain.fit_score, 4, "Don't wait, seriously, call for a free estimate");
+    assert.equal(seriously.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
+    assert.equal(signalPoints(seriously), 4);
+
+    const sorry = computeFit({
+      ...peer,
+      research: research("We don't offer, sorry, financing"),
+    });
+    assert.equal(sorry.fit_score - plain.fit_score, 3, "We don't offer, sorry, financing");
+    assert.equal(sorry.fit_reasons.find(row => row.label === 'Financing').points, 3);
+    assert.equal(signalPoints(sorry), 3);
+
+    const sorryBut = computeFit({
+      ...peer,
+      research: research("We don't offer, sorry, but we have financing"),
+    });
+    assert.equal(sorryBut.fit_score - plain.fit_score, 3, "We don't offer, sorry, but we have financing");
+    assert.equal(sorryBut.fit_reasons.find(row => row.label === 'Financing').points, 3);
+    assert.equal(signalPoints(sorryBut), 3);
+
+    const callToday = computeFit({
+      ...peer,
+      research: research("Don't wait, call today, for a free estimate"),
+    });
+    assert.equal(callToday.fit_score - plain.fit_score, 4, "Don't wait, call today, for a free estimate");
+    assert.equal(callToday.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
+    assert.equal(signalPoints(callToday), 4);
+
+    const danglingHyphen = computeFit({
+      ...peer,
+      research: research('We do not -offer financing'),
+    });
+    assert.equal(danglingHyphen.fit_score - plain.fit_score, 3, 'We do not -offer financing');
+    assert.equal(danglingHyphen.fit_reasons.find(row => row.label === 'Financing').points, 3);
+    assert.equal(signalPoints(danglingHyphen), 3);
 
     const afterSentence = computeFit({
       ...peer,
