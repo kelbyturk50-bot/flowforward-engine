@@ -4,9 +4,10 @@
 // base64url (22 characters). Public lookup hashes the presented token and
 // compares with crypto.timingSafeEqual, including a dummy compare when no
 // row matches, so the compare itself does not branch on secret length.
-// The raw token is also stored on pilot_tokens.token so a cold one-pager
-// can put the same link back on the page. It is not a column on proposals
-// (GET /api/proposals/:id selects every proposal column).
+// Only the SHA-256 hash is stored. The raw token lives in this process's
+// memory after a mint, so a warm one-pager can render the same link. A cold
+// cache mints a new token and revokes the previous active row. There is no
+// token column on pilot_tokens or on proposals.
 //
 // proposals.demo_revoked_at sticks after revoke, including when the proposal
 // is discarded. Anonymous /p/:slug renders do not mint while it is set.
@@ -125,32 +126,6 @@ async function mintForProposal(proposalId, options = {}) {
       await db.query('ROLLBACK');
       return null;
     }
-    if (fromOnePager) {
-      const existing = await db.query(
-        `SELECT id, token, expires_at
-           FROM pilot_tokens
-          WHERE proposal_id = $1
-            AND revoked_at IS NULL
-            AND expires_at > NOW()
-            AND token IS NOT NULL
-          ORDER BY id DESC
-          LIMIT 1`,
-        [proposal.id]
-      );
-      if (existing.rows[0]) {
-        await db.query('COMMIT');
-        const row = existing.rows[0];
-        await remember(proposal.id, row.token, row.expires_at);
-        return {
-          id: row.id,
-          token: row.token,
-          expires_at: row.expires_at,
-          proposal_id: Number(proposal.id),
-          prospect_id: Number(proposal.prospect_id),
-          reused: true,
-        };
-      }
-    }
 
     const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
     if (Buffer.from(token, 'base64url').length < TOKEN_BYTES) {
@@ -158,8 +133,9 @@ async function mintForProposal(proposalId, options = {}) {
     }
     const expiresAt = new Date(Date.now() + ttlMs());
     const tokenHash = hashToken(token);
+    // One live token per proposal. A cold one-pager mints again; the previous link stops working.
     await db.query(
-      `UPDATE pilot_tokens SET revoked_at = NOW(), token = NULL
+      `UPDATE pilot_tokens SET revoked_at = NOW()
         WHERE proposal_id = $1 AND revoked_at IS NULL`,
       [proposal.id]
     );
@@ -170,10 +146,10 @@ async function mintForProposal(proposalId, options = {}) {
       );
     }
     const inserted = await db.query(
-      `INSERT INTO pilot_tokens (proposal_id, prospect_id, token, token_hash, expires_at)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO pilot_tokens (proposal_id, prospect_id, token_hash, expires_at)
+       VALUES ($1, $2, $3, $4)
        RETURNING id, expires_at`,
-      [proposal.id, proposal.prospect_id, token, tokenHash, expiresAt]
+      [proposal.id, proposal.prospect_id, tokenHash, expiresAt]
     );
     await db.query('COMMIT');
     await remember(proposal.id, token, expiresAt);
@@ -205,7 +181,7 @@ async function revokeForProposal(proposalId) {
     }
     await db.query('UPDATE proposals SET demo_revoked_at = NOW() WHERE id = $1', [id]);
     const { rowCount } = await db.query(
-      `UPDATE pilot_tokens SET revoked_at = NOW(), token = NULL
+      `UPDATE pilot_tokens SET revoked_at = NOW()
         WHERE proposal_id = $1 AND revoked_at IS NULL`,
       [id]
     );
@@ -236,22 +212,6 @@ async function demoHrefForProposal(req, proposalId) {
     const row = await resolveToken(cached.token);
     if (row && row.proposal_id === id) return publicDemoPath(cached.token);
     cache.delete(id);
-  }
-
-  const active = await pool.query(
-    `SELECT token, expires_at
-       FROM pilot_tokens
-      WHERE proposal_id = $1
-        AND revoked_at IS NULL
-        AND expires_at > NOW()
-        AND token IS NOT NULL
-      ORDER BY id DESC
-      LIMIT 1`,
-    [id]
-  );
-  if (active.rows[0]) {
-    await remember(id, active.rows[0].token, active.rows[0].expires_at);
-    return publicDemoPath(active.rows[0].token);
   }
 
   const gate = consume(clientIp(req), 'mint');

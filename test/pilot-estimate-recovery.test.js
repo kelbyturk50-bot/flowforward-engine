@@ -96,6 +96,39 @@ async function tokenStats(proposalId) {
   return rows[0];
 }
 
+const HASH_ONLY_COLUMNS = [
+  'created_at', 'expires_at', 'id', 'proposal_id', 'prospect_id', 'revoked_at', 'token_hash',
+];
+
+async function assertHashOnly(proposalId, rawTokens) {
+  const secrets = [].concat(rawTokens).filter(Boolean);
+  const columns = await pool.query(
+    `SELECT column_name, data_type FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'pilot_tokens'
+      ORDER BY column_name`
+  );
+  assert.deepEqual(columns.rows.map((row) => row.column_name), HASH_ONLY_COLUMNS);
+  const textCols = HASH_ONLY_COLUMNS.filter((name) => name !== 'token_hash');
+  const scanned = await pool.query(
+    `SELECT ${textCols.map((name) => `COALESCE(${name}::text, '')`).join(" || '|' || ")} AS blob,
+            token_hash
+       FROM pilot_tokens WHERE proposal_id = $1`,
+    [proposalId]
+  );
+  assert.ok(scanned.rows.length >= 1);
+  for (const row of scanned.rows) {
+    const hash = Buffer.from(row.token_hash);
+    assert.equal(hash.length, 32);
+    for (const secret of secrets) {
+      assert.equal(row.blob.includes(secret), false);
+      assert.equal(hash.toString('utf8').includes(secret), false);
+      assert.equal(hash.toString('hex').includes(secret), false);
+      assert.equal(hash.toString('base64').includes(secret), false);
+      assert.equal(hash.toString('base64url').includes(secret), false);
+    }
+  }
+}
+
 function assertClosed(res) {
   assert.equal(res.status, 404);
   assert.deepEqual(res.json, NOT_FOUND);
@@ -287,36 +320,29 @@ describe('pilot estimate recovery', () => {
     assert.equal(JSON.stringify(minted.json).includes(PROSPECT_EMAIL), false);
 
     const stored = await pool.query(
-      `SELECT id, proposal_id, prospect_id, token, token_hash, expires_at, revoked_at
-         FROM pilot_tokens WHERE proposal_id = $1`,
+      `SELECT id, proposal_id, prospect_id, token_hash, expires_at, revoked_at
+         FROM pilot_tokens WHERE proposal_id = $1 AND revoked_at IS NULL`,
       [proposal.id]
     );
     assert.equal(stored.rows.length, 1);
     const hash = crypto.createHash('sha256').update(minted.json.token, 'utf8').digest();
     assert.ok(Buffer.from(stored.rows[0].token_hash).equals(hash));
-    assert.equal(stored.rows[0].token, minted.json.token);
     assert.equal(stored.rows[0].revoked_at, null);
     assert.ok(new Date(stored.rows[0].expires_at).getTime() > Date.now());
+    await assertHashOnly(proposal.id, minted.json.token);
     const revokedFlag = await pool.query(
       'SELECT demo_revoked_at FROM proposals WHERE id = $1',
       [proposal.id]
     );
     assert.equal(revokedFlag.rows[0].demo_revoked_at, null);
 
-    const columns = await pool.query(
-      `SELECT column_name FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = 'pilot_tokens'
-        ORDER BY column_name`
+    await pool.query('ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS token TEXT');
+    await pool.query(
+      `UPDATE pilot_tokens SET token = $2 WHERE id = $1`,
+      [stored.rows[0].id, minted.json.token]
     );
-    assert.deepEqual(columns.rows.map((r) => r.column_name), [
-      'created_at', 'expires_at', 'id', 'proposal_id', 'prospect_id', 'revoked_at', 'token', 'token_hash',
-    ]);
-    const asText = await pool.query(
-      `SELECT id::text || proposal_id::text || prospect_id::text || created_at::text || expires_at::text AS blob
-         FROM pilot_tokens WHERE id = $1`,
-      [stored.rows[0].id]
-    );
-    assert.equal(asText.rows[0].blob.includes(minted.json.token), false);
+    await applySchema();
+    await assertHashOnly(proposal.id, minted.json.token);
     const detail = await request('GET', `/api/proposals/${proposal.id}`, {
       headers: { 'x-api-key': API_KEY },
     });
@@ -723,13 +749,12 @@ describe('pilot estimate recovery', () => {
     assertClosed(stillClosed);
   });
 
-  it('reuses the active token when the one-pager cache is cold', async () => {
+  it('mints one replacement when the one-pager cache is cold', async () => {
     setFlags({ master: true, link: true });
     const row = await insertProposal(prospect.id, { slug: 'pilot-one-active' });
     const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.80' };
     const first = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
     assert.equal(first.status, 201);
-    const before = await tokenStats(row.id);
     tokens._clearCacheForTests();
 
     const page = await request('GET', '/p/pilot-one-active', {
@@ -737,9 +762,17 @@ describe('pilot estimate recovery', () => {
     });
     assert.equal(page.status, 200);
     const href = ctaHref(page.text);
-    assert.equal(tokenFromPath(href), first.json.token);
-    assert.deepEqual(await tokenStats(row.id), before);
+    const fresh = tokenFromPath(href);
+    assert.ok(fresh);
+    assert.notEqual(fresh, first.json.token);
+    const active = await tokenStats(row.id);
+    assert.equal(active.active, 1);
+    await assertHashOnly(row.id, [first.json.token, fresh]);
 
+    const old = await request('GET', first.json.path, {
+      headers: { 'x-forwarded-for': '203.0.113.82' },
+    });
+    assertClosed(old);
     const current = await request('GET', href, {
       headers: { 'x-forwarded-for': '203.0.113.82' },
     });
@@ -748,12 +781,10 @@ describe('pilot estimate recovery', () => {
 
     const again = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
     assert.equal(again.status, 201);
-    assert.notEqual(again.json.token, first.json.token);
-    const stillOne = await pool.query(
-      `SELECT COUNT(*)::int AS n FROM pilot_tokens WHERE proposal_id = $1 AND revoked_at IS NULL`,
-      [row.id]
-    );
-    assert.equal(stillOne.rows[0].n, 1);
+    assert.notEqual(again.json.token, fresh);
+    const stillOne = await tokenStats(row.id);
+    assert.equal(stillOne.active, 1);
+    await assertHashOnly(row.id, [first.json.token, fresh, again.json.token]);
     const replaced = await request('GET', href, {
       headers: { 'x-forwarded-for': '203.0.113.83' },
     });
