@@ -1,5 +1,5 @@
 // WHERE / ORDER BY builder for GET /api/prospects. No database import.
-// A tier filter that includes A also hides pest-name rows from that result.
+// A tier filter that includes A also hides company-name-gate rows from that result.
 // The stored fit_tier is not updated.
 const SORTS = require('./prospect-sorts');
 const { appendATierPestHide } = require('../scoring/industry');

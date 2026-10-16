@@ -38,6 +38,7 @@ const {
   legacyPestNameCountQuery,
   appendCompanyPestExclusion,
   appendDraftExclusion,
+  appendATierPestHide,
 } = require('../src/scoring/industry');
 const { FRANCHISE_PATTERNS } = require('../src/scoring/config');
 const { draftProposal, pickLeads, _setClient } = require('../src/proposals/draft');
@@ -553,11 +554,18 @@ describe('pest company-name gate', { concurrency: false }, () => {
 
     const aOnly = buildProspectListQuery({ tier: 'A' });
     assert.match(aOnly.listSql, /fit_tier = 'A'/);
-    assert.equal(aOnly.params.includes(PEST_TEXT_PATTERN), true);
+    assert.equal(aOnly.params.includes(PEST_COMPANY_PATTERN), true);
+    assert.equal(aOnly.params.includes(COMPANY_SPACE_PATTERN), true);
+    assert.equal(aOnly.params.includes(STREET_BRAND_PATTERN), true);
+    assert.equal(aOnly.params.includes(PEST_TEXT_PATTERN), false);
+    assert.match(aOnly.listSql, /char_length\(btrim\(regexp_replace\(translate\(COALESCE\(company, ''\)/);
+    assert.equal(aOnly.listSql.includes('lower('), false);
     const anyTier = buildProspectListQuery({});
     const bOnly = buildProspectListQuery({ tier: 'B' });
     assert.equal(anyTier.params.includes(PEST_TEXT_PATTERN), false);
     assert.equal(bOnly.params.includes(PEST_TEXT_PATTERN), false);
+    assert.equal(anyTier.params.includes(PEST_COMPANY_PATTERN), false);
+    assert.equal(bOnly.params.includes(PEST_COMPANY_PATTERN), false);
 
     const stamp = await read();
     async function get(path) {
@@ -1039,9 +1047,14 @@ describe('pest company-name gate', { concurrency: false }, () => {
     assert.equal(COMPANY_SPACE_PATTERN.includes('\\u'), false);
     assert.equal(COMPANY_NAME_LIMIT, 200);
     assert.match(fragment, /left\(btrim\(regexp_replace\(translate\(COALESCE\(p\.company, ''\), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'\), \$1, ' ', 'g'\)\), 200\)/);
+    assert.match(fragment, /char_length\(btrim\(regexp_replace\(translate\(COALESCE\(p\.company, ''\), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'\), \$1, ' ', 'g'\)\)\) <= 200 AND /);
     assert.equal(fragment.includes('lower('), false);
     assert.equal(fragment.includes('~*'), false);
     assert.match(fragment, /!~ \$3/);
+    const aliased = [];
+    const aliasedHide = appendATierPestHide(aliased, 'p');
+    assert.equal(aliasedHide, `NOT (p.fit_tier = 'A' AND NOT (${fragment}))`);
+    assert.deepEqual(aliased, bound);
     assert.notEqual(PEST_COMPANY_PATTERN, PEST_TEXT_PATTERN);
 
     async function keptBy(build, company) {
@@ -1110,17 +1123,17 @@ describe('pest company-name gate', { concurrency: false }, () => {
     const started = process.hrtime.bigint();
     const matched = isPestCompanyName(longName);
     const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
-    assert.equal(matched, false);
+    assert.equal(matched, true);
     assert.ok(elapsedMs < 50, `js ${elapsedMs}ms`);
 
     const sqlStarted = process.hrtime.bigint();
-    assert.equal(await kept(longName), true);
+    assert.equal(await kept(longName), false);
     const sqlMs = Number(process.hrtime.bigint() - sqlStarted) / 1e6;
     assert.ok(sqlMs < 50, `sql ${sqlMs}ms`);
 
     const past = `${'x'.repeat(COMPANY_NAME_LIMIT)}Terminix`;
-    assert.equal(isPestCompanyName(past), false);
-    assert.equal(await kept(past), true);
+    assert.equal(isPestCompanyName(past), true);
+    assert.equal(await kept(past), false);
 
     const inside = `Terminix ${'x'.repeat(80000)}`;
     const insideStarted = process.hrtime.bigint();
@@ -1130,16 +1143,142 @@ describe('pest company-name gate', { concurrency: false }, () => {
     assert.equal(await kept(inside), false);
   });
 
+  it('treats a folded name longer than 200 code points as pest in JS and SQL', async () => {
+    async function kept(company) {
+      const params = [];
+      const sql = appendCompanyPestExclusion(params);
+      const companyIndex = params.push(company);
+      const { rows } = await pool.query(
+        `SELECT (${sql}) AS kept FROM (SELECT $${companyIndex}::text AS company) p`,
+        params
+      );
+      return rows[0].kept;
+    }
+
+    const blocked = [
+      `TEST: ${'x'.repeat(300)} Pest Control`,
+      `TEST: ${'x'.repeat(300)} Terminix`,
+      `Rollins ${'x'.repeat(250)} Pest`,
+      `${'x'.repeat(194)} Pest`,
+    ];
+    const benign200 = 'x'.repeat(200);
+    const benign201 = 'x'.repeat(201);
+    const codePoints200 = `${'x'.repeat(199)}\u{1F600}`;
+    const codePoints201 = `${'x'.repeat(200)}\u{1F600}`;
+    assert.equal([...benign200].length, 200);
+    assert.equal([...benign201].length, 201);
+    assert.equal([...codePoints200].length, 200);
+    assert.equal(codePoints200.length, 201);
+    assert.equal([...codePoints201].length, 201);
+
+    for (const company of blocked) {
+      assert.equal(isPestCompanyName(company), true, company.slice(0, 24));
+      assert.equal(await kept(company), false, company.slice(0, 24));
+    }
+    assert.equal(isPestCompanyName(benign200), false);
+    assert.equal(await kept(benign200), true);
+    assert.equal(isPestCompanyName(benign201), true);
+    assert.equal(await kept(benign201), false);
+    assert.equal(isPestCompanyName(codePoints200), false);
+    assert.equal(await kept(codePoints200), true);
+    assert.equal(isPestCompanyName(codePoints201), true);
+    assert.equal(await kept(codePoints201), false);
+  });
+
+  it('hides brand names that still score A from the tier A list and Today', async () => {
+    await resetDb();
+    const names = ['TrulyNolen', 'Massey Services', 'Hawx Mosquito'];
+    const hidden = [];
+    for (let i = 0; i < names.length; i++) {
+      const company = names[i];
+      const fit = computeFit({ ...sweet, company });
+      assert.equal(fit.fit_score, 100, company);
+      assert.equal(fit.fit_tier, 'A', company);
+      assert.equal(isPestCompanyName(company), true, company);
+      const lead = await insertProspect({
+        google_place_id: `test-place-a-hide-${i}`,
+        company,
+        industry: 'HVAC',
+        email: `test+ahide${i}@example.com`,
+      });
+      hidden.push(lead);
+    }
+    const benignFit = computeFit(sweet);
+    assert.equal(benignFit.fit_score, 100);
+    assert.equal(benignFit.fit_tier, 'A');
+    assert.equal(isPestCompanyName(sweet.company), false);
+    const benign = await insertProspect({
+      google_place_id: 'test-place-a-hide-benign',
+      company: 'Wasatch Heating',
+      industry: 'HVAC',
+      email: 'test+ahide-benign@example.com',
+    });
+    const ids = hidden.map(row => row.id).concat(benign.id);
+    const before = await pool.query(
+      `SELECT id, fit_score, fit_tier, fit_reasons::text AS reasons, stage, updated_at
+         FROM prospects WHERE id = ANY($1::int[])`,
+      [ids]
+    );
+    await pool.query(
+      `UPDATE prospects SET fit_tier = 'A', fit_score = 100, stage = 'found' WHERE id = ANY($1::int[])`,
+      [ids]
+    );
+    const stamp = await pool.query(
+      `SELECT id, fit_score, fit_tier, fit_reasons::text AS reasons, stage, updated_at
+         FROM prospects WHERE id = ANY($1::int[]) ORDER BY id`,
+      [ids]
+    );
+
+    async function get(path) {
+      const res = await fetch(apiBase + path);
+      const json = await res.json();
+      assert.equal(res.status, 200, `${path} ${JSON.stringify(json)}`);
+      return json;
+    }
+    const tierA = await get('/api/prospects?tier=A');
+    const focus = await get('/api/focus');
+    const listed = new Set((tierA.prospects || []).map(row => row.id));
+    for (const lead of hidden) {
+      assert.equal(listed.has(lead.id), false, lead.company);
+      assert.equal(focus.top_new_leads.some(row => row.id === lead.id), false, lead.company);
+    }
+    assert.equal(listed.has(benign.id), true);
+    assert.equal(focus.top_new_leads.some(row => row.id === benign.id), true);
+    assert.equal(tierA.total, 1);
+    assert.equal(focus.counts.a_tier_open, 1);
+
+    const after = await pool.query(
+      `SELECT id, fit_score, fit_tier, fit_reasons::text AS reasons, stage, updated_at
+         FROM prospects WHERE id = ANY($1::int[]) ORDER BY id`,
+      [ids]
+    );
+    assert.equal(after.rows.length, stamp.rows.length);
+    for (let i = 0; i < stamp.rows.length; i++) {
+      assert.equal(after.rows[i].fit_score, stamp.rows[i].fit_score);
+      assert.equal(after.rows[i].fit_tier, 'A');
+      assert.equal(after.rows[i].reasons, stamp.rows[i].reasons);
+      assert.equal(after.rows[i].stage, stamp.rows[i].stage);
+      assert.equal(new Date(after.rows[i].updated_at).toISOString(), new Date(stamp.rows[i].updated_at).toISOString());
+    }
+    assert.equal(before.rows.length, ids.length);
+  });
+
   it('folds only ASCII A-Z and agrees on C and en_US.utf8', async () => {
     const src = fs.readFileSync(path.join(__dirname, '../src/scoring/industry.js'), 'utf8');
     const keyFn = src.slice(src.indexOf('function companyNameKey'), src.indexOf('function industryKey'));
     assert.match(keyFn, /replace\(\/\[A-Z\]\/g, c => String\.fromCharCode\(c\.charCodeAt\(0\) \+ 32\)\)/);
     assert.equal(keyFn.includes('toLowerCase'), false);
-    const sqlFn = src.slice(src.indexOf('function appendCompanyPestExclusion'), src.indexOf('function appendDraftExclusion'));
-    assert.match(sqlFn, /translate\(COALESCE\(p\.company, ''\), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'\)/);
+    const sqlFn = src.slice(src.indexOf('function companyNameKeptSql'), src.indexOf('function appendDraftExclusion'));
+    assert.match(sqlFn, /translate\(COALESCE\(\$\{companyExpr\}, ''\), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'\)/);
+    assert.match(sqlFn, /'p\.company'/);
     assert.equal(sqlFn.includes('lower('), false);
     assert.equal(sqlFn.includes('~*'), false);
-    assert.match(sqlFn, /left\(btrim\(regexp_replace\(translate\(/);
+    assert.match(sqlFn, /char_length\(\$\{normalized\}\) <= \$\{COMPANY_NAME_LIMIT\}/);
+    assert.match(sqlFn, /left\(\$\{normalized\}, \$\{COMPANY_NAME_LIMIT\}\)/);
+    const hideFn = src.slice(src.indexOf('function appendATierPestHide'), src.indexOf('function legacyPestNameCountQuery'));
+    assert.match(hideFn, /companyNameKeptSql\(params, `\$\{prefix\}company`, excluded\)/);
+    assert.equal(hideFn.includes('PEST_TEXT_PATTERN'), false);
+    assert.equal(hideFn.includes('lower('), false);
 
     const kelvin = 'OR\u212AIN';
     const dotted = `${'İ'.repeat(195)} pest`;

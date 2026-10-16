@@ -23,8 +23,9 @@ router.get('/', async (req, res) => {
       pool.query(`SELECT * FROM prospects
                    WHERE stage <> ALL($1) AND next_action_at IS NOT NULL AND next_action_at <= ${d}
                    ORDER BY next_action_at, fit_score DESC NULLS LAST LIMIT 50`, withDate),
-      // Best untouched leads to reach out to. Pest-name rows stored as A are
-      // omitted here. The SELECT does not update the row.
+      // Best untouched leads to reach out to. Rows stored as A whose company
+      // name fails the company-name gate are omitted here. The SELECT does
+      // not update the row.
       pool.query(`SELECT * FROM prospects
                    WHERE stage = 'found' AND fit_tier IN ('A','B') AND (phone IS NOT NULL OR website IS NOT NULL)
                      AND ${topHide}

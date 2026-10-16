@@ -24,10 +24,12 @@ const PEST_TEXT_RE = new RegExp(PEST_TEXT_PATTERN);
 
 // Company-name gate only. These are not industry synonyms, so computeFit does
 // not change. Both sides fold ASCII A-Z only, fold COMPANY_SPACE_PATTERN to
-// one space, trim, then keep the first COMPANY_NAME_LIMIT characters. The cap
-// is after that fold so a Unicode casefold cannot change the length on one
-// side only. Then both strip street-style Orkin/Terminix with
-// STREET_BRAND_PATTERN and test PEST_COMPANY_PATTERN. The patterns are
+// one space, and trim. A folded key longer than COMPANY_NAME_LIMIT code
+// points is a match, counted before the prefix. Otherwise both sides keep
+// the first COMPANY_NAME_LIMIT characters. The cap is after that fold so a
+// Unicode casefold cannot change the length on one side only. Then both
+// strip street-style Orkin/Terminix with STREET_BRAND_PATTERN and test
+// PEST_COMPANY_PATTERN. The patterns are
 // case-sensitive (no /i, no ~*). The space class is literal code points.
 // Postgres \s is POSIX space and does not match JS \s, so the class is not
 // written with \s. U+200B is in the class and is not part of JS \s.
@@ -100,8 +102,8 @@ function stripStreetBrand(key) {
   return key.replace(new RegExp(STREET_BRAND_PATTERN, 'g'), '$1$4');
 }
 
-// SQL left() counts Unicode code points. Stop at the limit so a long name
-// never reaches the company pattern.
+// SQL left() and char_length count Unicode code points. The pattern sees only
+// the prefix. The length check uses the same count on the full folded key.
 function takePrefix(value, limit) {
   let units = 0;
   let i = 0;
@@ -113,17 +115,31 @@ function takePrefix(value, limit) {
   return i === value.length ? value : value.slice(0, i);
 }
 
+function codePointLength(value) {
+  let count = 0;
+  for (let i = 0; i < value.length;) {
+    const cp = value.codePointAt(i);
+    i += cp > 0xffff ? 2 : 1;
+    count += 1;
+  }
+  return count;
+}
+
 // Company gate only. industryKey stays on JS \s and toLowerCase so scoring
 // and industry synonyms do not move. ASCII A-Z only: toLowerCase() maps
 // U+212A to "k" and expands U+0130, and Postgres lower() follows the database
-// locale. A new RegExp each call: the global flag keeps lastIndex.
+// locale. A new RegExp each call: the global flag keeps lastIndex. The length
+// check reads this string before takePrefix.
 function companyNameKey(value) {
+  return takePrefix(foldedCompanyName(value), COMPANY_NAME_LIMIT);
+}
+
+function foldedCompanyName(value) {
   if (value == null) return '';
-  const folded = String(value)
+  return String(value)
     .replace(/[A-Z]/g, c => String.fromCharCode(c.charCodeAt(0) + 32))
     .replace(new RegExp(COMPANY_SPACE_PATTERN, 'g'), ' ')
     .trim();
-  return takePrefix(folded, COMPANY_NAME_LIMIT);
 }
 
 function industryKey(value) {
@@ -206,27 +222,38 @@ function isPestDiscoveryPlace(place, excluded = cfg.EXCLUDED_INDUSTRIES) {
 }
 
 // Cached company name. Pest words plus the brand rules above, on ASCII
-// boundaries, matching appendCompanyPestExclusion. Off when Pest Control is
-// not on the exclusion list. Does not fetch and does not score the row.
+// boundaries, matching appendCompanyPestExclusion. A folded name longer than
+// COMPANY_NAME_LIMIT code points is a match, counted before takePrefix. Off
+// when Pest Control is not on the exclusion list. Does not fetch and does
+// not score the row.
 function isPestCompanyName(company, excluded = cfg.EXCLUDED_INDUSTRIES) {
   if (!pestCategoryExcluded(excluded)) return false;
-  const key = stripStreetBrand(companyNameKey(company));
+  const folded = foldedCompanyName(company);
+  if (codePointLength(folded) > COMPANY_NAME_LIMIT) return true;
+  const key = stripStreetBrand(takePrefix(folded, COMPANY_NAME_LIMIT));
   return key !== '' && PEST_COMPANY_RE.test(key);
 }
 
-// SQL fragment. TRUE when the name gate is off. Placeholder numbers continue
-// from params.length. The column is the cached company name, not a request.
-// Bound parameters, in order: COMPANY_SPACE_PATTERN, STREET_BRAND_PATTERN,
-// PEST_COMPANY_PATTERN. translate folds ASCII A-Z only. left(..., 200) is
-// applied after that fold and the space fold. !~ is case-sensitive.
-function appendCompanyPestExclusion(params, excluded = cfg.EXCLUDED_INDUSTRIES) {
+// TRUE when the row is kept. companyExpr is p.company for draft and send, or
+// company / alias.company for the A-tier hide. Placeholder numbers continue
+// from params.length. Bound parameters, in order: COMPANY_SPACE_PATTERN,
+// STREET_BRAND_PATTERN, PEST_COMPANY_PATTERN. translate folds ASCII A-Z only.
+// char_length of that fold must be <= 200, counted before left(). The pattern
+// then sees left(..., 200) after the street strip. !~ is case-sensitive.
+function companyNameKeptSql(params, companyExpr, excluded = cfg.EXCLUDED_INDUSTRIES) {
   if (!pestCategoryExcluded(excluded)) return 'TRUE';
   const spaceIndex = params.push(COMPANY_SPACE_PATTERN);
   const streetIndex = params.push(STREET_BRAND_PATTERN);
   const patternIndex = params.push(PEST_COMPANY_PATTERN);
-  const folded = `left(btrim(regexp_replace(translate(COALESCE(p.company, ''), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), $${spaceIndex}, ' ', 'g')), ${COMPANY_NAME_LIMIT})`;
-  const stripped = `regexp_replace(${folded}, $${streetIndex}, '\\1\\4', 'g')`;
-  return `${stripped} !~ $${patternIndex}`;
+  const normalized = `btrim(regexp_replace(translate(COALESCE(${companyExpr}, ''), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), $${spaceIndex}, ' ', 'g'))`;
+  const stripped = `regexp_replace(left(${normalized}, ${COMPANY_NAME_LIMIT}), $${streetIndex}, '\\1\\4', 'g')`;
+  return `char_length(${normalized}) <= ${COMPANY_NAME_LIMIT} AND ${stripped} !~ $${patternIndex}`;
+}
+
+// SQL fragment. TRUE when the name gate is off. The column is the cached
+// company name, not a request.
+function appendCompanyPestExclusion(params, excluded = cfg.EXCLUDED_INDUSTRIES) {
+  return companyNameKeptSql(params, 'p.company', excluded);
 }
 
 // Industry exclusion plus the company-name gate. pickLeads and the eligible
@@ -239,17 +266,18 @@ function appendDraftExclusion(params, excluded = cfg.EXCLUDED_INDUSTRIES) {
 }
 
 // Read-time hide for an A-tier queue. A stored tier of A is left in the
-// database; the SELECT drops a pest-name row from that result. TRUE when
-// Pest Control is not excluded. alias is '' or a SQL identifier such as 'p'.
+// database. The SELECT drops a row whose company name fails the same
+// predicate as appendCompanyPestExclusion: brands, pest context, and a
+// folded name longer than 200. TRUE when Pest Control is not excluded.
+// alias is '' or a SQL identifier such as 'p'.
 function appendATierPestHide(params, alias = '', excluded = cfg.EXCLUDED_INDUSTRIES) {
   if (!pestCategoryExcluded(excluded)) return 'TRUE';
   if (alias !== '' && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) {
     throw new Error('bad alias');
   }
   const prefix = alias ? `${alias}.` : '';
-  const patternIndex = params.push(PEST_TEXT_PATTERN);
-  const key = `lower(regexp_replace(btrim(COALESCE(${prefix}company, '')), '\\s+', ' ', 'g'))`;
-  return `NOT (${prefix}fit_tier = 'A' AND ${key} ~ $${patternIndex})`;
+  const kept = companyNameKeptSql(params, `${prefix}company`, excluded);
+  return `NOT (${prefix}fit_tier = 'A' AND NOT (${kept}))`;
 }
 
 // Count of rows the name gate newly covers: the company matches, and the
