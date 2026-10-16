@@ -492,8 +492,121 @@ function installNetworkGuard() {
   installTunnelGuard();
   installNativeConnectGuard();
   installUdpGuard();
+  installDnsGuard();
   installUndiciProxyGuard();
   installNodemailerProxyGuard();
+}
+
+// c-ares does not use the JS UDP binding. Nodemailer's default Gmail transport
+// resolves smtp.gmail.com with dns.Resolver before any socket is opened.
+// localhost is answered locally. An IP literal is answered as itself (0.0.0.0
+// is the wildcard bind address, not a name). Every other name throws. The
+// original resolver is not called, so no query is sent.
+function dnsQueryName(name) {
+  return name === 'lookup' || name === 'lookupService' || name === 'reverse' || name.startsWith('resolve');
+}
+
+function dnsDecision(host) {
+  const normalized = normalizeHost(host);
+  if (normalized === 'localhost' || net.isIP(normalized)) return 'local';
+  return 'block';
+}
+
+function localDnsValue(name, host, args) {
+  const normalized = normalizeHost(host);
+  const ipFamily = net.isIP(normalized);
+  const v4 = ipFamily === 4 ? normalized : '127.0.0.1';
+  const v6 = ipFamily === 6 ? normalized : '::1';
+  const options = args.length >= 2 && typeof args[1] !== 'function' ? args[1] : undefined;
+  const ttl = !!(options && typeof options === 'object' && options.ttl);
+  const withTtl = (address) => (ttl ? [{ address, ttl: 0 }] : [address]);
+
+  if (name === 'lookup') {
+    const family = typeof options === 'number' ? options : options && options.family;
+    const all = !!(options && typeof options === 'object' && options.all);
+    let records;
+    if (ipFamily === 4 || ipFamily === 6) records = [{ address: normalized, family: ipFamily }];
+    else if (family === 6) records = [{ address: '::1', family: 6 }];
+    else if (family === 4) records = [{ address: '127.0.0.1', family: 4 }];
+    else records = [{ address: '127.0.0.1', family: 4 }, { address: '::1', family: 6 }];
+    return all ? records : records[0];
+  }
+  if (name === 'lookupService') return { hostname: 'localhost', service: '0' };
+  if (name === 'reverse' || name === 'resolvePtr') return ['localhost'];
+  if (name === 'resolve6') return withTtl(v6);
+  if (name === 'resolveMx') return [{ exchange: 'localhost', priority: 0 }];
+  if (name === 'resolveSrv') return [{ name: 'localhost', port: 0, priority: 0, weight: 0 }];
+  if (name === 'resolveSoa') {
+    return {
+      nsname: 'localhost', hostmaster: 'localhost', serial: 0,
+      refresh: 0, retry: 0, expire: 0, minttl: 0,
+    };
+  }
+  if (name === 'resolveTxt') return [['localhost']];
+  if (name === 'resolveCname' || name === 'resolveNs') return ['localhost'];
+  if (name === 'resolveAny') return [{ type: 'A', address: v4, ttl: 0 }];
+  if (name === 'resolveNaptr' || name === 'resolveCaa' || name === 'resolveTlsa') return [];
+  const rrtype = typeof options === 'string' ? options.toUpperCase() : '';
+  if (rrtype === 'AAAA') return [v6];
+  return withTtl(v4);
+}
+
+function deliverDns(name, args, value, promiseMode) {
+  if (promiseMode) {
+    if (value instanceof Error) return Promise.reject(value);
+    return Promise.resolve(value);
+  }
+  const callback = args[args.length - 1];
+  if (typeof callback !== 'function') {
+    if (value instanceof Error) throw value;
+    return value;
+  }
+  if (value instanceof Error) {
+    callback(value);
+    return;
+  }
+  if (name === 'lookup') {
+    const options = args.length >= 2 && typeof args[1] !== 'function' ? args[1] : undefined;
+    if (options && typeof options === 'object' && options.all) callback(null, value);
+    else callback(null, value.address, value.family);
+    return;
+  }
+  if (name === 'lookupService') {
+    callback(null, value.hostname, value.service);
+    return;
+  }
+  callback(null, value);
+}
+
+function guardDnsMethod(name, promiseMode) {
+  function guarded(...args) {
+    const host = args[0];
+    if (dnsDecision(host) === 'local') return deliverDns(name, args, localDnsValue(name, host, args), promiseMode);
+    const err = new TestNetworkGuardError(normalizeHost(host) || String(host), 'dns');
+    return deliverDns(name, args, err, promiseMode);
+  }
+  guarded.__ffGuarded = true;
+  return guarded;
+}
+
+function wrapDnsQueries(target, promiseMode) {
+  if (!target) return;
+  for (const name of Object.getOwnPropertyNames(target)) {
+    if (!dnsQueryName(name)) continue;
+    const original = target[name];
+    if (typeof original !== 'function' || original.__ffGuarded) continue;
+    target[name] = guardDnsMethod(name, promiseMode);
+  }
+}
+
+function installDnsGuard() {
+  const dns = require('dns');
+  wrapDnsQueries(dns, false);
+  wrapDnsQueries(dns.promises, true);
+  if (dns.Resolver && dns.Resolver.prototype) wrapDnsQueries(dns.Resolver.prototype, false);
+  if (dns.promises && dns.promises.Resolver && dns.promises.Resolver.prototype) {
+    wrapDnsQueries(dns.promises.Resolver.prototype, true);
+  }
 }
 
 function fetchHostname(input) {

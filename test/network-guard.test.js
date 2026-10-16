@@ -166,6 +166,82 @@ describe('network guard', () => {
     }
   });
 
+  it('does not query DNS for the default Gmail transport', async () => {
+    const dns = require('dns');
+    const cares = process.binding('cares_wrap');
+    let queries = 0;
+    const restore = [];
+    function spy(obj, key) {
+      const original = obj[key];
+      if (typeof original !== 'function') return;
+      function wrapped() {
+        queries += 1;
+        return original.apply(this, arguments);
+      }
+      obj[key] = wrapped;
+      restore.push(() => { obj[key] = original; });
+    }
+    spy(cares, 'getaddrinfo');
+    const proto = cares.ChannelWrap.prototype;
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      if (name.startsWith('query') || name === 'getHostByAddr') spy(proto, name);
+    }
+    const nodemailer = require('nodemailer');
+    // Same options as src/proposals/send.js mailer(): service 'gmail'.
+    const transport = nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: 'test-not-real@example.com', pass: 'test-not-a-real-password' },
+      connectionTimeout: 1000,
+      dnsTimeout: 1000,
+    });
+    try {
+      assert.throws(
+        () => dns.lookup('example.com'),
+        (err) => {
+          assert.ok(err instanceof TestNetworkGuardError, err && err.stack);
+          assert.equal(err.code, 'TEST_NETWORK_BLOCKED');
+          assert.match(err.message, /example\.com/);
+          assert.match(err.stack, /guard\.js/);
+          return true;
+        }
+      );
+      assert.throws(
+        () => new dns.Resolver().resolve4('example.com'),
+        (err) => {
+          assert.ok(err instanceof TestNetworkGuardError, err && err.stack);
+          assert.equal(err.code, 'TEST_NETWORK_BLOCKED');
+          assert.match(err.message, /example\.com/);
+          assert.match(err.stack, /guard\.js/);
+          return true;
+        }
+      );
+      const local = await new Promise((resolve, reject) => {
+        dns.lookup('localhost', (err, address) => (err ? reject(err) : resolve(address)));
+      });
+      assert.ok(local === '127.0.0.1' || local === '::1', local);
+
+      await assert.rejects(
+        () => transport.sendMail({
+          from: 'test-not-real@example.com',
+          to: 'nobody@example.com',
+          subject: 'guard',
+          text: 'guard',
+        }),
+        (err) => {
+          assert.ok(err instanceof TestNetworkGuardError, err && err.stack);
+          assert.equal(err.originalCode || err.code, 'TEST_NETWORK_BLOCKED');
+          assert.match(err.message, /smtp\.gmail\.com/);
+          assert.match(err.message, /\bdns\b/);
+          return true;
+        }
+      );
+      assert.equal(queries, 0);
+    } finally {
+      transport.close();
+      for (const undo of restore) undo();
+    }
+  });
+
   it('blocks maps.googleapis.com and www.googleapis.com', async () => {
     await assert.rejects(
       () => axios.get('https://maps.googleapis.com/maps/api/place/nearbysearch/json', { timeout: 2000 }),
