@@ -14,6 +14,7 @@ import {
   LOCAL_API_URL,
   PRODUCTION_API_URL,
   PRODUCTION_HOSTS,
+  acceptedApiUrl,
   apiUrlIssue,
   resolveApiBase,
   shouldStoreApiUrl,
@@ -250,6 +251,17 @@ describe('ApiBanner', () => {
   });
 });
 
+const UNSAFE_API_URLS = [
+  'data:text/html,<b>x</b>',
+  'data:...',
+  'not a url',
+  'javascript:alert(1)',
+  'javascript:...',
+  'ftp://x',
+  'ftp://...',
+  'http://evil.example',
+];
+
 describe('apiUrlIssue', () => {
   it('allows https, and http only for localhost and 127.0.0.1', () => {
     expect(apiUrlIssue('https://staging.example.test/api')).toBe('');
@@ -273,6 +285,28 @@ describe('apiUrlIssue', () => {
       expect(apiUrlIssue(value)).toBe(API_URL_SCHEME_MESSAGE);
     }
     expect(apiUrlIssue('   ')).toBe('Enter an API address.');
+  });
+
+  it('rejects stored and build-time values with the same rule', () => {
+    for (const value of UNSAFE_API_URLS) {
+      expect(apiUrlIssue(value)).not.toBe('');
+      expect(acceptedApiUrl(value)).toBe('');
+      expect(resolve({ savedUrl: value, hostname: PREVIEW_HOST })).toEqual({
+        url: '',
+        configured: false,
+        source: 'unconfigured',
+      });
+      expect(resolve({ viteApiUrl: value, hostname: PREVIEW_HOST })).toEqual({
+        url: '',
+        configured: false,
+        source: 'unconfigured',
+      });
+      expect(resolve({ savedUrl: value, hostname: PRODUCTION_HOSTS[0] })).toEqual({
+        url: PRODUCTION_API_URL,
+        configured: true,
+        source: 'production',
+      });
+    }
   });
 
   it('rejects a username or password', () => {

@@ -55,7 +55,9 @@ export function apiUrlIssue(value) {
   return API_URL_SCHEME_MESSAGE;
 }
 
-function usableApiUrl(value) {
+// One gate for a Settings save, a stored `ff.apiUrl`, and `VITE_API_URL`.
+// Empty means "not a usable address": blank, or `apiUrlIssue` rejected it.
+export function acceptedApiUrl(value) {
   const url = normalizeUrl(value);
   if (!url || apiUrlIssue(url)) return '';
   return url;
@@ -75,10 +77,10 @@ export function isProductionHost({ hostname, port, protocol } = {}) {
 }
 
 export function resolveApiBase({ viteApiUrl, dev, prod, hostname, port, protocol, savedUrl } = {}) {
-  const saved = usableApiUrl(savedUrl);
+  const saved = acceptedApiUrl(savedUrl);
   if (saved) return { url: saved, configured: true, source: 'settings' };
 
-  const fromEnv = usableApiUrl(viteApiUrl);
+  const fromEnv = acceptedApiUrl(viteApiUrl);
   if (fromEnv) return { url: fromEnv, configured: true, source: 'env' };
 
   if (dev) return { url: LOCAL_API_URL, configured: true, source: 'dev' };

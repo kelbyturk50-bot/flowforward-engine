@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, settings } from '../api';
-import { apiUrlIssue, shouldStoreApiUrl } from '../api-base.js';
+import { acceptedApiUrl, apiUrlIssue, shouldStoreApiUrl } from '../api-base.js';
 import { useAsync, ErrorNote, timeAgo, toast, money2 } from '../ui';
 
 export default function Settings({ authProblem, onSaved, version }) {
@@ -17,14 +17,12 @@ export default function Settings({ authProblem, onSaved, version }) {
   const saveAndTest = async (e) => {
     e.preventDefault();
     const trimmed = url.trim();
-    if (trimmed) {
-      const issue = apiUrlIssue(trimmed);
-      if (issue) { setUrlError(issue); setStatus(null); return; }
-    }
+    const accepted = acceptedApiUrl(trimmed);
+    if (trimmed && !accepted) { setUrlError(apiUrlIssue(trimmed)); setStatus(null); return; }
     setUrlError('');
     setBusy(true); setStatus(null);
     if (!trimmed) settings.apiUrl = '';
-    else if (shouldStoreApiUrl(trimmed, baseline)) settings.apiUrl = trimmed;
+    else if (shouldStoreApiUrl(trimmed, baseline)) settings.apiUrl = accepted;
     settings.apiKey = key;
     try {
       await api.health();
