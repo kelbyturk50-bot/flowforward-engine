@@ -79,6 +79,10 @@ These numbered rules are authoritative and apply in order. `tieRank` is only the
 
 **Input rules:** `fsm_detected` wins, and research signals are used only when it's empty. A state of `Utah` or `UT` (any case) counts as Utah, and a missing state parks the lead as unknown. Franchise names use word-boundary matching. Pest, franchise and out-of-state rules live in config.
 
+**Cost tier per agent:** estimate follow-up 1, speed-to-lead 1, review requests 1, scheduling 2, maintenance-plan renewal 2, dispatch 2, bookkeeping 2 (needs an accounting integration), receptionist 3.
+
+**Unknown state:** no prototype. The lead is parked until its state is known, matching the out-of-state park rule. #46 must match.
+
 1. **HVAC beachhead bias.** HVAC beats plumbing, and plumbing beats the rest. This is a picker bias only, not a fit-score change (Summit: no plumbing score tweak).
 2. **Estimate follow-up wins ties.** It is Pilot #1 and the only rung with an `estimate_recovered` proof path.
 3. **Cheapest to make real:** email-only beats needing an FSM integration, which beats needing telephony (#12 is blocked).
@@ -124,14 +128,14 @@ These numbered rules are authoritative and apply in order. `tieRank` is only the
     "quote_form":      { "status": "new-collect", "note": "needs research.js flag; separate spec" }
   },
   "agents": {
-    "estimate_followup": { "free_estimate": 25, "financing": 20, "rv_slow_quote": 25, "contact_form_only": 5, "maint_plan": 5, "fsm_jobber_hcp": 10, "fsm_none": 5, "size_sweet": 10, "size_big": 5, "hvac": 10, "tieRank": 1 },
-    "speed_to_lead":     { "free_estimate": 10, "financing": 5, "rv_slow_quote": 10, "rv_missed_call": 15, "no_booking": 10, "contact_form_only": 25, "no_chat": 15, "closed_after_hours": 5, "fsm_jobber_hcp": 5, "fsm_none": 5, "size_sweet": 10, "size_big": 5, "hvac": 5, "tieRank": 2 },
-    "receptionist":      { "rv_missed_call": 30, "rv_scheduling": 5, "no_booking": 5, "no_chat": 10, "closed_after_hours": 20, "fsm_none": 5, "size_sweet": 10, "size_big": 10, "hvac": 5, "tieRank": 3 },
-    "scheduling":        { "rv_scheduling": 25, "no_booking": 25, "contact_form_only": 10, "fsm_none": 10, "size_sweet": 10, "hvac": 5, "tieRank": 4 },
-    "review_requests":   { "no_review_tool": 30, "small_good_rating": 20, "fsm_jobber_hcp": 5, "size_sweet": 10, "hvac": 5, "tieRank": 5 },
-    "maint_renewal":     { "maint_plan": 35, "fsm_jobber_hcp": 10, "size_sweet": 10, "size_big": 10, "hvac": 10, "tieRank": 6 },
-    "dispatch":          { "rv_scheduling": 15, "fsm_none": 10, "size_sweet": 5, "size_big": 15, "hvac": 5, "tieRank": 7 },
-    "bookkeeping":       { "fsm_none": 5, "size_sweet": 5, "tieRank": 8 }
+    "estimate_followup": { "free_estimate": 25, "financing": 20, "rv_slow_quote": 25, "contact_form_only": 5, "maint_plan": 5, "fsm_jobber_hcp": 10, "fsm_none": 5, "size_sweet": 10, "size_big": 5, "hvac": 10, "costTier": 1, "tieRank": 1 },
+    "speed_to_lead":     { "free_estimate": 10, "financing": 5, "rv_slow_quote": 10, "rv_missed_call": 15, "no_booking": 10, "contact_form_only": 25, "no_chat": 15, "closed_after_hours": 5, "fsm_jobber_hcp": 5, "fsm_none": 5, "size_sweet": 10, "size_big": 5, "hvac": 5, "costTier": 1, "tieRank": 2 },
+    "receptionist":      { "rv_missed_call": 30, "rv_scheduling": 5, "no_booking": 5, "no_chat": 10, "closed_after_hours": 20, "fsm_none": 5, "size_sweet": 10, "size_big": 10, "hvac": 5, "costTier": 3, "tieRank": 3 },
+    "scheduling":        { "rv_scheduling": 25, "no_booking": 25, "contact_form_only": 10, "fsm_none": 10, "size_sweet": 10, "hvac": 5, "costTier": 2, "tieRank": 4 },
+    "review_requests":   { "no_review_tool": 30, "small_good_rating": 20, "fsm_jobber_hcp": 5, "size_sweet": 10, "hvac": 5, "costTier": 1, "tieRank": 5 },
+    "maint_renewal":     { "maint_plan": 35, "fsm_jobber_hcp": 10, "size_sweet": 10, "size_big": 10, "hvac": 10, "costTier": 2, "tieRank": 6 },
+    "dispatch":          { "rv_scheduling": 15, "fsm_none": 10, "size_sweet": 5, "size_big": 15, "hvac": 5, "costTier": 2, "tieRank": 7 },
+    "bookkeeping":       { "fsm_none": 5, "size_sweet": 5, "costTier": 2, "tieRank": 8 }
   }
 }
 ```
