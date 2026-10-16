@@ -59,6 +59,7 @@ export default function Settings({ authProblem, onSaved, version }) {
           </div>
           <ErrorNote error={runs.error} />
           {runs.data?.length > 0 && (
+            <div className="runs-scroll">
             <table className="runs">
               <thead><tr><th>Started</th><th>Status</th><th>Queries</th><th>Found</th><th>New</th><th>Errors</th></tr></thead>
               <tbody>
@@ -71,6 +72,7 @@ export default function Settings({ authProblem, onSaved, version }) {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </section>
       )}
