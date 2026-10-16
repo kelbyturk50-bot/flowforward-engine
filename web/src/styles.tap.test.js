@@ -28,6 +28,8 @@ describe('phone tap targets', () => {
       expect(phone).toContain(rule);
       expect(desktop).not.toContain(rule);
     }
+    expect(phone).toContain('.form-actions .btn { min-height: 44px;');
+    expect(desktop).not.toContain('.form-actions .btn { min-height: 44px;');
   });
 
   it('styles the unconfigured banner as info, with a 44px action', () => {

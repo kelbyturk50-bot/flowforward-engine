@@ -14,6 +14,13 @@ export default function Settings({ authProblem, onSaved, version }) {
   const connected = !!settings.apiKey;
   const runs = useAsync(() => connected ? api.runs() : Promise.resolve(null), [version, connected]);
 
+  const onAddress = (e) => {
+    const next = e.target.value;
+    setUrl(next);
+    setUrlError(next.trim() ? apiUrlIssue(next) : '');
+    setStatus(null);
+  };
+
   const saveAndTest = async (e) => {
     e.preventDefault();
     const trimmed = url.trim();
@@ -62,14 +69,14 @@ export default function Settings({ authProblem, onSaved, version }) {
 
       <form className="panel form" onSubmit={saveAndTest}>
         <h2>Connection</h2>
-        <p className="muted">Saved on this device only if you change the address. https is required, except http for localhost or 127.0.0.1. Clear the address and save, or choose Reset, to drop a saved address.</p>
-        <label>API address<input className="input" value={url} onChange={e => { setUrl(e.target.value); setUrlError(''); }} placeholder="https://…" aria-invalid={urlError ? 'true' : undefined} aria-describedby={urlError ? 'api-url-error' : undefined} /></label>
+        <p className="muted">{"Saved on this device only. Use an https address (http is fine for localhost). Reset goes back to this environment's default."}</p>
+        <label>API address<input className="input" value={url} onChange={onAddress} placeholder="https://…" aria-invalid={urlError ? 'true' : undefined} aria-describedby={urlError ? 'api-url-error' : undefined} /></label>
         {urlError && <p id="api-url-error" className="error-text" role="alert">{urlError}</p>}
         <label>API key<input className="input" type="password" value={key} onChange={e => setKey(e.target.value)} autoComplete="off" placeholder="Value of CRM_API_KEY" /></label>
-        {status && <p className={status.ok ? 'ok-note' : 'error-text'} role="status">{status.msg}</p>}
+        {status && !urlError && <p className={status.ok ? 'ok-note' : 'error-text'} role="status">{status.msg}</p>}
         <div className="form-actions">
           <button type="button" className="btn btn-quiet" onClick={resetAddress} disabled={busy}>Reset</button>
-          <button className="btn" disabled={busy}>{busy ? 'Checking…' : 'Save and connect'}</button>
+          <button className="btn" disabled={busy || !!urlError}>{busy ? 'Checking…' : 'Save and connect'}</button>
         </div>
       </form>
 

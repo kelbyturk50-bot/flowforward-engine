@@ -373,10 +373,31 @@ describe('Settings API address', () => {
     const address = screen.getByLabelText('API address');
     await user.clear(address);
     await user.type(address, 'http://10.1.1.1:3000');
-    await user.click(screen.getByRole('button', { name: 'Save and connect' }));
+    const save = screen.getByRole('button', { name: 'Save and connect' });
+    expect(save).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent(API_URL_SCHEME_MESSAGE);
     expect(writes).toEqual([]);
     expect(api.health).not.toHaveBeenCalled();
+  });
+
+  it('clears Connected and blocks Save when the address is invalid', async () => {
+    const user = userEvent.setup();
+    watchSettings('');
+    render(<Settings version={0} onSaved={() => {}} />);
+    expect(screen.getByText("Saved on this device only. Use an https address (http is fine for localhost). Reset goes back to this environment's default.")).toBeInTheDocument();
+    const address = screen.getByLabelText('API address');
+    await user.type(address, 'https://staging.example.test');
+    await user.click(screen.getByRole('button', { name: 'Save and connect' }));
+    expect(await screen.findByText('Connected. Your leads are loading.')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    await user.clear(address);
+    await user.type(address, 'https://user:pass@staging.example.test');
+    expect(screen.queryByText('Connected. Your leads are loading.')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(API_URL_USERINFO_MESSAGE);
+    expect(screen.getByRole('button', { name: 'Save and connect' })).toBeDisabled();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(api.health).toHaveBeenCalledTimes(1);
   });
 
   it('does not save the prefilled address when only the key is saved', async () => {
@@ -415,7 +436,7 @@ describe('Settings API address', () => {
     const writes = watchSettings('');
     render(<Settings version={0} onSaved={() => {}} />);
     await user.type(screen.getByLabelText('API address'), 'https://user:pass@staging.example.test');
-    await user.click(screen.getByRole('button', { name: 'Save and connect' }));
+    expect(screen.getByRole('button', { name: 'Save and connect' })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent(API_URL_USERINFO_MESSAGE);
     expect(writes).toEqual([]);
     expect(api.health).not.toHaveBeenCalled();

@@ -461,6 +461,8 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   .tally dd { font-size: clamp(1.15rem, 5.2vw, 1.5rem); }
   .tally small { display: block; font-size: .85rem; }
   .btn, .btn-sm { min-height: 44px; }
+  .form-actions { flex-wrap: wrap; }
+  .form-actions .btn { min-height: 44px; }
   .mini-select { min-height: 44px; padding: 0 .55rem; }
   .chip { min-height: 44px; display: inline-flex; align-items: center; }
   .drawer-close { width: 44px; height: 44px; }
