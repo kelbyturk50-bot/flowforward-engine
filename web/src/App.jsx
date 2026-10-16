@@ -14,15 +14,9 @@ import { api, currentApiBase, settings } from './api';
 import ApiBanner from './ApiBanner';
 import { JobsProvider, useJobs } from './jobs';
 import { badgeCount } from './format';
-
-const ICONS = {
-  today: 'M4 12h4l3-8 4 16 3-8h2',
-  leads: 'M4 6h16M4 12h16M4 18h10',
-  proposals: 'M4 6l8 6 8-6M4 6h16v12H4z',
-  pipeline: 'M4 5v14M10 5v10M16 5v6M22 5v3',
-  projects: 'M4 7h16v12H4zM9 7V4h6v3',
-  more: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
-};
+import { FF_CAMPAIGNS, flagEnabled } from './flags';
+import { moreBadge, railItems, resolveRoute, tabIsOn, tabItems } from './campaigns/nav';
+import Campaigns from './views/Campaigns';
 
 function GearIcon() {
   return (
@@ -33,32 +27,10 @@ function GearIcon() {
   );
 }
 
-const ROUTES = [
-  { id: 'today',    label: 'Today',    icon: ICONS.today },
-  { id: 'leads',    label: 'Leads',    icon: ICONS.leads },
-  { id: 'proposals', label: 'Proposals', icon: ICONS.proposals },
-  { id: 'pipeline', label: 'Pipeline', icon: ICONS.pipeline },
-  { id: 'projects', label: 'Projects', icon: ICONS.projects },
-  { id: 'settings', label: 'Settings' },
-];
-
-const TABS = [
-  { id: 'today', label: 'Today', icon: ICONS.today },
-  { id: 'leads', label: 'Leads', icon: ICONS.leads },
-  { id: 'pipeline', label: 'Pipeline', icon: ICONS.pipeline },
-  { id: 'proposals', label: 'Proposals', icon: ICONS.proposals },
-  { id: 'more', label: 'More', icon: ICONS.more },
-];
-
-const KNOWN = new Set([...ROUTES.map(r => r.id), 'more']);
-
-const readRoute = () => {
-  const r = window.location.hash.replace(/^#\/?/, '').split('?')[0];
-  if (KNOWN.has(r)) return r;
-  return settings.apiKey ? 'today' : 'settings';
-};
-
-const tabOn = (id, route) => id === 'more' ? route === 'more' || route === 'projects' : route === id;
+const readRoute = () => resolveRoute(window.location.hash, {
+  campaigns: flagEnabled(FF_CAMPAIGNS),
+  hasKey: Boolean(settings.apiKey),
+});
 
 function BrandMark() {
   return (
@@ -91,6 +63,8 @@ export default function App() {
   const openProposal = useCallback((id) => { setLeadId(null); setProjectId(null); setProposalId(id); }, []);
   const shared = { version, bump, openLead, openProject, openProposal };
   const apiConfigured = currentApiBase().configured;
+  const campaigns = flagEnabled(FF_CAMPAIGNS);
+  const routes = railItems(campaigns);
 
   return (
     <JobsProvider bump={bump} version={version}>
@@ -102,7 +76,7 @@ export default function App() {
           <BrandMark />
           <span>Flow<span className="brand-forward">Forward</span></span>
         </div>
-        {ROUTES.map(r => (
+        {routes.map(r => (
           <a key={r.id} href={`#/${r.id}`} className={`rail-link ${route === r.id ? 'active' : ''}`} aria-current={route === r.id ? 'page' : undefined}>
             {r.id === 'settings' ? <GearIcon /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d={r.icon} /></svg>}
             <span>{r.label}</span>
@@ -110,7 +84,7 @@ export default function App() {
           </a>
         ))}
       </nav>
-      <MobileTabs route={route} version={version} />
+      <MobileTabs route={route} version={version} campaigns={campaigns} />
 
       <main id="main" className="main">
         <ApiBanner configured={apiConfigured} />
@@ -118,8 +92,16 @@ export default function App() {
         {route === 'leads'    && <Leads {...shared} />}
         {route === 'proposals' && <Proposals {...shared} />}
         {route === 'pipeline' && <Pipeline {...shared} />}
+        {route === 'campaigns' && <Campaigns />}
         {route === 'projects' && <Projects {...shared} />}
         {route === 'more'     && <More />}
+        {route === 'not-found' && (
+          <div className="not-found-card">
+            <h1>Page not found</h1>
+            <p className="muted">That page is not here.</p>
+            <a className="btn" href="#/today">Back to FlowForward</a>
+          </div>
+        )}
         {route === 'settings' && <Settings {...shared} authProblem={authProblem} onSaved={() => { setAuthProblem(false); bump(); }} />}
       </main>
 
@@ -157,22 +139,29 @@ function useFocusCounts(version) {
   return data;
 }
 
-function MobileTabs({ route, version }) {
+function MobileTabs({ route, version, campaigns }) {
   const { unreviewed } = useJobs();
   const focus = useFocusCounts(version);
   const todayN = focus?.followups_due?.length || 0;
   const moreN = (focus?.task_queue || []).filter(t => isOverdue(t.due_date)).length;
-  const counts = { today: todayN, proposals: unreviewed, more: moreN };
-  const labels = { today: 'follow-ups due', proposals: 'proposals to review', more: 'overdue project tasks' };
+  const badges = moreBadge({ campaignsOn: campaigns, proposalsN: unreviewed, overdueN: moreN });
+  const tabs = tabItems(campaigns);
   return (
     <nav className="tabbar" aria-label="Mobile">
-      {TABS.map(t => {
-        const on = tabOn(t.id, route);
+      {tabs.map(t => {
+        const on = tabIsOn(t.id, route, campaigns);
+        const badge = t.id === 'today'
+          ? { n: todayN, label: `${todayN} follow-ups due` }
+          : t.id === 'proposals'
+            ? badges.proposals
+            : t.id === 'more'
+              ? badges.more
+              : null;
         return (
           <a key={t.id} href={`#/${t.id}`} className={`tabbar-link ${on ? 'active' : ''}`} aria-current={on ? 'page' : undefined}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d={t.icon} /></svg>
             <span>{t.label}</span>
-            {counts[t.id] != null && <TabCount n={counts[t.id]} what={labels[t.id]} />}
+            {badge && <TabCount n={badge.n} what={badge.label} />}
           </a>
         );
       })}
@@ -182,8 +171,8 @@ function MobileTabs({ route, version }) {
 
 function TabCount({ n, what }) {
   const text = badgeCount(n);
-  if (!text) return null;
-  return <span className="tab-badge" aria-label={`${n} ${what}`}>{text}</span>;
+  if (!text || !what) return null;
+  return <span className="tab-badge" aria-label={what}>{text}</span>;
 }
 
 function ProposalsBadge() {

@@ -27,6 +27,7 @@ describe('demo code split', () => {
     expect(flags).toMatch(/\[FF_PILOT_LINK_ON_ONEPAGER\]:\s*false/);
     expect(flags).toMatch(/\[FF_PILOT_ESTIMATE_SMS\]:\s*false/);
     expect(flags).toMatch(/\[FF_PROTOTYPE_GALLERY\]:\s*false/);
+    expect(flags).toMatch(/\[FF_CAMPAIGNS\]:\s*false/);
     expect(flags).not.toMatch(/VITE_FF/);
     expect(main).not.toMatch(/GalleryApp/);
     expect(main).not.toMatch(/fixture-brand/);
