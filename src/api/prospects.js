@@ -5,6 +5,18 @@ const pool    = require('../db/client');
 const { rescore } = require('../scoring/fit');
 const { normalizeIndustry } = require('../scoring/industry');
 
+// Public writes must already be text. Do not coerce objects, arrays, or numbers.
+// Length is checked after trim. Control characters, including bidi marks, are rejected.
+const INDUSTRY_MAX = 80;
+const INDUSTRY_CONTROL = /[\u0000-\u001F\u007F-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/;
+
+function industryIsValid(value) {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > INDUSTRY_MAX) return false;
+  return !INDUSTRY_CONTROL.test(trimmed);
+}
+
 const STAGES = ['found', 'contacted', 'responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const CLOSED = ['won', 'lost', 'disqualified'];
 const { buildProspectListQuery, ProspectQueryError } = require('./prospect-query');
@@ -82,6 +94,7 @@ router.post('/rescore', async (req, res) => {
 // POST /api/prospects — add a lead by hand (referral, walk-in, etc.)
 router.post('/', async (req, res) => {
   const b = req.body || {};
+  if (!industryIsValid(b.industry)) return res.status(400).json({ error: 'invalid industry' });
   const industry = normalizeIndustry(b.industry);
   if (!b.company || !industry) return res.status(400).json({ error: 'company and industry are required' });
   try {
@@ -124,8 +137,8 @@ const RESCORE_FIELDS = ['fit_boost', 'industry', 'city', 'phone', 'website'];
 router.patch('/:id', async (req, res) => {
   const body = { ...req.body };
   if (Object.prototype.hasOwnProperty.call(body, 'industry')) {
+    if (!industryIsValid(body.industry)) return res.status(400).json({ error: 'invalid industry' });
     body.industry = normalizeIndustry(body.industry);
-    if (!body.industry) return res.status(400).json({ error: 'industry is required' });
   }
   if (body.stage && !STAGES.includes(body.stage)) return res.status(400).json({ error: `stage must be one of ${STAGES.join(', ')}` });
   for (const k of ['next_action_at', 'est_value', 'email', 'contact_name', 'website', 'phone']) if (body[k] === '') body[k] = null;

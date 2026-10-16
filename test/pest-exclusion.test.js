@@ -412,4 +412,71 @@ describe('pest control exclusion', { concurrency: false }, () => {
     assert.equal(picked.some(row => row.id === patched.json.id), false);
     assert.equal(picked.some(row => row.company === 'Pestana Plumbing' && row.industry === 'Plumbing'), true);
   });
+
+  it('rejects a non-string, overlong, or control-character industry', async () => {
+    async function send(method, path, body) {
+      const res = await fetch(apiBase + path, {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      return { status: res.status, json };
+    }
+
+    const rejected = [
+      ['object', { a: 1 }],
+      ['array', ['HVAC', 'x']],
+      ['number', 123],
+      ['boolean', true],
+      ['null', null],
+      ['blank', '   '],
+      ['overlong', ` ${'H'.repeat(81)} `],
+      ['null byte', 'HVAC\u0000'],
+      ['rtl mark', `HVAC\u200F`],
+    ];
+
+    for (const [label, industry] of rejected) {
+      const created = await send('POST', '/api/prospects', leadBody({
+        company: `Reject ${label}`,
+        industry,
+      }));
+      assert.equal(created.status, 400, label);
+      assert.deepEqual(created.json, { error: 'invalid industry' }, label);
+      const stored = await pool.query('SELECT id FROM prospects WHERE company = $1', [`Reject ${label}`]);
+      assert.equal(stored.rows.length, 0, label);
+    }
+
+    const created = await send('POST', '/api/prospects', leadBody({
+      company: 'Valid Electrical',
+      industry: '  Electrical  ',
+    }));
+    assert.equal(created.status, 201);
+    assert.equal(created.json.industry, 'Electrical');
+
+    const eighty = 'A'.repeat(80);
+    const maxed = await send('POST', '/api/prospects', leadBody({
+      company: 'Valid Eighty',
+      industry: ` ${eighty} `,
+    }));
+    assert.equal(maxed.status, 201);
+    assert.equal(maxed.json.industry, eighty);
+
+    for (const [label, industry] of rejected) {
+      const patched = await send('PATCH', `/api/prospects/${created.json.id}`, { industry });
+      assert.equal(patched.status, 400, label);
+      assert.deepEqual(patched.json, { error: 'invalid industry' }, label);
+    }
+    const unchanged = await pool.query('SELECT industry FROM prospects WHERE id = $1', [created.json.id]);
+    assert.equal(unchanged.rows[0].industry, 'Electrical');
+
+    const otherField = await send('PATCH', `/api/prospects/${created.json.id}`, { city: 'Lehi' });
+    assert.equal(otherField.status, 200);
+    assert.equal(otherField.json.industry, 'Electrical');
+    assert.equal(otherField.json.city, 'Lehi');
+
+    const renamed = await send('PATCH', `/api/prospects/${created.json.id}`, { industry: 'Plumbing' });
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.json.industry, 'Plumbing');
+  });
 });
