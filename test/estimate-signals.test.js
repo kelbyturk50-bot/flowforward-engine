@@ -867,6 +867,115 @@ describe('F-003 estimate signals', () => {
     assert.equal(lender.fit_reasons.find(row => row.label === 'Financing').points, 3);
   });
 
+  it('does not cut a CTA through a negator, a newline, or a title join', () => {
+    const plain = computeFit(peer);
+    // pageText joins a heading to the next paragraph with spaces. The first
+    // comma is inside the refusal, so the CTA cut must not throw that negator away.
+    const joinedHeading = [
+      ["Don't wait We do not offer, at this time, any kind of financing", 'do not offer'],
+      ["Don't wait We do not, unfortunately, offer financing", 'unfortunately'],
+      ["Don't delay We do not yet offer, in your area, any kind of financing", 'do not yet'],
+      ["Don't wait We cannot provide, for now, your free estimate", 'cannot provide'],
+      ["Don't Sweat It We cannot provide, for now, your free estimate", 'sweat it cannot'],
+      ["Don't Forget We do not offer, at this time, any kind of financing", 'forget'],
+      ["Don't Miss Out We do not offer, at this time, any kind of financing", 'miss out'],
+      ["Don't wait We do not offer, at this time, our financing", 'our financing'],
+      ["Don't wait We do not have, at this time, a quote form", 'quote form'],
+      ["Don't Sweat It We do not offer, for now, a contact form", 'contact form'],
+      ["Don't wait--we do not offer, at this time, any kind of financing", 'unspaced double hyphen'],
+      ["Don't wait-we do not offer, at this time, any kind of financing", 'unspaced hyphen'],
+      ["Don't wait--we do not, unfortunately, offer financing", 'unspaced unfortunately'],
+      ["Don't wait--we do not yet offer, in your area, any kind of financing", 'unspaced do not yet'],
+      ["Don't wait-we cannot provide, for now, your free estimate", 'unspaced cannot'],
+      ["Don't wait--we do not have, at this time, a quote form", 'unspaced quote form'],
+      ["Don't wait-we do not offer, for now, a contact form", 'unspaced contact form'],
+    ];
+    for (const [text, name] of joinedHeading) {
+      const fit = computeFit({ ...peer, research: research(text) });
+      assert.equal(fit.fit_score, plain.fit_score, name);
+      assert.equal(signalPoints(fit), 0, name);
+    }
+
+    const fields = [
+      ['title pipe', "Don't Wait | Wasatch Heating", '', 'We do not offer, at this time, any kind of financing'],
+      ['title pipe long', "Don't Wait | Wasatch Heating and Air", '', 'We do not offer, at this time, any kind of financing'],
+      ['meta description', 'Acme Heating', "Don't wait", 'We do not offer, at this time, any kind of financing'],
+      ['title unfortunately', "Don't Wait | Wasatch Heating", '', 'We do not, unfortunately, offer financing'],
+      ['meta unfortunately', 'Acme Heating', "Don't wait", 'We do not, unfortunately, offer financing'],
+      ['title do not yet', "Don't Delay | Wasatch Heating", '', 'We do not yet offer, in your area, any kind of financing'],
+      ['meta do not yet', 'Acme Heating', "Don't delay", 'We do not yet offer, in your area, any kind of financing'],
+      ['title cannot', "Don't Sweat It | Acme Heating", '', 'We cannot provide, for now, your free estimate'],
+      ['meta cannot', 'Acme Heating', "Don't sweat it", 'We cannot provide, for now, your free estimate'],
+      ['title our financing', "Don't Forget | Wasatch Heating", '', 'We do not offer, at this time, our financing'],
+      ['title quote form', "Don't Wait | Wasatch Heating", '', 'We do not have, at this time, a quote form'],
+      ['meta quote form', 'Acme Heating', "Don't wait", 'We do not have, at this time, a quote form'],
+      ['title contact form', "Don't Sweat It | Acme Heating", '', 'We do not offer, for now, a contact form'],
+      ['meta contact form', 'Acme Heating', "Don't Miss Out", 'We do not offer, for now, a contact form'],
+      ['pipe in the body', 'Home', '', "Don't Wait | Wasatch Heating We do not offer, at this time, any kind of financing"],
+    ];
+    for (const [name, title, description, text] of fields) {
+      const fit = computeFit({ ...peer, research: research(text, { title, description }) });
+      assert.equal(fit.fit_score, plain.fit_score, name);
+      assert.equal(signalPoints(fit), 0, name);
+    }
+
+    const afterPeriod = computeFit({
+      ...peer,
+      research: research("Don't wait We do not offer, at this time, any kind of financing. Call for a free estimate."),
+    });
+    assert.equal(afterPeriod.fit_score - plain.fit_score, 4, 'heading refusal then a real estimate');
+    assert.equal(signalPoints(afterPeriod), 4, 'heading refusal then a real estimate');
+    assert.equal(afterPeriod.fit_reasons.some(row => row.label === 'Financing'), false);
+    assert.equal(afterPeriod.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
+
+    const titledPeriod = computeFit({
+      ...peer,
+      research: research(
+        'We do not offer, at this time, any kind of financing. Call for a free estimate.',
+        { title: "Don't Wait | Wasatch Heating" },
+      ),
+    });
+    assert.equal(titledPeriod.fit_score - plain.fit_score, 4, 'title CTA then a refusal and an estimate');
+    assert.equal(signalPoints(titledPeriod), 4, 'title CTA then a refusal and an estimate');
+    assert.equal(titledPeriod.fit_reasons.some(row => row.label === 'Financing'), false);
+
+    const stillCalls = [
+      ["Don't wait, call for a free estimate", 4, 'Free estimate'],
+      ["Don't wait - call today for a free estimate", 4, 'Free estimate'],
+      ["Don't wait, seriously, call for a free estimate", 4, 'Free estimate'],
+      ["Don't sweat it, call for a free estimate", 4, 'Free estimate'],
+      ["Don't miss out, call for a free estimate", 4, 'Free estimate'],
+      // "charge" is not a negator. Main scores this 0. The comma after wait is the cut.
+      ["Don't wait, we charge for free estimates", 4, 'Free estimate'],
+    ];
+    for (const [text, weight, label] of stillCalls) {
+      const fit = computeFit({ ...peer, research: research(text) });
+      assert.equal(fit.fit_score - plain.fit_score, weight, text);
+      assert.equal(fit.fit_reasons.find(row => row.label === label).points, weight, text);
+      assert.equal(signalPoints(fit), weight, text);
+    }
+
+    const bodyCta = computeFit({
+      ...peer,
+      research: research("Don't wait, call for a free estimate", {
+        title: "Don't Wait | Wasatch Heating",
+        description: "Don't wait",
+      }),
+    });
+    assert.equal(bodyCta.fit_score - plain.fit_score, 4, 'body CTA after a titled don\'t');
+    assert.equal(signalPoints(bodyCta), 4, 'body CTA after a titled don\'t');
+
+    const metaCta = computeFit({
+      ...peer,
+      research: research('', {
+        title: 'Acme Heating',
+        description: "Don't wait, call for a free estimate",
+      }),
+    });
+    assert.equal(metaCta.fit_score - plain.fit_score, 4, 'meta description CTA');
+    assert.equal(signalPoints(metaCta), 4, 'meta description CTA');
+  });
+
   it('still penalizes ServiceTitan and caps it after the new boost', () => {
     const sweet = {
       company: 'Wasatch Heating',
