@@ -8,7 +8,8 @@
  *
  * Exit 0 skips the build. Exit 1 runs the build.
  *
- * `main` always builds. Any other ref builds when the merge-base diff
+ * `VERCEL_ENV=production` always builds. So does ref `main` or
+ * `refs/heads/main`. Any other ref builds when the merge-base diff
  * against `origin/main` touches `web/`, this script, or Vercel config
  * (`vercel.json` at the repo root, `web/vercel.json`, `.vercelignore`,
  * or anything under `.vercel/`). A diff that succeeds and touches none
@@ -39,14 +40,31 @@ export const SCRIPT_REPO_PATH = 'web/scripts/vercel-ignore.mjs';
 
 const MAIN_REFSPEC = 'refs/heads/main:refs/remotes/origin/main';
 
+/** `main` and the full ref Vercel may send for that branch. */
+export function isMainRef(ref) {
+  if (typeof ref !== 'string') return false;
+  const name = ref.trim();
+  return name === 'main' || name === 'refs/heads/main';
+}
+
+/** Vercel sets this to `production`, `preview`, or `development`. */
+export function isProductionEnv(vercelEnv) {
+  return typeof vercelEnv === 'string' && vercelEnv.trim() === 'production';
+}
+
 /**
  * A successful empty diff skips: the branch matches the merge base, so
  * no frontend or Vercel config path changed. Callers must pass
  * `diffOk: true` only after git actually produced the name list.
+ * Production and main build before that list is considered.
  */
-export function shouldBuild({ ref, changedFiles, diffOk } = {}) {
-  if (ref === 'main') {
-    return { build: true, reason: 'VERCEL_GIT_COMMIT_REF is main' };
+export function shouldBuild({ ref, changedFiles, diffOk, vercelEnv } = {}) {
+  if (isProductionEnv(vercelEnv)) {
+    return { build: true, reason: 'VERCEL_ENV is production' };
+  }
+  if (isMainRef(ref)) {
+    const shown = typeof ref === 'string' ? ref.trim() : 'main';
+    return { build: true, reason: `VERCEL_GIT_COMMIT_REF is ${shown}` };
   }
   if (diffOk !== true || !Array.isArray(changedFiles)) {
     return { build: true, reason: 'diff against origin/main was not computed' };
@@ -121,14 +139,14 @@ function summarize(paths) {
   return shown.join(', ');
 }
 
-function git(args, cwd) {
+function git(args, cwd, env = process.env) {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 120_000,
     env: {
-      ...process.env,
+      ...env,
       GIT_TERMINAL_PROMPT: '0',
       GCM_INTERACTIVE: 'never',
     },
@@ -141,24 +159,24 @@ function readEnvRef(env) {
   return raw.trim();
 }
 
-function readShallow(root) {
+function readShallow(root, env) {
   try {
-    return git(['rev-parse', '--is-shallow-repository'], root).trim() === 'true';
+    return git(['rev-parse', '--is-shallow-repository'], root, env).trim() === 'true';
   } catch {
     return false;
   }
 }
 
-function canMergeBase(root) {
+function canMergeBase(root, env) {
   try {
-    return git(['merge-base', 'origin/main', 'HEAD'], root).trim().length > 0;
+    return git(['merge-base', 'origin/main', 'HEAD'], root, env).trim().length > 0;
   } catch {
     return false;
   }
 }
 
-function prepareOriginMain(root) {
-  const shallow = readShallow(root);
+function prepareOriginMain(root, env) {
+  const shallow = readShallow(root, env);
   const attempts = shallow
     ? [
         ['fetch', '--depth=50', 'origin', MAIN_REFSPEC],
@@ -171,54 +189,55 @@ function prepareOriginMain(root) {
   const errors = [];
   for (const args of attempts) {
     try {
-      git(args, root);
+      git(args, root, env);
     } catch (err) {
       errors.push(errorText(err));
     }
-    if (canMergeBase(root)) return { shallow };
+    if (canMergeBase(root, env)) return { shallow };
   }
   const why = errors.length > 0 ? errors.join('; ') : 'no common ancestor with origin/main';
   throw new Error(why);
 }
 
-function changedFilesAgainstMain(root) {
-  const { shallow } = prepareOriginMain(root);
-  const base = git(['merge-base', 'origin/main', 'HEAD'], root).trim();
+function changedFilesAgainstMain(root, env) {
+  const { shallow } = prepareOriginMain(root, env);
+  const base = git(['merge-base', 'origin/main', 'HEAD'], root, env).trim();
   if (!base) throw new Error('merge-base returned an empty revision');
-  const out = git(['diff', '--no-renames', '--name-only', '-z', base, 'HEAD'], root);
+  const out = git(['diff', '--no-renames', '--name-only', '-z', base, 'HEAD'], root, env);
   return { base, files: parseDiffNames(out), shallow };
 }
 
 export function decide(env = process.env, cwd = process.cwd()) {
+  const vercelEnv = env && typeof env.VERCEL_ENV === 'string' ? env.VERCEL_ENV : '';
   const fromEnv = readEnvRef(env);
-  if (fromEnv === 'main') {
-    return shouldBuild({ ref: 'main', changedFiles: [], diffOk: true });
+  if (isProductionEnv(vercelEnv) || isMainRef(fromEnv)) {
+    return shouldBuild({ ref: fromEnv, changedFiles: [], diffOk: false, vercelEnv });
   }
 
-  const root = git(['rev-parse', '--show-toplevel'], cwd).trim();
+  const root = git(['rev-parse', '--show-toplevel'], cwd, env).trim();
   if (!root) throw new Error('git rev-parse --show-toplevel returned an empty path');
 
   let ref = fromEnv;
   let refSource = 'VERCEL_GIT_COMMIT_REF';
   if (!ref) {
-    ref = git(['rev-parse', '--abbrev-ref', 'HEAD'], root).trim();
+    ref = git(['rev-parse', '--abbrev-ref', 'HEAD'], root, env).trim();
     refSource = 'HEAD';
   }
   if (!ref || ref === 'HEAD') {
     throw new Error('branch ref is unknown');
   }
-  if (ref === 'main') {
-    return { build: true, reason: `${refSource} is main` };
+  if (isMainRef(ref)) {
+    return shouldBuild({ ref, changedFiles: [], diffOk: false, vercelEnv });
   }
 
-  const { base, files, shallow } = changedFilesAgainstMain(root);
+  const { base, files, shallow } = changedFilesAgainstMain(root, env);
   log(`ref=${ref} (${refSource}) shallow=${shallow} merge-base=${base}`);
   if (files.length > 0) {
     log(`changed: ${summarize(files)}`);
   } else {
     log('changed: (none)');
   }
-  return shouldBuild({ ref, changedFiles: files, diffOk: true });
+  return shouldBuild({ ref, changedFiles: files, diffOk: true, vercelEnv });
 }
 
 function report(decision) {

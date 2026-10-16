@@ -1,10 +1,12 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   IGNORE_COMMAND,
   SCRIPT_REPO_PATH,
+  decide,
   errorText,
   exitCodeFor,
   parseDiffNames,
@@ -40,6 +42,65 @@ describe('shouldBuild', () => {
     expect(shouldBuild({ ref: 'main', changedFiles: ['src/server.js'], diffOk: true }).build).toBe(true);
     expect(shouldBuild({ ref: 'main', changedFiles: [], diffOk: false }).build).toBe(true);
     expect(shouldBuild({ ref: 'main' }).reason).toMatch(/main/);
+  });
+
+  it('builds when VERCEL_ENV is production even for an API-only diff', () => {
+    const decision = shouldBuild({
+      ref: 'feature',
+      changedFiles: ['src/server.js', 'docs/PLAYBOOK.md'],
+      diffOk: true,
+      vercelEnv: 'production',
+    });
+    expect(decision.build).toBe(true);
+    expect(decision.reason).toMatch(/VERCEL_ENV is production/);
+    expect(exitCodeFor(decision)).toBe(1);
+    expect(shouldBuild({
+      ref: 'feature',
+      changedFiles: ['src/server.js'],
+      diffOk: false,
+      vercelEnv: 'production',
+    }).build).toBe(true);
+  });
+
+  it('does not treat preview, development, or a lookalike as production', () => {
+    for (const vercelEnv of ['preview', 'development', 'production-ish', 'Production']) {
+      expect(shouldBuild({
+        ref: 'feature',
+        changedFiles: ['src/server.js'],
+        diffOk: true,
+        vercelEnv,
+      }).build).toBe(false);
+    }
+  });
+
+  it('builds when the ref is refs/heads/main', () => {
+    const decision = shouldBuild({
+      ref: 'refs/heads/main',
+      changedFiles: ['src/server.js'],
+      diffOk: true,
+      vercelEnv: 'preview',
+    });
+    expect(decision.build).toBe(true);
+    expect(decision.reason).toMatch(/refs\/heads\/main/);
+    expect(exitCodeFor(decision)).toBe(1);
+    expect(shouldBuild({
+      ref: 'refs/heads/main',
+      changedFiles: [],
+      diffOk: false,
+    }).build).toBe(true);
+  });
+
+  it('does not treat a longer main ref as main', () => {
+    expect(shouldBuild({
+      ref: 'refs/heads/mainline',
+      changedFiles: ['src/server.js'],
+      diffOk: true,
+    }).build).toBe(false);
+    expect(shouldBuild({
+      ref: 'refs/heads/main/extra',
+      changedFiles: ['src/server.js'],
+      diffOk: true,
+    }).build).toBe(false);
   });
 
   it('builds when web/vercel.json or the root vercel.json changed', () => {
@@ -95,6 +156,28 @@ describe('shouldBuild', () => {
     expect(pathTriggersBuild('website/index.html')).toBe(false);
     expect(pathTriggersBuild('src/web/note.txt')).toBe(false);
     expect(pathTriggersBuild('./web/src/App.jsx')).toBe(true);
+  });
+});
+
+describe('decide', () => {
+  const missing = path.join(tmpdir(), 'ff-vercel-ignore-missing-cwd');
+
+  it('builds for production before any git call', () => {
+    const decision = decide({
+      VERCEL_ENV: 'production',
+      VERCEL_GIT_COMMIT_REF: 'feature',
+    }, missing);
+    expect(decision.build).toBe(true);
+    expect(decision.reason).toMatch(/VERCEL_ENV is production/);
+  });
+
+  it('builds for refs/heads/main before any git call', () => {
+    const decision = decide({
+      VERCEL_ENV: 'preview',
+      VERCEL_GIT_COMMIT_REF: 'refs/heads/main',
+    }, missing);
+    expect(decision.build).toBe(true);
+    expect(decision.reason).toMatch(/refs\/heads\/main/);
   });
 });
 
