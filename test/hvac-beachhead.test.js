@@ -350,10 +350,22 @@ describe('HVAC beachhead', { concurrency: false }, () => {
     assert.equal(htmlHasServiceTitan(html.scheduler), true);
     assert.equal(htmlHasServiceTitan(html.jobber), false);
     assert.equal(detectSignals(html.scheduler, '').online_booking.includes('ServiceTitan scheduler'), true);
-    assert.equal(fsmDetectedFromResearch({ site: { signals: detectSignals(html.st, '') } }), 'ServiceTitan');
-    assert.equal(fsmDetectedFromResearch({ site: { signals: detectSignals(html.jobber, '') } }), 'Jobber');
-    assert.equal(fsmDetectedFromResearch({ site: { signals: detectSignals(html.hcp, '') } }), 'Housecall Pro');
-    assert.equal(fsmDetectedFromResearch({ site: { signals: {} } }), 'none');
+    const crawled = (signals) => ({
+      site: {
+        reachable: true,
+        error: null,
+        pages: [{ url: 'https://example.test/', title: 'Home', text: 'Family owned' }],
+        signals,
+      },
+    });
+    assert.equal(fsmDetectedFromResearch(crawled(detectSignals(html.st, ''))), 'ServiceTitan');
+    assert.equal(fsmDetectedFromResearch(crawled(detectSignals(html.jobber, ''))), 'Jobber');
+    assert.equal(fsmDetectedFromResearch(crawled(detectSignals(html.hcp, ''))), 'Housecall Pro');
+    assert.equal(fsmDetectedFromResearch(crawled({})), 'none');
+    assert.equal(fsmDetectedFromResearch({ site: { signals: {} } }), null);
+    assert.equal(fsmDetectedFromResearch({
+      site: { reachable: false, error: 'homepage unreachable: boom', pages: [], signals: {} },
+    }), null);
     assert.equal(fsmDetectedFromResearch({}), null);
 
     const pages = {
@@ -408,6 +420,97 @@ describe('HVAC beachhead', { concurrency: false }, () => {
         assert.equal(tagged, fsm === 'ServiceTitan', placeId);
       }
       assert.equal(calls.length, 4);
+    } finally {
+      axios.get = originalGet;
+      _setClient(null);
+    }
+  });
+
+  it('keeps ServiceTitan when a fresh crawl fails, and does not treat list-scheduler as ServiceTitan', async () => {
+    const falseClasses = ['list-scheduler', 'best-scheduler', 'first-scheduler', 'last-scheduler'];
+    for (const name of falseClasses) {
+      const html = `<html><div class="${name}">Book</div></html>`;
+      assert.equal(htmlHasServiceTitan(html), false, name);
+      const signals = detectSignals(html, '');
+      assert.equal(signals.online_booking, undefined, name);
+      assert.equal(signals.field_service_software, undefined, name);
+    }
+    const realMarkers = [
+      '<html><script src="https://scheduler.servicetitan.com/embed.js"></script></html>',
+      '<html><div class="st-scheduler">Book</div></html>',
+      '<html><div id="st-scheduler"></div></html>',
+    ];
+    for (const html of realMarkers) {
+      assert.equal(htmlHasServiceTitan(html), true, html);
+      assert.equal(detectSignals(html, '').online_booking.includes('ServiceTitan scheduler'), true, html);
+    }
+
+    const pages = {
+      'https://real-host.example/': '<html><iframe src="https://scheduler.servicetitan.com/book"></iframe></html>',
+      'https://real-class.example/': '<html><div class="st-scheduler">Book</div></html>',
+      'https://list.example/': '<html><div class="list-scheduler">Book</div></html>',
+    };
+    const originalGet = axios.get;
+    let mode = 'html';
+    axios.get = async (url) => {
+      if (mode === 'throw') throw new Error('homepage down');
+      const key = String(url);
+      const body = pages[key];
+      assert.ok(body, key);
+      return {
+        data: body,
+        headers: { 'content-type': 'text/html' },
+        request: { res: { responseUrl: key } },
+      };
+    };
+    _setClient(fakeClaude());
+    try {
+      async function drafted(placeId, website) {
+        const row = await insertProspect({
+          google_place_id: placeId,
+          company: placeId,
+          city: 'Lehi',
+          website,
+          email: null,
+          contact_name: null,
+          review_count: 80,
+          rating: 4.0,
+        });
+        await draftProposal(row.id);
+        const saved = await pool.query(
+          'SELECT fsm_detected, fit_score, fit_tier, fit_reasons FROM prospects WHERE id = $1',
+          [row.id]
+        );
+        return { id: row.id, ...saved.rows[0] };
+      }
+
+      const host = await drafted('test-place-st-host', 'https://real-host.example/');
+      assert.equal(host.fsm_detected, 'ServiceTitan');
+      assert.equal(host.fit_score, 85);
+      assert.equal(host.fit_tier, 'A');
+      assert.equal(host.fit_reasons.some(r => r.detail === ST_REASON), true);
+
+      const token = await drafted('test-place-st-token', 'https://real-class.example/');
+      assert.equal(token.fsm_detected, 'ServiceTitan');
+      assert.equal(token.fit_score, 85);
+      assert.equal(token.fit_reasons.some(r => r.label === 'ServiceTitan'), true);
+
+      const list = await drafted('test-place-list-scheduler', 'https://list.example/');
+      assert.equal(list.fsm_detected, 'none');
+      assert.equal(list.fit_score, 100);
+      assert.equal(list.fit_tier, 'A');
+      assert.equal(list.fit_reasons.some(r => r.label === 'ServiceTitan'), false);
+
+      mode = 'throw';
+      await draftProposal(host.id, { reuseResearch: false });
+      const kept = await pool.query(
+        'SELECT fsm_detected, fit_score, fit_tier, fit_reasons FROM prospects WHERE id = $1',
+        [host.id]
+      );
+      assert.equal(kept.rows[0].fsm_detected, 'ServiceTitan');
+      assert.equal(kept.rows[0].fit_score, 85);
+      assert.equal(kept.rows[0].fit_tier, 'A');
+      assert.equal(kept.rows[0].fit_reasons.some(r => r.detail === ST_REASON), true);
     } finally {
       axios.get = originalGet;
       _setClient(null);

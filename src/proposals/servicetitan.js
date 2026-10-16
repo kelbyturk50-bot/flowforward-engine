@@ -6,9 +6,11 @@
 // This module does not fetch.
 
 const SERVICETITAN_RE = /servicetitan/i;
-// scheduler.servicetitan is already covered by SERVICETITAN_RE. st-scheduler
-// is the token that the broader pattern does not match.
-const SERVICETITAN_SCHEDULER_RE = /scheduler\.servicetitan|st-scheduler/i;
+// scheduler.servicetitan is a host token. st-scheduler is a standalone
+// class, id, or file token. The character before st-scheduler must be a
+// boundary, so list-scheduler, best-scheduler, first-scheduler, and
+// last-scheduler do not match (each contains "st-scheduler" as a suffix).
+const SERVICETITAN_SCHEDULER_RE = /(?:^|[^a-z0-9.])scheduler\.servicetitan(?![a-z0-9])|(?:^|[^a-z0-9-])st-scheduler(?![a-z0-9-])/i;
 
 const ST_FSM_LABEL = 'ServiceTitan';
 const ST_SCHEDULER_LABEL = 'ServiceTitan scheduler';
@@ -24,12 +26,25 @@ function signalsHaveServiceTitan(signals) {
   return fsm.includes(ST_FSM_LABEL) || booking.includes(ST_SCHEDULER_LABEL);
 }
 
+// A crawl that actually read HTML. An error, a social/directory page, a missing
+// site, or a homepage that never came back is unknown: the caller must not
+// overwrite a cached fingerprint. crawlSite still returns a site object in
+// those cases, with reachable false and pages empty.
+function crawlUsable(site) {
+  if (!site || typeof site !== 'object') return false;
+  if (site.error) return false;
+  if (site.reachable !== true) return false;
+  return Array.isArray(site.pages) && site.pages.length > 0;
+}
+
 // Value for prospects.fsm_detected.
-// null  — research payload has no site object; leave the cache alone.
+// null — unknown (failed crawl, no usable HTML, or no site object). Leave the cache.
 // 'ServiceTitan' | 'Housecall Pro' | 'Jobber' | other fingerprint | 'none'
+// 'none' is written only after a successful crawl that saw no field-service tool.
 function fsmDetectedFromResearch(research) {
-  if (!research || research.site == null || typeof research.site !== 'object') return null;
-  const signals = research.site.signals || {};
+  const site = research?.site;
+  if (!crawlUsable(site)) return null;
+  const signals = site.signals || {};
   if (signalsHaveServiceTitan(signals)) return ST_FSM_LABEL;
   const fsm = Array.isArray(signals.field_service_software) ? signals.field_service_software : [];
   if (fsm.includes('Housecall Pro')) return 'Housecall Pro';

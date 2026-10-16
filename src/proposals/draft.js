@@ -172,9 +172,9 @@ async function draftProposal(prospectId, opts = {}) {
     );
 
     // Fill in contact details the lead is missing; never overwrite what Kelby typed.
-    // fsm_detected is the ServiceTitan cache. null means this payload had no
-    // site object, so the previous cache is kept. 'none' means research ran
-    // and did not see a field-service fingerprint.
+    // fsm_detected is the ServiceTitan cache. null means the crawl failed or
+    // returned no usable HTML, so COALESCE keeps the previous value. 'none'
+    // is written only after a successful crawl that saw no field-service tool.
     const fsmDetected = fsmDetectedFromResearch(research);
     await db.query(
       `UPDATE prospects SET researched_at = NOW(),

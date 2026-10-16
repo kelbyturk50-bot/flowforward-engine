@@ -115,7 +115,7 @@ Every lead gets a 0–100 fit score and an A–D tier, recomputed on boot, after
 | ServiceTitan | −15 | Only when proposal research cached ServiceTitan on the lead (`fsm_detected`). Not a hard exclusion. Jobber and Housecall Pro are not penalized. |
 | Your boost | ±20 | Manual adjustment per lead |
 
-Tiers: A ≥ 80, B ≥ 65, C ≥ 50, D below. Tune everything in `src/scoring/config.js`, then hit "Re-rank all leads" in Settings.
+Tiers: A ≥ 78, B ≥ 62, C ≥ 47, D below. Tune everything in `src/scoring/config.js`, then hit "Re-rank all leads" in Settings.
 
 ## CRM frontend (`web/`)
 
