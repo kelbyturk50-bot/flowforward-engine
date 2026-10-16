@@ -28,6 +28,7 @@ async function resetDb() {
       proposal_runs,
       proposals,
       prospect_activities,
+      prospect_brands,
       tasks,
       projects,
       discovery_runs,

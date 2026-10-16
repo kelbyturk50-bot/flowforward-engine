@@ -379,3 +379,154 @@ BEGIN
       ));
   END IF;
 END $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Brand entry and prototype rubric (idempotent — applied on every boot).
+-- v1 stores TEST fixtures and manual brands only. Nothing here fetches a
+-- logo or copies proposals.research. prospects.research stays NULL until a
+-- caller writes a cache. The picker reads it and does not fetch.
+-- Inserts use ON CONFLICT DO NOTHING so a re-boot does not rewrite rows.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS research JSONB;
+
+CREATE TABLE IF NOT EXISTS prospect_brands (
+  id           SERIAL PRIMARY KEY,
+  prospect_id  INTEGER REFERENCES prospects(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  logo_url     TEXT,
+  colors       JSONB NOT NULL DEFAULT '[]'::jsonb,
+  source       TEXT NOT NULL,
+  test_tag     TEXT NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT prospect_brands_name_test CHECK (
+    char_length(name) BETWEEN 6 AND 120
+    AND left(name, 5) = 'TEST:'
+    AND position('@' IN name) = 0
+  ),
+  CONSTRAINT prospect_brands_source_check CHECK (source IN ('fixture', 'manual')),
+  CONSTRAINT prospect_brands_tag_check CHECK (
+    test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+    AND char_length(test_tag) <= 80
+  ),
+  CONSTRAINT prospect_brands_logo_http CHECK (
+    logo_url IS NULL OR (
+      char_length(logo_url) BETWEEN 8 AND 300
+      AND logo_url ~ '^https?://'
+      AND logo_url !~ '://[^/?#]*@'
+    )
+  ),
+  CONSTRAINT prospect_brands_colors_hex CHECK (
+    jsonb_typeof(colors) = 'array'
+    AND jsonb_array_length(colors) BETWEEN 0 AND 8
+    AND colors::text ~ '^\[(\s*"#[0-9a-f]{6}"(\s*,\s*"#[0-9a-f]{6}")*\s*)?\]$'
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prospect_brands_test_tag ON prospect_brands (test_tag);
+CREATE INDEX IF NOT EXISTS idx_prospect_brands_prospect ON prospect_brands (prospect_id);
+
+DROP TRIGGER IF EXISTS prospect_brands_updated_at ON prospect_brands;
+CREATE TRIGGER prospect_brands_updated_at
+  BEFORE UPDATE ON prospect_brands
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
+VALUES
+  ('TEST: Wasatch Heating', NULL, '["#1b4f72","#f4d03f"]'::jsonb, 'fixture', 'TEST:wasatch-heating'),
+  ('TEST: Canyon Plumbing', 'https://fixtures.example/test-canyon-logo.png', '["#0e4d3a","#e8f0ec"]'::jsonb, 'fixture', 'TEST:canyon-plumbing')
+ON CONFLICT (test_tag) DO NOTHING;
+
+-- Scout's selection rubric (docs/PROTOTYPE_PLAY.md). One row per agent signal.
+CREATE TABLE IF NOT EXISTS prototype_rubric_meta (
+  version          INTEGER PRIMARY KEY,
+  min_score        INTEGER NOT NULL,
+  max_picks        INTEGER NOT NULL,
+  never_auto_pick  TEXT[] NOT NULL,
+  st_allow         TEXT[] NOT NULL,
+  spec_ref         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS prototype_rubric (
+  id        SERIAL PRIMARY KEY,
+  version   INTEGER NOT NULL,
+  agent     TEXT NOT NULL,
+  signal    TEXT NOT NULL,
+  points    INTEGER NOT NULL,
+  tie_rank  INTEGER NOT NULL,
+  is_gap    BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prototype_rubric_key
+  ON prototype_rubric (version, agent, signal);
+
+INSERT INTO prototype_rubric_meta (version, min_score, max_picks, never_auto_pick, st_allow, spec_ref)
+VALUES (
+  1,
+  40,
+  2,
+  ARRAY['bookkeeping'],
+  ARRAY['estimate_followup', 'review_requests'],
+  'docs/PROTOTYPE_PLAY.md'
+)
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO prototype_rubric (version, agent, signal, points, tie_rank, is_gap)
+VALUES
+  (1, 'estimate_followup', 'free_estimate', 25, 1, FALSE),
+  (1, 'estimate_followup', 'financing', 20, 1, FALSE),
+  (1, 'estimate_followup', 'rv_slow_quote', 25, 1, TRUE),
+  (1, 'estimate_followup', 'contact_form_only', 5, 1, TRUE),
+  (1, 'estimate_followup', 'maint_plan', 5, 1, FALSE),
+  (1, 'estimate_followup', 'fsm_jobber_hcp', 10, 1, FALSE),
+  (1, 'estimate_followup', 'fsm_none', 5, 1, TRUE),
+  (1, 'estimate_followup', 'size_sweet', 10, 1, FALSE),
+  (1, 'estimate_followup', 'size_big', 5, 1, FALSE),
+  (1, 'estimate_followup', 'hvac', 10, 1, FALSE),
+  (1, 'speed_to_lead', 'free_estimate', 10, 2, FALSE),
+  (1, 'speed_to_lead', 'financing', 5, 2, FALSE),
+  (1, 'speed_to_lead', 'rv_slow_quote', 10, 2, TRUE),
+  (1, 'speed_to_lead', 'rv_missed_call', 15, 2, TRUE),
+  (1, 'speed_to_lead', 'no_booking', 10, 2, TRUE),
+  (1, 'speed_to_lead', 'contact_form_only', 25, 2, TRUE),
+  (1, 'speed_to_lead', 'no_chat', 15, 2, TRUE),
+  (1, 'speed_to_lead', 'closed_after_hours', 5, 2, TRUE),
+  (1, 'speed_to_lead', 'fsm_jobber_hcp', 5, 2, FALSE),
+  (1, 'speed_to_lead', 'fsm_none', 5, 2, TRUE),
+  (1, 'speed_to_lead', 'size_sweet', 10, 2, FALSE),
+  (1, 'speed_to_lead', 'size_big', 5, 2, FALSE),
+  (1, 'speed_to_lead', 'hvac', 5, 2, FALSE),
+  (1, 'receptionist', 'rv_missed_call', 30, 3, TRUE),
+  (1, 'receptionist', 'rv_scheduling', 5, 3, TRUE),
+  (1, 'receptionist', 'no_booking', 5, 3, TRUE),
+  (1, 'receptionist', 'no_chat', 10, 3, TRUE),
+  (1, 'receptionist', 'closed_after_hours', 20, 3, TRUE),
+  (1, 'receptionist', 'fsm_none', 5, 3, TRUE),
+  (1, 'receptionist', 'size_sweet', 10, 3, FALSE),
+  (1, 'receptionist', 'size_big', 10, 3, FALSE),
+  (1, 'receptionist', 'hvac', 5, 3, FALSE),
+  (1, 'scheduling', 'rv_scheduling', 25, 4, TRUE),
+  (1, 'scheduling', 'no_booking', 25, 4, TRUE),
+  (1, 'scheduling', 'contact_form_only', 10, 4, TRUE),
+  (1, 'scheduling', 'fsm_none', 10, 4, TRUE),
+  (1, 'scheduling', 'size_sweet', 10, 4, FALSE),
+  (1, 'scheduling', 'hvac', 5, 4, FALSE),
+  (1, 'review_requests', 'no_review_tool', 30, 5, TRUE),
+  (1, 'review_requests', 'small_good_rating', 20, 5, TRUE),
+  (1, 'review_requests', 'fsm_jobber_hcp', 5, 5, FALSE),
+  (1, 'review_requests', 'size_sweet', 10, 5, FALSE),
+  (1, 'review_requests', 'hvac', 5, 5, FALSE),
+  (1, 'maint_renewal', 'maint_plan', 35, 6, FALSE),
+  (1, 'maint_renewal', 'fsm_jobber_hcp', 10, 6, FALSE),
+  (1, 'maint_renewal', 'size_sweet', 10, 6, FALSE),
+  (1, 'maint_renewal', 'size_big', 10, 6, FALSE),
+  (1, 'maint_renewal', 'hvac', 10, 6, FALSE),
+  (1, 'dispatch', 'rv_scheduling', 15, 7, TRUE),
+  (1, 'dispatch', 'fsm_none', 10, 7, TRUE),
+  (1, 'dispatch', 'size_sweet', 5, 7, FALSE),
+  (1, 'dispatch', 'size_big', 15, 7, FALSE),
+  (1, 'dispatch', 'hvac', 5, 7, FALSE),
+  (1, 'bookkeeping', 'fsm_none', 5, 8, TRUE),
+  (1, 'bookkeeping', 'size_sweet', 5, 8, FALSE)
+ON CONFLICT (version, agent, signal) DO NOTHING;

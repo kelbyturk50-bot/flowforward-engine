@@ -64,6 +64,8 @@ app.use('/api/tasks',     tasks);
 app.use('/api/focus',     require('./api/focus'));
 app.use('/api/runs',      require('./api/runs'));
 app.use('/api/proposals', require('./api/proposals'));
+app.use('/api/brands',    require('./api/brands'));
+app.use('/api/rubric',    require('./api/rubric'));
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────
 const CRON_SCHEDULE = process.env.DISCOVERY_CRON || '0 6 * * *';
