@@ -11,6 +11,7 @@ const { researchLead } = require('./research');
 const { fsmDetectedFromResearch } = require('./servicetitan');
 const { rescore } = require('../scoring/fit');
 const { systemPrompt, userPrompt, SUBMIT_TOOL } = require('./prompt');
+const { attachPrototype } = require('../prototypes/store');
 
 let client = null;
 function claude() {
@@ -200,6 +201,13 @@ async function draftProposal(prospectId, opts = {}) {
     await db.query('COMMIT');
     // Score from the cache just written. rescore does not fetch.
     await rescore([lead.id]);
+    // After the draft is committed. A prototype failure must not fail the draft.
+    // Flag off returns before any prototype write. No fetch, send, or job enqueue.
+    try {
+      await attachPrototype({ prospectId: lead.id, research });
+    } catch (err) {
+      console.error('[prototype] hook failed:', err.message);
+    }
     return ins.rows[0];
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
