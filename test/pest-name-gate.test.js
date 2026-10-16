@@ -27,6 +27,7 @@ const {
   PEST_NAME_REASON,
   PEST_TEXT_PATTERN,
   PEST_COMPANY_PATTERN,
+  STREET_BRAND_PATTERN,
   isPestCompanyName,
   isPestText,
   isPestDiscoveryPlace,
@@ -122,76 +123,118 @@ const GATED = [
 
 const LOOKALIKES = ['Pestana Plumbing', 'Compest', 'Best Heating', 'Best', 'Pestana', 'Pesticide Solutions'];
 
-// National brands. computeFit still scores these from industry and the
-// existing franchise rules. The name gate is the only new refusal.
+// Names the company gate refuses. computeFit still uses the franchise rules.
 const BRANDS = [
   'Terminix',
   'Orkin',
   'Rentokil',
-  'Aptive',
   'Truly Nolen',
   'TrulyNolen',
-  'Rollins',
+  'Rollins Inc',
+  'Rollins, Inc.',
   'Ecolab Pest',
   'Arrow Exterminators',
   'Western Exterminator',
   'Massey Services',
-  'Hawx',
   'Moxie Pest',
   'Bulwark Exterminating',
 ];
 
 // Already capped at 77/B by the word-boundary franchise list. TrulyNolen has
 // no space, so that list does not cap it.
-const FRANCHISE_BRANDS = new Set(['Terminix', 'Orkin', 'Rentokil', 'Aptive', 'Truly Nolen', 'Rollins']);
+const FRANCHISE_BRANDS = new Set(['Terminix', 'Orkin', 'Rentokil', 'Truly Nolen', 'Rollins Inc', 'Rollins, Inc.']);
+
+// Surname-style tokens stay in scope unless the name also has pest context.
+// A franchise cap, when one already applies, is unchanged.
+const ALLOWED_NAMES = [
+  ['Rollins Heating', true],
+  ['Rollins Plumbing', true],
+  ['Rollins HVAC', true],
+  ['Aptive Electric', true],
+  ['Hawx Heating', false],
+  ['Massey Plumbing', false],
+  ['Western Heating', false],
+  ['Orkin Street Landscaping', true],
+];
 
 const BRAND_HITS = [
   ...BRANDS,
   'Terminix of Provo',
   '  TERMINIX  ',
   "Orkin's",
+  'Orkin LLC',
+  'Orkin Pest Control',
   'Rentokil Initial',
-  'Aptive Environmental',
+  'Rentokil-Initial',
+  'Aptive Environmental Pest',
   'Truly   Nolen',
   'Truly-Nolen',
+  'Truly - Nolen',
   'TRULYNOLEN',
-  'Rollins Heating',
   'Ecolab-Pest',
   'Arrow  Exterminators',
   'Western-Exterminator',
   'Massey - Services',
   'Hawx Pest Control',
+  'Hawx Mosquito',
+  'Hawx Mosquitoes',
+  'Rollins Bug Control',
+  'Aptive Rodent',
+  'Mosquito Hawx',
   'Moxie  Pest',
   'Bulwark-Exterminating',
+  'Orkin Street Pest Control',
 ];
 
 const BRAND_MISSES = [
+  ...ALLOWED_NAMES.map(([company]) => company),
+  'Aptive',
+  'Aptive Environmental',
+  'Hawx',
+  'Rollins',
+  'Massey',
+  'Massey Heating',
+  'Massey Service',
+  'MasseyServices',
+  'Arrow',
+  'Arrow Plumbing',
+  'Western',
+  'Ecolab',
+  'Ecolab Cleaning',
+  'Ecolaboratory',
+  'Bulwark',
+  'Bulwark Heating',
+  'Moxie',
+  'Moxie HVAC',
+  'Nolen Roofing',
+  'Truly Clean',
+  'Truly Heating',
+  'Nolen Plumbing',
+  'Truly Nolan',
+  'TrulyNolan',
+  'Morkin HVAC',
+  'Terminix Drive',
+  'Terminix Dr',
+  'Terminix Street Heating',
+  'Terminix Ave',
+  'Terminix Avenue Shop',
+  'Orkin St Plumbing',
+  'Orkin Road',
+  'Orkin Rd Landscaping',
   'Captive Heating',
   'Adaptive Comfort',
   'Dorkin Plumbing',
   'Orkins',
   'Working Plumbing',
   'Rollinson HVAC',
+  'Rollinson Plumbing',
   'Trollins Air',
-  'Truly Heating',
-  'Nolen Plumbing',
-  'Truly Nolan',
-  'TrulyNolan',
-  'Massey Plumbing',
-  'Massey Service',
-  'MasseyServices',
-  'Ecolab',
-  'Ecolab Cleaning',
-  'Ecolaboratory',
   'Hawxley Air',
   'Shawx Heating',
   'Thawx Heating',
-  'Arrow Heating',
-  'Western Heating',
-  'Moxie HVAC',
-  'Moxie',
-  'Bulwark Heating',
-  'Bulwark',
+  'Mosquito Joe',
+  'Bug Heating',
+  'Rodent Pros',
   'Pestana Plumbing',
   'Compest',
   'Best Heating',
@@ -201,6 +244,7 @@ const BRAND_MISSES = [
   'Tempest Heating',
   'Preterminix',
   'Terminixing',
+  'Terminixx',
   'Untruly Nolen',
   'Services Inc',
   'Wasatch Heating',
@@ -929,6 +973,21 @@ describe('pest company-name gate', { concurrency: false }, () => {
       }
       // Brands are not industry synonyms. Discovery and scoring stay on the
       // pest, exterminator, and termite words.
+      for (const [company, franchise] of ALLOWED_NAMES) {
+        assert.equal(isPestCompanyName(company), false, company);
+        const fit = computeFit({ ...sweet, company, industry: 'HVAC' });
+        assert.equal(fit.fit_reasons.some(r => r.detail === PEST_NAME_REASON), false, company);
+        assert.equal(fit.fit_reasons.some(r => /out of scope/.test(r.detail)), false, company);
+        if (franchise) {
+          assert.equal(isFranchise(company, FRANCHISE_PATTERNS), true, company);
+          assert.equal(fit.fit_score, 77, company);
+          assert.equal(fit.fit_tier, 'B', company);
+        } else {
+          assert.equal(fit.fit_score, twin.fit_score, company);
+          assert.equal(fit.fit_tier, twin.fit_tier, company);
+          assert.equal(JSON.stringify(fit.fit_reasons), JSON.stringify(twin.fit_reasons), company);
+        }
+      }
       for (const company of ['Terminix', 'Orkin', 'Rentokil', 'Aptive', 'Truly Nolen', 'TrulyNolen', 'Rollins', 'Massey Services', 'Hawx']) {
         assert.equal(isPestText(company), false, company);
         assert.equal(normalizeIndustry(company), company, company);
@@ -955,9 +1014,11 @@ describe('pest company-name gate', { concurrency: false }, () => {
 
     const bound = [];
     const fragment = appendCompanyPestExclusion(bound);
-    assert.deepEqual(bound, [PEST_COMPANY_PATTERN]);
+    assert.deepEqual(bound, [STREET_BRAND_PATTERN, PEST_COMPANY_PATTERN]);
     assert.equal(fragment.includes(PEST_COMPANY_PATTERN), false);
-    assert.match(fragment, /!~ \$1/);
+    assert.equal(fragment.includes(STREET_BRAND_PATTERN), false);
+    assert.match(fragment, /regexp_replace/);
+    assert.match(fragment, /!~ \$2/);
     assert.notEqual(PEST_COMPANY_PATTERN, PEST_TEXT_PATTERN);
 
     async function keptBy(build, company) {
@@ -1024,7 +1085,19 @@ describe('pest company-name gate', { concurrency: false }, () => {
       website: null,
       email: 'test+brand-captive@example.com',
     });
-    const ids = brands.map(row => row.lead.id).concat(lookalike.id, captive.id);
+    const allowed = [];
+    for (let i = 0; i < ALLOWED_NAMES.length; i++) {
+      const [company] = ALLOWED_NAMES[i];
+      const lead = await insertProspect({
+        google_place_id: `test-place-allowed-${i}`,
+        company,
+        industry: 'HVAC',
+        website: null,
+        email: `test+allowed${i}@example.com`,
+      });
+      allowed.push({ company, lead });
+    }
+    const ids = brands.map(row => row.lead.id).concat(lookalike.id, captive.id, allowed.map(row => row.lead.id));
     await pool.query(
       `UPDATE prospects SET fit_tier = 'A', fit_score = 100, stage = 'found' WHERE id = ANY($1::int[])`,
       [ids]
@@ -1034,6 +1107,7 @@ describe('pest company-name gate', { concurrency: false }, () => {
     for (const row of brands) assert.equal(picked.has(row.lead.id), false, row.company);
     assert.equal(picked.has(lookalike.id), true);
     assert.equal(picked.has(captive.id), true);
+    for (const row of allowed) assert.equal(picked.has(row.lead.id), true, row.company);
     const summaryRes = await fetch(apiBase + '/api/proposals/summary');
     const summary = await summaryRes.json();
     assert.equal(summaryRes.status, 200);
@@ -1189,6 +1263,20 @@ describe('pest company-name gate', { concurrency: false }, () => {
       assert.equal(await activityCount(row.lead.id), activitiesBefore, row.company);
     }
 
+    const rollins = allowed.find(row => row.company === 'Rollins Heating');
+    const rollinsId = await insertDraft(rollins.lead.id, 'rollins-heating-mark-sent', 'test+rollins-heating@example.com');
+    const rollinsRes = await fetch(`${apiBase}/api/proposals/${rollinsId}/mark-sent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note: 'left a voicemail' }),
+    });
+    const rollinsJson = await rollinsRes.json();
+    assert.equal(rollinsRes.status, 200, JSON.stringify(rollinsJson));
+    assert.equal(rollinsJson.status, 'sent');
+    assert.ok(rollinsJson.followup1_due_at);
+    const rollinsLead = await prospectStamp(rollins.lead.id);
+    assert.equal(rollinsLead.stage, 'contacted');
+
     const okId = await insertDraft(lookalike.id, 'pestana-mark-sent', 'test+brand-pestana@example.com');
     const ok = await fetch(`${apiBase}/api/proposals/${okId}/mark-sent`, {
       method: 'POST',
@@ -1232,7 +1320,8 @@ describe('pest company-name gate', { concurrency: false }, () => {
     const brandSentAt = new Date(Date.now() - 26 * 60 * 60 * 1000);
     const brandProposalIds = [];
     const brandLeadIds = [];
-    for (let i = 0; i < BRANDS.length * 2; i++) {
+    const blockedRows = Math.max(28, BRANDS.length * 2);
+    for (let i = 0; i < blockedRows; i++) {
       const company = BRANDS[i % BRANDS.length];
       const lead = await insertProspect({
         google_place_id: `test-place-brand-fu-${i}`,
@@ -1258,6 +1347,10 @@ describe('pest company-name gate', { concurrency: false }, () => {
     const normals = [
       ['Provo Heating', 'HVAC', 'test+brand-provo@example.com', 'brand-provo'],
       ['Pestana Plumbing', 'Plumbing', 'test+brand-pestana-fu@example.com', 'brand-pestana-fu'],
+      ['Rollins Heating', 'HVAC', 'test+rollins-heating-fu@example.com', 'rollins-heating-fu'],
+      ['Aptive Electric', 'Electrical', 'test+aptive-electric-fu@example.com', 'aptive-electric-fu'],
+      ['Hawx Heating', 'HVAC', 'test+hawx-heating-fu@example.com', 'hawx-heating-fu'],
+      ['Orkin Street Landscaping', 'Landscaping', 'test+orkin-st-fu@example.com', 'orkin-st-fu'],
     ];
     const normalSentAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
     for (let i = 0; i < normals.length; i++) {
@@ -1305,7 +1398,7 @@ describe('pest company-name gate', { concurrency: false }, () => {
          FROM proposals WHERE id = ANY($1::int[]) ORDER BY id`,
       [brandProposalIds]
     );
-    assert.equal(proposalsAfter.rows.length, BRANDS.length * 2);
+    assert.equal(proposalsAfter.rows.length, blockedRows);
     for (let i = 0; i < proposalsBefore.rows.length; i++) {
       const before = proposalsBefore.rows[i];
       const after = proposalsAfter.rows[i];

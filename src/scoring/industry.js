@@ -22,28 +22,60 @@ const PEST_WORD_ALTERNATION = 'pests?|exterminat(or|ors|ing|ion)?|termites?';
 const PEST_TEXT_PATTERN = `(^|[^a-z0-9_])(${PEST_WORD_ALTERNATION})([^a-z0-9_]|$)`;
 const PEST_TEXT_RE = new RegExp(PEST_TEXT_PATTERN);
 
-// National brands. Company-name gate only, so an industry value of "Hawx" or
-// "Terminix" is not a pest synonym and computeFit does not change. Whitespace
-// is collapsed before the match. A run of spaces or hyphens separates a
-// multi-word brand. TrulyNolen is the same brand with no separator. The JS
-// check and appendCompanyPestExclusion both use PEST_COMPANY_PATTERN.
-const PEST_BRAND_ALTERNATION = [
-  'terminix',
-  'orkin',
-  'rentokil',
-  'aptive',
-  'truly[- ]*nolen',
-  'rollins',
-  'ecolab[- ]+pest',
+// Company-name gate only. These are not industry synonyms, so computeFit does
+// not change. Whitespace is collapsed before the match. JS strips street-style
+// Orkin/Terminix with STREET_BRAND_PATTERN, then tests PEST_COMPANY_PATTERN.
+// appendCompanyPestExclusion does those two steps in SQL with the same strings.
+//
+// Distinctive tokens match on their own: Terminix, Orkin, Rentokil, Truly Nolen
+// (a space or hyphen, and TrulyNolen with neither). Rollins Inc / Rollins, Inc.
+// and the multi-word brands match on their own. Surname-style tokens (Rollins,
+// Aptive, Hawx, Massey, Bulwark, Moxie, Arrow, Western, Ecolab) match only when
+// the name also has pest context: pest, exterminator, termite, bug, rodent, or
+// mosquito.
+const DISTINCTIVE_ALTERNATION = 'terminix|orkin|rentokil|truly[- ]*nolen';
+const AMBIGUOUS_ALTERNATION = 'rollins|aptive|hawx|massey|bulwark|moxie|arrow|western|ecolab';
+const CONTEXT_ALTERNATION = 'bugs?|rodents?|mosquitoe?s?';
+const MULTIWORD_ALTERNATION = [
+  'ecolab[- ]+pests?',
   'arrow[- ]+exterminators',
   'western[- ]+exterminator',
   'massey[- ]+services',
-  'hawx',
-  'moxie[- ]+pest',
+  'moxie[- ]+pests?',
   'bulwark[- ]+exterminating',
+  'rollins[- ,]+inc',
 ].join('|');
-const PEST_COMPANY_PATTERN = `(^|[^a-z0-9_])(${PEST_WORD_ALTERNATION}|${PEST_BRAND_ALTERNATION})([^a-z0-9_]|$)`;
+// Longer street suffixes come first so "street" is not read as "st".
+const STREET_SUFFIX_ALTERNATION = 'street|avenue|drive|road|ave|rd|st|dr';
+// Four capturing groups. Group 1 is the boundary before the brand. Group 4 is
+// the boundary after the suffix. The replacement keeps both so neighboring
+// words do not merge. Orkin Street Pest still matches the pest word.
+const STREET_BRAND_PATTERN = `(^|[^a-z0-9_])(terminix|orkin)[- ]+(${STREET_SUFFIX_ALTERNATION})([^a-z0-9_]|$)`;
+
+function bounded(alternation) {
+  return `(?:^|[^a-z0-9_])(?:${alternation})(?:[^a-z0-9_]|$)`;
+}
+
+// Either order. The first token must be its own word. The second token is the
+// next word, or a later word that still starts on a boundary.
+function eitherOrder(left, right) {
+  const forward = `(?:^|[^a-z0-9_])(?:${left})(?:[^a-z0-9_]|$)(?:.*(?:^|[^a-z0-9_]))?(?:${right})(?:[^a-z0-9_]|$)`;
+  const reverse = `(?:^|[^a-z0-9_])(?:${right})(?:[^a-z0-9_]|$)(?:.*(?:^|[^a-z0-9_]))?(?:${left})(?:[^a-z0-9_]|$)`;
+  return `${forward}|${reverse}`;
+}
+
+const PEST_COMPANY_PATTERN = [
+  bounded(PEST_WORD_ALTERNATION),
+  bounded(DISTINCTIVE_ALTERNATION),
+  bounded(MULTIWORD_ALTERNATION),
+  eitherOrder(AMBIGUOUS_ALTERNATION, CONTEXT_ALTERNATION),
+].join('|');
 const PEST_COMPANY_RE = new RegExp(PEST_COMPANY_PATTERN);
+
+function stripStreetBrand(key) {
+  if (!key) return '';
+  return key.replace(new RegExp(STREET_BRAND_PATTERN, 'g'), '$1$4');
+}
 
 function industryKey(value) {
   if (value == null) return '';
@@ -124,22 +156,25 @@ function isPestDiscoveryPlace(place, excluded = cfg.EXCLUDED_INDUSTRIES) {
   return isPestText(placeName(place)) || isPestPlaceType(place);
 }
 
-// Cached company name. Pest words plus the national-brand list, on ASCII
+// Cached company name. Pest words plus the brand rules above, on ASCII
 // boundaries, matching appendCompanyPestExclusion. Off when Pest Control is
 // not on the exclusion list. Does not fetch and does not score the row.
 function isPestCompanyName(company, excluded = cfg.EXCLUDED_INDUSTRIES) {
   if (!pestCategoryExcluded(excluded)) return false;
-  const key = industryKey(company);
+  const key = stripStreetBrand(industryKey(company));
   return key !== '' && PEST_COMPANY_RE.test(key);
 }
 
 // SQL fragment. TRUE when the name gate is off. Placeholder numbers continue
 // from params.length. The column is the cached company name, not a request.
-// The bound pattern is PEST_COMPANY_PATTERN, the same one isPestCompanyName uses.
+// The bound patterns are STREET_BRAND_PATTERN and PEST_COMPANY_PATTERN, the
+// same strings isPestCompanyName uses.
 function appendCompanyPestExclusion(params, excluded = cfg.EXCLUDED_INDUSTRIES) {
   if (!pestCategoryExcluded(excluded)) return 'TRUE';
+  const streetIndex = params.push(STREET_BRAND_PATTERN);
   const patternIndex = params.push(PEST_COMPANY_PATTERN);
-  return `${COMPANY_PEST_KEY} !~ $${patternIndex}`;
+  const stripped = `regexp_replace(${COMPANY_PEST_KEY}, $${streetIndex}, '\\1\\4', 'g')`;
+  return `${stripped} !~ $${patternIndex}`;
 }
 
 // Industry exclusion plus the company-name gate. pickLeads and the eligible
@@ -187,6 +222,7 @@ module.exports = {
   PEST_NAME_REASON,
   PEST_TEXT_PATTERN,
   PEST_COMPANY_PATTERN,
+  STREET_BRAND_PATTERN,
   normalizeIndustry,
   isPestText,
   isPestCompanyName,
