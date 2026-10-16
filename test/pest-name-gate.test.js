@@ -26,9 +26,14 @@ const { isFranchise } = require('../src/scoring/prototypes');
 const {
   PEST_NAME_REASON,
   PEST_TEXT_PATTERN,
+  PEST_COMPANY_PATTERN,
   isPestCompanyName,
   isPestText,
+  isPestDiscoveryPlace,
+  normalizeIndustry,
   legacyPestNameCountQuery,
+  appendCompanyPestExclusion,
+  appendDraftExclusion,
 } = require('../src/scoring/industry');
 const { FRANCHISE_PATTERNS } = require('../src/scoring/config');
 const { draftProposal, pickLeads, _setClient } = require('../src/proposals/draft');
@@ -116,6 +121,91 @@ const GATED = [
 ];
 
 const LOOKALIKES = ['Pestana Plumbing', 'Compest', 'Best Heating', 'Best', 'Pestana', 'Pesticide Solutions'];
+
+// National brands. computeFit still scores these from industry and the
+// existing franchise rules. The name gate is the only new refusal.
+const BRANDS = [
+  'Terminix',
+  'Orkin',
+  'Rentokil',
+  'Aptive',
+  'Truly Nolen',
+  'TrulyNolen',
+  'Rollins',
+  'Ecolab Pest',
+  'Arrow Exterminators',
+  'Western Exterminator',
+  'Massey Services',
+  'Hawx',
+  'Moxie Pest',
+  'Bulwark Exterminating',
+];
+
+// Already capped at 77/B by the word-boundary franchise list. TrulyNolen has
+// no space, so that list does not cap it.
+const FRANCHISE_BRANDS = new Set(['Terminix', 'Orkin', 'Rentokil', 'Aptive', 'Truly Nolen', 'Rollins']);
+
+const BRAND_HITS = [
+  ...BRANDS,
+  'Terminix of Provo',
+  '  TERMINIX  ',
+  "Orkin's",
+  'Rentokil Initial',
+  'Aptive Environmental',
+  'Truly   Nolen',
+  'Truly-Nolen',
+  'TRULYNOLEN',
+  'Rollins Heating',
+  'Ecolab-Pest',
+  'Arrow  Exterminators',
+  'Western-Exterminator',
+  'Massey - Services',
+  'Hawx Pest Control',
+  'Moxie  Pest',
+  'Bulwark-Exterminating',
+];
+
+const BRAND_MISSES = [
+  'Captive Heating',
+  'Adaptive Comfort',
+  'Dorkin Plumbing',
+  'Orkins',
+  'Working Plumbing',
+  'Rollinson HVAC',
+  'Trollins Air',
+  'Truly Heating',
+  'Nolen Plumbing',
+  'Truly Nolan',
+  'TrulyNolan',
+  'Massey Plumbing',
+  'Massey Service',
+  'MasseyServices',
+  'Ecolab',
+  'Ecolab Cleaning',
+  'Ecolaboratory',
+  'Hawxley Air',
+  'Shawx Heating',
+  'Thawx Heating',
+  'Arrow Heating',
+  'Western Heating',
+  'Moxie HVAC',
+  'Moxie',
+  'Bulwark Heating',
+  'Bulwark',
+  'Pestana Plumbing',
+  'Compest',
+  'Best Heating',
+  'Best',
+  'Pestana',
+  'Pesticide Solutions',
+  'Tempest Heating',
+  'Preterminix',
+  'Terminixing',
+  'Untruly Nolen',
+  'Services Inc',
+  'Wasatch Heating',
+  "'; DROP TABLE prospects; --",
+];
 
 function armNoFetch() {
   const hits = [];
@@ -812,6 +902,432 @@ describe('pest company-name gate', { concurrency: false }, () => {
     assert.equal(result.stdout, '3\n');
     for (const [company] of rows) {
       assert.equal(result.stdout.includes(company), false, company);
+    }
+  });
+
+  it('matches national brands in JS and SQL and leaves computeFit on the old snapshot', async () => {
+    const guard = armNoFetch();
+    try {
+      const twin = computeFit(sweet);
+      assert.equal(twin.fit_score, 100);
+      assert.equal(twin.fit_tier, 'A');
+      for (const company of BRANDS) {
+        assert.equal(isPestCompanyName(company), true, company);
+        const fit = computeFit({ ...sweet, company, industry: 'HVAC' });
+        assert.equal(fit.fit_reasons.some(r => r.detail === PEST_NAME_REASON), false, company);
+        assert.equal(fit.fit_reasons.some(r => /out of scope/.test(r.detail)), false, company);
+        if (FRANCHISE_BRANDS.has(company)) {
+          assert.equal(isFranchise(company, FRANCHISE_PATTERNS), true, company);
+          assert.equal(fit.fit_score, 77, company);
+          assert.equal(fit.fit_tier, 'B', company);
+          assert.equal(fit.fit_reasons.find(r => r.label === 'Franchise').points, -20, company);
+        } else {
+          assert.equal(fit.fit_score, twin.fit_score, company);
+          assert.equal(fit.fit_tier, twin.fit_tier, company);
+          assert.equal(JSON.stringify(fit.fit_reasons), JSON.stringify(twin.fit_reasons), company);
+        }
+      }
+      // Brands are not industry synonyms. Discovery and scoring stay on the
+      // pest, exterminator, and termite words.
+      for (const company of ['Terminix', 'Orkin', 'Rentokil', 'Aptive', 'Truly Nolen', 'TrulyNolen', 'Rollins', 'Massey Services', 'Hawx']) {
+        assert.equal(isPestText(company), false, company);
+        assert.equal(normalizeIndustry(company), company, company);
+        assert.equal(isPestDiscoveryPlace({ displayName: { text: company } }), false, company);
+      }
+      const asIndustry = computeFit({ ...sweet, company: 'Wasatch Heating', industry: 'Terminix' });
+      assert.equal(asIndustry.fit_reasons.some(r => /out of scope/.test(r.detail)), false);
+      assert.notEqual(asIndustry.fit_score, 0);
+
+      for (const company of BRAND_HITS) assert.equal(isPestCompanyName(company), true, company);
+      for (const company of BRAND_MISSES) {
+        assert.equal(isPestCompanyName(company), false, company);
+        assert.equal(isPestText(company), false, company);
+      }
+      for (const [name, row, score, tier] of SNAPSHOT) {
+        const fit = computeFit(row);
+        assert.equal(fit.fit_score, score, name);
+        assert.equal(fit.fit_tier, tier, name);
+      }
+    } finally {
+      guard.restore();
+    }
+    assert.deepEqual(guard.hits, []);
+
+    const bound = [];
+    const fragment = appendCompanyPestExclusion(bound);
+    assert.deepEqual(bound, [PEST_COMPANY_PATTERN]);
+    assert.equal(fragment.includes(PEST_COMPANY_PATTERN), false);
+    assert.match(fragment, /!~ \$1/);
+    assert.notEqual(PEST_COMPANY_PATTERN, PEST_TEXT_PATTERN);
+
+    async function keptBy(build, company) {
+      const params = [];
+      const sql = build(params);
+      const companyIndex = params.push(company);
+      const industryIndex = params.push('HVAC');
+      const { rows } = await pool.query(
+        `SELECT (${sql}) AS kept
+           FROM (SELECT $${industryIndex}::text AS industry, $${companyIndex}::text AS company) p`,
+        params
+      );
+      return rows[0].kept;
+    }
+
+    for (const company of BRAND_HITS) {
+      assert.equal(await keptBy(appendCompanyPestExclusion, company), false, company);
+      assert.equal(await keptBy(appendDraftExclusion, company), false, company);
+      assert.equal(await keptBy(appendCompanyPestExclusion, company), !isPestCompanyName(company), company);
+    }
+    for (const company of BRAND_MISSES) {
+      assert.equal(await keptBy(appendCompanyPestExclusion, company), true, company);
+      assert.equal(await keptBy(appendDraftExclusion, company), true, company);
+    }
+    assert.equal(await keptBy(appendCompanyPestExclusion, null), true);
+    assert.equal(isPestCompanyName(null), false);
+    const stillThere = await pool.query('SELECT COUNT(*)::int AS n FROM prospects');
+    assert.equal(typeof stillThere.rows[0].n, 'number');
+  });
+
+  it('refuses mark-sent, draft, send, and restore for each brand and writes nothing', async () => {
+    await resetDb();
+    const sentMail = [];
+    _setTransport({
+      async sendMail(mail) {
+        sentMail.push(mail);
+        return { messageId: '<brand-gate@localhost>', threadId: 'thr-brand-gate' };
+      },
+    });
+
+    const brands = [];
+    for (let i = 0; i < BRANDS.length; i++) {
+      const company = BRANDS[i];
+      const lead = await insertProspect({
+        google_place_id: `test-place-brand-${i}`,
+        company,
+        industry: 'HVAC',
+        website: 'https://brand.example',
+        email: `test+brand${i}@example.com`,
+      });
+      brands.push({ company, lead });
+    }
+    const lookalike = await insertProspect({
+      google_place_id: 'test-place-brand-pestana',
+      company: 'Pestana Plumbing',
+      industry: 'Plumbing',
+      website: null,
+      email: 'test+brand-pestana@example.com',
+    });
+    const captive = await insertProspect({
+      google_place_id: 'test-place-brand-captive',
+      company: 'Captive Heating',
+      industry: 'HVAC',
+      website: null,
+      email: 'test+brand-captive@example.com',
+    });
+    const ids = brands.map(row => row.lead.id).concat(lookalike.id, captive.id);
+    await pool.query(
+      `UPDATE prospects SET fit_tier = 'A', fit_score = 100, stage = 'found' WHERE id = ANY($1::int[])`,
+      [ids]
+    );
+
+    const picked = new Set((await pickLeads(50)).map(row => row.id));
+    for (const row of brands) assert.equal(picked.has(row.lead.id), false, row.company);
+    assert.equal(picked.has(lookalike.id), true);
+    assert.equal(picked.has(captive.id), true);
+    const summaryRes = await fetch(apiBase + '/api/proposals/summary');
+    const summary = await summaryRes.json();
+    assert.equal(summaryRes.status, 200);
+    assert.equal(summary.eligible_leads, picked.size);
+
+    async function prospectStamp(id) {
+      const { rows } = await pool.query(
+        `SELECT stage, last_contacted_at, fit_score, fit_tier, fit_reasons::text AS reasons, updated_at
+           FROM prospects WHERE id = $1`,
+        [id]
+      );
+      return rows[0];
+    }
+    function sameTime(a, b, label) {
+      if (a == null && b == null) return;
+      assert.equal(new Date(a).toISOString(), new Date(b).toISOString(), label);
+    }
+    function assertProspectUntouched(before, after, label) {
+      assert.equal(after.stage, before.stage, label);
+      assert.equal(after.last_contacted_at, before.last_contacted_at, label);
+      assert.equal(after.fit_score, before.fit_score, label);
+      assert.equal(after.fit_tier, before.fit_tier, label);
+      assert.equal(after.reasons, before.reasons, label);
+      sameTime(after.updated_at, before.updated_at, label);
+    }
+
+    const stamps = new Map();
+    for (const row of brands) stamps.set(row.lead.id, await prospectStamp(row.lead.id));
+    const callsBefore = claudeCalls;
+    const guard = armNoFetch();
+    try {
+      for (const row of brands) {
+        await assert.rejects(
+          () => draftProposal(row.lead.id),
+          (err) => {
+            assert.equal(err.status, 409, row.company);
+            assert.equal(err.message, `${PEST_NAME_REASON}.`, row.company);
+            assert.equal(err.message.includes(row.company), false, row.company);
+            return true;
+          }
+        );
+        const res = await fetch(apiBase + '/api/proposals', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ prospect_id: row.lead.id, force: true, industry: 'Plumbing' }),
+        });
+        const json = await res.json();
+        assert.equal(res.status, 409, row.company);
+        assert.deepEqual(json, { error: `${PEST_NAME_REASON}.` });
+      }
+    } finally {
+      guard.restore();
+    }
+    assert.deepEqual(guard.hits, []);
+    assert.equal(claudeCalls, callsBefore);
+    const proposals = await pool.query('SELECT id FROM proposals WHERE prospect_id = ANY($1::int[])', [brands.map(row => row.lead.id)]);
+    assert.equal(proposals.rows.length, 0);
+    const jobs = await pool.query('SELECT id FROM proposal_jobs WHERE prospect_id = ANY($1::int[])', [brands.map(row => row.lead.id)]);
+    assert.equal(jobs.rows.length, 0);
+    for (const row of brands) {
+      assertProspectUntouched(stamps.get(row.lead.id), await prospectStamp(row.lead.id), row.company);
+    }
+
+    async function insertDraft(prospectId, slug, email) {
+      const { rows } = await pool.query(
+        `INSERT INTO proposals (
+           prospect_id, version, status, slug, to_email, to_name, subject, body, followup1, followup2
+         ) VALUES (
+           $1, 1, 'draft', $2, $3, 'Dana', 'A note', 'Hello from the draft.', 'Checking back.', 'Last note.'
+         ) RETURNING id`,
+        [prospectId, slug, email]
+      );
+      return rows[0].id;
+    }
+    async function proposalStamp(id) {
+      const { rows } = await pool.query(
+        `SELECT status, approved_at, sent_at, followup1_due_at, followup1_sent_at,
+                followup2_due_at, followup2_sent_at, error, stop_reason, updated_at
+           FROM proposals WHERE id = $1`,
+        [id]
+      );
+      return rows[0];
+    }
+    async function activityCount(prospectId) {
+      const { rows } = await pool.query(
+        'SELECT COUNT(*)::int AS n FROM prospect_activities WHERE prospect_id = $1',
+        [prospectId]
+      );
+      return rows[0].n;
+    }
+    function assertProposalUntouched(before, after, label) {
+      assert.equal(after.status, before.status, label);
+      assert.equal(after.approved_at, before.approved_at, label);
+      assert.equal(after.sent_at, before.sent_at, label);
+      assert.equal(after.followup1_due_at, before.followup1_due_at, label);
+      assert.equal(after.followup1_sent_at, before.followup1_sent_at, label);
+      assert.equal(after.followup2_due_at, before.followup2_due_at, label);
+      assert.equal(after.followup2_sent_at, before.followup2_sent_at, label);
+      assert.equal(after.error, before.error, label);
+      assert.equal(after.stop_reason, before.stop_reason, label);
+      sameTime(after.updated_at, before.updated_at, label);
+    }
+
+    const pestWord = await insertProspect({
+      google_place_id: 'test-place-brand-pest-word',
+      company: 'Wasatch Pest Control',
+      industry: 'HVAC',
+      website: null,
+      email: 'test+brand-pestword@example.com',
+    });
+    const marked = brands.concat([{ company: pestWord.company, lead: pestWord }]);
+    for (let i = 0; i < marked.length; i++) {
+      const row = marked[i];
+      const proposalId = await insertDraft(row.lead.id, `brand-draft-${i}`, `test+brand-draft${i}@example.com`);
+      const activitiesBefore = await activityCount(row.lead.id);
+      const proposalBefore = await proposalStamp(proposalId);
+      const leadBefore = await prospectStamp(row.lead.id);
+
+      const mark = await fetch(`${apiBase}/api/proposals/${proposalId}/mark-sent`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ note: `called ${row.company}` }),
+      });
+      const markJson = await mark.json();
+      assert.equal(mark.status, 409, row.company);
+      assert.deepEqual(markJson, { error: `${PEST_NAME_REASON}.` });
+      assert.equal(markJson.error.includes(row.company), false, row.company);
+      assertProposalUntouched(proposalBefore, await proposalStamp(proposalId), `mark-sent ${row.company}`);
+      assertProspectUntouched(leadBefore, await prospectStamp(row.lead.id), `mark-sent ${row.company}`);
+      assert.equal(await activityCount(row.lead.id), activitiesBefore, row.company);
+      assert.equal(proposalBefore.followup1_due_at, null, row.company);
+      assert.equal(proposalBefore.followup2_due_at, null, row.company);
+
+      const sendRes = await fetch(`${apiBase}/api/proposals/${proposalId}/send`, { method: 'POST' });
+      const sendJson = await sendRes.json();
+      assert.equal(sendRes.status, 409, row.company);
+      assert.deepEqual(sendJson, { error: `${PEST_NAME_REASON}.` });
+      assert.equal(sentMail.length, 0, row.company);
+      assertProposalUntouched(proposalBefore, await proposalStamp(proposalId), `send ${row.company}`);
+      assertProspectUntouched(leadBefore, await prospectStamp(row.lead.id), `send ${row.company}`);
+
+      await pool.query(`UPDATE proposals SET status = 'discarded' WHERE id = $1`, [proposalId]);
+      const discardedBefore = await proposalStamp(proposalId);
+      const leadDiscarded = await prospectStamp(row.lead.id);
+      const restore = await fetch(`${apiBase}/api/proposals/${proposalId}/restore`, { method: 'POST' });
+      const restoreJson = await restore.json();
+      assert.equal(restore.status, 409, row.company);
+      assert.deepEqual(restoreJson, { error: `${PEST_NAME_REASON}.` });
+      assertProposalUntouched(discardedBefore, await proposalStamp(proposalId), `restore ${row.company}`);
+      assertProspectUntouched(leadDiscarded, await prospectStamp(row.lead.id), `restore ${row.company}`);
+      assert.equal(await activityCount(row.lead.id), activitiesBefore, row.company);
+    }
+
+    const okId = await insertDraft(lookalike.id, 'pestana-mark-sent', 'test+brand-pestana@example.com');
+    const ok = await fetch(`${apiBase}/api/proposals/${okId}/mark-sent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note: 'left a voicemail' }),
+    });
+    const okJson = await ok.json();
+    assert.equal(ok.status, 200, JSON.stringify(okJson));
+    assert.equal(okJson.status, 'sent');
+    assert.ok(okJson.sent_at);
+    assert.ok(okJson.followup1_due_at);
+    assert.ok(okJson.followup2_due_at);
+    const okLead = await prospectStamp(lookalike.id);
+    assert.equal(okLead.stage, 'contacted');
+    assert.ok(okLead.last_contacted_at);
+    const notes = await pool.query(
+      `SELECT body FROM prospect_activities WHERE prospect_id = $1 AND type = 'note'`,
+      [lookalike.id]
+    );
+    assert.equal(notes.rows.some(row => row.body.includes('left a voicemail')), true);
+    assert.equal(sentMail.length, 0);
+
+    const markSrc = fs.readFileSync(path.join(__dirname, '../src/api/proposals.js'), 'utf8');
+    const markFn = markSrc.slice(markSrc.indexOf("router.post('/:id/mark-sent'"), markSrc.indexOf("async function revokeDemoOnDiscard"));
+    const pestAt = markFn.indexOf('isPestCompanyName(p.company)');
+    const updateAt = markFn.indexOf('UPDATE proposals');
+    assert.ok(pestAt > 0 && updateAt > pestAt);
+  });
+
+  it('excludes every national brand from the follow-up batch and still sends lookalikes', async () => {
+    await resetDb();
+    const sentMail = [];
+    _setTransport({
+      async sendMail(mail) {
+        sentMail.push(mail);
+        return { messageId: '<brand-batch@localhost>', threadId: 'thr-brand-batch' };
+      },
+    });
+
+    const due = new Date(Date.now() - 30 * 60 * 1000);
+    const brandSentAt = new Date(Date.now() - 26 * 60 * 60 * 1000);
+    const brandProposalIds = [];
+    const brandLeadIds = [];
+    for (let i = 0; i < BRANDS.length * 2; i++) {
+      const company = BRANDS[i % BRANDS.length];
+      const lead = await insertProspect({
+        google_place_id: `test-place-brand-fu-${i}`,
+        company,
+        industry: 'HVAC',
+        website: null,
+        email: `test+brandfu${i}@example.com`,
+      });
+      brandLeadIds.push(lead.id);
+      const { rows } = await pool.query(
+        `INSERT INTO proposals (
+           prospect_id, version, status, slug, to_email, to_name, subject, body, followup1, followup2,
+           sent_at, followup1_due_at, message_id
+         ) VALUES (
+           $1, 1, 'sent', $2, $3, 'Dana', 'A note', 'Hello from the draft.', 'Checking back.', 'Last note.',
+           $4, $5, $6
+         ) RETURNING id`,
+        [lead.id, `brand-fu-${i}`, `test+brandfu${i}@example.com`, brandSentAt, due, `<brand-fu-${i}@localhost>`]
+      );
+      brandProposalIds.push(rows[0].id);
+    }
+
+    const normals = [
+      ['Provo Heating', 'HVAC', 'test+brand-provo@example.com', 'brand-provo'],
+      ['Pestana Plumbing', 'Plumbing', 'test+brand-pestana-fu@example.com', 'brand-pestana-fu'],
+    ];
+    const normalSentAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    for (let i = 0; i < normals.length; i++) {
+      const [company, industry, email, slug] = normals[i];
+      const lead = await insertProspect({
+        google_place_id: `test-place-brand-ok-${i}`,
+        company,
+        industry,
+        website: null,
+        email,
+      });
+      await pool.query(
+        `INSERT INTO proposals (
+           prospect_id, version, status, slug, to_email, to_name, subject, body, followup1, followup2,
+           sent_at, followup1_due_at, message_id
+         ) VALUES (
+           $1, 1, 'sent', $2, $3, 'Dana', 'A note', 'Hello from the draft.', 'Checking back.', 'Last note.',
+           $4, $5, $6
+         )`,
+        [lead.id, slug, email, normalSentAt, due, `<brand-ok-${i}@localhost>`]
+      );
+    }
+
+    const proposalsBefore = await pool.query(
+      `SELECT id, status, followup1_sent_at, followup2_sent_at, error, stop_reason, updated_at
+         FROM proposals WHERE id = ANY($1::int[]) ORDER BY id`,
+      [brandProposalIds]
+    );
+    const leadsBefore = await pool.query(
+      `SELECT id, fit_score, fit_tier, fit_reasons::text AS reasons, stage, last_contacted_at, updated_at
+         FROM prospects WHERE id = ANY($1::int[]) ORDER BY id`,
+      [brandLeadIds]
+    );
+
+    const result = await sendDueFollowups();
+    assert.equal(result.sent, normals.length);
+    assert.equal(sentMail.length, normals.length);
+    assert.deepEqual(sentMail.map(mail => mail.to.address).sort(), normals.map(([, , email]) => email).sort());
+    for (const brand of BRANDS) {
+      assert.equal(sentMail.some(mail => String(mail.to.address).includes('brandfu')), false, brand);
+    }
+
+    const proposalsAfter = await pool.query(
+      `SELECT id, status, followup1_sent_at, followup2_sent_at, error, stop_reason, updated_at
+         FROM proposals WHERE id = ANY($1::int[]) ORDER BY id`,
+      [brandProposalIds]
+    );
+    assert.equal(proposalsAfter.rows.length, BRANDS.length * 2);
+    for (let i = 0; i < proposalsBefore.rows.length; i++) {
+      const before = proposalsBefore.rows[i];
+      const after = proposalsAfter.rows[i];
+      assert.equal(after.status, 'sent');
+      assert.equal(after.followup1_sent_at, null);
+      assert.equal(after.followup2_sent_at, null);
+      assert.equal(after.error, before.error);
+      assert.equal(after.stop_reason, before.stop_reason);
+      assert.equal(new Date(after.updated_at).toISOString(), new Date(before.updated_at).toISOString());
+    }
+    const leadsAfter = await pool.query(
+      `SELECT id, fit_score, fit_tier, fit_reasons::text AS reasons, stage, last_contacted_at, updated_at
+         FROM prospects WHERE id = ANY($1::int[]) ORDER BY id`,
+      [brandLeadIds]
+    );
+    for (let i = 0; i < leadsBefore.rows.length; i++) {
+      const before = leadsBefore.rows[i];
+      const after = leadsAfter.rows[i];
+      assert.equal(after.fit_score, before.fit_score);
+      assert.equal(after.fit_tier, before.fit_tier);
+      assert.equal(after.reasons, before.reasons);
+      assert.equal(after.stage, before.stage);
+      assert.equal(after.last_contacted_at, before.last_contacted_at);
+      assert.equal(new Date(after.updated_at).toISOString(), new Date(before.updated_at).toISOString());
     }
   });
 });

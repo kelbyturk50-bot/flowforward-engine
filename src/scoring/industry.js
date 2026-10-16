@@ -1,7 +1,9 @@
 // One pest-control rule for discovery, fit scoring, lead picking, and the
-// prospects API. Synonyms collapse to PEST_CANONICAL. Place names and the
-// company-name gate use the same words on a boundary, so Pestana, Compest,
-// and Best stay in scope. The company check reads the cached name only.
+// prospects API. Synonyms collapse to PEST_CANONICAL. Place names use the
+// pest, exterminator, and termite words on a boundary, so Pestana, Compest,
+// and Best stay in scope. The company-name gate uses those words plus a
+// national-brand list. It reads the cached name only and does not change
+// computeFit.
 
 const cfg = require('./config');
 
@@ -16,8 +18,32 @@ const INDUSTRY_PEST_KEY = "lower(regexp_replace(btrim(COALESCE(p.industry, '')),
 
 // Lowercased industry text. Word characters are ASCII, matching JS \w and the
 // SQL check in appendIndustryExclusion (locale-independent).
-const PEST_TEXT_PATTERN = '(^|[^a-z0-9_])(pests?|exterminat(or|ors|ing|ion)?|termites?)([^a-z0-9_]|$)';
+const PEST_WORD_ALTERNATION = 'pests?|exterminat(or|ors|ing|ion)?|termites?';
+const PEST_TEXT_PATTERN = `(^|[^a-z0-9_])(${PEST_WORD_ALTERNATION})([^a-z0-9_]|$)`;
 const PEST_TEXT_RE = new RegExp(PEST_TEXT_PATTERN);
+
+// National brands. Company-name gate only, so an industry value of "Hawx" or
+// "Terminix" is not a pest synonym and computeFit does not change. Whitespace
+// is collapsed before the match. A run of spaces or hyphens separates a
+// multi-word brand. TrulyNolen is the same brand with no separator. The JS
+// check and appendCompanyPestExclusion both use PEST_COMPANY_PATTERN.
+const PEST_BRAND_ALTERNATION = [
+  'terminix',
+  'orkin',
+  'rentokil',
+  'aptive',
+  'truly[- ]*nolen',
+  'rollins',
+  'ecolab[- ]+pest',
+  'arrow[- ]+exterminators',
+  'western[- ]+exterminator',
+  'massey[- ]+services',
+  'hawx',
+  'moxie[- ]+pest',
+  'bulwark[- ]+exterminating',
+].join('|');
+const PEST_COMPANY_PATTERN = `(^|[^a-z0-9_])(${PEST_WORD_ALTERNATION}|${PEST_BRAND_ALTERNATION})([^a-z0-9_]|$)`;
+const PEST_COMPANY_RE = new RegExp(PEST_COMPANY_PATTERN);
 
 function industryKey(value) {
   if (value == null) return '';
@@ -98,19 +124,21 @@ function isPestDiscoveryPlace(place, excluded = cfg.EXCLUDED_INDUSTRIES) {
   return isPestText(placeName(place)) || isPestPlaceType(place);
 }
 
-// Cached company name. Same word-boundary pattern as isPestText (ASCII
-// boundaries, matching the SQL check and isFranchise's word match). Off when
-// Pest Control is not on the exclusion list. Does not fetch.
+// Cached company name. Pest words plus the national-brand list, on ASCII
+// boundaries, matching appendCompanyPestExclusion. Off when Pest Control is
+// not on the exclusion list. Does not fetch and does not score the row.
 function isPestCompanyName(company, excluded = cfg.EXCLUDED_INDUSTRIES) {
   if (!pestCategoryExcluded(excluded)) return false;
-  return isPestText(company);
+  const key = industryKey(company);
+  return key !== '' && PEST_COMPANY_RE.test(key);
 }
 
 // SQL fragment. TRUE when the name gate is off. Placeholder numbers continue
 // from params.length. The column is the cached company name, not a request.
+// The bound pattern is PEST_COMPANY_PATTERN, the same one isPestCompanyName uses.
 function appendCompanyPestExclusion(params, excluded = cfg.EXCLUDED_INDUSTRIES) {
   if (!pestCategoryExcluded(excluded)) return 'TRUE';
-  const patternIndex = params.push(PEST_TEXT_PATTERN);
+  const patternIndex = params.push(PEST_COMPANY_PATTERN);
   return `${COMPANY_PEST_KEY} !~ $${patternIndex}`;
 }
 
@@ -158,6 +186,7 @@ module.exports = {
   PEST_CANONICAL,
   PEST_NAME_REASON,
   PEST_TEXT_PATTERN,
+  PEST_COMPANY_PATTERN,
   normalizeIndustry,
   isPestText,
   isPestCompanyName,

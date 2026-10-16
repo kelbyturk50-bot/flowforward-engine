@@ -319,9 +319,22 @@ router.post('/:id/mark-sent', async (req, res) => {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
-    const { rows } = await db.query(`SELECT pr.*, p.stage FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1 FOR UPDATE`, [req.params.id]);
+    const { rows } = await db.query(
+      `SELECT pr.*, p.company, p.stage
+         FROM proposals pr
+         JOIN prospects p ON p.id = pr.prospect_id
+        WHERE pr.id = $1
+        FOR UPDATE`,
+      [req.params.id]
+    );
     const p = rows[0];
     if (!p) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+    // Same refusal as send. Roll back before any status change, prospect
+    // update, or follow-up scheduling.
+    if (isPestCompanyName(p.company)) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+    }
     if (p.status !== 'draft') { await db.query('ROLLBACK'); return res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` }); }
 
     const now = new Date();
