@@ -53,7 +53,7 @@ ${back ? `<p><a href="${esc(back)}" style="color:#2F6B57;font-weight:600">Back t
 app.use('/p', require('./proposals/onepager').router);
 
 // Public pilot demo (no API key — the token is the credential).
-// 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly "true". No mint route.
+// 404 unless the master flag is effectively on. No mint route.
 app.use('/demo/estimate-recovery', pilotDemo.router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
@@ -66,8 +66,10 @@ app.use('/api/runs',      require('./api/runs'));
 app.use('/api/proposals', require('./api/proposals'));
 app.use('/api/brands',    require('./api/brands'));
 app.use('/api/rubric',    require('./api/rubric'));
-// CSV intake for Pilot #1. 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly
-// "true". These routes do not send mail.
+app.use('/api/flags',     require('./api/flags'));
+// CSV intake for Pilot #1. 404 unless the master flag is effectively on
+// (database row true, and the env var is not a trimmed case-insensitive
+// "false", "off", "0", or "no"). These routes do not send mail.
 app.use('/api/pilot/estimate-recovery', require('./api/pilot-estimates'));
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────

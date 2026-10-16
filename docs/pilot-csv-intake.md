@@ -4,7 +4,7 @@ This slice stores open estimates from a CSV for one shop. It does not send email
 
 ## Flag and auth
 
-`FF_PILOT_ESTIMATE_RECOVERY` must be the exact string `true`, and `CRM_API_KEY` must trim to at least 32 non-whitespace characters. Spaces do not count, so 32 spaces, or 31 characters plus a space, leave the routes closed. Otherwise every route under `/api/pilot/estimate-recovery` returns **404** and writes nothing. A missing key does not leave the routes open.
+`FF_PILOT_ESTIMATE_RECOVERY` must be effectively on, and `CRM_API_KEY` must trim to at least 32 non-whitespace characters. The flag is a `feature_flags` row, seeded off. A trimmed case-insensitive env value `false`, `off`, `0`, or `no` forces it off. An empty string or an unset variable uses the row. Any other env value also uses the row. Env never forces the flag on. Spaces do not count toward the key length, so 32 spaces, or 31 characters plus a space, leave the routes closed. Otherwise every route under `/api/pilot/estimate-recovery` returns **404** and writes nothing. A missing key does not leave the routes open.
 
 When that key is set, the routes also require `x-api-key` (a `Bearer` token is also accepted). A missing or wrong key is **401** and writes nothing.
 

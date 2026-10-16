@@ -183,10 +183,10 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | `SEND_DAILY_LIMIT` | no | `20` emails/day including follow-ups |
 | `FOLLOWUP_DAYS` | no | `3,10` |
 | `SEND_HOURS` / `SEND_DAYS` | no | `8,17` / `1,2,3,4,5` |
-| `FF_PILOT_ESTIMATE_RECOVERY` | no | Master switch for the unsold-estimate demo. Off unless exactly `true` |
-| `FF_PILOT_LINK_ON_ONEPAGER` | no | Shows "Try a live demo" on `/p/:slug`. Off unless exactly `true` |
-| `FF_PILOT_ESTIMATE_SMS` | no | SMS touches. Off unless exactly `true`. v1 does not send SMS |
-| `FF_PILOT_ESTIMATE_LIVE_SEND` | no | Global live-send kill for the paid pilot. Sends stay killed unless exactly `true`. CSV intake does not send. See `docs/pilot-csv-intake.md` |
+| `FF_PILOT_ESTIMATE_RECOVERY` | no | Database flag, seeded off. A trimmed case-insensitive `false`, `off`, `0`, or `no` forces it off. An empty string or unset uses the row. Env never forces it on |
+| `FF_PILOT_LINK_ON_ONEPAGER` | no | Database flag for "Try a live demo" on `/p/:slug`. Same kill switch as the master flag |
+| `FF_PILOT_ESTIMATE_SMS` | no | Env-only. On only when the value is exactly `true`. Not stored. Not writable from `PUT /api/flags`. v1 does not send SMS |
+| `FF_PILOT_ESTIMATE_LIVE_SEND` | no | Global live-send kill for the paid pilot. Stays env-only (not in `feature_flags`). Sends stay killed unless exactly `true`. CSV intake does not send. See `docs/pilot-csv-intake.md` |
 | `PILOT_DEMO_RATE_MAX` / `PILOT_DEMO_RATE_WINDOW_MS` | no | `60` requests / `60000` ms per IP. The IP is the right-most `X-Forwarded-For` hop (`trust proxy` = 1; Railway is one reverse proxy) |
 | `PILOT_DEMO_TOKEN_TTL_HOURS` | no | `336` (14 days) |
 | `PILOT_DEMO_BASE_URL` | no | Optional origin for the one-pager demo link. Unset = relative path |
@@ -216,12 +216,14 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | POST | `/api/proposals/check-inbox` | Check replies + send due follow-ups now |
 | GET/POST | `/api/proposals/gmail/status` · `/gmail/connect` · `/gmail/disconnect` | Gmail connection |
 | GET | `/oauth/google/callback` | Google sign-in return (public) |
-| GET | `/p/:slug` | Public one-pager (`?preview=1` doesn't count a view). "Try a live demo" only when both pilot flags above are `true`, `CRM_API_KEY` is at least 32 characters, and an active demo generation exists. The page recomputes that token and does not insert a row. A revoked proposal, discarded included, gets no link |
+| GET | `/api/flags` | List server feature flags. API key when one is set. Each item has `name`, `enabled`, `effective`, `env_forced_off`, `updated_at`, `updated_by`, `writable`, `source` (`db` or `env`) |
+| PUT | `/api/flags/:name` | `{ "enabled": true\|false }`. Requires a `CRM_API_KEY` of at least 32 non-whitespace characters plus the API-key header. Otherwise 503 `writes_disabled` and nothing is written. Unknown name is 400 `unknown_flag`. `FF_PILOT_ESTIMATE_SMS` and `FF_CAMPAIGN_OPEN_PIXEL` are 400 `flag_not_writable`. A non-boolean `enabled` is 400 `invalid_body`. A kill switch of `false`, `off`, `0`, or `no` still stores the row and the response has `effective: false` and `env_forced_off: true` |
+| GET | `/p/:slug` | Public one-pager (`?preview=1` doesn't count a view). "Try a live demo" only when both pilot flags are effectively on, `CRM_API_KEY` is at least 32 characters, and an active demo generation exists. The page recomputes that token and does not insert a row. A revoked proposal, discarded included, gets no link |
 | POST | `/api/proposals/:id/demo-token` | Mint or rotate a demo token (API key). Bumps generation and revokes the previous active row. 404 when the master flag is off or `CRM_API_KEY` is missing or shorter than 32 characters. No public mint route. Rotating `CRM_API_KEY` does not revoke links already issued (lookup is by hash); this mint is what makes `/p/:slug` recompute a link after a rotation |
 | POST | `/api/proposals/:id/demo-token/revoke` | Revoke active demo tokens and set `proposals.demo_revoked_at` so `/p/:slug` will not derive another. Also required when `CRM_API_KEY` or a demo link leaked: rotating the key leaves already-issued links returning 200 until they expire or this revoke runs |
 | GET | `/demo/estimate-recovery/:token` | Synthetic demo JSON. 404 when the master flag is off, or the token is unknown, expired, revoked, or malformed. `X-Robots-Tag: noindex, nofollow`, `Cache-Control: no-store`, per-IP rate limit on the right-most trusted hop |
 | POST | `/demo/estimate-recovery/:token/events` | `{ "type": "demo_view" }` and the other allowlisted step types. Same token, flag, and rate-limit gates |
-| POST | `/api/pilot/estimate-recovery/customers` | Create a pilot shop. `live_send_enabled` stays false. 404 unless `FF_PILOT_ESTIMATE_RECOVERY` is exactly `true` and `CRM_API_KEY` trims to at least 32 non-whitespace characters. See `docs/pilot-csv-intake.md` |
+| POST | `/api/pilot/estimate-recovery/customers` | Create a pilot shop. `live_send_enabled` stays false. 404 unless `FF_PILOT_ESTIMATE_RECOVERY` is effectively on and `CRM_API_KEY` trims to at least 32 non-whitespace characters. See `docs/pilot-csv-intake.md` |
 | POST | `/api/pilot/estimate-recovery/customers/:id/estimates` | CSV of open estimates. Upserts on source estimate id. 404 and no write when the master flag is off |
 | GET | `/api/pilot/estimate-recovery/customers/:id/estimates` | Export that customer's estimates (`?format=csv` for CSV) |
 | DELETE | `/api/pilot/estimate-recovery/customers/:id/estimates` | Delete that customer's estimates. Deleting the customer row cascades estimates and keeps opt-out rows |
