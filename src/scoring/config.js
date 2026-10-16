@@ -75,8 +75,9 @@ const TIER_CAP_FOR = {
 // A negated phrase does not count. Verb negations keep a wide window and may
 // cross a comma ("we do not offer financing", "we don't offer financing",
 // "not offering installation", "we do not offer, at this time, any kind of
-// financing", and "financing not available" after the phrase). "not" followed
-// by "only" is not a verb negation. A bare "no" or "without" negates only
+// financing", "no longer", "no more", and "financing not available" after the
+// phrase). "not" followed by "only" is not a verb negation. A bare "no" or
+// "without" negates only
 // when the phrase comes next, or with just any, a, an, or the in between
 // ("no free estimates", "without any financing"). A curly apostrophe counts
 // (don’t, doesn’t). "no-hassle", "no interest", and "no-cost" are not negations.
