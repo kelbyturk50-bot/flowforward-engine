@@ -72,6 +72,32 @@ describe('resolveApiBase', () => {
     expect(resolve({ viteApiUrl, dev: true, prod: false, hostname: 'localhost' }).url).toBe('https://staging.example.test/api');
   });
 
+  it('treats an invalid VITE_API_URL as unset', () => {
+    for (const viteApiUrl of ['ftp://files.example.test', 'javascript:alert(1)', 'not a url', 'file:///tmp/api']) {
+      expect(resolve({ viteApiUrl, hostname: PREVIEW_HOST })).toEqual({
+        url: '',
+        configured: false,
+        source: 'unconfigured',
+      });
+      expect(resolve({
+        viteApiUrl,
+        dev: true,
+        prod: false,
+        hostname: 'localhost',
+      })).toEqual({ url: LOCAL_API_URL, configured: true, source: 'dev' });
+      expect(resolve({ viteApiUrl, hostname: PRODUCTION_HOSTS[0] })).toEqual({
+        url: PRODUCTION_API_URL,
+        configured: true,
+        source: 'production',
+      });
+    }
+    expect(resolve({ viteApiUrl: 'http://staging.example.test', hostname: PREVIEW_HOST })).toEqual({
+      url: 'http://staging.example.test',
+      configured: true,
+      source: 'env',
+    });
+  });
+
   it('lets a saved Settings URL override the default, including on a preview', () => {
     const savedUrl = 'https://api.example.test/crm/';
     expect(resolve({ savedUrl, hostname: PREVIEW_HOST })).toMatchObject({

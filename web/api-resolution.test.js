@@ -74,6 +74,31 @@ describe('real API client', () => {
     expect(fetchSpy.mock.calls[0][0]).toBe('https://staging.example.test/health');
   });
 
+  it('ignores an invalid VITE_API_URL and continues resolution', async () => {
+    const fetchSpy = vi.fn(() => { throw new Error('fetch must not run'); });
+    vi.stubGlobal('fetch', fetchSpy);
+    _setRuntimeForTests({
+      dev: false,
+      prod: true,
+      hostname: PREVIEW_HOST,
+      viteApiUrl: 'javascript:alert(1)',
+      savedUrl: '',
+    });
+    await expect(api.health()).rejects.toMatchObject({ message: UNCONFIGURED_MESSAGE, status: 0 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    vi.stubGlobal('fetch', okFetch());
+    _setRuntimeForTests({
+      dev: true,
+      prod: false,
+      hostname: 'localhost',
+      viteApiUrl: 'not a url',
+      savedUrl: '',
+    });
+    await api.health();
+    expect(fetch).toHaveBeenCalledWith('http://localhost:3000/health', expect.anything());
+  });
+
   it('uses a Settings-saved URL the user stored, and only then', async () => {
     const fetchSpy = okFetch();
     vi.stubGlobal('fetch', fetchSpy);

@@ -4,7 +4,8 @@
 // 1. Settings-saved URL (`localStorage` key `ff.apiUrl`). Written only when
 //    someone changes the address and saves. The prefilled default is not stored.
 //    The value must be https, except http for localhost or 127.0.0.1.
-// 2. `VITE_API_URL`, when the build set it. Wins over the defaults below.
+// 2. `VITE_API_URL`, when it is an http: or https: URL. Any other value is
+//    treated as unset, and resolution continues below.
 // 3. `http://localhost:3000` when `import.meta.env.DEV` (the API's default port).
 // 4. The production Railway URL when `import.meta.env.PROD` and
 //    `location.hostname` is exactly one of `PRODUCTION_HOSTS`.
@@ -51,6 +52,16 @@ export function shouldStoreApiUrl(typed, prefilled) {
   return normalizeUrl(typed) !== normalizeUrl(prefilled);
 }
 
+function envApiUrl(value) {
+  const url = normalizeUrl(value);
+  if (!url) return '';
+  let parsed;
+  try { parsed = new URL(url); }
+  catch { return ''; }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+  return url;
+}
+
 export function isProductionHost(hostname) {
   const host = String(hostname ?? '');
   for (const allowed of PRODUCTION_HOSTS) {
@@ -63,7 +74,7 @@ export function resolveApiBase({ viteApiUrl, dev, prod, hostname, savedUrl } = {
   const saved = normalizeUrl(savedUrl);
   if (saved) return { url: saved, configured: true, source: 'settings' };
 
-  const fromEnv = normalizeUrl(viteApiUrl);
+  const fromEnv = envApiUrl(viteApiUrl);
   if (fromEnv) return { url: fromEnv, configured: true, source: 'env' };
 
   if (dev) return { url: LOCAL_API_URL, configured: true, source: 'dev' };
