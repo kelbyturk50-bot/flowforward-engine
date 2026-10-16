@@ -397,6 +397,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .api-banner-title { font-weight: 600; }
 .api-banner-help { margin-top: .35rem; }
 .api-banner .btn { margin-top: .75rem; min-height: 44px; padding: 0 1rem; }
+.error-note, .error-note p, .error-text, .ok-note { min-width: 0; overflow-wrap: anywhere; }
 .error-note { display: flex; justify-content: space-between; align-items: center; gap: 1rem; background: var(--rust-wash); color: var(--rust); border-radius: var(--radius-s); padding: .7rem 1rem; margin-bottom: 1rem; }
 .error-text { color: var(--rust); }
 .ok-note { color: var(--juniper); font-weight: 600; }

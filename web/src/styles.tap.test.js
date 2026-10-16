@@ -32,6 +32,11 @@ describe('phone tap targets', () => {
     expect(desktop).not.toContain('.form-actions .btn { min-height: 44px;');
   });
 
+  it('lets error and status notes wrap a long address', () => {
+    const notes = css.slice(css.indexOf('.error-note, .error-note p'), css.indexOf('.toast'));
+    expect(notes).toContain('.error-note, .error-note p, .error-text, .ok-note { min-width: 0; overflow-wrap: anywhere;');
+  });
+
   it('styles the unconfigured banner as info, with a 44px action', () => {
     const banner = css.slice(css.indexOf('.api-banner {'), css.indexOf('.error-note'));
     expect(banner).toContain('background: var(--paper)');
