@@ -111,10 +111,25 @@ function isSocketPath(host) {
   return host.startsWith('/') && !host.startsWith('//');
 }
 
+// 127.0.0.0/8 and ::1, including IPv4-mapped loopback (::ffff:127.0.0.1).
+function isLoopbackAddress(value) {
+  let raw = String(value || '').trim().toLowerCase();
+  if (raw.startsWith('[') && raw.endsWith(']')) raw = raw.slice(1, -1);
+  if (!raw) return false;
+  if (raw === '::1' || raw === '0:0:0:0:0:0:0:1') return true;
+  if (raw.startsWith('::ffff:')) return isLoopbackAddress(raw.slice('::ffff:'.length));
+  const parts = raw.split('.');
+  if (parts.length !== 4) return false;
+  const nums = parts.map(part => (/^\d{1,3}$/.test(part) ? Number(part) : NaN));
+  if (nums.some(n => Number.isNaN(n) || n > 255)) return false;
+  return nums[0] === 127;
+}
+
 function classifyHost(host) {
   const normalized = normalizeHost(host);
   if (!normalized) return { ok: false, host: normalized, reason: 'has no host' };
   if (isSocketPath(normalized)) return { ok: true, host: normalized };
+  if (normalized === 'localhost' || isLoopbackAddress(normalized)) return { ok: true, host: normalized };
   const hosted = HOSTED_DB_SUFFIXES.find(suffix => hostMatches(normalized, suffix));
   if (hosted) return { ok: false, host: normalized, reason: `a hosted database (${hosted})` };
   if (!LOCAL_HOSTS.has(normalized)) return { ok: false, host: normalized, reason: 'not a local host' };
@@ -204,21 +219,28 @@ function shouldUseProvidedDatabase(url) {
   return name === 'flowforward_test';
 }
 
-function readDotenvDatabaseUrl(file = path.join(process.cwd(), '.env')) {
-  if (!fs.existsSync(file)) return undefined;
+const DOTENV_GUARD_KEYS = ['DATABASE_URL', 'PGHOST', 'PGHOSTADDR', 'PGSERVICE'];
+
+function readDotenvValues(file = path.join(process.cwd(), '.env')) {
+  const found = {};
+  if (!file || !fs.existsSync(file)) return found;
   const text = fs.readFileSync(file, 'utf8');
   for (const line of text.split(/\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
-    const match = trimmed.match(/^(?:export\s+)?DATABASE_URL\s*=\s*(.*)$/);
-    if (!match) continue;
-    let value = match[1].trim();
+    const match = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match || !DOTENV_GUARD_KEYS.includes(match[1])) continue;
+    let value = match[2].trim();
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
-    return value;
+    found[match[1]] = value;
   }
-  return undefined;
+  return found;
+}
+
+function readDotenvDatabaseUrl(file) {
+  return readDotenvValues(file).DATABASE_URL;
 }
 
 function formatRefusal(source, result) {
@@ -236,17 +258,56 @@ function refusal(source, result) {
   return err;
 }
 
-function assertSafeDatabaseEnv({ allowUnset = false } = {}) {
+function effectivePgValue(key, fromFile) {
+  // An explicit empty string counts as set, so dotenv will not replace it.
+  if (process.env[key] != null) return String(process.env[key]).trim();
+  return fromFile[key] ? String(fromFile[key]).trim() : '';
+}
+
+function pgSource(key, fromFile) {
+  if (process.env[key] != null && String(process.env[key]).trim()) return key;
+  if (fromFile[key]) return `.env ${key}`;
+  return key;
+}
+
+function assertSafeDatabaseEnv({ allowUnset = false, envFile } = {}) {
   const envResult = inspectPgEnv(process.env);
   if (!envResult.ok) throw refusal(envResult.source || 'the environment', envResult);
 
+  // dotenv in src/db/client.js loads .env later and does not override variables
+  // that are already set. PGHOST in that file is invisible until then, and an
+  // empty URL host makes node-postgres use it. Read the file here.
+  const fromFile = readDotenvValues(envFile);
+  const filePg = inspectPgEnv({
+    PGHOST: fromFile.PGHOST,
+    PGHOSTADDR: fromFile.PGHOSTADDR,
+    PGSERVICE: fromFile.PGSERVICE,
+  });
+  if (!filePg.ok) {
+    filePg.source = `.env ${filePg.source}`;
+    throw refusal(filePg.source, filePg);
+  }
+
   const sources = [];
   if (process.env.DATABASE_URL) sources.push(['the environment DATABASE_URL', process.env.DATABASE_URL]);
-  const fromFile = readDotenvDatabaseUrl();
-  if (fromFile) sources.push(['.env DATABASE_URL', fromFile]);
+  if (fromFile.DATABASE_URL) sources.push(['.env DATABASE_URL', fromFile.DATABASE_URL]);
   for (const [source, url] of sources) {
     const result = inspectDatabaseUrl(url);
     if (!result.ok) throw refusal(source, result);
+  }
+
+  // The URL node-postgres will use: an already-set env var wins over dotenv.
+  const effectiveUrl = process.env.DATABASE_URL || fromFile.DATABASE_URL;
+  if (effectiveUrl) {
+    const parsed = inspectDatabaseUrl(effectiveUrl);
+    if (parsed.implicit) {
+      const pgSet = ['PGHOST', 'PGHOSTADDR', 'PGSERVICE'].filter(key => effectivePgValue(key, fromFile));
+      if (pgSet.length) {
+        throw refusal(pgSet.map(key => pgSource(key, fromFile)).join(', '), {
+          reason: 'set while DATABASE_URL has no host. Unset PGHOST, PGHOSTADDR, and PGSERVICE (including in .env)',
+        });
+      }
+    }
   }
   if (!allowUnset && !process.env.DATABASE_URL) {
     throw refusal('DATABASE_URL', { reason: 'not set. Run npm test, which starts a disposable Postgres on 127.0.0.1' });
@@ -268,9 +329,7 @@ function isLocalName(value) {
   const normalized = normalizeHost(value);
   if (!normalized) return true;
   if (isSocketPath(normalized)) return true;
-  if (LOCAL_HOSTS.has(normalized)) return true;
-  // Node reports IPv4 loopback on a dual-stack socket as ::ffff:127.0.0.1.
-  if (normalized.startsWith('::ffff:')) return isLocalName(normalized.slice('::ffff:'.length));
+  if (normalized === 'localhost' || isLoopbackAddress(normalized)) return true;
   return false;
 }
 
@@ -321,6 +380,11 @@ function blockedRequestHost(args) {
   return '';
 }
 
+function isNumericPort(value) {
+  if (typeof value === 'number') return Number.isInteger(value) && value >= 0;
+  return typeof value === 'string' && /^\d+$/.test(value);
+}
+
 // A connect name is forbidden when it is on the vendor list or is not loopback.
 // Empty values are ignored. Unix sockets (one leading slash) are local.
 function forbiddenConnectName(value) {
@@ -358,8 +422,13 @@ function blockedConnectHost(args, socket) {
     if (value.socket && typeof value.socket === 'object') add('remote', value.socket.remoteAddress);
   };
   args.forEach(visit);
-  if (typeof args[0] === 'string') add('path', args[0]);
-  if (typeof args[1] === 'string') add('host', args[1]);
+  // tls.connect(port, host, options) is what http2.connect uses. A numeric
+  // string is a port, not an IPC path. Only a non-numeric string is a path.
+  if (isNumericPort(args[0])) {
+    if (typeof args[1] === 'string') add('host', args[1]);
+  } else if (typeof args[0] === 'string') {
+    add('path', args[0]);
+  }
   if (socket && typeof socket.remoteAddress === 'string') add('remote', socket.remoteAddress);
   // Dialed names outrank SNI, so { host: smtp.gmail.com, servername: localhost }
   // is reported as smtp.gmail.com and not as the local servername.
@@ -391,9 +460,7 @@ function installNetworkGuard() {
   const originalFetch = globalThis.fetch;
   if (typeof originalFetch === 'function') {
     globalThis.fetch = function guardedFetch(input, init) {
-      const raw = typeof input === 'string' ? input : (input && input.url) || '';
-      let host = '';
-      try { host = new URL(raw).hostname; } catch { host = ''; }
+      const host = fetchHostname(input);
       if (isBlockedHost(host)) return Promise.reject(new TestNetworkGuardError(normalizeHost(host), 'fetch'));
       return originalFetch.call(globalThis, input, init);
     };
@@ -415,6 +482,69 @@ function installNetworkGuard() {
     if (host) throw new TestNetworkGuardError(host, 'tls');
     return originalTlsConnect.apply(this, args);
   };
+
+  installNativeConnectGuard();
+  installNodemailerProxyGuard();
+}
+
+function fetchHostname(input) {
+  try {
+    if (typeof input === 'string') return new URL(input).hostname;
+    if (typeof URL !== 'undefined' && input instanceof URL) return input.hostname;
+    if (typeof Request !== 'undefined' && input instanceof Request) return new URL(input.url).hostname;
+    if (input && typeof input.href === 'string') return new URL(input.href).hostname;
+    if (input && typeof input.url === 'string') return new URL(input.url).hostname;
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+// Last line of defense. net/tls/http/undici all end in TCP.prototype.connect
+// (IPv4) or connect6 (IPv6) with the address they are about to dial. A custom
+// lookup, or a replaced dns.lookup, can make that address differ from the
+// hostname. Throw before the native binding runs so no SYN is sent.
+function installNativeConnectGuard() {
+  const { TCP } = process.binding('tcp_wrap');
+  const { Pipe } = process.binding('pipe_wrap');
+  const guardMethod = (proto, name, via) => {
+    const original = proto[name];
+    if (typeof original !== 'function' || original.__ffGuarded) return;
+    function guarded(...args) {
+      if (!isLoopbackAddress(args[1])) {
+        throw new TestNetworkGuardError(String(args[1]), via);
+      }
+      return original.apply(this, args);
+    }
+    guarded.__ffGuarded = true;
+    proto[name] = guarded;
+  };
+  guardMethod(TCP.prototype, 'connect', 'tcp');
+  guardMethod(TCP.prototype, 'connect6', 'tcp');
+  const originalPipe = Pipe.prototype.connect;
+  if (typeof originalPipe === 'function' && !originalPipe.__ffGuarded) {
+    function guardedPipe(...args) {
+      if (!isSocketPath(normalizeHost(args[1]))) {
+        throw new TestNetworkGuardError(String(args[1]), 'pipe');
+      }
+      return originalPipe.apply(this, args);
+    }
+    guardedPipe.__ffGuarded = true;
+    Pipe.prototype.connect = guardedPipe;
+  }
+}
+
+function installNodemailerProxyGuard() {
+  const nodemailer = require('nodemailer');
+  if (nodemailer.createTransport.__ffGuarded) return;
+  const original = nodemailer.createTransport;
+  function guardedCreateTransport(options, defaults) {
+    const proxy = options && typeof options === 'object' ? options.proxy : '';
+    if (proxy) throw new TestNetworkGuardError(String(proxy), 'nodemailer-proxy');
+    return original.call(this, options, defaults);
+  }
+  guardedCreateTransport.__ffGuarded = true;
+  nodemailer.createTransport = guardedCreateTransport;
 }
 
 module.exports = {

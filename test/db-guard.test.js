@@ -3,6 +3,8 @@ require('./preload');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const {
   normalizeHost,
@@ -10,6 +12,7 @@ const {
   inspectDatabaseUrl,
   inspectPgEnv,
   shouldUseProvidedDatabase,
+  assertSafeDatabaseEnv,
 } = require('./guard');
 
 const LOCAL = 'postgresql://fftest@127.0.0.1:5432/flowforward_test';
@@ -127,6 +130,55 @@ describe('database guard', () => {
     assert.equal(evil.source, 'PGHOST');
     assert.equal(evil.host, '//evil.com');
     assert.equal(evil.reason, 'not a local host');
+  });
+
+  it('refuses PGHOST, PGHOSTADDR, and PGSERVICE from .env before dotenv loads them', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-dotenv-'));
+    const file = path.join(dir, '.env');
+    const previous = process.env.DATABASE_URL;
+    try {
+      fs.writeFileSync(file, [
+        'DATABASE_URL=postgresql://fftest@127.0.0.1:5432/flowforward_test',
+        'PGHOST="x.rlwy.net"',
+      ].join('\n'));
+      assert.throws(
+        () => assertSafeDatabaseEnv({ envFile: file }),
+        (err) => {
+          assert.match(err.message, /Refusing to run tests: \.env PGHOST "x\.rlwy\.net"/);
+          assert.doesNotMatch(err.message, /password/);
+          return true;
+        }
+      );
+
+      fs.writeFileSync(file, 'PGHOSTADDR=8.8.8.8\n');
+      assert.throws(
+        () => assertSafeDatabaseEnv({ envFile: file }),
+        /Refusing to run tests: \.env PGHOSTADDR "8\.8\.8\.8"/
+      );
+
+      fs.writeFileSync(file, "export PGSERVICE='prod'\n");
+      assert.throws(
+        () => assertSafeDatabaseEnv({ envFile: file }),
+        /Refusing to run tests: \.env PGSERVICE "prod"/
+      );
+
+      // A local value is fine when the URL itself names a loopback host.
+      fs.writeFileSync(file, 'PGHOST=127.8.8.8\n');
+      assert.doesNotThrow(() => assertSafeDatabaseEnv({ envFile: file }));
+
+      // An empty URL host would let a later dotenv load of PGHOST choose the server.
+      fs.writeFileSync(file, 'PGHOST=127.0.0.1\n');
+      process.env.DATABASE_URL = 'postgresql://fftest@/flowforward_test';
+      delete process.env.PGHOST;
+      assert.throws(
+        () => assertSafeDatabaseEnv({ envFile: file }),
+        /DATABASE_URL has no host/
+      );
+    } finally {
+      if (previous == null) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previous;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('uses a provided URL only when it is local and named flowforward_test', () => {

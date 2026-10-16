@@ -183,6 +183,166 @@ describe('network guard', () => {
     );
   });
 
+  function badLookup(address, family) {
+    return (hostname, options, callback) => {
+      if (typeof options === 'function') {
+        callback = options;
+        options = {};
+      }
+      if (options && options.all) callback(null, [{ address, family }]);
+      else callback(null, address, family);
+    };
+  }
+
+  // The native TCP connect throws on the next tick, before the syscall.
+  function captureGuard(start) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let result;
+      const timer = setTimeout(() => finish(new Error('timed out before the guard threw')), 1000);
+      function finish(err) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        process.off('uncaughtException', onUncaught);
+        if (result && typeof result.destroy === 'function') result.destroy();
+        if (err instanceof Error && err.message === 'handshake') reject(err);
+        else resolve(err);
+      }
+      function onUncaught(err) { finish(err); }
+      process.on('uncaughtException', onUncaught);
+      try {
+        result = start();
+        if (result && typeof result.on === 'function') {
+          result.on('error', finish);
+          result.on('connect', () => finish(new Error('handshake')));
+          if (typeof result.destroy === 'function') result.once('error', () => result.destroy());
+        }
+        if (result && typeof result.then === 'function') {
+          result.then(() => finish(new Error('handshake')), finish);
+        }
+      } catch (err) {
+        finish(err);
+      }
+    });
+  }
+
+  function guardError(err) {
+    let current = err;
+    while (current && !(current instanceof TestNetworkGuardError) && current.cause) current = current.cause;
+    return current;
+  }
+
+  function assertGuard(err, host) {
+    const guard = guardError(err);
+    assert.ok(guard instanceof TestNetworkGuardError, err && (err.stack || err));
+    assert.equal(guard.code, 'TEST_NETWORK_BLOCKED');
+    assert.match(guard.message, /network guard/);
+    assert.match(guard.stack, /guard\.js/);
+    assert.doesNotMatch(guard.stack, /afterConnect/);
+    if (host) assert.match(guard.message, new RegExp(host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+
+  it('blocks a resolved address that is not loopback, before the native connect', async () => {
+    const dns = require('dns');
+    const tls = require('tls');
+    const https = require('https');
+    const http2 = require('http2');
+    const { Agent } = require('undici');
+
+    const cases = [
+      () => net.connect({ host: 'localhost', port: 9, lookup: badLookup('192.0.2.1', 4) }),
+      () => net.connect({ host: 'localhost', port: 9, lookup: badLookup('2001:db8::1', 6) }),
+      () => tls.connect({ host: 'localhost', port: 443, servername: 'localhost', lookup: badLookup('192.0.2.1', 4) }),
+      () => https.request({ hostname: 'localhost', port: 443, servername: 'localhost', lookup: badLookup('192.0.2.1', 4) }),
+      () => http2.connect('https://localhost', {
+        createConnection() {
+          return net.connect({ host: 'localhost', port: 443, lookup: badLookup('192.0.2.1', 4) });
+        },
+      }),
+      () => fetch('http://localhost:8080/', {
+        dispatcher: new Agent({ connect: { lookup: badLookup('192.0.2.1', 4) } }),
+      }),
+    ];
+    for (const [i, start] of cases.entries()) {
+      const err = await captureGuard(start);
+      assertGuard(err, i === 1 ? '2001:db8::1' : '192.0.2.1');
+    }
+
+    const originalLookup = dns.lookup;
+    dns.lookup = badLookup('192.0.2.1', 4);
+    try {
+      const err = await captureGuard(() => net.connect({ host: 'localhost', port: 9 }));
+      assertGuard(err, '192.0.2.1');
+    } finally {
+      dns.lookup = originalLookup;
+    }
+
+    // 127.0.0.0/8 is still dialed. The failure is the OS, not the guard.
+    const allowed = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout')), 1000);
+      const socket = net.connect({ host: 'localhost', port: 1, lookup: badLookup('127.8.8.8', 4) });
+      socket.on('error', (err) => { clearTimeout(timer); socket.destroy(); resolve(err); });
+      socket.on('connect', () => { clearTimeout(timer); socket.destroy(); reject(new Error('handshake')); });
+    });
+    assert.ok(!(allowed instanceof TestNetworkGuardError));
+    assert.notEqual(allowed.code, 'TEST_NETWORK_BLOCKED');
+  });
+
+  it('does not treat tls.connect(port, host) as a socket path', async () => {
+    const http2 = require('http2');
+    const session = http2.connect('https://localhost');
+    try {
+      const err = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('timeout')), 2000);
+        session.once('error', (error) => { clearTimeout(timer); resolve(error); });
+        session.once('connect', () => { clearTimeout(timer); reject(new Error('handshake')); });
+      });
+      assert.ok(!(err instanceof TestNetworkGuardError), err && err.message);
+      assert.notEqual(err.code, 'TEST_NETWORK_BLOCKED');
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('blocks fetch of a URL object or a Request', async () => {
+    await assert.rejects(
+      () => fetch(new URL('https://places.googleapis.com/v1/places:searchText')),
+      (err) => {
+        assert.ok(err instanceof TestNetworkGuardError);
+        assertBlocked(err, 'places.googleapis.com');
+        return true;
+      }
+    );
+    await assert.rejects(
+      () => fetch(new Request('https://www.googleapis.com/oauth2/v1/userinfo')),
+      (err) => {
+        assert.ok(err instanceof TestNetworkGuardError);
+        assertBlocked(err, 'www.googleapis.com');
+        return true;
+      }
+    );
+  });
+
+  it('blocks nodemailer proxy before any tunnel', () => {
+    const nodemailer = require('nodemailer');
+    assert.throws(
+      () => nodemailer.createTransport({
+        host: '127.0.0.1',
+        port: 2525,
+        secure: false,
+        proxy: 'http://127.0.0.1:8888',
+      }),
+      (err) => {
+        assert.ok(err instanceof TestNetworkGuardError);
+        assert.equal(err.code, 'TEST_NETWORK_BLOCKED');
+        assert.match(err.message, /127\.0\.0\.1:8888/);
+        assert.match(err.stack, /guard\.js/);
+        return true;
+      }
+    );
+  });
+
   it('still allows a connection attempt to localhost', async () => {
     await assert.rejects(
       () => fetch('http://127.0.0.1:9/'),
