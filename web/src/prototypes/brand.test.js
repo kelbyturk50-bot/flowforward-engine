@@ -23,11 +23,13 @@ import { HOSTILE_BRAND, NAVY_BRAND, TEST_BRAND, YELLOW_BRAND } from './fixture-b
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 describe('brand sanitizer', () => {
-  it('keeps the bundled TEST fixture name, logo, and hex colors', () => {
+  it('keeps the bundled TEST fixture name, wordmark, and hex colors', () => {
     const brand = presentBrand(TEST_BRAND);
     expect(brand.name).toBe('TEST: Wasatch Heating');
     expect(brand.name.startsWith('TEST:')).toBe(true);
-    expect(brand.logoUrl).toBe(BUNDLED_LOGO_ID);
+    expect(brand.name).not.toMatch(/\(Sample\)/);
+    expect(brand.logoUrl).toBe('');
+    expect(brand.logoPlate).toBe('text');
     expect(brand.colors).toEqual({
       primary: '#1F4E79',
       accent: '#8A4E12',
@@ -35,7 +37,9 @@ describe('brand sanitizer', () => {
     });
     expect(brand.theme.accent).toBe('#8A4E12');
     expect(brand.theme.onAccent).toBe('#FFFFFF');
-    expect(brand.logoPlate).toBe('none');
+    const bundled = presentBrand({ ...TEST_BRAND, logoUrl: BUNDLED_LOGO_ID });
+    expect(bundled.logoUrl).toBe(BUNDLED_LOGO_ID);
+    expect(bundled.logoPlate).toBe('none');
     expect(contrastRatio(brand.theme.accent, SURFACE)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(brand.theme.accent, PAPER)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(WATERMARK_FG, WATERMARK_BG)).toBeGreaterThanOrEqual(4.5);
@@ -56,8 +60,9 @@ describe('brand sanitizer', () => {
     expect(brand.theme).not.toHaveProperty('watermark');
   });
 
-  it('allows https logo URLs and bundled ids, and rejects the rest', () => {
-    expect(sanitizeLogoUrl('https://cdn.example/logo.png')).toBe('https://cdn.example/logo.png');
+  it('allows a bundled logo id and rejects remote URLs', () => {
+    expect(sanitizeLogoUrl('https://cdn.example/logo.png')).toBe('');
+    expect(sanitizeLogoUrl('https://prospect.example/logo.png')).toBe('');
     expect(sanitizeLogoUrl(`  ${BUNDLED_LOGO_ID}  `)).toBe(BUNDLED_LOGO_ID);
     expect(sanitizeLogoUrl('http://cdn.example/logo.png')).toBe('');
     expect(sanitizeLogoUrl('javascript:alert(1)')).toBe('');
@@ -65,6 +70,15 @@ describe('brand sanitizer', () => {
     expect(sanitizeLogoUrl('//cdn.example/logo.png')).toBe('');
     expect(sanitizeLogoUrl('https://user:pass@cdn.example/logo.png')).toBe('');
     expect(sanitizeLogoUrl('/etc/passwd')).toBe('');
+    const remote = presentBrand({
+      name: 'TEST: Cedar Lane HVAC',
+      logoUrl: 'https://prospect.example/logo.png',
+      colors: { accent: '#1F4E79' },
+    });
+    expect(remote.name).toBe('TEST: Cedar Lane HVAC');
+    expect(remote.logoUrl).toBe('');
+    expect(remote.logoPlate).toBe('text');
+    expect(remote.theme.accent).toBe('#1F4E79');
     expect(presentBrand({ name: '<b>TEST: Shop</b>' }).name).toBe('<b>TEST: Shop</b>');
     expect(presentBrand({ name: '  ' }).name).toBe(FALLBACK_NAME);
     expect(presentBrand({ colors: { primary: 'red', accent: '#abc' } }).colors).toEqual({

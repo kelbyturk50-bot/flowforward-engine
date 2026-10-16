@@ -1,5 +1,6 @@
 // Brand input for a prototype screen: { name, logoUrl, colors }.
-// Logos are a bundled id or an https URL. This build never requests the URL.
+// A logo is a bundled asset id only. Remote URLs are dropped, never fetched,
+// and never sampled for color. With no bundled logo, the header is a wordmark.
 // Colors are hex only. The painted theme is contrast-checked for text.
 
 export const BUNDLED_LOGO_ID = 'bundled:test-wasatch-heating';
@@ -181,13 +182,7 @@ export function sanitizeLogoUrl(value, bundled = [BUNDLED_LOGO_ID]) {
   const raw = stripControls(value).trim();
   if (!raw) return '';
   if (bundled.includes(raw)) return raw;
-  let url;
-  try { url = new URL(raw); }
-  catch { return ''; }
-  if (url.protocol !== 'https:') return '';
-  if (url.username || url.password) return '';
-  if (!url.hostname) return '';
-  return url.href;
+  return '';
 }
 
 function colorBag(value) {

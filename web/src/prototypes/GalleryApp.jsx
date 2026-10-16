@@ -62,7 +62,7 @@ export default function GalleryApp({ token }) {
 }
 
 const AGENTS = [
-  ['estimate-follow-up', 'Estimate follow-up', 'Open estimate follow-up', 'Email previews for a stale estimate. They stop if the customer replies. No text or call goes out.'],
+  ['estimate-follow-up', 'Estimate follow-up', 'Open estimate follow-up', 'Emails from the owner mailbox. The sequence stops if the customer replies. A call appears only as a reminder to the owner.'],
   ['scheduling', 'Scheduling', 'Open scheduling', 'Sample visit slots for a fictional homeowner. Nothing is written to a calendar.'],
   ['call', 'Call', 'Open call', 'A missed-call card and a draft text-back. Nothing is dialed.'],
   ['bookkeeping', 'Bookkeeping', 'Open bookkeeping', 'Sample receipts from fictional vendors. Sync stays on this page.'],

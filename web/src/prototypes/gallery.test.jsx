@@ -172,9 +172,15 @@ describe('prototype gallery', () => {
 
     await user.click(screen.getByRole('button', { name: 'Send estimate' }));
     expect(screen.getByRole('heading', { name: 'Preview — nothing is sent' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Thank you' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Close the loop' })).toBeInTheDocument();
-    expect(screen.getByText(/Stops on reply/)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Thanks for asking' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Still open' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Reminder to you' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Sequence stopped' })).toBeInTheDocument();
+    expect(screen.getByText(/· Stopped/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Email from your mailbox/)).toHaveLength(3);
+    expect(container.querySelectorAll('.demo-mail-stopped')).toHaveLength(1);
+    expect(screen.queryByRole('heading', { name: /Call now/ })).not.toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/sms|text-back|text message/i);
     const toast = screen.getByText(ACTION_TOAST);
     expect(toast).toBeInTheDocument();
     expect(container.querySelector('.prototype-scroll').contains(toast)).toBe(false);
@@ -185,6 +191,7 @@ describe('prototype gallery', () => {
 
     await user.click(screen.getByRole('button', { name: 'See the homeowner reply' }));
     expect(screen.getByRole('heading', { name: 'Is there financing?' })).toBeInTheDocument();
+    expect(screen.getByText('Sequence stopped. They replied, so the Day 12 email does not send.')).toBeInTheDocument();
     expectRibbon(container);
     expect(container.querySelector('.demo-quote .prototype-sample')).not.toBeNull();
     expect(container.querySelector('.demo-draft .prototype-sample')).not.toBeNull();
@@ -338,21 +345,31 @@ describe('prototype gallery', () => {
 
   it('escapes markup in the business name and still shows the watermark', () => {
     const payloads = [
-      'TEST: <style>.ribbon{display:none}</style>',
+      'TEST: <style>[role=note]{display:none}</style>',
+      'TEST: <img onerror=alert(1)>',
       'TEST: </div><script>alert(1)</script>',
       `TEST: ${'Very long shop name '.repeat(12)}`,
     ];
     for (const name of payloads) {
-      const brand = presentBrand({ name, colors: { accent: '#F5E050', primary: '#F5E050' } });
+      const brand = presentBrand({ name, logoUrl: 'https://prospect.example/logo.png', colors: { accent: '#F5E050', primary: '#F5E050' } });
       const { container, unmount } = render(
         <PrototypeLayout brand={brand}><h1>Injection</h1></PrototypeLayout>,
       );
-      expectRibbon(container);
+      const mark = expectRibbon(container);
       expect(container.querySelector('style')).toBeNull();
       expect(container.querySelector('script')).toBeNull();
-      expect(container.innerHTML).not.toContain('<style>.ribbon');
-      expect(container.innerHTML).not.toContain('<script>alert');
+      expect(container.querySelector('img')).toBeNull();
+      expect(container.innerHTML).not.toContain('<style');
+      expect(container.innerHTML).not.toContain('<img');
+      expect(container.innerHTML).not.toContain('<script');
       expect(container.querySelector('.prototype-wordmark').textContent).toBe(brand.name);
+      expect(mark.textContent).toBe(WATERMARK_TEXT);
+      expect(mark.style.display).toBe('block');
+      expect(mark.style.visibility).toBe('visible');
+      expect(mark.style.opacity).toBe('1');
+      expect(getComputedStyle(mark).display).not.toBe('none');
+      expect(Number(getComputedStyle(mark).opacity)).toBe(1);
+      expect(brand.logoUrl).toBe('');
       expect(brand.theme.accent).toBe('#7D7000');
       unmount();
     }

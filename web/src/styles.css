@@ -456,6 +456,8 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .demo-mail-top, .demo-from, .demo-subject { display: flex; justify-content: space-between; gap: .5rem; flex-wrap: wrap; }
 .demo-when, .demo-kind { font-family: var(--font-num); font-size: .78rem; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); }
 .demo-mail-task { border-color: var(--ochre); }
+.demo-mail-stopped { border-style: dashed; background: var(--paper); }
+.demo-stopped { font-weight: 700; margin: 0 0 .75rem; }
 .demo-from, .demo-subject { display: block; color: var(--ink-2); font-size: .92rem; margin-bottom: .35rem; }
 .demo-quote { margin: 0 0 .75rem; }
 .demo-approved { margin: .45rem 0 0; font-weight: 700; color: var(--juniper); }

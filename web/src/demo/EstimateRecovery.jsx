@@ -113,8 +113,47 @@ export default function EstimateRecovery({ token }) {
   );
 }
 
+function prototypeTouches(company) {
+  return [
+    {
+      id: 'day1',
+      when: 'Day 1',
+      kind: 'email',
+      title: 'Thanks for asking',
+      subject: `Thanks from ${company}`,
+      body: `This note would leave the ${company} mailbox. It is a preview on this page.`,
+    },
+    {
+      id: 'day4',
+      when: 'Day 4',
+      kind: 'email',
+      title: 'Still open',
+      subject: 'Your estimate is still open',
+      body: `${company} would cover timing and what the price includes. This preview does not send it.`,
+    },
+    {
+      id: 'day8',
+      when: 'Day 8',
+      kind: 'task',
+      title: 'Reminder to you',
+      subject: 'Reminder to you: call',
+      body: `A task for the owner at ${company}. No call is placed.`,
+    },
+    {
+      id: 'day12',
+      when: 'Day 12',
+      kind: 'email',
+      stopped: true,
+      title: 'Sequence stopped',
+      subject: 'Not sent',
+      body: 'They replied, so this email stays unsent.',
+    },
+  ];
+}
+
 function Landing({ demo, onSend }) {
   const notify = usePrototypeNotify();
+  const chrome = usePrototypeChrome();
   const furnace = demo.estimates.find(item => item.options);
   return (
     <section aria-labelledby="demo-step-title">
@@ -123,7 +162,9 @@ function Landing({ demo, onSend }) {
         <SampleValue>{demo.company}</SampleValue>: <SampleValue>{demo.openCount}</SampleValue> open estimates, <SampleValue>{formatDollars(demo.openTotal)}</SampleValue>
       </h1>
       <p className="muted demo-lead">
-        Three fictional open jobs. Send estimate plays the follow-up as previews on this page. No email, text, or call goes out.
+        {chrome
+          ? 'Three fictional open jobs. Send estimate plays mailbox previews on this page. These would be emails from the owner. Nothing is sent.'
+          : 'Three fictional open jobs. Send estimate plays the follow-up as previews on this page. No email, text, or call goes out.'}
       </p>
       <ul className="demo-estimates">
         {demo.estimates.map(item => (
@@ -154,9 +195,15 @@ function Landing({ demo, onSend }) {
   );
 }
 
+function touchKind(kind, chrome) {
+  if (kind === 'stopped') return 'Stopped';
+  if (kind === 'task') return chrome ? 'Reminder to you' : 'Owner task';
+  return chrome ? 'Email from your mailbox' : 'Email preview';
+}
+
 function Timeline({ demo, onNext }) {
   const chrome = usePrototypeChrome();
-  const items = demo.timeline;
+  const items = chrome ? prototypeTouches(demo.company) : demo.timeline;
   const [count, setCount] = useState(() => (prefersReducedMotion() ? items.length : 1));
 
   useEffect(() => {
@@ -172,20 +219,23 @@ function Timeline({ demo, onNext }) {
       <p className="demo-kicker">Step 2 of 4 · <SampleValue>{demo.company}</SampleValue></p>
       <h1 id="demo-step-title">Preview — nothing is sent</h1>
       <p className="muted demo-lead">
-        Email previews branded for <SampleValue>{demo.company}</SampleValue>. The day 5 card is an owner task, not a message to the homeowner.
-        {chrome ? ' Stops on reply.' : ''}
+        {chrome
+          ? <>Emails from the <SampleValue>{demo.company}</SampleValue> mailbox. They stop when the customer replies. The call card is a reminder to you, not a call that goes out.</>
+          : <>Email previews branded for <SampleValue>{demo.company}</SampleValue>. The day 5 card is an owner task, not a message to the homeowner.</>}
       </p>
       <p role="status" className="demo-status">{done ? 'Preview finished. Nothing was sent.' : 'Playing the preview…'}</p>
       <ol className="demo-timeline" aria-label="Email previews">
         {items.slice(0, count).map(item => (
-          <li key={item.id} className={`demo-mail demo-mail-${item.kind}`}>
+          <li key={item.id} className={`demo-mail demo-mail-${item.kind}${item.stopped ? ' demo-mail-stopped' : ''}`}>
             <div className="demo-mail-top">
               <span className="demo-when"><SampleValue>{item.when}</SampleValue></span>
-              <span className="demo-kind">{item.kind === 'task' ? 'Owner task' : 'Email preview'}</span>
+              <span className="demo-kind">{touchKind(item.kind, chrome)}{item.stopped ? ' · Stopped' : ''}</span>
             </div>
             <h2><SampleValue>{item.title}</SampleValue></h2>
             <p className="demo-from">
-              {item.kind === 'task' ? 'Task for ' : 'From '}<SampleValue>{demo.company}</SampleValue>
+              {item.stopped
+                ? 'Not sent'
+                : <>{item.kind === 'task' ? 'Task for ' : 'From '}<SampleValue>{demo.company}</SampleValue></>}
             </p>
             <p className="demo-subject">Subject: <SampleValue>{item.subject}</SampleValue></p>
             <p><SampleValue>{item.body}</SampleValue></p>
@@ -199,12 +249,16 @@ function Timeline({ demo, onNext }) {
 
 function Reply({ demo, approved, onApprove, onNext }) {
   const notify = usePrototypeNotify();
+  const chrome = usePrototypeChrome();
   const furnace = demo.estimates.find(item => item.id === 'furnace');
   return (
     <section aria-labelledby="demo-step-title">
       <p className="demo-kicker">Step 3 of 4 · <SampleValue>{demo.company}</SampleValue></p>
       <h1 id="demo-step-title"><SampleValue>{demo.reply.question}</SampleValue></h1>
       <p className="muted demo-lead">A simulated homeowner reply. The answer below is a draft waiting for the owner.</p>
+      {chrome && (
+        <p className="demo-stopped" role="status">Sequence stopped. They replied, so the Day 12 email does not send.</p>
+      )}
       <blockquote className="demo-quote"><SampleValue>{demo.reply.question}</SampleValue></blockquote>
       <article className="demo-draft" aria-label="Drafted answer">
         <h2>Draft awaiting owner approval</h2>
