@@ -4,8 +4,8 @@ import { apiUrlIssue, shouldStoreApiUrl } from '../api-base.js';
 import { useAsync, ErrorNote, timeAgo, toast, money2 } from '../ui';
 
 export default function Settings({ authProblem, onSaved, version }) {
-  const [initialUrl] = useState(() => settings.apiUrl);
-  const [url, setUrl] = useState(initialUrl);
+  const [baseline, setBaseline] = useState(() => settings.apiUrl);
+  const [url, setUrl] = useState(baseline);
   const [key, setKey] = useState(settings.apiKey);
   const [urlError, setUrlError] = useState('');
   const [status, setStatus] = useState(null);
@@ -16,11 +16,15 @@ export default function Settings({ authProblem, onSaved, version }) {
 
   const saveAndTest = async (e) => {
     e.preventDefault();
-    const issue = apiUrlIssue(url);
-    if (issue) { setUrlError(issue); setStatus(null); return; }
+    const trimmed = url.trim();
+    if (trimmed) {
+      const issue = apiUrlIssue(trimmed);
+      if (issue) { setUrlError(issue); setStatus(null); return; }
+    }
     setUrlError('');
     setBusy(true); setStatus(null);
-    if (shouldStoreApiUrl(url, initialUrl)) settings.apiUrl = url.trim();
+    if (!trimmed) settings.apiUrl = '';
+    else if (shouldStoreApiUrl(trimmed, baseline)) settings.apiUrl = trimmed;
     settings.apiKey = key;
     try {
       await api.health();
@@ -31,6 +35,16 @@ export default function Settings({ authProblem, onSaved, version }) {
     } catch (err) {
       setStatus({ ok: false, msg: err.status === 401 ? 'The API rejected that key. Check CRM_API_KEY in Railway Variables.' : err.message });
     } finally { setBusy(false); }
+  };
+
+  const resetAddress = () => {
+    settings.apiUrl = '';
+    const next = settings.apiUrl;
+    setBaseline(next);
+    setUrl(next);
+    setUrlError('');
+    setStatus(null);
+    onSaved?.();
   };
 
   const trigger = async () => {
@@ -50,12 +64,15 @@ export default function Settings({ authProblem, onSaved, version }) {
 
       <form className="panel form" onSubmit={saveAndTest}>
         <h2>Connection</h2>
-        <p className="muted">Saved on this device only if you change the address. https is required, except http for localhost or 127.0.0.1.</p>
-        <label>API address<input className="input" value={url} onChange={e => { setUrl(e.target.value); setUrlError(''); }} placeholder="https://…" required aria-invalid={urlError ? 'true' : undefined} aria-describedby={urlError ? 'api-url-error' : undefined} /></label>
+        <p className="muted">Saved on this device only if you change the address. https is required, except http for localhost or 127.0.0.1. Clear the address and save, or choose Reset, to drop a saved address.</p>
+        <label>API address<input className="input" value={url} onChange={e => { setUrl(e.target.value); setUrlError(''); }} placeholder="https://…" aria-invalid={urlError ? 'true' : undefined} aria-describedby={urlError ? 'api-url-error' : undefined} /></label>
         {urlError && <p id="api-url-error" className="error-text" role="alert">{urlError}</p>}
         <label>API key<input className="input" type="password" value={key} onChange={e => setKey(e.target.value)} autoComplete="off" placeholder="Value of CRM_API_KEY" /></label>
         {status && <p className={status.ok ? 'ok-note' : 'error-text'} role="status">{status.msg}</p>}
-        <div className="form-actions"><button className="btn" disabled={busy}>{busy ? 'Checking…' : 'Save and connect'}</button></div>
+        <div className="form-actions">
+          <button type="button" className="btn btn-quiet" onClick={resetAddress} disabled={busy}>Reset</button>
+          <button className="btn" disabled={busy}>{busy ? 'Checking…' : 'Save and connect'}</button>
+        </div>
       </form>
 
       {connected && (

@@ -10,6 +10,7 @@ import Leads from './views/Leads';
 import Settings from './views/Settings';
 import {
   API_URL_SCHEME_MESSAGE,
+  API_URL_USERINFO_MESSAGE,
   LOCAL_API_URL,
   PRODUCTION_API_URL,
   PRODUCTION_HOSTS,
@@ -73,7 +74,16 @@ describe('resolveApiBase', () => {
   });
 
   it('treats an invalid VITE_API_URL as unset', () => {
-    for (const viteApiUrl of ['ftp://files.example.test', 'javascript:alert(1)', 'not a url', 'file:///tmp/api']) {
+    for (const viteApiUrl of [
+      'ftp://files.example.test',
+      'javascript:alert(1)',
+      'not a url',
+      'file:///tmp/api',
+      'http://staging.example.test',
+      'http://evil.com',
+      'https://user:pass@staging.example.test',
+      'https://user@staging.example.test',
+    ]) {
       expect(resolve({ viteApiUrl, hostname: PREVIEW_HOST })).toEqual({
         url: '',
         configured: false,
@@ -91,10 +101,39 @@ describe('resolveApiBase', () => {
         source: 'production',
       });
     }
-    expect(resolve({ viteApiUrl: 'http://staging.example.test', hostname: PREVIEW_HOST })).toEqual({
-      url: 'http://staging.example.test',
+    expect(resolve({ viteApiUrl: 'http://localhost:3000', hostname: PREVIEW_HOST })).toEqual({
+      url: 'http://localhost:3000',
       configured: true,
       source: 'env',
+    });
+    expect(resolve({ viteApiUrl: 'http://127.0.0.1:3000/', hostname: PREVIEW_HOST }).url).toBe('http://127.0.0.1:3000');
+  });
+
+  it('ignores a stored http://evil.com address and continues', () => {
+    expect(resolve({ savedUrl: 'http://evil.com', hostname: PREVIEW_HOST })).toEqual({
+      url: '',
+      configured: false,
+      source: 'unconfigured',
+    });
+    expect(resolve({
+      savedUrl: 'http://evil.com',
+      viteApiUrl: 'https://staging.example.test',
+      hostname: PREVIEW_HOST,
+    })).toEqual({
+      url: 'https://staging.example.test',
+      configured: true,
+      source: 'env',
+    });
+    expect(resolve({
+      savedUrl: 'http://evil.com',
+      dev: true,
+      prod: false,
+      hostname: 'localhost',
+    })).toEqual({ url: LOCAL_API_URL, configured: true, source: 'dev' });
+    expect(resolve({ savedUrl: 'https://user:pass@evil.com', hostname: PREVIEW_HOST }).source).toBe('unconfigured');
+    expect(resolve({ savedUrl: 'http://localhost:3000', hostname: PREVIEW_HOST })).toMatchObject({
+      url: 'http://localhost:3000',
+      source: 'settings',
     });
   });
 
@@ -182,12 +221,24 @@ describe('apiUrlIssue', () => {
       'http://evil.localhost',
       'http://127.0.0.1.evil.com',
       'http://example.com',
+      'http://evil.com',
       'ftp://localhost',
       'not a url',
     ]) {
       expect(apiUrlIssue(value)).toBe(API_URL_SCHEME_MESSAGE);
     }
     expect(apiUrlIssue('   ')).toBe('Enter an API address.');
+  });
+
+  it('rejects a username or password', () => {
+    for (const value of [
+      'https://user:pass@staging.example.test',
+      'https://user@staging.example.test',
+      'http://user:pass@localhost:3000',
+      'http://user:pass@127.0.0.1',
+    ]) {
+      expect(apiUrlIssue(value)).toBe(API_URL_USERINFO_MESSAGE);
+    }
   });
 });
 
@@ -258,6 +309,37 @@ describe('Settings API address', () => {
     expect(await screen.findByText('Connected. Your leads are loading.')).toBeInTheDocument();
     expect(writes).toEqual([]);
     expect(api.health).toHaveBeenCalled();
+  });
+
+  it('clears a saved address when the field is blank', async () => {
+    const user = userEvent.setup();
+    const writes = watchSettings('https://staging.example.test');
+    render(<Settings version={0} onSaved={() => {}} />);
+    await user.clear(screen.getByLabelText('API address'));
+    await user.click(screen.getByRole('button', { name: 'Save and connect' }));
+    expect(await screen.findByText('Connected. Your leads are loading.')).toBeInTheDocument();
+    expect(writes).toEqual(['']);
+  });
+
+  it('removes a saved address from Reset', async () => {
+    const user = userEvent.setup();
+    const writes = watchSettings('https://staging.example.test');
+    render(<Settings version={0} onSaved={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Reset' }));
+    expect(writes).toEqual(['']);
+    expect(screen.getByLabelText('API address')).toHaveValue('');
+    expect(api.health).not.toHaveBeenCalled();
+  });
+
+  it('does not save an address that includes a username or password', async () => {
+    const user = userEvent.setup();
+    const writes = watchSettings('');
+    render(<Settings version={0} onSaved={() => {}} />);
+    await user.type(screen.getByLabelText('API address'), 'https://user:pass@staging.example.test');
+    await user.click(screen.getByRole('button', { name: 'Save and connect' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(API_URL_USERINFO_MESSAGE);
+    expect(writes).toEqual([]);
+    expect(api.health).not.toHaveBeenCalled();
   });
 
   it('saves an https address the user typed', async () => {

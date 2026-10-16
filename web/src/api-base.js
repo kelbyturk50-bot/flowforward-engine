@@ -1,11 +1,13 @@
 // How the CRM chooses an API base URL.
 //
 // Precedence, first match:
-// 1. Settings-saved URL (`localStorage` key `ff.apiUrl`). Written only when
-//    someone changes the address and saves. The prefilled default is not stored.
-//    The value must be https, except http for localhost or 127.0.0.1.
-// 2. `VITE_API_URL`, when it is an http: or https: URL. Any other value is
-//    treated as unset, and resolution continues below.
+// 1. Settings-saved URL (`localStorage` key `ff.apiUrl`), when `apiUrlIssue`
+//    accepts it. Written only when someone changes the address and saves.
+//    The prefilled default is not stored. A stored value that fails, including
+//    one saved by an older build, is ignored and resolution continues.
+//    Clearing the field and saving, or Reset, removes the key.
+// 2. `VITE_API_URL`, under the same rule: https, or http for localhost or
+//    127.0.0.1, and no username or password. Any other value is treated as unset.
 // 3. `http://localhost:3000` when `import.meta.env.DEV` (the API's default port).
 // 4. The production Railway URL when `import.meta.env.PROD` and
 //    `location.hostname` is exactly one of `PRODUCTION_HOSTS`.
@@ -35,6 +37,7 @@ export function normalizeUrl(value) {
 }
 
 export const API_URL_SCHEME_MESSAGE = 'Use an https address. http is only allowed for localhost and 127.0.0.1.';
+export const API_URL_USERINFO_MESSAGE = 'Remove the username and password from the address.';
 
 export function apiUrlIssue(value) {
   const raw = String(value ?? '').trim();
@@ -42,24 +45,21 @@ export function apiUrlIssue(value) {
   let parsed;
   try { parsed = new URL(raw); }
   catch { return API_URL_SCHEME_MESSAGE; }
+  if (parsed.username || parsed.password) return API_URL_USERINFO_MESSAGE;
   const host = parsed.hostname;
   if (parsed.protocol === 'https:') return '';
   if (parsed.protocol === 'http:' && (host === 'localhost' || host === '127.0.0.1')) return '';
   return API_URL_SCHEME_MESSAGE;
 }
 
-export function shouldStoreApiUrl(typed, prefilled) {
-  return normalizeUrl(typed) !== normalizeUrl(prefilled);
+function usableApiUrl(value) {
+  const url = normalizeUrl(value);
+  if (!url || apiUrlIssue(url)) return '';
+  return url;
 }
 
-function envApiUrl(value) {
-  const url = normalizeUrl(value);
-  if (!url) return '';
-  let parsed;
-  try { parsed = new URL(url); }
-  catch { return ''; }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
-  return url;
+export function shouldStoreApiUrl(typed, prefilled) {
+  return normalizeUrl(typed) !== normalizeUrl(prefilled);
 }
 
 export function isProductionHost(hostname) {
@@ -71,10 +71,10 @@ export function isProductionHost(hostname) {
 }
 
 export function resolveApiBase({ viteApiUrl, dev, prod, hostname, savedUrl } = {}) {
-  const saved = normalizeUrl(savedUrl);
+  const saved = usableApiUrl(savedUrl);
   if (saved) return { url: saved, configured: true, source: 'settings' };
 
-  const fromEnv = envApiUrl(viteApiUrl);
+  const fromEnv = usableApiUrl(viteApiUrl);
   if (fromEnv) return { url: fromEnv, configured: true, source: 'env' };
 
   if (dev) return { url: LOCAL_API_URL, configured: true, source: 'dev' };

@@ -99,6 +99,25 @@ describe('real API client', () => {
     expect(fetch).toHaveBeenCalledWith('http://localhost:3000/health', expect.anything());
   });
 
+  it('does not send the API key to a stored http://evil.com address', async () => {
+    const fetchSpy = vi.fn(() => { throw new Error('fetch must not run'); });
+    vi.stubGlobal('fetch', fetchSpy);
+    localStorage.setItem('ff.apiUrl', 'http://evil.com');
+    _setRuntimeForTests({ dev: false, prod: true, hostname: PREVIEW_HOST, viteApiUrl: '' });
+    await expect(api.health()).rejects.toMatchObject({ message: UNCONFIGURED_MESSAGE, status: 0 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores a VITE_API_URL that is http on a public host or has a password', async () => {
+    const fetchSpy = vi.fn(() => { throw new Error('fetch must not run'); });
+    vi.stubGlobal('fetch', fetchSpy);
+    for (const viteApiUrl of ['http://evil.com', 'https://user:pass@staging.example.test']) {
+      _setRuntimeForTests({ dev: false, prod: true, hostname: PREVIEW_HOST, viteApiUrl, savedUrl: '' });
+      await expect(api.health()).rejects.toMatchObject({ message: UNCONFIGURED_MESSAGE, status: 0 });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('uses a Settings-saved URL the user stored, and only then', async () => {
     const fetchSpy = okFetch();
     vi.stubGlobal('fetch', fetchSpy);
