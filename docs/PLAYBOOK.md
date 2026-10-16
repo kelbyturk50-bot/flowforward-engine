@@ -57,7 +57,7 @@ Rules:
 
 Scheduled and agent routines stop at a **draft, an issue, or a PR**.
 
-They do not send email, contact a prospect, run discovery against live Places, approve a proposal, or change Railway or Vercel settings. A person does those. Kelby approves spend.
+They do not send email, contact a prospect, run discovery against live Places, approve a proposal, or change Railway or Vercel settings or env vars. A person does those. Kelby approves spend.
 
 Routines never merge. Merging is always a deliberate step by the owning engineer bot, never automated by a routine. See step 8.
 
@@ -70,7 +70,7 @@ Kelby confirmed this on Oct 15, 2026.
 1. While FlowForward is pre-production, the current Railway environment is staging. There is no separate staging environment yet. A separate Railway staging environment is deferred until real production go-live. After real production go-live, never write to the production DB or API.
 2. Tagged test DB and API writes are allowed in this environment only when every test record is clearly marked as test, the records are cleaned up afterward, and the proof is posted on the PR. Marked as test means the visible name starts with `TEST:` (prospect `company` or project `name`) and any email uses a `test+…@` address; there is no `is_test` column.
 3. Still banned in this environment: sending emails, proposal sends, discovery runs, and contacting prospects.
-4. Still banned: changing Railway or Vercel settings or environment variables.
+4. Still banned: changing Railway or Vercel settings or env vars.
 5. Never put secrets in chat, code, PRs, issues, or templates.
 
 The allowance in item 2 is only those tagged test DB and API writes. It does not change items 3, 4, or 5, and it does not change the standing bans on live Places, live Anthropic, or real sends. Local work still defaults to a disposable Postgres. The same rule is in `AGENTS.md`.
