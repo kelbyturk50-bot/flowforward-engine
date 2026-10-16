@@ -108,6 +108,9 @@ export function PrototypeShell({ brandName, accent, children }) {
         <div className="prototype-root">
           <a className="skip" href="#prototype-main">Skip to content</a>
           <PrototypeWatermark />
+          {message ? (
+            <p className="prototype-toast" role="status">{message}</p>
+          ) : null}
           <div className="prototype-scroll">
             <div
               className="prototype-screen prototype-tile"
@@ -118,9 +121,6 @@ export function PrototypeShell({ brandName, accent, children }) {
               <PrototypeFooter business={brandName} />
             </div>
           </div>
-          {message ? (
-            <p className="prototype-toast" role="status">{message}</p>
-          ) : null}
         </div>
       </PrototypeActionContext.Provider>
     </PrototypeChromeContext.Provider>

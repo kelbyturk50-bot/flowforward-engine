@@ -156,7 +156,9 @@ describe('prototype gallery', () => {
     expect(screen.getByRole('heading', { name: 'Preview — nothing is sent' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Thank you' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Close the loop' })).toBeInTheDocument();
-    expect(screen.getByText(ACTION_TOAST)).toBeInTheDocument();
+    const toast = screen.getByText(ACTION_TOAST);
+    expect(toast).toBeInTheDocument();
+    expect(container.querySelector('.prototype-scroll').contains(toast)).toBe(false);
     expectRibbon(container);
     for (const card of container.querySelectorAll('.demo-mail')) {
       expect(card.querySelector('.prototype-sample')).not.toBeNull();

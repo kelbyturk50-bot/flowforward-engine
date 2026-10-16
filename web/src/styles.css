@@ -565,17 +565,17 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   line-height: 1.35 !important;
 }
 .prototype-toast {
-  position: fixed !important;
-  left: 50% !important;
-  bottom: 16px !important;
-  transform: translateX(-50%) !important;
-  z-index: 2147482000 !important;
+  position: static !important;
+  flex-shrink: 0 !important;
+  z-index: auto !important;
   display: block !important;
-  max-width: calc(100% - 24px) !important;
+  width: 100% !important;
+  max-width: none !important;
   margin: 0 !important;
   padding: 12px 16px !important;
   min-height: 44px !important;
-  border-radius: 10px !important;
+  border-radius: 0 !important;
+  transform: none !important;
   background-color: #1E2A2F !important;
   color: #FFFFFF !important;
   -webkit-text-fill-color: #FFFFFF !important;
