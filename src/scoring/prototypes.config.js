@@ -8,6 +8,8 @@
 //
 // F-003 job-ad and LSA signals are not in Scout's v1 matrix, so they add 0.
 // quote_form is new-collect and is not scored.
+// computeFit scores those cache hits separately (ESTIMATE_SIGNAL_POINTS).
+// This picker does not read that table and does not change a fit score.
 //
 // Plumbing has no industry points. That is a picker bias only (Summit: no
 // plumbing score tweak). HVAC's place in prospectBeachhead sorts prospects,
