@@ -1339,7 +1339,7 @@ describe('pest-name archive', { concurrency: false }, () => {
       google_place_id: 'test-place-opt-control',
       company: 'TEST: Opt Control Heating',
       industry: 'HVAC',
-      email: 'test+opt-control@example.com',
+      email: 'test+opt-control@opt-control.test',
       website: null,
       stage: 'contacted',
     });
@@ -1347,7 +1347,7 @@ describe('pest-name archive', { concurrency: false }, () => {
       google_place_id: 'test-place-opt-archived',
       company: 'TEST: Opt Heating',
       industry: 'HVAC',
-      email: 'test+opt-archived@example.com',
+      email: 'test+opt-archived@opt-archived.test',
       website: null,
       stage: 'contacted',
       next_action: 'Leave this',
@@ -1372,11 +1372,11 @@ describe('pest-name archive', { concurrency: false }, () => {
       );
       return rows[0].id;
     }
-    const controlId = await dueSent(control.id, 'opt-control', 'test+opt-control@example.com');
-    const archivedId = await dueSent(archived.id, 'opt-archived', 'test+opt-archived@example.com');
+    const controlId = await dueSent(control.id, 'opt-control', 'test+opt-control@opt-control.test');
+    const archivedId = await dueSent(archived.id, 'opt-archived', 'test+opt-archived@opt-archived.test');
 
     const reply = await applyInboxMessages([{
-      from: 'test+opt-archived@example.com',
+      from: 'test+opt-archived@opt-archived.test',
       text: 'Sounds good, let us talk next week.',
       date: new Date(),
       inReplyTo: '<opt-archived@localhost>',
@@ -1389,7 +1389,7 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.equal(stillAction.rows[0].next_action, 'Leave this');
 
     const recorded = await applyInboxMessages([{
-      from: 'test+opt-archived@example.com',
+      from: 'test+opt-archived@opt-archived.test',
       text: 'Please unsubscribe me from these emails.',
       date: new Date(),
       inReplyTo: '<opt-archived@localhost>',
@@ -1413,7 +1413,7 @@ describe('pest-name archive', { concurrency: false }, () => {
       google_place_id: 'test-place-bounce-archived',
       company: 'TEST: Bounce Heating',
       industry: 'HVAC',
-      email: 'test+bounce-archived@example.com',
+      email: 'test+bounce-archived@bounce-archived.test',
       website: null,
       stage: 'contacted',
     });
@@ -1423,11 +1423,11 @@ describe('pest-name archive', { concurrency: false }, () => {
         WHERE id = $1`,
       [bouncedLead.id, PEST_ARCHIVE_REASON, '66666666-6666-4666-8666-666666666666']
     );
-    const bounceId = await dueSent(bouncedLead.id, 'bounce-archived', 'test+bounce-archived@example.com');
+    const bounceId = await dueSent(bouncedLead.id, 'bounce-archived', 'test+bounce-archived@bounce-archived.test');
     const bounced = await applyInboxMessages([{
-      from: 'mailer-daemon@example.com',
+      from: 'mailer-daemon@bounce-archived.test',
       subject: 'Delivery Status Notification (Failure)',
-      text: 'Delivery to test+bounce-archived@example.com failed',
+      text: 'Delivery to test+bounce-archived@bounce-archived.test failed',
       date: new Date(),
     }]);
     assert.equal(bounced.matched, 1);
@@ -1467,7 +1467,7 @@ describe('pest-name archive', { concurrency: false }, () => {
     const follow = await sendDueFollowups();
     assert.equal(follow.sent, 1);
     assert.equal(sentMail.length, 1);
-    assert.equal(sentMail[0].to.address, 'test+opt-control@example.com');
+    assert.equal(sentMail[0].to.address, 'test+opt-control@opt-control.test');
     const archivedFollow = await pool.query(
       'SELECT status, followup1_sent_at FROM proposals WHERE id = $1',
       [archivedId]
