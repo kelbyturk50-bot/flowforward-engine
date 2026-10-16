@@ -1,10 +1,10 @@
 # FlowForward Engine
 
-Automated prospect discovery for FlowForward AI Consulting. Finds home service SMBs (HVAC, roofing, landscaping, plumbing, pest control, etc.) across your target markets using the Google Places API and stores them in PostgreSQL.
+Automated prospect discovery for FlowForward AI Consulting. Finds home service SMBs (HVAC, roofing, landscaping, plumbing, and similar trades) across your target markets using the Google Places API and stores them in PostgreSQL. Pest control is out of scope.
 
 ## What it does
 
-- **Discovery bot** — queries Google Places for 22 industry types × your target markets, deduplicates by Place ID, and upserts new leads into the database
+- **Discovery bot** — queries Google Places for 20 search queries × your target markets, deduplicates by Place ID, and upserts new leads into the database
 - **REST API** — serves prospect data to the FlowForward Pipeline dashboard
 - **Scheduled cron** — runs discovery automatically every morning at 6am
 
@@ -170,7 +170,7 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | `PROPOSAL_MODEL` | no | `claude-sonnet-5-5` |
 | `PROPOSAL_NIGHTLY_COUNT` | no | `5` |
 | `PROPOSAL_TIERS` | no | `A` (e.g. `A,B` later) |
-| `EXCLUDED_INDUSTRIES` | no | `Pest Control` (also skipped by discovery) |
+| `EXCLUDED_INDUSTRIES` | no | `Pest Control` (skipped by discovery; fit score forced to 0 / tier D) |
 | `PROPOSAL_AUTO_DRAFT` | no | off. `1` = also draft automatically each night |
 | `PROPOSAL_CRON` | no | `0 3 * * *` (only used when auto-draft is on) |
 | `PROPOSAL_WEB_SEARCH` / `PROPOSAL_WEB_SEARCH_MAX` | no | on / `3` searches per lead |
@@ -215,7 +215,7 @@ Default: Utah County + Salt Lake Valley
 
 ## Industries tracked
 
-22 search query types across: HVAC, Roofing, Landscaping, Plumbing, Electrical, Pest Control, Cleaning, Painting, Gutters, Windows, General Contractors.
+20 search queries across: HVAC, Roofing, Landscaping, Plumbing, Electrical, Cleaning, Painting, Gutters, Windows, General Contractors. Pest control is out of scope.
 
 Edit `src/bot/industries.js` to add or remove.
 

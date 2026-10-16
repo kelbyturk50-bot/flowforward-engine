@@ -25,10 +25,6 @@ module.exports = [
   { query: 'electrician',            industry: 'Electrical',  score: 7 },
   { query: 'electrical contractor',  industry: 'Electrical',  score: 7 },
 
-  // Pest Control
-  { query: 'pest control company',   industry: 'Pest Control', score: 9 },
-  { query: 'exterminator',           industry: 'Pest Control', score: 9 },
-
   // Cleaning
   { query: 'house cleaning service', industry: 'Cleaning',    score: 6 },
   { query: 'commercial cleaning',    industry: 'Cleaning',    score: 7 },

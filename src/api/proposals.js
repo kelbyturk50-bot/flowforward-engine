@@ -3,6 +3,7 @@ const express = require('express');
 const router  = express.Router();
 const pool    = require('../db/client');
 const cfg     = require('../proposals/config');
+const { appendIndustryExclusion } = require('../scoring/industry');
 const { draftProposal, runProposalBatch, getSetting, isRunning } = require('../proposals/draft');
 const send    = require('../proposals/send');
 const jobs    = require('../proposals/jobs');
@@ -48,12 +49,14 @@ router.get('/summary', async (req, res) => {
       const { rows } = await pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr WHERE ${w}`);
       counts[k] = rows[0].n;
     }));
+    const eligibleParams = [cfg.TIERS];
+    const industrySql = appendIndustryExclusion(eligibleParams, cfg.EXCLUDED_INDUSTRIES);
     const [spend, sentToday, eligible] = await Promise.all([
       pool.query(`SELECT COALESCE(SUM(cost_usd), 0)::float AS month FROM proposals WHERE created_at >= date_trunc('month', NOW())`),
       send.sentToday(),
       pool.query(`SELECT COUNT(*)::int AS n FROM prospects p WHERE p.fit_tier = ANY($1) AND p.stage = 'found' AND NOT p.do_not_contact
-                    AND p.industry <> ALL($2) AND (p.website IS NOT NULL OR p.email IS NOT NULL)
-                    AND NOT EXISTS (SELECT 1 FROM proposals pr WHERE pr.prospect_id = p.id)`, [cfg.TIERS, cfg.EXCLUDED_INDUSTRIES]),
+                    AND ${industrySql} AND (p.website IS NOT NULL OR p.email IS NOT NULL)
+                    AND NOT EXISTS (SELECT 1 FROM proposals pr WHERE pr.prospect_id = p.id)`, eligibleParams),
     ]);
     const [unreviewed, activeJobs] = await Promise.all([
       pool.query(`SELECT COUNT(*)::int AS n FROM proposals WHERE status = 'draft' AND reviewed_at IS NULL`),

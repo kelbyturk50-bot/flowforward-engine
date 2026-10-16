@@ -3,6 +3,19 @@ const express = require('express');
 const router  = express.Router();
 const pool    = require('../db/client');
 const { rescore } = require('../scoring/fit');
+const { normalizeIndustry } = require('../scoring/industry');
+
+// Public writes must already be text. Do not coerce objects, arrays, or numbers.
+// Length is checked after trim. Control characters, including bidi marks, are rejected.
+const INDUSTRY_MAX = 80;
+const INDUSTRY_CONTROL = /[\u0000-\u001F\u007F-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/;
+
+function industryIsValid(value) {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > INDUSTRY_MAX) return false;
+  return !INDUSTRY_CONTROL.test(trimmed);
+}
 
 const STAGES = ['found', 'contacted', 'responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const CLOSED = ['won', 'lost', 'disqualified'];
@@ -81,13 +94,15 @@ router.post('/rescore', async (req, res) => {
 // POST /api/prospects — add a lead by hand (referral, walk-in, etc.)
 router.post('/', async (req, res) => {
   const b = req.body || {};
-  if (!b.company || !b.industry) return res.status(400).json({ error: 'company and industry are required' });
+  if (!industryIsValid(b.industry)) return res.status(400).json({ error: 'invalid industry' });
+  const industry = normalizeIndustry(b.industry);
+  if (!b.company || !industry) return res.status(400).json({ error: 'company and industry are required' });
   try {
     const { rows } = await pool.query(
       `INSERT INTO prospects (company, industry, phone, website, email, contact_name, address, city, state, zip,
                               rating, review_count, note, source, stage, est_value, fit_boost)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'manual',$14,$15,$16) RETURNING id`,
-      [b.company, b.industry, b.phone || null, b.website || null, b.email || null, b.contact_name || null,
+      [b.company, industry, b.phone || null, b.website || null, b.email || null, b.contact_name || null,
        b.address || null, b.city || null, b.state || 'UT', b.zip || null, b.rating || null, b.review_count || 0,
        b.note || null, STAGES.includes(b.stage) ? b.stage : 'found', b.est_value || null, b.fit_boost || 0]
     );
@@ -121,6 +136,10 @@ const RESCORE_FIELDS = ['fit_boost', 'industry', 'city', 'phone', 'website'];
 
 router.patch('/:id', async (req, res) => {
   const body = { ...req.body };
+  if (Object.prototype.hasOwnProperty.call(body, 'industry')) {
+    if (!industryIsValid(body.industry)) return res.status(400).json({ error: 'invalid industry' });
+    body.industry = normalizeIndustry(body.industry);
+  }
   if (body.stage && !STAGES.includes(body.stage)) return res.status(400).json({ error: `stage must be one of ${STAGES.join(', ')}` });
   for (const k of ['next_action_at', 'est_value', 'email', 'contact_name', 'website', 'phone']) if (body[k] === '') body[k] = null;
   if (body.fit_boost != null) body.fit_boost = Math.max(-20, Math.min(20, parseInt(body.fit_boost, 10) || 0));

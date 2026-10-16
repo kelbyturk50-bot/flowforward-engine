@@ -25,6 +25,8 @@ const FIELD_MASK = [
   'places.userRatingCount',
   'places.businessStatus',
   'places.addressComponents',
+  'places.primaryType',
+  'places.types',
 ].join(',');
 
 /**

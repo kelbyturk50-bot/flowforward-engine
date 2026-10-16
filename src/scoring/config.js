@@ -6,8 +6,9 @@
 // the owner makes the buying decision, reachable, and close enough to meet.
 
 // Industry fit, 1–10. Defaults come from src/bot/industries.js; override here.
+// Pest Control is intentionally absent: it is out of scope (see EXCLUDED_INDUSTRIES).
+// Synonyms are normalized to that name in src/scoring/industry.js.
 const INDUSTRY_FIT = {
-  'Pest Control': 9,   // recurring service routes, heavy scheduling + follow-up
   'HVAC':         9,   // high ticket, dispatch + maintenance agreements
   'Plumbing':     8,
   'Roofing':      8,   // lead follow-up, estimates, insurance paperwork
@@ -58,4 +59,12 @@ const TIERS = [
   { tier: 'D', min: 0 },
 ];
 
-module.exports = { INDUSTRY_FIT, HOME_CITIES, HOME_STATE, FRANCHISE_PATTERNS, SOCIAL_HOSTS, TIERS };
+// Trades FlowForward does not sell to. One list, shared by discovery, fit scoring,
+// and proposal drafting. Default is Pest Control. Override with
+// EXCLUDED_INDUSTRIES="A,B" (comma-separated). An empty value clears the list.
+const EXCLUDED_INDUSTRIES = (process.env.EXCLUDED_INDUSTRIES ?? 'Pest Control')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+module.exports = { INDUSTRY_FIT, EXCLUDED_INDUSTRIES, HOME_CITIES, HOME_STATE, FRANCHISE_PATTERNS, SOCIAL_HOSTS, TIERS };

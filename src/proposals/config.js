@@ -1,6 +1,8 @@
 // Proposal bot configuration. Everything here can be overridden with Railway
 // Variables; the defaults match how Kelby sells today.
 
+const { EXCLUDED_INDUSTRIES } = require('../scoring/config');
+
 const list = (v, d) => (v ?? d).split(',').map(s => s.trim()).filter(Boolean);
 const num  = (v, d) => (v == null || v === '' || isNaN(Number(v)) ? d : Number(v));
 
@@ -52,7 +54,8 @@ const config = {
   // Which leads the nightly run drafts for
   NIGHTLY_COUNT:       num(process.env.PROPOSAL_NIGHTLY_COUNT, 5),
   TIERS:               list(process.env.PROPOSAL_TIERS, 'A'),
-  EXCLUDED_INDUSTRIES: list(process.env.EXCLUDED_INDUSTRIES, 'Pest Control'),
+  // Same list discovery skips and computeFit hard-demotes. Defined in src/scoring/config.js.
+  EXCLUDED_INDUSTRIES,
   // Automatic nightly drafting is OFF unless PROPOSAL_AUTO_DRAFT=1. Drafts are made on demand from the CRM.
   AUTO_DRAFT:          process.env.PROPOSAL_AUTO_DRAFT === '1',
   CRON:                process.env.PROPOSAL_CRON || '0 3 * * *',      // used only when AUTO_DRAFT is on
