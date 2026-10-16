@@ -1075,19 +1075,21 @@ describe('pest company-name gate', { concurrency: false }, () => {
             return true;
           }
         );
-        const res = await fetch(apiBase + '/api/proposals', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ prospect_id: row.lead.id, force: true, industry: 'Plumbing' }),
-        });
-        const json = await res.json();
-        assert.equal(res.status, 409, row.company);
-        assert.deepEqual(json, { error: `${PEST_NAME_REASON}.` });
       }
     } finally {
       guard.restore();
     }
     assert.deepEqual(guard.hits, []);
+    for (const row of brands) {
+      const res = await fetch(apiBase + '/api/proposals', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prospect_id: row.lead.id, force: true, industry: 'Plumbing' }),
+      });
+      const json = await res.json();
+      assert.equal(res.status, 409, row.company);
+      assert.deepEqual(json, { error: `${PEST_NAME_REASON}.` });
+    }
     assert.equal(claudeCalls, callsBefore);
     const proposals = await pool.query('SELECT id FROM proposals WHERE prospect_id = ANY($1::int[])', [brands.map(row => row.lead.id)]);
     assert.equal(proposals.rows.length, 0);
