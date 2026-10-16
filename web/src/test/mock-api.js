@@ -7,6 +7,10 @@ export const settings = {
   apiKey: 'test-key',
 };
 
+export function currentApiBase() {
+  return { url: settings.apiUrl, configured: true, source: 'test' };
+}
+
 export class ApiError extends Error {
   constructor(message, status) {
     super(message);
