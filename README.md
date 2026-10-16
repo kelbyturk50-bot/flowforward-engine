@@ -107,6 +107,7 @@ Every lead gets a 0–100 fit score and an A–D tier, recomputed on boot, after
 | Factor | Points | Logic |
 |---|---|---|
 | Industry | 30 | Automation leverage per trade (`src/scoring/config.js`) |
+| Pest name | hard stop | A company name matching the pest word-boundary pattern scores 0 / tier D even when the stored industry is HVAC or plumbing, and the proposal bot will not draft it. Pestana, Compest, and Best are not matches. |
 | Size | 25 | Review count as a 2–15 truck proxy; max points at 25–200 reviews |
 | Reputation | 10 | Google rating |
 | Reachability | 15 | Real website + phone (social-only pages score lower) |
