@@ -1,9 +1,10 @@
 // Opaque demo tokens. 16 random bytes is 22 unpadded base64url characters.
+// Valid tokens are base64url and 22 to 64 characters. Anything else is not a token.
 // The CRM preview link uses a fixed synthetic token. It is not a credential.
 
 export const DEMO_PREVIEW_TOKEN = 'demo-example-heating-air';
 
-const TOKEN = /^[A-Za-z0-9_-]{22,}$/;
+const TOKEN = /^[A-Za-z0-9_-]{22,64}$/;
 const DEMO_PATH = /^\/demo\/estimate-recovery\/([^/]+)\/?$/;
 
 export function isDemoToken(token) {
