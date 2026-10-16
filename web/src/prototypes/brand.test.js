@@ -169,9 +169,15 @@ describe('brand sanitizer', () => {
     expect(step).toContain('background: var(--surface)');
     expect(step).toContain('color: var(--proto-accent, var(--accent))');
     expect(step).toContain('border-color: var(--proto-accent, var(--accent))');
-    expect(css).toContain('--proto-accent: var(--proto-accent-dark, var(--proto-accent-light, var(--accent)))');
-    expect(css).toContain('--paper: #141C1F');
-    expect(css).toContain('--surface: #1C262A');
+    const root = css.slice(css.indexOf('.prototype-root {'), css.indexOf('.prototype-scroll'));
+    expect(root).toContain('--paper: #F3F6F5');
+    expect(root).toContain('--surface: #FFFFFF');
+    expect(root).toContain('--ink: #1E2A2F');
+    expect(root).toContain('color-scheme: light');
+    const proto = css.slice(css.indexOf('/* ── Prototype gallery'), css.indexOf('/* prototype-watermark:'));
+    expect(proto).not.toContain('--proto-accent-dark');
+    expect(contrastRatio('#14213D', PAPER)).toBeGreaterThanOrEqual(text);
+    expect(contrastRatio('#14213D', SURFACE)).toBeGreaterThanOrEqual(text);
   });
 
   it('strips bidi overrides and zero-width characters from names', () => {
