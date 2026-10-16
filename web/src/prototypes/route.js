@@ -1,0 +1,57 @@
+// Prototype gallery routes live under /demo so the existing X-Robots-Tag
+// on /demo/:path* covers them. Token shape matches the estimate-recovery demo
+// (22–64 base64url characters, at least 16 bytes). Link expiry is the
+// issuer's job; this static preview uses one fixed synthetic token.
+
+import { isDemoToken } from '../demo/token';
+
+const GALLERY = /^\/demo\/gallery\/([^/]+)(?:\/([^/]+))?\/?$/;
+
+export const GALLERY_PREVIEW_TOKEN = 'demo-test-wasatch-heating';
+
+function decodePart(value) {
+  try { return decodeURIComponent(value); }
+  catch { return value; }
+}
+
+export function galleryRouteFromPath(pathname) {
+  const match = String(pathname ?? '').match(GALLERY);
+  if (!match) return null;
+  const token = decodePart(match[1]);
+  const rawScreen = match[2] ? decodePart(match[2]) : 'index';
+  const screen = rawScreen === 'index' || rawScreen === 'estimate-follow-up' ? rawScreen : 'unknown';
+  return { token, screen };
+}
+
+export function galleryTokenOk(token) {
+  return isDemoToken(token);
+}
+
+function encodeList(value) {
+  return String(value)
+    .split(',')
+    .map(part => encodeURIComponent(part.trim()))
+    .filter(Boolean)
+    .join(',');
+}
+
+export function galleryHref(token = GALLERY_PREVIEW_TOKEN, screen = 'index', search = '') {
+  const path = screen === 'estimate-follow-up'
+    ? `/demo/gallery/${token}/estimate-follow-up`
+    : `/demo/gallery/${token}`;
+  const current = new URLSearchParams(String(search || '').replace(/^\?/, ''));
+  const parts = [];
+  const flags = current.get('flags');
+  if (flags) parts.push(`flags=${encodeList(flags)}`);
+  if (current.get('fixture') === 'hostile') parts.push('fixture=hostile');
+  const query = parts.join('&');
+  return `${path}${query ? `?${query}` : ''}`;
+}
+
+export function followGalleryLink(event, href) {
+  if (event.defaultPrevented) return;
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+  event.preventDefault();
+  window.history.pushState({}, '', href);
+  window.dispatchEvent(new PopStateEvent('popstate'));
+}

@@ -22,10 +22,18 @@ describe('demo code split', () => {
     expect(view).not.toMatch(/from ['"]\.\/fixture/);
     expect(adapter).toMatch(/import\(\s*['"]\.\/fixture\.js['"]\s*\)/);
     expect(view).toMatch(/import\(\s*['"]\.\/fixture\.js['"]\s*\)/);
+    const galleryGate = readFileSync(path.join(webRoot, 'src/prototypes/GalleryGate.jsx'), 'utf8');
     expect(flags).toMatch(/\[FF_PILOT_ESTIMATE_RECOVERY\]:\s*false/);
     expect(flags).toMatch(/\[FF_PILOT_LINK_ON_ONEPAGER\]:\s*false/);
     expect(flags).toMatch(/\[FF_PILOT_ESTIMATE_SMS\]:\s*false/);
+    expect(flags).toMatch(/\[FF_PROTOTYPE_GALLERY\]:\s*false/);
     expect(flags).not.toMatch(/VITE_FF/);
+    expect(main).not.toMatch(/GalleryApp/);
+    expect(main).not.toMatch(/fixture-brand/);
+    expect(main).not.toMatch(/PrototypeWatermark/);
+    expect(galleryGate).toMatch(/import\(\s*['"]\.\/GalleryApp\.jsx['"]\s*\)/);
+    expect(galleryGate).not.toMatch(/fixture-brand/);
+    expect(galleryGate).not.toMatch(/EstimateRecovery/);
   });
 
   it('keeps the fixture out of the main chunk', () => {
@@ -62,10 +70,16 @@ describe('demo code split', () => {
       expect(entry, names.join(', ')).toBeTruthy();
       expect(entry.text).not.toContain('Example Heating & Air');
       expect(entry.text).not.toContain('Is there financing?');
+      expect(entry.text).not.toContain('TEST: Wasatch Heating');
+      expect(entry.text).not.toContain('PROTOTYPE, not live');
       const fixture = files.find(file => file.text.includes('Example Heating & Air'));
       expect(fixture, names.join(', ')).toBeTruthy();
       expect(fixture.name).not.toBe(entry.name);
       expect(fixture.text).toContain('Is there financing?');
+      const gallery = files.find(file => file.text.includes('TEST: Wasatch Heating'));
+      expect(gallery, names.join(', ')).toBeTruthy();
+      expect(gallery.name).not.toBe(entry.name);
+      expect(gallery.text).toContain('PROTOTYPE, not live');
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }

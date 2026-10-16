@@ -31,11 +31,43 @@ function downloadJson(filename, text) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+export function EstimateRecoveryFlow({ demo }) {
+  const [step, setStep] = useState(1);
+  const [approved, setApproved] = useState(false);
+
+  return (
+    <div className="demo-wrap" data-step={step}>
+      <p className="demo-banner" role="note">
+        Sample walkthrough for {demo.company}. The jobs and amounts are fictional. Nothing on this page is sent.
+      </p>
+      <ol className="demo-steps" aria-label="Demo progress">
+        {STEPS.map(item => (
+          <li key={item.id} aria-current={item.id === step ? 'step' : undefined}>{item.id} {item.label}</li>
+        ))}
+      </ol>
+      {step === 1 && <Landing demo={demo} onSend={() => setStep(2)} />}
+      {step === 2 && <Timeline demo={demo} onNext={() => setStep(3)} />}
+      {step === 3 && (
+        <Reply
+          demo={demo}
+          approved={approved}
+          onApprove={() => setApproved(true)}
+          onNext={() => setStep(4)}
+        />
+      )}
+      {step === 4 && (
+        <Summary
+          demo={demo}
+          onRestart={() => { setApproved(false); setStep(1); }}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function EstimateRecovery({ token }) {
   const [demo, setDemo] = useState(null);
   const [failed, setFailed] = useState(false);
-  const [step, setStep] = useState(1);
-  const [approved, setApproved] = useState(false);
 
   useEffect(() => {
     const company = readCompanyOverride();
@@ -70,33 +102,8 @@ export default function EstimateRecovery({ token }) {
   }
 
   return (
-    <main className="demo" data-step={step}>
-      <div className="demo-wrap">
-        <p className="demo-banner" role="note">
-          Sample walkthrough for {demo.company}. The jobs and amounts are fictional. Nothing on this page is sent.
-        </p>
-        <ol className="demo-steps" aria-label="Demo progress">
-          {STEPS.map(item => (
-            <li key={item.id} aria-current={item.id === step ? 'step' : undefined}>{item.id} {item.label}</li>
-          ))}
-        </ol>
-        {step === 1 && <Landing demo={demo} onSend={() => setStep(2)} />}
-        {step === 2 && <Timeline demo={demo} onNext={() => setStep(3)} />}
-        {step === 3 && (
-          <Reply
-            demo={demo}
-            approved={approved}
-            onApprove={() => setApproved(true)}
-            onNext={() => setStep(4)}
-          />
-        )}
-        {step === 4 && (
-          <Summary
-            demo={demo}
-            onRestart={() => { setApproved(false); setStep(1); }}
-          />
-        )}
-      </div>
+    <main className="demo">
+      <EstimateRecoveryFlow demo={demo} />
     </main>
   );
 }
