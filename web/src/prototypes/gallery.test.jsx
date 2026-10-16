@@ -161,7 +161,10 @@ describe('prototype gallery', () => {
     expect(container.innerHTML).not.toContain('<script>alert(1)</script>');
     expect(container.innerHTML).toContain('&lt;script&gt;');
 
-    const mark = screen.getByRole('note', { name: WATERMARK_TEXT });
+    const mark = container.querySelector('[data-prototype-watermark="true"]');
+    expect(mark).not.toBeNull();
+    expect(mark.textContent).toBe(WATERMARK_TEXT);
+    expect(mark.getAttribute('aria-label')).toBe(WATERMARK_TEXT);
     const branded = container.querySelector('.prototype-screen');
     expect(branded.contains(mark)).toBe(false);
     expect(mark.getAttribute('hidden')).toBeNull();
@@ -183,8 +186,9 @@ describe('prototype gallery', () => {
   });
 
   it('ignores props that try to hide the watermark', () => {
-    render(<PrototypeWatermark hidden watermark="off" style={{ display: 'none', opacity: 0 }} />);
-    const mark = screen.getByRole('note', { name: WATERMARK_TEXT });
+    const { container } = render(<PrototypeWatermark hidden watermark="off" style={{ display: 'none', opacity: 0 }} />);
+    const mark = container.querySelector('[data-prototype-watermark="true"]');
+    expect(mark.textContent).toBe(WATERMARK_TEXT);
     expect(mark.style.display).toBe('block');
     expect(mark.style.opacity).toBe('1');
     expect(mark.hidden).toBe(false);

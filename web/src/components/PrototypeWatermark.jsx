@@ -48,6 +48,7 @@ export default function PrototypeWatermark() {
     <p
       className="prototype-watermark"
       role="note"
+      aria-label={WATERMARK_TEXT}
       data-prototype-watermark="true"
       style={WATERMARK_STYLE}
     >
