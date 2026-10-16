@@ -28,6 +28,8 @@ const {
   PEST_TEXT_PATTERN,
   PEST_COMPANY_PATTERN,
   STREET_BRAND_PATTERN,
+  COMPANY_SPACE_PATTERN,
+  COMPANY_NAME_LIMIT,
   isPestCompanyName,
   isPestText,
   isPestDiscoveryPlace,
@@ -184,6 +186,14 @@ const BRAND_HITS = [
   'Moxie  Pest',
   'Bulwark-Exterminating',
   'Orkin Street Pest Control',
+  'Truly\u00A0Nolen',
+  'Rollins\u00A0Inc',
+  'Massey\u00A0Services',
+  'Truly\u2007Nolen',
+  'Rollins\u202FInc',
+  'Massey\u3000Services',
+  'Truly\u200BNolen',
+  'Orkin\u00A0Street Pest Control',
 ];
 
 const BRAND_MISSES = [
@@ -219,6 +229,12 @@ const BRAND_MISSES = [
   'Terminix Ave',
   'Terminix Avenue Shop',
   'Orkin St Plumbing',
+  'Orkin\u00A0St',
+  'Orkin\u2007St',
+  'Orkin\u202FSt',
+  'Orkin\u3000St',
+  'Orkin\u200BSt',
+  'Orkin\u00A0St Plumbing',
   'Orkin Road',
   'Orkin Rd Landscaping',
   'Captive Heating',
@@ -1014,11 +1030,15 @@ describe('pest company-name gate', { concurrency: false }, () => {
 
     const bound = [];
     const fragment = appendCompanyPestExclusion(bound);
-    assert.deepEqual(bound, [STREET_BRAND_PATTERN, PEST_COMPANY_PATTERN]);
+    assert.deepEqual(bound, [COMPANY_SPACE_PATTERN, STREET_BRAND_PATTERN, PEST_COMPANY_PATTERN]);
     assert.equal(fragment.includes(PEST_COMPANY_PATTERN), false);
     assert.equal(fragment.includes(STREET_BRAND_PATTERN), false);
-    assert.match(fragment, /regexp_replace/);
-    assert.match(fragment, /!~ \$2/);
+    assert.equal(fragment.includes(COMPANY_SPACE_PATTERN), false);
+    assert.equal(COMPANY_SPACE_PATTERN.includes('\\s'), false);
+    assert.equal(COMPANY_SPACE_PATTERN.includes('\\u'), false);
+    assert.equal(COMPANY_NAME_LIMIT, 200);
+    assert.match(fragment, /left\(btrim\(regexp_replace\(lower\(COALESCE\(p\.company, ''\)\), \$1, ' ', 'g'\)\), 200\)/);
+    assert.match(fragment, /!~ \$3/);
     assert.notEqual(PEST_COMPANY_PATTERN, PEST_TEXT_PATTERN);
 
     async function keptBy(build, company) {
@@ -1047,6 +1067,64 @@ describe('pest company-name gate', { concurrency: false }, () => {
     assert.equal(isPestCompanyName(null), false);
     const stillThere = await pool.query('SELECT COUNT(*)::int AS n FROM prospects');
     assert.equal(typeof stillThere.rows[0].n, 'number');
+  });
+
+  it('folds the same whitespace in JS and SQL and caps a long name before the match', async () => {
+    for (let cp = 0; cp <= 0xffff; cp++) {
+      const ch = String.fromCharCode(cp);
+      if (/\s/.test(ch) || cp === 0x200b) {
+        assert.equal(COMPANY_SPACE_PATTERN.includes(ch), true, cp.toString(16));
+      }
+    }
+
+    async function kept(company) {
+      const params = [];
+      const sql = appendCompanyPestExclusion(params);
+      const companyIndex = params.push(company);
+      const { rows } = await pool.query(
+        `SELECT (${sql}) AS kept FROM (SELECT $${companyIndex}::text AS company) p`,
+        params
+      );
+      return rows[0].kept;
+    }
+
+    const blocked = ['Truly\u00A0Nolen', 'Rollins\u00A0Inc', 'Massey\u00A0Services'];
+    const allowed = ['Orkin\u00A0St'];
+    for (const company of blocked) {
+      assert.equal(isPestCompanyName(company), true, JSON.stringify(company));
+      assert.equal(await kept(company), false, JSON.stringify(company));
+    }
+    for (const company of allowed) {
+      assert.equal(isPestCompanyName(company), false, JSON.stringify(company));
+      assert.equal(await kept(company), true, JSON.stringify(company));
+    }
+    for (const company of [...BRAND_HITS, ...BRAND_MISSES, ...blocked, ...allowed]) {
+      assert.equal(await kept(company), !isPestCompanyName(company), JSON.stringify(company));
+    }
+
+    const longName = 'rollins '.repeat(10000);
+    assert.equal(longName.length, 80000);
+    const started = process.hrtime.bigint();
+    const matched = isPestCompanyName(longName);
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.equal(matched, false);
+    assert.ok(elapsedMs < 50, `js ${elapsedMs}ms`);
+
+    const sqlStarted = process.hrtime.bigint();
+    assert.equal(await kept(longName), true);
+    const sqlMs = Number(process.hrtime.bigint() - sqlStarted) / 1e6;
+    assert.ok(sqlMs < 50, `sql ${sqlMs}ms`);
+
+    const past = `${'x'.repeat(COMPANY_NAME_LIMIT)}Terminix`;
+    assert.equal(isPestCompanyName(past), false);
+    assert.equal(await kept(past), true);
+
+    const inside = `Terminix ${'x'.repeat(80000)}`;
+    const insideStarted = process.hrtime.bigint();
+    assert.equal(isPestCompanyName(inside), true);
+    const insideMs = Number(process.hrtime.bigint() - insideStarted) / 1e6;
+    assert.ok(insideMs < 50, `js prefix ${insideMs}ms`);
+    assert.equal(await kept(inside), false);
   });
 
   it('refuses mark-sent, draft, send, and restore for each brand and writes nothing', async () => {
