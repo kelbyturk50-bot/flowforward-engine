@@ -8,7 +8,7 @@
 ### Builder guardrails (binding for Summit's team)
 - **Nothing real goes out.** No real email, SMS, or calls from any prototype screen. No Twilio.
 - **No live calls from the generator.** No live discovery runs, and no Places, Anthropic, or Gmail calls. Inputs are cached prospect data plus fixtures.
-- **Logos in v1 come only from fixtures or manual entry.** Fetching a logo or brand assets from a prospect's site is gated on the SSRF fix (#30) plus Warden review. **Working default until Kelby decides:** company name and colors only, with no scraped logo before first contact.
+- **No real prospect logos (Kelby, Oct 16).** Previews use the company name and colors only, entered by hand or from fixtures. Fetching logos or brand assets from a prospect's site is not approved. Reopening it needs Kelby's yes plus the SSRF fix (#30) and Warden review.
 - **Flag:** `FF_PROTOTYPE_GALLERY` gates every prototype route and generator. It defaults to **OFF in prod**.
 - **No Railway or Vercel setting or env changes.**
 - **Tagged test data only,** per the pre-prod policy. Prototype rows and events are tagged, cleaned up after, and the proof is posted on the PR.
@@ -160,8 +160,8 @@ The lead is the **outcome**, not the AI. Utah replacement installs average about
 3. **Hosting and maintenance plan.** Monitoring, fixes, small changes. Monthly, cancel anytime, export included.
 4. **Consulting.** Hourly or a small block, for the next workflow or an audit.
 
-### Pricing anchors: **PENDING KELBY (not blocking)**
-The proposed ranges below are the working defaults until Kelby sets them. They are guesses, not decisions. Whether the first build gets a case-study discount is still open.
+### Pricing anchors: **DECIDED (Kelby, Oct 16)**
+Prototype $0 · MVP build $1.5–3.5K · hosting/maintenance $150–400/mo · consulting $125–200/hr. The first build may be discounted in exchange for a case study.
 
 | Rung | Proposed anchor | Market evidence (public, mostly vendor or agency blogs, so treat as directional) |
 |---|---|---|
@@ -170,7 +170,7 @@ The proposed ranges below are the working defaults until Kelby sets them. They a
 | Hosting/maintenance | **$150–$400/mo** (hypothesis) | $250/mo hosting+monitoring ([Ascend](https://ascend-intuition.com/blog/ai-agent-cost-small-business)); $300/mo maintenance tier ([Agents Chef](https://www.agentschef.com/pricing)); SMB retainers $500–$1,500/mo ([Taskip](https://taskip.net/ai-automation-agency-pricing/)). Ceiling: Hatch is reportedly ~$600–1,500/location/mo ([ServiceAgent](https://serviceagent.ai/blogs/hatch-pricing/), third-party). Floor: Jobber Receptionist at $29/mo ([Jobber](https://help.getjobber.com/en/articles/receptionistpowered-by-jobber-ai/)) |
 | Consulting | **$125–$200/hr** (hypothesis) | Advisory $100–$300/hr ([Iternal](https://iternal.ai/ai-consulting-for-small-business)); mid-level AI automation $120–$180/hr ([Milicevic](https://lazar-milicevic.com/blog/hiring-an-ai-automation-consultant-for-your-small-business)); $250/hr advisory ([Ascend](https://ascend-intuition.com/blog/ai-agent-cost-small-business)); Upwork $35–$60/hr ([Jahanzaib](https://www.jahanzaib.ai/blog/ai-automation-consultant-hourly-rate)) |
 
-Why this sits at the low end of the market: it is a beachhead for 2–15-truck owners, and the proof gate (1 paid build) matters more than margin right now. Kelby decides whether to discount the first build in exchange for a case study.
+Why this sits at the low end of the market: it is a beachhead for 2–15-truck owners, and the proof gate (1 paid build) matters more than margin right now. Kelby approved a first-build discount in exchange for a case study.
 
 ### Objection handling
 1. **"Is this real or a mockup?"** It's a prototype on fake data, and it says so on every screen. The real version uses your inbox and your estimates. That's the paid build.
@@ -193,7 +193,7 @@ Why this sits at the low end of the market: it is a beachhead for 2–15-truck o
 - Never imply they are a client. No "trusted by" or client lists using their name.
 - No fake reviews or testimonials, and no made-up customer quotes.
 - **No ROI or close-rate promises.** Use conditional wording only.
-- Their name, colors, and (once allowed) logo appear **only** in the private prototype shown to them, never in our marketing.
+- Their name and colors (no logo) appear **only** in the private prototype shown to them, never in our marketing.
 - **Synthetic data only.** No real customer names, phone numbers, or addresses, even if public.
 - Take it down on request, the same day. Log `prototype_takedown_requested`.
 - Bots generate prototypes. Only Kelby shares the link.
@@ -215,5 +215,5 @@ Why this sits at the low end of the market: it is a beachhead for 2–15-truck o
 - **Decided (Summit):** links expire after 14 days.
 - **Decided:** #22 intake stays CSV-only by default.
 - **Decided (Scout):** franchises get no prototype in v1. Hard floor at minScore 40, no override.
-- **PENDING KELBY (not blocking):** the price anchors (the proposed ranges stay as working defaults; the case-study discount is still open).
-- **PENDING KELBY (not blocking):** whether a prospect's public logo can be used at all. Until he decides: company name and colors only, and any logo fetch stays gated on #30 + Warden.
+- **Decided (Kelby, Oct 16):** price anchors as above; first-build case-study discount allowed; links expire after 14 days.
+- **Decided (Kelby, Oct 16):** no real prospect logos; name and colors only.
