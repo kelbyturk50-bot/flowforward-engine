@@ -1,5 +1,5 @@
 // Brand object validation for v1. Accepts fixtures and manual entry.
-// Rejects a bad hex color and any logo URL that is not http(s), including
+// Rejects a bad hex color and any logo URL that is not https, including
 // userinfo, javascript:, and data:. Does not fetch the URL and does not
 // resolve DNS. A stored logoUrl is text until a later, separately approved
 // fetcher exists.
@@ -49,22 +49,22 @@ function validateColors(value) {
 
 function validateLogoUrl(value) {
   if (value == null) return { ok: true, logoUrl: null };
-  if (typeof value !== 'string') return fail('logoUrl', 'logoUrl must be an http or https URL');
+  if (typeof value !== 'string') return fail('logoUrl', 'logoUrl must be an https URL');
   const raw = value.trim();
   if (!raw) return { ok: true, logoUrl: null };
   if (raw.length > URL_MAX) return fail('logoUrl', 'logoUrl is too long');
-  if (CSS_BREAK.test(raw)) return fail('logoUrl', 'logoUrl must be an http or https URL');
-  if (!/^https?:\/\//i.test(raw)) return fail('logoUrl', 'logoUrl must be an http or https URL');
+  if (CSS_BREAK.test(raw)) return fail('logoUrl', 'logoUrl must be an https URL');
+  if (!/^https:\/\//i.test(raw)) return fail('logoUrl', 'logoUrl must be an https URL');
   let url;
   try { url = new URL(raw); }
-  catch { return fail('logoUrl', 'logoUrl must be an http or https URL'); }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return fail('logoUrl', 'logoUrl must be an http or https URL');
+  catch { return fail('logoUrl', 'logoUrl must be an https URL'); }
+  if (url.protocol !== 'https:') {
+    return fail('logoUrl', 'logoUrl must be an https URL');
   }
   if (url.username || url.password) return fail('logoUrl', 'logoUrl must not include userinfo');
-  if (!url.hostname) return fail('logoUrl', 'logoUrl must be an http or https URL');
-  if (CSS_BREAK.test(url.href)) return fail('logoUrl', 'logoUrl must be an http or https URL');
-  const authority = raw.replace(/^https?:\/\//i, '').split(/[/?#]/)[0];
+  if (!url.hostname) return fail('logoUrl', 'logoUrl must be an https URL');
+  if (CSS_BREAK.test(url.href)) return fail('logoUrl', 'logoUrl must be an https URL');
+  const authority = raw.replace(/^https:\/\//i, '').split(/[/?#]/)[0];
   if (authority.includes('@')) return fail('logoUrl', 'logoUrl must not include userinfo');
   return { ok: true, logoUrl: url.href };
 }

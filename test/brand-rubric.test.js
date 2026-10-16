@@ -6,7 +6,7 @@ require('./preload');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const express = require('express');
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -24,7 +24,7 @@ const {
 } = require('../src/scoring/prototypes');
 const { loadRubric } = require('../src/scoring/rubric-store');
 const { computeFit } = require('../src/scoring/fit');
-const { applyMainSchema } = require('../src/db/migrate');
+const { applyMainSchema, applyBrandConstraints } = require('../src/db/migrate');
 const { resetDb, insertProspect, seedBrandFixtures, closePool, pool } = require('./fixtures');
 
 const ROOT = path.join(__dirname, '..');
@@ -128,7 +128,7 @@ function request(port, method, reqPath, body) {
 describe('brand extract and prototype rubric', { concurrency: false }, () => {
   after(() => closePool());
 
-  it('rejects bad colors and any logo URL that is not http(s) without userinfo', () => {
+  it('rejects bad colors and any logo URL that is not https without userinfo', () => {
     const good = {
       name: 'TEST: Wasatch Heating',
       logoUrl: null,
@@ -162,6 +162,9 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       '//fixtures.example/logo.png',
       'fixtures.example/logo.png',
       'http://',
+      'http://fixtures.example/logo.png',
+      'HTTP://fixtures.example/logo.png',
+      'http://ok.example/a.png',
     ];
     for (const logoUrl of badUrls) {
       const result = validateBrand({ ...good, logoUrl });
@@ -628,9 +631,11 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     const missing = recommendPrototypes(estimateShop({ state: undefined }));
     assert.deepEqual(missing.picks, []);
     assert.equal(missing.disqualified, 'unknown_state');
-    const blank = recommendPrototypes(estimateShop({ state: '  ' }));
-    assert.deepEqual(blank.picks, []);
-    assert.equal(blank.disqualified, 'unknown_state');
+    for (const state of ['', '  ', '\t', ' \n ']) {
+      const blank = recommendPrototypes(estimateShop({ state }));
+      assert.deepEqual(blank.picks, [], JSON.stringify(state));
+      assert.equal(blank.disqualified, 'unknown_state', JSON.stringify(state));
+    }
     const parked = recommendPrototypes(estimateShop({ state: 'CO' }));
     assert.deepEqual(parked.picks, []);
     assert.equal(parked.disqualified, 'out_of_state');
@@ -765,6 +770,15 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       });
       assert.equal(userinfo.status, 400);
       assert.equal(userinfo.json.field, 'logoUrl');
+
+      const httpLogo = await request(port, 'POST', '/api/brands', {
+        name: 'TEST: Http Logo',
+        logoUrl: 'http://fixtures.example/logo.png',
+        colors: ['#112233'],
+        testTag: 'TEST:http-logo',
+      });
+      assert.equal(httpLogo.status, 400);
+      assert.equal(httpLogo.json.field, 'logoUrl');
 
       const lead = await insertProspect({
         google_place_id: 'test-place-brand-manual',
@@ -948,5 +962,181 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     assert.equal(rubric.rows[0].n, rubricRows().length);
     const meta = await pool.query('SELECT COUNT(*)::int AS n FROM prototype_rubric_meta');
     assert.equal(meta.rows[0].n, 1);
+  });
+
+  it('commits schema.sql and boots when a 51c459d brand row breaks the tighter checks', async () => {
+    const schema = fs.readFileSync(path.join(ROOT, 'src/db/schema.sql'), 'utf8');
+    const repair = fs.readFileSync(path.join(ROOT, 'src/db/brand-constraints.sql'), 'utf8');
+    assert.equal(/DROP\s+CONSTRAINT/i.test(schema), false);
+    assert.equal(/DROP\s+CONSTRAINT/i.test(repair), false);
+    assert.match(repair, /NOT VALID/);
+    assert.match(repair, /VALIDATE CONSTRAINT prospect_brands_name_strict/);
+    assert.match(repair, /VALIDATE CONSTRAINT prospect_brands_logo_https/);
+    assert.match(repair, /\^https:\/\//);
+    const cleanup = [...schema.matchAll(/DELETE\s+FROM\s+prospect_brands[^;]*/gi)]
+      .concat([...repair.matchAll(/DELETE\s+FROM\s+prospect_brands[^;]*/gi)]);
+    for (const match of cleanup) {
+      assert.equal(/\bLIKE\b/i.test(match[0]), false, match[0]);
+      assert.match(match[0], /test_tag\s*(=|IN\s*\()/i);
+    }
+
+    let child;
+    try {
+    await resetDb();
+    await applyMainSchema();
+    await assert.rejects(
+      () => pool.query(
+        `INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
+         VALUES ('TEST: Http Logo', 'http://fixtures.example/logo.png', '[]'::jsonb, 'manual', 'TEST:http-logo')`
+      ),
+      (err) => err.code === '23514'
+    );
+
+    // The checks from 51c459d: TEST: prefix, no @, and an http(s) logo with no userinfo.
+    await pool.query(`
+      ALTER TABLE prospect_brands DROP CONSTRAINT IF EXISTS prospect_brands_name_strict;
+      ALTER TABLE prospect_brands DROP CONSTRAINT IF EXISTS prospect_brands_name_test;
+      ALTER TABLE prospect_brands ADD CONSTRAINT prospect_brands_name_test CHECK (
+        char_length(name) BETWEEN 6 AND 120
+        AND left(name, 5) = 'TEST:'
+        AND position('@' IN name) = 0
+      );
+      ALTER TABLE prospect_brands DROP CONSTRAINT IF EXISTS prospect_brands_logo_https;
+      ALTER TABLE prospect_brands DROP CONSTRAINT IF EXISTS prospect_brands_logo_http;
+      ALTER TABLE prospect_brands ADD CONSTRAINT prospect_brands_logo_http CHECK (
+        logo_url IS NULL OR (
+          char_length(logo_url) BETWEEN 8 AND 300
+          AND logo_url ~ '^https?://'
+          AND logo_url !~ '://[^/?#]*@'
+        )
+      );
+    `);
+    await pool.query(
+      `INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
+       VALUES ($1, $2, '[]'::jsonb, 'manual', 'TEST:legacy-markup')`,
+      ['TEST: <b>x</b>', 'https://ok.example/a(1).png']
+    );
+
+    await applyMainSchema();
+    const beforeBoot = await pool.query(
+      `SELECT name, logo_url FROM prospect_brands WHERE test_tag = 'TEST:legacy-markup'`
+    );
+    assert.equal(beforeBoot.rows.length, 1);
+    assert.equal(beforeBoot.rows[0].name, 'TEST: <b>x</b>');
+
+    const firstRepair = await applyBrandConstraints();
+    const secondRepair = await applyBrandConstraints();
+    assert.equal(firstRepair.notices.some(note => note.includes('name check validation failed')), true);
+    assert.equal(firstRepair.notices.some(note => note.includes('logo check validation failed')), true);
+    assert.equal(secondRepair.notices.some(note => note.includes('name check validation failed')), true);
+    assert.equal(secondRepair.errors.length, 0);
+    assert.equal(firstRepair.errors.length, 0);
+
+    const checks = await pool.query(
+      `SELECT conname, convalidated
+         FROM pg_constraint
+        WHERE conname IN ('prospect_brands_name_strict', 'prospect_brands_logo_https')
+        ORDER BY conname`
+    );
+    assert.deepEqual(checks.rows, [
+      { conname: 'prospect_brands_logo_https', convalidated: false },
+      { conname: 'prospect_brands_name_strict', convalidated: false },
+    ]);
+
+    const probe = http.createServer();
+    const port = await new Promise((resolve, reject) => {
+      probe.once('error', reject);
+      probe.listen(0, '127.0.0.1', () => resolve(probe.address().port));
+    });
+    await new Promise((resolve) => probe.close(resolve));
+
+    try {
+      child = spawn(process.execPath, [path.join(ROOT, 'src/server.js')], {
+        env: {
+          ...process.env,
+          PORT: String(port),
+          NODE_ENV: 'test',
+          DISABLE_CRON: '1',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let output = '';
+      child.stdout.on('data', (buf) => { output += buf.toString('utf8'); });
+      child.stderr.on('data', (buf) => { output += buf.toString('utf8'); });
+      const health = await new Promise((resolve, reject) => {
+        const deadline = Date.now() + 20000;
+        const attempt = () => {
+          const req = http.request({
+            method: 'GET', hostname: '127.0.0.1', port, path: '/health',
+          }, (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode));
+          });
+          req.on('error', () => {
+            if (Date.now() > deadline || (child.exitCode != null)) {
+              reject(new Error(`server did not listen: ${JSON.stringify(output).slice(0, 2000)}`));
+            } else setTimeout(attempt, 100);
+          });
+          req.end();
+        };
+        attempt();
+      });
+      assert.equal(health, 200);
+      assert.equal(output.includes('Startup migration/rescore failed'), false, output);
+      assert.match(output, /Fit scores refreshed/);
+      assert.match(output, /prospect_brands: name check validation failed/);
+      assert.match(output, /prospect_brands: logo check validation failed/);
+
+      const afterBoot = await pool.query(
+        `SELECT name, logo_url FROM prospect_brands WHERE test_tag = 'TEST:legacy-markup'`
+      );
+      assert.equal(afterBoot.rows.length, 1);
+      assert.equal(afterBoot.rows[0].logo_url, 'https://ok.example/a(1).png');
+      await assert.rejects(
+        () => pool.query(
+          `INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
+           VALUES ('TEST: <b>y</b>', 'https://fixtures.example/ok.png', '[]'::jsonb, 'manual', 'TEST:still-markup')`
+        ),
+        (err) => err.code === '23514'
+      );
+      await assert.rejects(
+        () => pool.query(
+          `INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
+           VALUES ('TEST: Http Again', 'http://fixtures.example/logo.png', '[]'::jsonb, 'manual', 'TEST:http-again')`
+        ),
+        (err) => err.code === '23514'
+      );
+      await pool.query(
+        `INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
+         VALUES ('TEST: Strict Ok', 'https://fixtures.example/ok.png', '[]'::jsonb, 'manual', 'TEST:strict-ok')`
+      );
+    } finally {
+      if (child && child.exitCode == null) {
+        child.kill('SIGTERM');
+        await new Promise((resolve) => child.once('exit', resolve));
+      }
+    }
+    } finally {
+      if (child && child.exitCode == null) {
+        child.kill('SIGTERM');
+        await new Promise((resolve) => child.once('exit', resolve));
+      }
+      await pool.query(
+        `DELETE FROM prospect_brands
+          WHERE test_tag IN ('TEST:legacy-markup', 'TEST:strict-ok', 'TEST:still-markup', 'TEST:http-again')`
+      );
+      await pool.query(`
+        ALTER TABLE prospect_brands DROP CONSTRAINT IF EXISTS prospect_brands_name_test;
+        ALTER TABLE prospect_brands ADD CONSTRAINT prospect_brands_name_test CHECK (
+          char_length(name) BETWEEN 6 AND 120
+          AND left(name, 5) = 'TEST:'
+          AND position('@' IN name) = 0
+          AND name !~ U&'[[:cntrl:]<>\\200B-\\200F\\202A-\\202E\\2060-\\2064\\2066-\\2069\\FEFF]'
+          AND btrim(substring(name from 6)) ~ '[[:graph:]]'
+        );
+        ALTER TABLE prospect_brands DROP CONSTRAINT IF EXISTS prospect_brands_logo_http;
+      `);
+      await applyBrandConstraints();
+    }
   });
 });

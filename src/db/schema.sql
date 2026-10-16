@@ -414,10 +414,10 @@ CREATE TABLE IF NOT EXISTS prospect_brands (
     test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
     AND char_length(test_tag) <= 80
   ),
-  CONSTRAINT prospect_brands_logo_http CHECK (
+  CONSTRAINT prospect_brands_logo_https CHECK (
     logo_url IS NULL OR (
       char_length(logo_url) BETWEEN 8 AND 300
-      AND logo_url ~ '^https?://'
+      AND logo_url ~ '^https://'
       AND logo_url !~ '://[^/?#]*@'
       AND logo_url !~ '[[:space:][:cntrl:]]'
       AND logo_url !~ '[''"`();\\<>{}]'
@@ -438,26 +438,13 @@ CREATE TRIGGER prospect_brands_updated_at
   BEFORE UPDATE ON prospect_brands
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
--- Re-apply the name and logo checks so a database that already created the
--- first version of these constraints picks up the tighter rules on boot.
-ALTER TABLE prospect_brands DROP CONSTRAINT IF EXISTS prospect_brands_name_test;
-ALTER TABLE prospect_brands ADD CONSTRAINT prospect_brands_name_test CHECK (
-  char_length(name) BETWEEN 6 AND 120
-  AND left(name, 5) = 'TEST:'
-  AND position('@' IN name) = 0
-  AND name !~ U&'[[:cntrl:]<>\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
-  AND btrim(substring(name from 6)) ~ '[[:graph:]]'
-);
-ALTER TABLE prospect_brands DROP CONSTRAINT IF EXISTS prospect_brands_logo_http;
-ALTER TABLE prospect_brands ADD CONSTRAINT prospect_brands_logo_http CHECK (
-  logo_url IS NULL OR (
-    char_length(logo_url) BETWEEN 8 AND 300
-    AND logo_url ~ '^https?://'
-    AND logo_url !~ '://[^/?#]*@'
-    AND logo_url !~ '[[:space:][:cntrl:]]'
-    AND logo_url !~ '[''"`();\\<>{}]'
-  )
-);
+-- Do not DROP or re-add prospect_brands_name_test / prospect_brands_logo_https
+-- in this transaction. A validating ADD scans every existing row, and this
+-- file has no lock_timeout. A row that was legal at 51c459d would roll the
+-- whole boot back. src/db/brand-constraints.sql adds the tightened checks
+-- NOT VALID and validates them after this file commits.
+-- This file does not delete brand rows. A TEST: cleanup, if one is added,
+-- must match test_tag with = or IN (...) and must not use LIKE.
 
 -- Scout's selection rubric (docs/PROTOTYPE_PLAY.md). One row per agent signal.
 -- Rubric versions are immutable. ON CONFLICT DO NOTHING keeps version 1 as

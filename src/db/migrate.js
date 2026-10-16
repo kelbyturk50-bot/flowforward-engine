@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// Applies schema.sql to DATABASE_URL, then the pilot repair in a second
-// transaction. schema.sql includes the additive pilot tables and columns.
-// It is still one implicit transaction with no lock_timeout and no
-// statement_timeout. pilot-schema.sql runs only after that commit and is
-// the only place SET LOCAL lock_timeout and statement_timeout apply. A
-// pilot failure cannot roll the main schema back.
+// Applies schema.sql to DATABASE_URL, then brand-constraint validation, then
+// the pilot repair. schema.sql is one implicit transaction with no
+// lock_timeout and no statement_timeout. brand-constraints.sql and
+// pilot-schema.sql each run after that commit, in their own transaction.
+// SET LOCAL lock_timeout and statement_timeout apply only there. A brand or
+// pilot failure cannot roll the main schema back. A brand-check failure is
+// logged and does not throw.
 //
 // Run manually: node src/db/migrate.js
 
@@ -22,6 +23,41 @@ function isBootTimeout(err) {
 async function applyMainSchema() {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   await pool.query(sql);
+}
+
+async function applyBrandConstraints() {
+  const sql = fs.readFileSync(path.join(__dirname, 'brand-constraints.sql'), 'utf8');
+  const client = await pool.connect();
+  const notices = [];
+  function onNotice(msg) {
+    const text = msg && typeof msg === 'object' ? String(msg.message || '') : String(msg || '');
+    if (text.startsWith('prospect_brands:')) {
+      notices.push(text);
+      console.warn(`[brand] ${text}`);
+    }
+  }
+  client.on('notice', onNotice);
+  let failed = null;
+  try {
+    // SET LOCAL applies only until this transaction ends. 5s stops a held
+    // lock on prospect_brands; 15s stops a validation scan that runs too
+    // long. schema.sql has already committed on another connection.
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await client.query("SET LOCAL statement_timeout = '15s'");
+    await client.query(sql);
+    await client.query('COMMIT');
+  } catch (err) {
+    failed = err;
+    await client.query('ROLLBACK').catch(() => {});
+    const message = String(err && err.message || 'brand constraint validation failed');
+    console.warn(`[brand] prospect_brands: constraint transaction failed: ${message}`);
+    notices.push(message);
+  } finally {
+    client.removeListener('notice', onNotice);
+    client.release();
+  }
+  return { errors: failed ? [String(failed.message || 'brand constraint validation failed')] : [], notices };
 }
 
 async function applyPilotSchema() {
@@ -74,10 +110,11 @@ async function applyPilotSchema() {
 
 async function applySchema() {
   await applyMainSchema();
+  await applyBrandConstraints();
   return applyPilotSchema();
 }
 
-module.exports = { applySchema, applyMainSchema, applyPilotSchema };
+module.exports = { applySchema, applyMainSchema, applyPilotSchema, applyBrandConstraints };
 
 if (require.main === module) {
   console.log('[migrate] Applying schema...');
