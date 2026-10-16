@@ -4,6 +4,8 @@ How the Grok Bot team ships work on FlowForward. Coding agents follow `AGENTS.md
 
 Kelby owns the product. Who presses merge, and when, is Change flow step 8.
 
+Branded agent prototypes (selection, GTM, build order): [`PROTOTYPE_PLAY.md`](PROTOTYPE_PLAY.md).
+
 ## Roles
 
 | Person | Role | Does | Does not |
