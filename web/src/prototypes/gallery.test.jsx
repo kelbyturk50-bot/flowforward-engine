@@ -2,9 +2,9 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import PrototypeWatermark, { WATERMARK_TEXT } from '../components/PrototypeWatermark';
+import PrototypeWatermark, { ACTION_TOAST, FOOTER_LEAD, WATERMARK_TEXT } from '../components/PrototypeWatermark';
 import GalleryGate from './GalleryGate';
 import { GALLERY_PREVIEW_TOKEN, galleryHref, galleryRouteFromPath, galleryTokenOk } from './route';
 
@@ -17,6 +17,33 @@ function at(pathAndSearch) {
 
 function paint(value) {
   return String(value || '').replace(/\s/g, '').toLowerCase();
+}
+
+function expectFooter(container, name) {
+  const footer = container.querySelector('.prototype-footer');
+  expect(footer).not.toBeNull();
+  expect(footer.querySelector('.prototype-business').textContent).toBe(name);
+  expect(footer.querySelector('.prototype-sample').textContent).toBe('Sample');
+  const sentence = footer.cloneNode(true);
+  sentence.querySelector('.prototype-sample').remove();
+  expect(sentence.textContent).toBe(`${FOOTER_LEAD}${name}`);
+}
+
+function expectRibbon(container) {
+  const ribbon = container.querySelector('[data-prototype-ribbon]');
+  const scroll = container.querySelector('.prototype-scroll');
+  expect(ribbon).not.toBeNull();
+  expect(ribbon.textContent).toBe(WATERMARK_TEXT);
+  expect(ribbon.querySelector('button')).toBeNull();
+  expect(scroll.contains(ribbon)).toBe(false);
+  expect(scroll.contains(container.querySelector('.prototype-screen'))).toBe(true);
+  expect(ribbon.style.position).toBe('sticky');
+  expect(ribbon.style.top).toBe('0px');
+  expect(paint(ribbon.style.backgroundColor)).toMatch(/#1e2a2f|rgb\(30,42,47\)/);
+  expect(paint(ribbon.style.color)).toMatch(/#ffffff|rgb\(255,255,255\)/);
+  expect(ribbon.getAttribute('style')).not.toContain('var(');
+  expect(container.querySelector('.prototype-brand-name .prototype-sample').textContent).toBe('Sample');
+  return ribbon;
 }
 
 describe('prototype gallery', () => {
@@ -108,35 +135,50 @@ describe('prototype gallery', () => {
 
     expect(await screen.findByRole('heading', { name: 'Prototype gallery' })).toBeInTheDocument();
     expect(screen.getByText('TEST: Wasatch Heating')).toBeInTheDocument();
-    expect(screen.getByText(WATERMARK_TEXT)).toBeInTheDocument();
+    expectRibbon(container);
+    expect(container.querySelector('.prototype-tile')).not.toBeNull();
+    expectFooter(container, 'TEST: Wasatch Heating');
     const open = screen.getByRole('link', { name: 'Open estimate follow-up' });
     expect(open).toHaveAttribute('href', galleryHref(TOKEN, 'estimate-follow-up', '?flags=FF_PROTOTYPE_GALLERY'));
 
     await user.click(open);
     expect(await screen.findByRole('heading', { name: 'TEST: Wasatch Heating: 3 open estimates, $38,400' })).toBeInTheDocument();
-    expect(screen.getByText(WATERMARK_TEXT)).toBeInTheDocument();
+    expectRibbon(container);
     expect(container.querySelector('img')).toBeNull();
+    for (const row of container.querySelectorAll('.demo-estimates > li')) {
+      expect(row.querySelector('.prototype-sample')).not.toBeNull();
+    }
+    for (const option of container.querySelectorAll('.demo-options li')) {
+      expect(option.querySelector('.prototype-sample').textContent).toBe('Sample');
+    }
 
     await user.click(screen.getByRole('button', { name: 'Send estimate' }));
     expect(screen.getByRole('heading', { name: 'Preview — nothing is sent' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Thank you' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Close the loop' })).toBeInTheDocument();
-    expect(screen.getByText(WATERMARK_TEXT)).toBeInTheDocument();
+    expect(screen.getByText(ACTION_TOAST)).toBeInTheDocument();
+    expectRibbon(container);
+    for (const card of container.querySelectorAll('.demo-mail')) {
+      expect(card.querySelector('.prototype-sample')).not.toBeNull();
+    }
 
     await user.click(screen.getByRole('button', { name: 'See the homeowner reply' }));
     expect(screen.getByRole('heading', { name: 'Is there financing?' })).toBeInTheDocument();
-    expect(screen.getByText(WATERMARK_TEXT)).toBeInTheDocument();
+    expectRibbon(container);
+    expect(container.querySelector('.demo-quote .prototype-sample')).not.toBeNull();
+    expect(container.querySelector('.demo-draft .prototype-sample')).not.toBeNull();
     await user.click(screen.getByRole('button', { name: 'Approve reply' }));
     expect(screen.getByText('Approved → schedule install')).toBeInTheDocument();
+    expect(screen.getByText(ACTION_TOAST)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'See the owner summary' }));
     expect(screen.getByRole('heading', { name: 'Recovered: $14,800. You own this workflow.' })).toBeInTheDocument();
-    expect(screen.getByText(WATERMARK_TEXT)).toBeInTheDocument();
+    expectRibbon(container);
 
     await user.click(screen.getByRole('button', { name: 'Export sample data (JSON)' }));
-    await waitFor(() => expect(downloads).toEqual([
-      expect.objectContaining({ download: 'estimate-recovery-demo.json' }),
-    ]));
+    expect(screen.getByText(ACTION_TOAST)).toBeInTheDocument();
+    expect(downloads).toEqual([]);
+    expect(createObjectURL).not.toHaveBeenCalled();
 
     expect(calls.fetch).toBe(0);
     expect(calls.xhr).toBe(0);
@@ -161,12 +203,11 @@ describe('prototype gallery', () => {
     expect(container.innerHTML).not.toContain('<script>alert(1)</script>');
     expect(container.innerHTML).toContain('&lt;script&gt;');
 
-    const mark = container.querySelector('[data-prototype-watermark="true"]');
-    expect(mark).not.toBeNull();
-    expect(mark.textContent).toBe(WATERMARK_TEXT);
+    const mark = expectRibbon(container);
     expect(mark.getAttribute('aria-label')).toBe(WATERMARK_TEXT);
     const branded = container.querySelector('.prototype-screen');
     expect(branded.contains(mark)).toBe(false);
+    expectFooter(container, 'TEST: <script>alert(1)</script>');
     expect(mark.getAttribute('hidden')).toBeNull();
     expect(paint(mark.style.backgroundColor)).toMatch(/#1e2a2f|rgb\(30,42,47\)/);
     expect(paint(mark.style.color)).toMatch(/#ffffff|rgb\(255,255,255\)/);
@@ -177,9 +218,9 @@ describe('prototype gallery', () => {
     expect(computed.display).not.toBe('none');
     expect(computed.visibility).not.toBe('hidden');
     expect(Number(computed.opacity)).toBe(1);
-    expect(branded.getAttribute('data-brand-primary')).toBe('#FFFFFF');
-    expect(branded.getAttribute('data-brand-on-primary')).toBe('#1E2A2F');
-    expect(paint(mark.style.backgroundColor)).not.toBe(paint(branded.getAttribute('data-brand-primary')));
+    expect(branded.getAttribute('data-brand-accent')).toBe('#2F6B57');
+    expect(paint(mark.style.backgroundColor)).not.toBe(paint(branded.getAttribute('data-brand-accent')));
+    expect(mark.getAttribute('style')).not.toContain('2F6B57');
 
     expect(calls.fetch).toBe(0);
     expect(calls.xhr).toBe(0);
@@ -192,6 +233,14 @@ describe('prototype gallery', () => {
     expect(mark.style.display).toBe('block');
     expect(mark.style.opacity).toBe('1');
     expect(mark.hidden).toBe(false);
+  });
+
+  it('shows the ribbon on the unknown prototype screen', async () => {
+    at(`/demo/gallery/${TOKEN}/not-in-this-build?flags=FF_PROTOTYPE_GALLERY`);
+    const { container } = render(<GalleryGate route={{ token: TOKEN, screen: 'unknown' }} />);
+    expect(await screen.findByRole('heading', { name: 'Prototype not in this build' })).toBeInTheDocument();
+    expectRibbon(container);
+    expectFooter(container, 'TEST: Wasatch Heating');
   });
 
   it('noindexes the gallery with the /demo header and robots.txt', () => {

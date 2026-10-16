@@ -5,9 +5,13 @@
 export const BUNDLED_LOGO_ID = 'bundled:test-wasatch-heating';
 export const BRAND_NAME_MAX = 80;
 export const PAPER = '#F3F6F5';
-export const FALLBACK_PRIMARY = '#2F6B57';
+export const SURFACE = '#FFFFFF';
+// Same hex as the --juniper / --accent theme token.
+export const JUNIPER_ACCENT = '#2F6B57';
 export const FALLBACK_INK = '#1E2A2F';
 export const FALLBACK_NAME = 'TEST: Wasatch Heating';
+
+const ACCENT_BACKGROUNDS = Object.freeze([SURFACE, PAPER]);
 
 const HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 const AA = 4.5;
@@ -51,26 +55,21 @@ export function contrastRatio(a, b) {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-function readableOn(background) {
-  if (contrastRatio(background, '#FFFFFF') >= AA) return '#FFFFFF';
-  if (contrastRatio(background, FALLBACK_INK) >= AA) return FALLBACK_INK;
-  return '';
-}
-
-export function paintPrimary(value) {
+export function paintAccent(value, backgrounds = ACCENT_BACKGROUNDS) {
   const color = normalizeHex(value);
-  if (color && readableOn(color)) return color;
-  return FALLBACK_PRIMARY;
+  if (!color) return '';
+  const passes = backgrounds.every(background => contrastRatio(color, background) >= AA);
+  return passes ? color : '';
 }
 
-export function onPrimary(primary) {
-  return readableOn(primary) || '#FFFFFF';
-}
-
-export function paintText(value, background = PAPER) {
-  const color = normalizeHex(value);
-  if (color && contrastRatio(color, background) >= AA) return color;
-  return FALLBACK_INK;
+// Brand color is an accent on paper and card surfaces. A miss falls back to juniper.
+export function resolveAccent(colors) {
+  const bag = colorBag(colors);
+  for (const value of [bag.accent, bag.primary]) {
+    const color = paintAccent(value);
+    if (color) return color;
+  }
+  return JUNIPER_ACCENT;
 }
 
 export function sanitizeLogoUrl(value, bundled = [BUNDLED_LOGO_ID]) {
@@ -95,7 +94,6 @@ export function presentBrand(input, { fallbackName = FALLBACK_NAME } = {}) {
   const colors = colorBag(input?.colors);
   const name = sanitizeName(input?.name) || fallbackName;
   const logoUrl = sanitizeLogoUrl(input?.logoUrl);
-  const primary = paintPrimary(colors.primary);
   return {
     name,
     logoUrl,
@@ -105,10 +103,7 @@ export function presentBrand(input, { fallbackName = FALLBACK_NAME } = {}) {
       ink: normalizeHex(colors.ink),
     },
     theme: {
-      primary,
-      onPrimary: onPrimary(primary),
-      accent: paintText(colors.accent),
-      ink: paintText(colors.ink),
+      accent: resolveAccent(colors),
     },
   };
 }

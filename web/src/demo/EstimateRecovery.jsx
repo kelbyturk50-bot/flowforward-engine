@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ACTION_TOAST, SampleValue, usePrototypeNotify } from '../components/PrototypeWatermark';
 import { readCompanyOverride } from '../flags';
 import { getDemo } from './getDemo';
 
@@ -38,7 +39,7 @@ export function EstimateRecoveryFlow({ demo }) {
   return (
     <div className="demo-wrap" data-step={step}>
       <p className="demo-banner" role="note">
-        Sample walkthrough for {demo.company}. The jobs and amounts are fictional. Nothing on this page is sent.
+        Sample walkthrough for <SampleValue>{demo.company}</SampleValue>. The jobs and amounts are fictional. Nothing on this page is sent.
       </p>
       <ol className="demo-steps" aria-label="Demo progress">
         {STEPS.map(item => (
@@ -109,11 +110,14 @@ export default function EstimateRecovery({ token }) {
 }
 
 function Landing({ demo, onSend }) {
+  const notify = usePrototypeNotify();
   const furnace = demo.estimates.find(item => item.options);
   return (
     <section aria-labelledby="demo-step-title">
       <p className="demo-kicker">Step 1 of 4</p>
-      <h1 id="demo-step-title">{demo.company}: {demo.openCount} open estimates, {formatDollars(demo.openTotal)}</h1>
+      <h1 id="demo-step-title">
+        <SampleValue>{demo.company}</SampleValue>: <SampleValue>{demo.openCount}</SampleValue> open estimates, <SampleValue>{formatDollars(demo.openTotal)}</SampleValue>
+      </h1>
       <p className="muted demo-lead">
         Three fictional open jobs. Send estimate plays the follow-up as previews on this page. No email, text, or call goes out.
       </p>
@@ -121,14 +125,14 @@ function Landing({ demo, onSend }) {
         {demo.estimates.map(item => (
           <li key={item.id}>
             <div className="demo-est-head">
-              <span>{item.name}</span>
-              <span className="demo-money">{formatDollars(item.amount)}</span>
+              <span><SampleValue>{item.name}</SampleValue></span>
+              <span className="demo-money"><SampleValue>{formatDollars(item.amount)}</SampleValue></span>
             </div>
             {item.options && (
               <ul className="demo-options">
                 {item.options.map(option => (
                   <li key={option.tier} className={option.amount === item.amount ? 'is-open' : undefined}>
-                    {option.tier} {formatDollars(option.amount)}
+                    <SampleValue>{option.tier} {formatDollars(option.amount)}</SampleValue>
                   </li>
                 ))}
               </ul>
@@ -138,10 +142,10 @@ function Landing({ demo, onSend }) {
       </ul>
       {furnace && (
         <p className="muted small">
-          The furnace job shows Good, Better, and Best. The open amount is the Better option, so the three jobs total {formatDollars(demo.openTotal)}.
+          The furnace job shows Good, Better, and Best. The open amount is the Better option, so the three jobs total <SampleValue>{formatDollars(demo.openTotal)}</SampleValue>.
         </p>
       )}
-      <button type="button" className="demo-btn" onClick={onSend}>Send estimate</button>
+      <button type="button" className="demo-btn" onClick={() => { notify?.(ACTION_TOAST); onSend(); }}>Send estimate</button>
     </section>
   );
 }
@@ -160,23 +164,25 @@ function Timeline({ demo, onNext }) {
 
   return (
     <section aria-labelledby="demo-step-title">
-      <p className="demo-kicker">Step 2 of 4 · {demo.company}</p>
+      <p className="demo-kicker">Step 2 of 4 · <SampleValue>{demo.company}</SampleValue></p>
       <h1 id="demo-step-title">Preview — nothing is sent</h1>
       <p className="muted demo-lead">
-        Email previews branded for {demo.company}. The day 5 card is an owner task, not a message to the homeowner.
+        Email previews branded for <SampleValue>{demo.company}</SampleValue>. The day 5 card is an owner task, not a message to the homeowner.
       </p>
       <p role="status" className="demo-status">{done ? 'Preview finished. Nothing was sent.' : 'Playing the preview…'}</p>
       <ol className="demo-timeline" aria-label="Email previews">
         {items.slice(0, count).map(item => (
           <li key={item.id} className={`demo-mail demo-mail-${item.kind}`}>
             <div className="demo-mail-top">
-              <span className="demo-when">{item.when}</span>
+              <span className="demo-when"><SampleValue>{item.when}</SampleValue></span>
               <span className="demo-kind">{item.kind === 'task' ? 'Owner task' : 'Email preview'}</span>
             </div>
-            <h2>{item.title}</h2>
-            <p className="demo-from">{item.kind === 'task' ? `Task for ${demo.company}` : `From ${demo.company}`}</p>
-            <p className="demo-subject">Subject: {item.subject}</p>
-            <p>{item.body}</p>
+            <h2><SampleValue>{item.title}</SampleValue></h2>
+            <p className="demo-from">
+              {item.kind === 'task' ? 'Task for ' : 'From '}<SampleValue>{demo.company}</SampleValue>
+            </p>
+            <p className="demo-subject">Subject: <SampleValue>{item.subject}</SampleValue></p>
+            <p><SampleValue>{item.body}</SampleValue></p>
           </li>
         ))}
       </ol>
@@ -186,21 +192,26 @@ function Timeline({ demo, onNext }) {
 }
 
 function Reply({ demo, approved, onApprove, onNext }) {
+  const notify = usePrototypeNotify();
   const furnace = demo.estimates.find(item => item.id === 'furnace');
   return (
     <section aria-labelledby="demo-step-title">
-      <p className="demo-kicker">Step 3 of 4 · {demo.company}</p>
-      <h1 id="demo-step-title">{demo.reply.question}</h1>
+      <p className="demo-kicker">Step 3 of 4 · <SampleValue>{demo.company}</SampleValue></p>
+      <h1 id="demo-step-title"><SampleValue>{demo.reply.question}</SampleValue></h1>
       <p className="muted demo-lead">A simulated homeowner reply. The answer below is a draft waiting for the owner.</p>
-      <blockquote className="demo-quote">{demo.reply.question}</blockquote>
+      <blockquote className="demo-quote"><SampleValue>{demo.reply.question}</SampleValue></blockquote>
       <article className="demo-draft" aria-label="Drafted answer">
         <h2>Draft awaiting owner approval</h2>
-        <p>{demo.reply.draft}</p>
+        <p><SampleValue>{demo.reply.draft}</SampleValue></p>
       </article>
-      {!approved && <button type="button" className="demo-btn" onClick={onApprove}>Approve reply</button>}
+      {!approved && (
+        <button type="button" className="demo-btn" onClick={() => { notify?.(ACTION_TOAST); onApprove(); }}>
+          Approve reply
+        </button>
+      )}
       {approved && (
         <div className="demo-approved-block" role="status">
-          <p className="demo-est-name">{furnace?.name}</p>
+          <p className="demo-est-name"><SampleValue>{furnace?.name}</SampleValue></p>
           <p className="demo-approved">Approved → schedule install</p>
           <p className="muted small">Approving updates this demo only. The reply was not sent.</p>
           <button type="button" className="demo-btn" onClick={onNext}>See the owner summary</button>
@@ -211,15 +222,20 @@ function Reply({ demo, approved, onApprove, onNext }) {
 }
 
 function Summary({ demo, onRestart }) {
+  const notify = usePrototypeNotify();
   const onExport = () => {
+    if (notify) {
+      notify(ACTION_TOAST);
+      return;
+    }
     import('./fixture.js').then(({ serializeDemo }) => {
       downloadJson('estimate-recovery-demo.json', serializeDemo(demo));
     });
   };
   return (
     <section aria-labelledby="demo-step-title">
-      <p className="demo-kicker">Step 4 of 4 · {demo.company}</p>
-      <h1 id="demo-step-title">Recovered: {formatDollars(demo.recovered)}. You own this workflow.</h1>
+      <p className="demo-kicker">Step 4 of 4 · <SampleValue>{demo.company}</SampleValue></p>
+      <h1 id="demo-step-title">Recovered: <SampleValue>{formatDollars(demo.recovered)}</SampleValue>. You own this workflow.</h1>
       <p className="muted demo-lead">
         That amount is the Better furnace option from the sample list. This page did not contact anyone, and the export stays on this device.
       </p>
@@ -227,8 +243,8 @@ function Summary({ demo, onRestart }) {
         {demo.estimates.map(item => (
           <li key={item.id}>
             <div className="demo-est-head">
-              <span>{item.name}</span>
-              <span className="demo-money">{formatDollars(item.amount)}</span>
+              <span><SampleValue>{item.name}</SampleValue></span>
+              <span className="demo-money"><SampleValue>{formatDollars(item.amount)}</SampleValue></span>
             </div>
             {item.id === 'furnace' && <p className="demo-approved">Approved → schedule install</p>}
           </li>

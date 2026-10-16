@@ -7,6 +7,7 @@
   --line: #D5DEDB;
   --line-2: #E6ECEA;
   --juniper: #2F6B57;
+  --accent: var(--juniper);
   --juniper-ink: #FFFFFF;
   --juniper-wash: #E3EFEA;
   --ochre: #C9952F;
@@ -467,80 +468,83 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 
 /* ── Prototype gallery ─────────────────────────────────── */
 .prototype-root {
-  min-height: 100vh; width: 100%; max-width: 100%; overflow-x: clip;
+  height: 100vh; height: 100dvh; width: 100%; max-width: 100%;
+  display: flex; flex-direction: column; overflow: hidden;
   background: var(--paper); color: var(--ink);
 }
+.prototype-scroll { flex: 1; min-height: 0; overflow: auto; }
 .prototype-screen {
   width: 100%; max-width: 40rem; min-width: 0; margin: 0 auto;
-  padding: 12px 12px 104px;
+  padding: 12px 12px 32px;
+}
+.prototype-tile {
+  background-color: var(--paper);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='168' height='96'%3E%3Ctext x='6' y='58' fill='%231E2A2F' fill-opacity='0.07' font-family='sans-serif' font-size='15' font-weight='700' transform='rotate(-28 84 48)'%3EPROTOTYPE%3C/text%3E%3C/svg%3E");
+  background-size: 168px 96px;
 }
 .prototype-brandbar {
   display: flex; align-items: center; gap: 12px; min-height: 44px; margin: 0 0 12px;
+  border-bottom: 3px solid var(--proto-accent, var(--accent));
 }
 .prototype-logo { width: 44px; height: 44px; flex: none; display: block; }
 .prototype-brand-name {
-  margin: 0; min-width: 0; font-weight: 700; overflow-wrap: anywhere;
-  color: var(--proto-ink, var(--ink));
+  margin: 0; min-width: 0; font-weight: 700; overflow-wrap: anywhere; color: var(--ink);
 }
-.prototype-index h1, .prototype-card h2, .prototype-card p { overflow-wrap: anywhere; }
+.prototype-index h1, .prototype-card h2, .prototype-card p, .prototype-footer { overflow-wrap: anywhere; }
 .prototype-index h1 { margin-bottom: .6rem; }
 .prototype-card {
   min-width: 0; max-width: 100%; background: var(--surface); border: 1px solid var(--line);
+  border-top: 3px solid var(--proto-accent, var(--accent));
   border-radius: 12px; padding: 12px;
 }
 .prototype-card p { margin: .4rem 0 0; }
+.prototype-sample {
+  display: inline-flex; align-items: center; margin-left: .4rem; padding: 0 .4rem;
+  min-height: 1.25rem; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--paper); color: var(--ink-2); font-size: .68rem; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase; vertical-align: middle;
+}
+.prototype-value { display: inline; }
+.prototype-footer { margin: 1.25rem 0 0; color: var(--ink-2); font-size: .92rem; }
 .prototype-open, .prototype-back {
   display: flex; align-items: center; justify-content: center; width: 100%;
   min-height: 44px; margin-top: 12px; padding: 10px 16px; border-radius: 10px;
   text-decoration: none; font-weight: 600; text-align: center;
 }
 .prototype-open {
-  background: var(--proto-primary, var(--juniper));
-  border: 1px solid var(--proto-primary, var(--juniper));
-  color: var(--proto-on-primary, #fff);
+  background: var(--juniper); border: 1px solid var(--juniper); color: var(--juniper-ink);
 }
 .prototype-back {
-  background: transparent; color: var(--proto-ink, var(--ink));
-  border: 1px solid var(--line);
+  background: var(--surface); color: var(--ink); border: 1px solid var(--line);
 }
 .prototype-screen .demo { min-height: 0; padding: 0; background: transparent; }
-.prototype-screen .demo-btn {
-  background: var(--proto-primary, var(--juniper));
-  border-color: var(--proto-primary, var(--juniper));
-  color: var(--proto-on-primary, #fff);
-}
-.prototype-screen .demo-btn-quiet {
-  background: transparent; color: var(--proto-ink, var(--ink)); border-color: var(--line);
-}
 .prototype-screen .demo-steps li[aria-current="step"] {
-  background: var(--proto-primary, var(--juniper));
-  border-color: var(--proto-primary, var(--juniper));
-  color: var(--proto-on-primary, #fff);
+  background: var(--surface); color: var(--proto-accent, var(--accent));
+  border-color: var(--proto-accent, var(--accent));
 }
-.prototype-screen .demo-approved { color: var(--proto-accent, var(--juniper)); }
+.prototype-screen .demo-options li.is-open { border-color: var(--proto-accent, var(--accent)); }
+.prototype-screen .demo-approved { color: var(--proto-accent, var(--accent)); }
 @media (max-width: 360px) {
-  .prototype-screen { padding: 8px 8px 104px; }
+  .prototype-screen { padding: 8px 8px 24px; }
   .prototype-card { padding: 10px; }
 }
 @media (min-width: 800px) {
-  .prototype-screen { max-width: 52rem; padding: 24px 24px 104px; }
+  .prototype-screen { max-width: 52rem; padding: 24px 24px 40px; }
 }
 
 /* prototype-watermark: literal colors only. Brand custom properties stay out of this rule. */
-.prototype-watermark {
-  position: fixed !important;
-  left: 8px !important;
-  right: 8px !important;
-  bottom: 8px !important;
+.prototype-ribbon {
+  position: sticky !important;
+  top: 0 !important;
   z-index: 2147483000 !important;
   display: block !important;
   visibility: visible !important;
   opacity: 1 !important;
+  flex-shrink: 0 !important;
   background-color: #1E2A2F !important;
   color: #FFFFFF !important;
   -webkit-text-fill-color: #FFFFFF !important;
-  border: 2px solid #C9952F !important;
-  border-radius: 10px !important;
+  border: 0 !important;
   box-shadow: none !important;
   filter: none !important;
   mix-blend-mode: normal !important;
@@ -550,7 +554,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   margin: 0 !important;
   min-height: 44px !important;
   height: auto !important;
-  width: auto !important;
+  width: 100% !important;
   max-width: none !important;
   overflow: visible !important;
   pointer-events: none !important;
@@ -559,6 +563,24 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   font-size: 14px !important;
   font-weight: 700 !important;
   line-height: 1.35 !important;
+}
+.prototype-toast {
+  position: fixed !important;
+  left: 50% !important;
+  bottom: 16px !important;
+  transform: translateX(-50%) !important;
+  z-index: 2147482000 !important;
+  display: block !important;
+  max-width: calc(100% - 24px) !important;
+  margin: 0 !important;
+  padding: 12px 16px !important;
+  min-height: 44px !important;
+  border-radius: 10px !important;
+  background-color: #1E2A2F !important;
+  color: #FFFFFF !important;
+  -webkit-text-fill-color: #FFFFFF !important;
+  font-weight: 700 !important;
+  text-align: center !important;
 }
 
 /* ── Mobile ────────────────────────────────────────────── */

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { buildDemo } from '../demo/fixture.js';
 import { EstimateRecoveryFlow } from '../demo/EstimateRecovery';
+import { SampleTag } from '../components/PrototypeWatermark';
 import { presentBrand } from './brand';
 import { HOSTILE_BRAND, TEST_BRAND } from './fixture-brand';
 import PrototypeLayout from './PrototypeLayout';
@@ -59,7 +60,7 @@ function GalleryIndex({ token, search }) {
         These screens are simulated previews on fictional jobs. They are not a live system, nothing is sent, and the sample shop has not endorsed them.
       </p>
       <article className="prototype-card">
-        <h2>Estimate follow-up</h2>
+        <h2>Estimate follow-up <SampleTag /></h2>
         <p>
           A walkthrough of unsold-estimate recovery for this brand. No email, text, or call goes out.
         </p>
