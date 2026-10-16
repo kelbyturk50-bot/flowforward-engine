@@ -72,11 +72,18 @@ const TIER_CAP_FOR = {
 //
 // Text matches are word-boundary matches. "preplacement", "reinstallation",
 // "refinancing", "freeestimate", and "free estimated" do not match.
+// A negated phrase does not count: "no free estimates", "we do not offer
+// financing", "we don't offer financing", and "not offering installation".
+// "not only" and "no-cost" / "no cost" financing are not negations.
 //
-// Plumbing is listed in ESTIMATE_SIGNAL_SKIP_INDUSTRIES. Summit's binding
-// condition is no plumbing score change; plumbing stays a playbook and offer
-// bias only. INDUSTRY_FIT.Plumbing stays 9. These points do not retune any
-// industry weight or any tier threshold.
+// HVAC only (Scout, PR #51). The points apply when industry or category is
+// HVAC, or when industry, category, or the company name says heating, cooling,
+// HVAC, AC, or furnace on a word boundary (ESTIMATE_SIGNAL_HVAC_WORDS).
+// "Plumbing & Heating" counts. "Plumber" and "Plumbing" alone do not.
+// Landscaping and every other trade get no points, so a non-beachhead shop
+// does not enter tier A on these signals. Summit's binding condition is still
+// no plumbing score change. INDUSTRY_FIT.Plumbing stays 9. These points do
+// not retune any industry weight or any tier threshold.
 //
 // replacement (+4). The wedge is an unsold replacement estimate. A shop that
 // says it replaces equipment is selling the high-ticket job the pilot follows
@@ -102,10 +109,11 @@ const TIER_CAP_FOR = {
 // page whose path names estimate, quote, or contact. A promise such as
 // "we'll follow up" turns this one signal off. Unknown form means 0.
 //
-// job_ad (+2). A comfort advisor or sales-role job ad means a replacement
-// sales motion. Only when that phrase, or a job_ads / comfort_advisor field,
-// is already in the cache. Generic mentions.hiring (techs, "join our team")
-// is not this signal. No job-board lookup.
+// job_ad (+2). A comfort advisor, sales advisor, comfort consultant, or sales
+// consultant means a replacement sales motion. Only when that role, or a
+// job_ads entry that names it, is already in the cache. A title that merely
+// contains "comfort" or "sales" (Comfort Technician, Parts Sales Clerk) does
+// not count. Generic mentions.hiring does not count. No job-board lookup.
 //
 // search_ads (+2). A slight boost. Local Services Ads or search ads mean they
 // buy estimate leads. Counted only from cache: a Google Ads signature in
@@ -121,8 +129,10 @@ const ESTIMATE_SIGNAL_POINTS = {
   search_ads: 2,
 };
 
-// Case-insensitive industry names that do not receive the points above.
-const ESTIMATE_SIGNAL_SKIP_INDUSTRIES = ['Plumbing'];
+// Case-insensitive words that mark an HVAC lead on industry, category, or
+// company. "ac" is the whole word, so "face" and "Plumbing" do not match.
+// "a/c" is the slashed form of the same word.
+const ESTIMATE_SIGNAL_HVAC_WORDS = ['hvac', 'heating', 'cooling', 'furnace', 'ac', 'a/c'];
 
 // Cities you can meet in person (case-insensitive). Override with env
 // FIT_HOME_CITIES="Saratoga Springs,Lehi,..."
@@ -172,6 +182,6 @@ const EXCLUDED_INDUSTRIES = (process.env.EXCLUDED_INDUSTRIES ?? 'Pest Control')
 
 module.exports = {
   INDUSTRY_FIT, SERVICETITAN_PENALTY, TIER_CAP_FOR, ESTIMATE_SIGNAL_POINTS,
-  ESTIMATE_SIGNAL_SKIP_INDUSTRIES, EXCLUDED_INDUSTRIES, HOME_CITIES, HOME_STATE,
+  ESTIMATE_SIGNAL_HVAC_WORDS, EXCLUDED_INDUSTRIES, HOME_CITIES, HOME_STATE,
   FRANCHISE_PATTERNS, SOCIAL_HOSTS, TIERS,
 };

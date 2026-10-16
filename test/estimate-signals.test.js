@@ -15,7 +15,7 @@ const { INDUSTRIES } = require('../src/bot/discover');
 const { _setSearch } = require('../src/bot/google-places');
 const {
   INDUSTRY_FIT, SERVICETITAN_PENALTY, TIER_CAP_FOR, TIERS, ESTIMATE_SIGNAL_POINTS,
-  ESTIMATE_SIGNAL_SKIP_INDUSTRIES,
+  ESTIMATE_SIGNAL_HVAC_WORDS,
 } = require('../src/scoring/config');
 const { computeFit, rescore, ST_REASON } = require('../src/scoring/fit');
 const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
@@ -217,7 +217,7 @@ describe('F-003 estimate signals', () => {
       job_ad: 2,
       search_ads: 2,
     });
-    assert.deepEqual(ESTIMATE_SIGNAL_SKIP_INDUSTRIES, ['Plumbing']);
+    assert.deepEqual(ESTIMATE_SIGNAL_HVAC_WORDS, ['hvac', 'heating', 'cooling', 'furnace', 'ac', 'a/c']);
     assert.equal(INDUSTRY_FIT.HVAC, 10);
     assert.equal(INDUSTRY_FIT.Plumbing, 9);
     assert.equal(INDUSTRY_FIT.Electrical, 5);
@@ -276,7 +276,9 @@ describe('F-003 estimate signals', () => {
     assert.equal(signalPoints(serviceOnly), 0);
     assert.equal(landscaping.fit_score, 56);
     assert.equal(landscaping.fit_tier, 'C');
-    assert.equal(sameCacheLandscaping.fit_score, 77);
+    assert.equal(sameCacheLandscaping.fit_score, 56);
+    assert.equal(sameCacheLandscaping.fit_tier, 'C');
+    assert.equal(signalPoints(sameCacheLandscaping), 0);
     assert.equal(replacement.fit_score, 100);
     assert.equal(replacement.fit_tier, 'A');
     assert.equal(signalPoints(replacement), 21);
@@ -312,7 +314,9 @@ describe('F-003 estimate signals', () => {
       ['quote form words', research('Fill out the quote form'), 3],
       ['comfort advisor', research('Now hiring comfort advisors'), 2],
       ['sales consultant', research('We need a sales consultant'), 2],
+      ['sales advisor', research('Now hiring a sales advisor'), 2],
       ['job title cache', research('', { signals: { job_ads: ['Comfort Advisor'] } }), 2],
+      ['sales advisor title', research('', { signals: { job_ads: ['Sales Advisor'] } }), 2],
       ['google ads signature', research('', { signals: { analytics_ads: ['Google Ads conversion'] } }), 2],
       ['LSA phrase', research('We buy LSA leads'), 2],
       ['local services ads', research('Local Services Ads'), 2],
@@ -335,17 +339,20 @@ describe('F-003 estimate signals', () => {
         },
       }),
       research('free estimated visit and a salesperson'),
+      research('', { signals: { job_ads: ['Comfort Technician'] } }),
+      research('', { signals: { job_ads: ['Parts Sales Clerk'] } }),
+      research('Now hiring a comfort technician and a parts sales clerk'),
       research('', { form: false, url: 'https://shop.example/contact' }),
       research('Contact form. We\'ll follow up tomorrow. Furnace replacement'),
       { signals: { mentions: { hiring: true, free_estimates: false, financing: false } } },
       {},
     ];
-    const followUp = computeFit({ ...peer, research: misses[3] });
+    const followUp = computeFit({ ...peer, research: misses[6] });
     assert.equal(followUp.fit_score - plain.fit_score, 4);
     assert.equal(followUp.fit_reasons.some(row => row.label === 'Quote form'), false);
     assert.equal(followUp.fit_reasons.find(row => row.label === 'Replacement').points, 4);
 
-    for (const cache of [misses[0], misses[1], misses[2], misses[4], misses[5]]) {
+    for (const cache of misses.filter((_, index) => index !== 6)) {
       const fit = computeFit({ ...peer, research: cache });
       assert.equal(fit.fit_score, plain.fit_score);
       assert.equal(signalPoints(fit), 0);
@@ -395,6 +402,129 @@ describe('F-003 estimate signals', () => {
     assert.equal(sweet.fit_score, 97);
     assert.equal(sweet.fit_tier, 'A');
     assert.equal(signalPoints(sweet), 0);
+
+    const plumber = computeFit({
+      ...peer,
+      company: 'City Plumber',
+      industry: 'Plumber',
+      research: replacementResearch(),
+    });
+    const plumberPlain = computeFit({ ...peer, company: 'City Plumber', industry: 'Plumber' });
+    assert.equal(signalPoints(plumber), 0);
+    assert.equal(plumber.fit_score, plumberPlain.fit_score);
+
+    const named = computeFit({
+      ...peer,
+      company: 'Plumbing & Heating',
+      industry: 'Plumbing',
+      research: replacementResearch(),
+    });
+    const namedPlain = computeFit({ ...peer, company: 'Plumbing & Heating', industry: 'Plumbing' });
+    assert.equal(signalPoints(named), 21);
+    assert.equal(named.fit_score, namedPlain.fit_score + 21);
+
+    const labeled = computeFit({
+      ...peer,
+      company: 'City Services',
+      industry: 'Plumbing & Heating',
+      research: replacementResearch(),
+    });
+    assert.equal(signalPoints(labeled), 21);
+
+    const byCategory = computeFit({
+      ...peer,
+      company: 'City Electric',
+      industry: 'Electrical',
+      category: 'HVAC',
+      research: replacementResearch(),
+    });
+    assert.equal(signalPoints(byCategory), 21);
+
+    const electrical = computeFit({
+      ...peer,
+      company: 'City Electric',
+      industry: 'Electrical',
+      research: replacementResearch(),
+    });
+    assert.equal(signalPoints(electrical), 0);
+  });
+
+  it('gives landscaping with every signal no boost and keeps it at or below 77/B', () => {
+    const sweet = {
+      company: 'Provo Lawns',
+      industry: 'Landscaping',
+      website: 'https://provolawns.example',
+      phone: '(801) 555-0140',
+      city: 'Provo',
+      state: 'UT',
+      rating: 4.0,
+      review_count: 80,
+      fit_boost: 0,
+      research: replacementResearch(),
+    };
+    const fit = computeFit(sweet);
+    assert.equal(signalPoints(fit), 0);
+    assert.equal(fit.fit_score, 77);
+    assert.equal(fit.fit_tier, 'B');
+    assert.ok(fit.fit_score <= 77);
+
+    const outOfMarket = computeFit({
+      ...peer,
+      company: 'Denver Lawns',
+      industry: 'Landscaping',
+      research: replacementResearch(),
+    });
+    assert.equal(signalPoints(outOfMarket), 0);
+    assert.equal(outOfMarket.fit_score, 56);
+    assert.ok(outOfMarket.fit_score <= 77);
+    assert.notEqual(outOfMarket.fit_tier, 'A');
+  });
+
+  it('ignores negated phrases and still counts an affirmative one', () => {
+    const plain = computeFit(peer);
+    const negated = [
+      ['no free estimates', research('No free estimates')],
+      ['do not offer financing', research('We do not offer financing')],
+      ['dont offer financing', research("We don't offer financing")],
+      ['not offering installation', research('We are not offering installation')],
+      ['no replacement', research('No replacement work here')],
+      ['mention contradicted', {
+        signals: { mentions: { free_estimates: true } },
+        site: { pages: [{ url: 'https://shop.example/', title: 'Home', text: 'No free estimates' }], signals: {} },
+      }],
+    ];
+    for (const [name, cache] of negated) {
+      const fit = computeFit({ ...peer, research: cache });
+      assert.equal(fit.fit_score, plain.fit_score, name);
+      assert.equal(signalPoints(fit), 0, name);
+    }
+
+    const mixed = computeFit({
+      ...peer,
+      research: research('Furnace replacement. We do not offer financing.'),
+    });
+    assert.equal(mixed.fit_score - plain.fit_score, 4);
+    assert.equal(mixed.fit_reasons.some(row => row.label === 'Financing'), false);
+    assert.equal(mixed.fit_reasons.find(row => row.label === 'Replacement').points, 4);
+
+    const notOnly = computeFit({
+      ...peer,
+      research: research('Not only installation, we also do replacement.'),
+    });
+    assert.equal(notOnly.fit_score - plain.fit_score, 7);
+    assert.equal(notOnly.fit_reasons.find(row => row.label === 'Installation').points, 3);
+    assert.equal(notOnly.fit_reasons.find(row => row.label === 'Replacement').points, 4);
+
+    const noCost = computeFit({ ...peer, research: research('Ask about no-cost financing and no cost financing.') });
+    assert.equal(noCost.fit_score - plain.fit_score, 3);
+    assert.equal(noCost.fit_reasons.find(row => row.label === 'Financing').points, 3);
+
+    const afterSentence = computeFit({
+      ...peer,
+      research: research('No. We offer financing on replacements.'),
+    });
+    assert.equal(afterSentence.fit_reasons.find(row => row.label === 'Financing').points, 3);
+    assert.equal(afterSentence.fit_reasons.find(row => row.label === 'Replacement').points, 4);
   });
 
   it('still penalizes ServiceTitan and caps it after the new boost', () => {

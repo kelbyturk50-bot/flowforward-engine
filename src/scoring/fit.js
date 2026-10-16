@@ -11,7 +11,8 @@
 //   Estimate signals      ESTIMATE_SIGNAL_POINTS from cached prospects.research only
 //                         (replacement, installation, free estimate, financing,
 //                         quote/contact form, job ad, search ads). Unknown = 0.
-//                         Plumbing is not boosted. No fetch.
+//                         HVAC only, including a heating/cooling/AC/furnace name.
+//                         Plumbing and Plumber alone are not boosted. No fetch.
 //   Manual boost  ±20     your own adjustment (fit_boost)
 //   Tier cap             TIER_CAP_FOR: ServiceTitan, and a word-boundary franchise, cannot exceed tier B
 //                         Applied after the estimate signals.
@@ -25,7 +26,8 @@
 // fit_boost, and the cached estimate signals, ServiceTitan and a word-boundary
 // franchise match are capped at tier B. The −20 still uses a substring match;
 // that is a separate follow-up. The estimate signals read prospects.research
-// only. A missing cache adds nothing, and plumbing is not boosted.
+// only, and only for an HVAC lead. A missing cache adds nothing. Plumbing,
+// Plumber, and every other trade are not boosted. A negated phrase adds nothing.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');
