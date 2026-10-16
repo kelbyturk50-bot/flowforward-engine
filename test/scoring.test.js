@@ -27,11 +27,16 @@ describe('scoring', () => {
     assert.equal(fit.fit_reasons.find(r => r.label === 'Location').points, 10);
   });
 
-  it('penalizes a national brand', () => {
+  it('penalizes a national brand and caps it at tier B', () => {
     const fit = computeFit({ ...sweetSpot, company: 'Terminix of Provo' });
-    assert.equal(fit.fit_score, 80);
-    assert.equal(fit.fit_tier, 'A');
     assert.equal(fit.fit_reasons.find(r => r.label === 'Franchise').points, -20);
+    assert.ok(fit.fit_score <= 77);
+    assert.equal(fit.fit_score, 77);
+    assert.equal(fit.fit_tier, 'B');
+    const cap = fit.fit_reasons.find(r => r.label === 'Tier cap');
+    assert.ok(cap);
+    assert.match(cap.detail, /franchise/);
+    assert.ok(fit.fit_reasons.findIndex(r => r.label === 'Franchise') < fit.fit_reasons.findIndex(r => r.label === 'Tier cap'));
   });
 
   it('scores a tiny out-of-market lead as tier D', () => {

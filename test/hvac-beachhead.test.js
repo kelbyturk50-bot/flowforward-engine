@@ -216,10 +216,14 @@ describe('HVAC beachhead', { concurrency: false }, () => {
     assert.equal(reason.points, SERVICETITAN_PENALTY);
     assert.equal(reason.detail, ST_REASON);
     assert.equal(reason.detail, 'ServiceTitan detected — weaker fit for owned build');
-    assert.equal(st.fit_score, plain.fit_score + SERVICETITAN_PENALTY);
-    assert.equal(st.fit_score, 85);
-    assert.equal(st.fit_tier, 'A');
+    assert.equal(plain.fit_score + SERVICETITAN_PENALTY, 85);
+    assert.ok(st.fit_score <= 77);
+    assert.equal(st.fit_score, 77);
+    assert.equal(st.fit_tier, 'B');
     assert.notEqual(st.fit_tier, 'D');
+    const cap = st.fit_reasons.find(r => r.label === 'Tier cap');
+    assert.ok(cap);
+    assert.equal(cap.points, 77 - 85);
 
     const cased = computeFit(lead('HVAC', { fsm_detected: ' servicetitan ' }));
     assert.equal(cased.fit_score, st.fit_score);
@@ -315,7 +319,8 @@ describe('HVAC beachhead', { concurrency: false }, () => {
     const guard = armNoFetch();
     try {
       const fit = computeFit({ ...row, fsm_detected: 'ServiceTitan' });
-      assert.equal(fit.fit_score, 85);
+      assert.ok(fit.fit_score <= 77);
+      assert.equal(fit.fit_score, 77);
       const n = await rescore([row.id]);
       assert.equal(n, 1);
       assert.deepEqual(guard.hits, []);
@@ -327,8 +332,8 @@ describe('HVAC beachhead', { concurrency: false }, () => {
       [row.id]
     );
     assert.equal(saved.rows[0].fsm_detected, 'ServiceTitan');
-    assert.equal(saved.rows[0].fit_score, 85);
-    assert.equal(saved.rows[0].fit_tier, 'A');
+    assert.equal(saved.rows[0].fit_score, 77);
+    assert.equal(saved.rows[0].fit_tier, 'B');
     assert.equal(saved.rows[0].fit_reasons.find(r => r.label === 'ServiceTitan').detail, ST_REASON);
   });
 
@@ -393,12 +398,12 @@ describe('HVAC beachhead', { concurrency: false }, () => {
     _setClient(fakeClaude());
     try {
       const specs = [
-        ['test-place-research-st', 'https://st.example/', 'ServiceTitan', 85],
-        ['test-place-research-sched', 'https://scheduler.example/', 'ServiceTitan', 85],
-        ['test-place-research-jobber', 'https://jobber.example/', 'Jobber', 100],
-        ['test-place-research-hcp', 'https://hcp.example/', 'Housecall Pro', 100],
+        ['test-place-research-st', 'https://st.example/', 'ServiceTitan', 77, 'B'],
+        ['test-place-research-sched', 'https://scheduler.example/', 'ServiceTitan', 77, 'B'],
+        ['test-place-research-jobber', 'https://jobber.example/', 'Jobber', 100, 'A'],
+        ['test-place-research-hcp', 'https://hcp.example/', 'Housecall Pro', 100, 'A'],
       ];
-      for (const [placeId, website, fsm, score] of specs) {
+      for (const [placeId, website, fsm, score, tier] of specs) {
         const row = await insertProspect({
           google_place_id: placeId,
           company: placeId,
@@ -416,6 +421,7 @@ describe('HVAC beachhead', { concurrency: false }, () => {
         );
         assert.equal(saved.rows[0].fsm_detected, fsm, placeId);
         assert.equal(saved.rows[0].fit_score, score, placeId);
+        assert.equal(saved.rows[0].fit_tier, tier, placeId);
         assert.notEqual(saved.rows[0].fit_tier, 'D', placeId);
         const tagged = saved.rows[0].fit_reasons.some(r => r.label === 'ServiceTitan');
         assert.equal(tagged, fsm === 'ServiceTitan', placeId);
@@ -487,13 +493,14 @@ describe('HVAC beachhead', { concurrency: false }, () => {
 
       const host = await drafted('test-place-st-host', 'https://real-host.example/');
       assert.equal(host.fsm_detected, 'ServiceTitan');
-      assert.equal(host.fit_score, 85);
-      assert.equal(host.fit_tier, 'A');
+      assert.ok(host.fit_score <= 77);
+      assert.equal(host.fit_score, 77);
+      assert.equal(host.fit_tier, 'B');
       assert.equal(host.fit_reasons.some(r => r.detail === ST_REASON), true);
 
       const token = await drafted('test-place-st-token', 'https://real-class.example/');
       assert.equal(token.fsm_detected, 'ServiceTitan');
-      assert.equal(token.fit_score, 85);
+      assert.equal(token.fit_score, 77);
       assert.equal(token.fit_reasons.some(r => r.label === 'ServiceTitan'), true);
 
       const list = await drafted('test-place-list-scheduler', 'https://list.example/');
@@ -509,8 +516,8 @@ describe('HVAC beachhead', { concurrency: false }, () => {
         [host.id]
       );
       assert.equal(kept.rows[0].fsm_detected, 'ServiceTitan');
-      assert.equal(kept.rows[0].fit_score, 85);
-      assert.equal(kept.rows[0].fit_tier, 'A');
+      assert.equal(kept.rows[0].fit_score, 77);
+      assert.equal(kept.rows[0].fit_tier, 'B');
       assert.equal(kept.rows[0].fit_reasons.some(r => r.detail === ST_REASON), true);
     } finally {
       _setResolver(null);
@@ -608,7 +615,7 @@ describe('HVAC beachhead', { concurrency: false }, () => {
     const stMain = stRows.map(row => mainScore(row).fit_score);
     assert.ok(median(stNow) < median(stMain));
     assert.equal(median(stMain), 97);
-    assert.equal(median(stNow), 85);
+    assert.equal(median(stNow), 77);
     for (const row of stRows) {
       assert.notEqual(byId.get(row.id).fit_tier, 'D');
     }

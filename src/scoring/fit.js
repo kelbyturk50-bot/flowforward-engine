@@ -9,13 +9,15 @@
 //   Franchise        -20  national brands / franchises
 //   ServiceTitan   −15    only when prospects.fsm_detected says ServiceTitan (no fetch)
 //   Manual boost  ±20     your own adjustment (fit_boost)
+//   Tier cap             TIER_CAP_FOR: ServiceTitan and franchise cannot exceed tier B
 //   Excluded industry      EXCLUDED_INDUSTRIES (default Pest Control) → score 0, tier D
 //
 // Key insight: businesses with 600+ reviews and 4.7+ stars are already systemized.
 // The winnable client has about 25–200 reviews (a busy 2–15 truck owner-op)
 // and a 3.8–4.3 rating (good enough to keep getting work, bad enough to feel the pain).
-// ServiceTitan is a weaker fit for an owned build. The penalty is soft: tier
-// still comes from the numeric score, and Jobber / Housecall Pro are not penalized.
+// ServiceTitan is a weaker fit for an owned build. The −15 is soft and does not
+// force tier D. Jobber / Housecall Pro are not penalized. After penalties and
+// fit_boost, ServiceTitan and a franchise name match are capped at tier B.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');
@@ -107,12 +109,59 @@ function franchisePenalty(company) {
 // and any other value are not ServiceTitan. Does not fetch.
 const ST_REASON = 'ServiceTitan detected — weaker fit for owned build';
 
-function serviceTitanPenalty(fsmDetected) {
-  if (fsmDetected == null) return [0, null];
+function isServiceTitan(fsmDetected) {
+  if (fsmDetected == null) return false;
   const name = String(fsmDetected).trim().toLowerCase();
-  if (!name || name === 'none') return [0, null];
-  if (name === 'servicetitan') return [cfg.SERVICETITAN_PENALTY, ST_REASON];
-  return [0, null];
+  return name === 'servicetitan';
+}
+
+function serviceTitanPenalty(fsmDetected) {
+  if (!isServiceTitan(fsmDetected)) return [0, null];
+  return [cfg.SERVICETITAN_PENALTY, ST_REASON];
+}
+
+// Ceiling for a capped tier: one point below the next-higher tier in TIERS.
+// B is 77 while A starts at 78. A, or a letter that is not in TIERS, has no ceiling.
+function tierCeiling(letter) {
+  if (!letter) return null;
+  const index = cfg.TIERS.findIndex(t => t.tier === letter);
+  if (index <= 0) return null;
+  return cfg.TIERS[index - 1].min - 1;
+}
+
+function capDetail(tier, ceiling, kinds) {
+  const names = kinds.map(kind => (kind === 'servicetitan' ? 'ServiceTitan' : 'franchise'));
+  const subject = names.length === 1
+    ? `${names[0]} leads are`
+    : `${names.join(' and ')} leads are`;
+  return `Capped at tier ${tier} (${ceiling}) — ${subject} not tier A buyers`;
+}
+
+// Applied after penalties, fit_boost, and the 0–100 clamp. A score already at
+// or below the ceiling is unchanged and gets no extra reason.
+function applyTierCap(score, reasons, { serviceTitan, franchise }) {
+  const active = [];
+  if (serviceTitan) {
+    const letter = cfg.TIER_CAP_FOR.servicetitan;
+    const ceiling = tierCeiling(letter);
+    if (ceiling != null) active.push({ kind: 'servicetitan', ceiling, tier: letter });
+  }
+  if (franchise) {
+    const letter = cfg.TIER_CAP_FOR.franchise;
+    const ceiling = tierCeiling(letter);
+    if (ceiling != null) active.push({ kind: 'franchise', ceiling, tier: letter });
+  }
+  if (!active.length) return score;
+  const ceiling = Math.min(...active.map(row => row.ceiling));
+  if (score <= ceiling) return score;
+  const binding = active.filter(row => row.ceiling === ceiling);
+  reasons.push({
+    label: 'Tier cap',
+    points: ceiling - score,
+    max: 0,
+    detail: capDetail(binding[0].tier, ceiling, binding.map(row => row.kind)),
+  });
+  return ceiling;
 }
 
 function tierFor(score) {
@@ -167,8 +216,10 @@ function computeFit(p) {
   if (boost) reasons.push({ label: 'Your boost', points: boost, max: 20, detail: 'Manual adjustment' });
 
   // Base max is 90; scale to 100 so a perfect lead reads 100.
+  // The tier cap runs after penalties and the boost, including a positive one.
   const base = indPts + sz + rep + rch + loc;
-  const score = Math.max(0, Math.min(100, Math.round(base * (100 / 90)) + fr + st + boost));
+  const raw = Math.max(0, Math.min(100, Math.round(base * (100 / 90)) + fr + st + boost));
+  const score = applyTierCap(raw, reasons, { serviceTitan: st !== 0, franchise: fr !== 0 });
   return { fit_score: score, fit_tier: tierFor(score), fit_reasons: reasons };
 }
 
