@@ -41,4 +41,12 @@ export default [
       globals: { ...globals.node },
     },
   },
+  {
+    // Node ignore script. The React plugin still visits it; give it the same
+    // version the app files declare so lint does not warn.
+    files: ['scripts/**/*.mjs'],
+    settings: {
+      react: { version: '18.3' },
+    },
+  },
 ];
