@@ -8,6 +8,7 @@ import {
   commitFlagLoad,
   currentFlagGeneration,
   failFlagLoad,
+  previewFlagsOverride,
   subscribeFeatureFlags,
 } from './flags';
 
@@ -41,6 +42,9 @@ export function useLoadFeatureFlags() {
     };
   }, []);
   useEffect(() => {
+    // A preview override replaces the API value, so the demo and gallery
+    // can stay on sample data with no request. Settings still loads the list.
+    if (previewFlagsOverride()) return;
     refreshRemoteFlags().catch(() => {});
   }, []);
 }

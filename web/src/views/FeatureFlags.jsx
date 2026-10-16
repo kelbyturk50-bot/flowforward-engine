@@ -85,7 +85,7 @@ export default function FeatureFlagsPanel() {
       )}
       {loading && <p className="flag-status" role="status">Loading feature flags…</p>}
       {snap.status === 'error' && (
-        <div className="error-note" role="alert">
+        <div className="error-note flag-alert" role="alert">
           <p>Feature flags could not be loaded. Every flag is off.</p>
           <button type="button" className="btn btn-quiet" onClick={() => setReloadToken((token) => token + 1)}>Retry</button>
         </div>
