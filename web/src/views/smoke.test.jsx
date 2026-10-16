@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from '../App';
-import { settings } from '../api';
+import { api, settings } from '../api';
 import { installApiDefaults } from '../test/defaults.js';
 import Today from './Today';
 import Leads from './Leads';
@@ -37,7 +37,25 @@ describe('CRM views', () => {
     render(<Leads {...shared} />);
     expect(await screen.findByRole('heading', { name: 'Leads' })).toBeInTheDocument();
     expect(await screen.findByText('Wasatch Air Co')).toBeInTheDocument();
-    expect(screen.getByText(/1 match/)).toBeInTheDocument();
+    expect(screen.getByText('1 match, ranked by fit for your business')).toBeInTheDocument();
+  });
+
+  it('says no leads are loaded when there is no count', async () => {
+    api.prospects.mockResolvedValueOnce({ total: 0, prospects: [] });
+    const zero = render(<Leads {...shared} />);
+    expect(await screen.findByText('0 match, ranked by fit for your business')).toBeInTheDocument();
+    zero.unmount();
+
+    api.prospects.mockResolvedValueOnce({ prospects: [] });
+    const missing = render(<Leads {...shared} />);
+    expect(await screen.findByText('No leads loaded yet')).toBeInTheDocument();
+    expect(screen.queryByText(/ranked by fit/)).not.toBeInTheDocument();
+    missing.unmount();
+
+    api.prospects.mockRejectedValue(Object.assign(new Error('API not configured for this environment'), { status: 0 }));
+    render(<Leads {...shared} />);
+    expect(await screen.findByText('No leads loaded yet')).toBeInTheDocument();
+    expect(screen.queryByText(/ranked by fit/)).not.toBeInTheDocument();
   });
 
   it('renders Proposals and switches tabs', async () => {

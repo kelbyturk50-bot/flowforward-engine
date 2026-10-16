@@ -148,6 +148,8 @@ describe('ApiBanner', () => {
     expect(await screen.findByRole('heading', { name: 'Leads' })).toBeInTheDocument();
     await waitFor(() => expect(api.prospects).toHaveBeenCalled());
     expect(screen.getAllByText(UNCONFIGURED_MESSAGE)).toHaveLength(1);
+    expect(screen.getByText('No leads loaded yet')).toBeInTheDocument();
+    expect(screen.queryByText(/ranked by fit/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });
 
