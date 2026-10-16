@@ -10,8 +10,9 @@
 // quote_form is new-collect and is not scored.
 //
 // Plumbing has no industry points. That is a picker bias only (Summit: no
-// plumbing score tweak). HVAC's points are the beachhead tie-break. Remaining
-// ties follow tieRank: estimate follow-up first, then cheapest to make real.
+// plumbing score tweak). HVAC's points are the beachhead column. Remaining
+// ties are ordered in prototypes.js: channel (email, then FSM, then
+// telephony), then tieRank, then the Jobber own-it penalty.
 // Bookkeeping is never auto-picked. Pest control and franchise names get no
 // prototype. ServiceTitan shops only get the light prototypes.
 //

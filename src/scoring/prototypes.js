@@ -13,13 +13,32 @@
 const cfg = require('./config');
 const { RUBRIC } = require('./prototypes.config');
 const { isExcludedIndustry, normalizeIndustry } = require('./industry');
-const { signalsHaveServiceTitan } = require('../proposals/servicetitan');
 
 const RV_MISSED = /no answer|voicemail|couldn'?t reach|never (called|call) back|didn'?t call back/i;
 const RV_SLOW = /never (got|received) (a|the|my) (quote|estimate)|slow (to )?quote|never followed up|no follow[- ]?up/i;
 const RV_SCHED = /no[- ]show|hard to schedule|reschedul|showed up late|never showed/i;
 
 const JOBBER_HCP = new Set(['jobber', 'housecall pro']);
+const HOME_STATE_NAMES = { UT: 'UTAH' };
+
+// TODO(scout): docs/PROTOTYPE_PLAY.md line 80 ranks channels as
+// email < FSM integration < telephony. tieRank puts receptionist (3)
+// ahead of scheduling (4), which would recommend a call agent over an
+// FSM agent on a tied score. Scout's ruling is pending. Until then the
+// most conservative choice is used: on an equal score, telephony sorts
+// after email-only and FSM agents, so a tie does not recommend a call
+// agent over a non-phone agent. tieRank still orders agents inside one
+// channel (estimate follow-up stays first).
+const CHANNEL_RANK = {
+  estimate_followup: 0,
+  speed_to_lead: 0,
+  review_requests: 0,
+  maint_renewal: 0,
+  scheduling: 1,
+  dispatch: 1,
+  bookkeeping: 1,
+  receptionist: 2,
+};
 
 function asObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -125,18 +144,48 @@ function isHvac(prospect) {
   return normalizeIndustry(prospect.industry).toLowerCase() === 'hvac';
 }
 
+function nameTokens(value) {
+  return String(value || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function tokensMatch(haystack, needle) {
+  if (!needle.length || needle.length > haystack.length) return false;
+  for (let i = 0; i <= haystack.length - needle.length; i++) {
+    let same = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) {
+        same = false;
+        break;
+      }
+    }
+    if (same) return true;
+  }
+  return false;
+}
+
+// Token sequence or exact name, not a substring. "trane" matches "Trane Heating"
+// and does not match "Constrane". "service experts" still matches as two tokens.
 function isFranchise(company) {
-  const name = String(company || '').toLowerCase();
-  if (!name) return false;
-  return cfg.FRANCHISE_PATTERNS.some(pattern => name.includes(pattern));
+  const name = nameTokens(company);
+  if (!name.length) return false;
+  return cfg.FRANCHISE_PATTERNS.some(pattern => tokensMatch(name, nameTokens(pattern)));
 }
 
 function outOfState(prospect) {
-  const state = String(prospect.state || '').trim().toUpperCase();
-  if (!state) return false;
-  return state !== String(cfg.HOME_STATE || 'UT').toUpperCase();
+  const raw = String(prospect.state || '').trim();
+  if (!raw) return false;
+  const home = String(cfg.HOME_STATE || 'UT').trim().toUpperCase();
+  const state = raw.toUpperCase();
+  if (state === home) return false;
+  if (HOME_STATE_NAMES[home] === state) return false;
+  const abbrev = Object.keys(HOME_STATE_NAMES).find(key => HOME_STATE_NAMES[key] === home);
+  if (abbrev && state === abbrev) return false;
+  return true;
 }
 
+// Spec line 38: read fsm_detected first. Only when that column is absent,
+// fall through to research.signals.field_service_software. A present column
+// wins even when the research cache names a different tool.
 function fsmInfo(prospect, signals) {
   const raw = prospect.fsm_detected;
   if (raw != null && String(raw).trim()) {
@@ -144,20 +193,53 @@ function fsmInfo(prospect, signals) {
   }
   const mentions = signals && asObject(signals.mentions);
   const list = signals && signals.field_service_software;
-  if (Array.isArray(list) && list.length) return { known: true, value: String(list[0]) };
+  if (Array.isArray(list) && list.length) {
+    const labels = list.map(name => String(name).trim()).filter(Boolean);
+    const serviceTitan = labels.find(name => name.toLowerCase() === 'servicetitan');
+    if (serviceTitan) return { known: true, value: serviceTitan };
+    if (labels.length) return { known: true, value: labels[0] };
+  }
   if (mentions) return { known: true, value: 'none' };
   return { known: false, value: null };
 }
 
-function isJobberOrHcp(value, signals) {
-  if (value && JOBBER_HCP.has(String(value).toLowerCase())) return true;
-  const list = Array.isArray(signals?.field_service_software) ? signals.field_service_software : [];
-  return list.some(name => JOBBER_HCP.has(String(name).toLowerCase()));
+function isJobberOrHcp(value) {
+  return JOBBER_HCP.has(String(value || '').trim().toLowerCase());
 }
 
-function isServiceTitan(value, signals) {
-  if (String(value || '').trim().toLowerCase() === 'servicetitan') return true;
-  return signalsHaveServiceTitan(signals);
+function isServiceTitan(value) {
+  return String(value || '').trim().toLowerCase() === 'servicetitan';
+}
+
+function channelRank(agent) {
+  return Object.hasOwn(CHANNEL_RANK, agent) ? CHANNEL_RANK[agent] : 1;
+}
+
+function ownItPenalty(agent, fsmValue) {
+  if (agent === 'receptionist' && String(fsmValue || '').trim().toLowerCase() === 'jobber') return 1;
+  return 0;
+}
+
+function comparePrototypeRank(a, b) {
+  return (b.score - a.score)
+    || (a.channel - b.channel)
+    || (a.tieRank - b.tieRank)
+    || (a.ownIt - b.ownIt)
+    || String(a.agent).localeCompare(String(b.agent));
+}
+
+// HVAC beats plumbing beats the rest when ordering prospects. Industry is
+// constant for one shop, so this does not reorder that shop's agents.
+function beachheadRank(prospect) {
+  const industry = normalizeIndustry(prospect && prospect.industry).toLowerCase();
+  if (industry === 'hvac') return 0;
+  if (industry === 'plumbing') return 1;
+  return 2;
+}
+
+function compareBeachhead(a, b) {
+  return beachheadRank(a) - beachheadRank(b)
+    || String((a && a.company) || '').localeCompare(String((b && b.company) || ''));
 }
 
 function anyReview(texts, re) {
@@ -175,8 +257,8 @@ function deriveSignals(prospect) {
   const bookingLanguage = mention(signals, 'online_booking_language');
   const emergency = mention(signals, 'emergency_24_7');
   const evenings = hoursClosedEvenings(hoursOf(research));
-  const serviceTitan = isServiceTitan(fsm.value, signals);
-  const jobber = isJobberOrHcp(fsm.value, signals) && !serviceTitan;
+  const serviceTitan = isServiceTitan(fsm.value);
+  const jobber = isJobberOrHcp(fsm.value) && !serviceTitan;
   const fsmNone = fsm.known && String(fsm.value).toLowerCase() === 'none' && !jobber && !serviceTitan;
   const reviews = numberOrNull(prospect.review_count);
   const rating = numberOrNull(prospect.rating);
@@ -204,6 +286,7 @@ function deriveSignals(prospect) {
     size_big: reviews !== null && reviews > 200,
     hvac: isHvac(prospect),
     serviceTitan,
+    fsmValue: fsm.value,
   };
 }
 
@@ -232,7 +315,14 @@ function recommendPrototypes(prospect, rubric = RUBRIC) {
     }
     reasons.sort((a, b) => a.signal.localeCompare(b.signal));
     score = Math.max(0, Math.min(100, score));
-    ranked.push({ agent, score, tieRank: spec.tieRank, reasons });
+    ranked.push({
+      agent,
+      score,
+      tieRank: spec.tieRank,
+      channel: channelRank(agent),
+      ownIt: ownItPenalty(agent, flags.fsmValue),
+      reasons,
+    });
   }
 
   if (flags.serviceTitan) {
@@ -242,7 +332,7 @@ function recommendPrototypes(prospect, rubric = RUBRIC) {
 
   const picks = ranked
     .filter(row => row.score >= rubric.minScore)
-    .sort((a, b) => b.score - a.score || a.tieRank - b.tieRank)
+    .sort(comparePrototypeRank)
     .slice(0, rubric.maxPicks)
     .map(({ agent, score, reasons }) => ({ agent, score, reasons }));
 
@@ -258,4 +348,7 @@ module.exports = {
   pickPrototypes,
   recommendPrototypes,
   hoursClosedEvenings,
+  beachheadRank,
+  compareBeachhead,
+  comparePrototypeRank,
 };

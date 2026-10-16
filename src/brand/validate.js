@@ -12,6 +12,11 @@ const TAG_MAX = 80;
 const URL_MAX = 300;
 const COLOR_MAX = 8;
 const SOURCES = new Set(['fixture', 'manual']);
+// Markup, C0/C1 controls, bidi overrides and isolates, and zero-width characters.
+const HOSTILE_TEXT = /[<>\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
+// Characters that would break out of a CSS url() if a later screen interpolates the value.
+const CSS_BREAK = /[\s'"()\\;<>`{}\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
+const PHONE_SEPARATORS = /[\s().+\-/\u2010-\u2015\u2212]/g;
 
 function fail(field, message) {
   return { ok: false, field, message };
@@ -48,7 +53,7 @@ function validateLogoUrl(value) {
   const raw = value.trim();
   if (!raw) return { ok: true, logoUrl: null };
   if (raw.length > URL_MAX) return fail('logoUrl', 'logoUrl is too long');
-  if (/[\u0000-\u001F\u007F\\]/.test(raw)) return fail('logoUrl', 'logoUrl must be an http or https URL');
+  if (CSS_BREAK.test(raw)) return fail('logoUrl', 'logoUrl must be an http or https URL');
   if (!/^https?:\/\//i.test(raw)) return fail('logoUrl', 'logoUrl must be an http or https URL');
   let url;
   try { url = new URL(raw); }
@@ -58,6 +63,7 @@ function validateLogoUrl(value) {
   }
   if (url.username || url.password) return fail('logoUrl', 'logoUrl must not include userinfo');
   if (!url.hostname) return fail('logoUrl', 'logoUrl must be an http or https URL');
+  if (CSS_BREAK.test(url.href)) return fail('logoUrl', 'logoUrl must be an http or https URL');
   const authority = raw.replace(/^https?:\/\//i, '').split(/[/?#]/)[0];
   if (authority.includes('@')) return fail('logoUrl', 'logoUrl must not include userinfo');
   return { ok: true, logoUrl: url.href };
@@ -68,9 +74,12 @@ function validateName(value) {
   const name = value.trim();
   if (!name.startsWith('TEST:')) return fail('name', 'name must start with TEST:');
   if (name.length < 6 || name.length > NAME_MAX) return fail('name', 'name must start with TEST:');
-  if (/[\u0000-\u001F\u007F]/.test(name)) return fail('name', 'name must start with TEST:');
+  if (HOSTILE_TEXT.test(name)) return fail('name', 'name must not contain markup or hidden characters');
+  const visible = name.slice(5).replace(/\s/g, '');
+  if (!visible) return fail('name', 'name must include a visible character');
   if (name.includes('@')) return fail('name', 'name must not contain an email address');
-  if (/\d{7,}/.test(name)) return fail('name', 'name must not contain a phone number');
+  const digits = name.replace(PHONE_SEPARATORS, '');
+  if (/\d{7,}/.test(digits)) return fail('name', 'name must not contain a phone number');
   return { ok: true, name };
 }
 

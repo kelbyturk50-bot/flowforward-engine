@@ -404,6 +404,8 @@ CREATE TABLE IF NOT EXISTS prospect_brands (
     char_length(name) BETWEEN 6 AND 120
     AND left(name, 5) = 'TEST:'
     AND position('@' IN name) = 0
+    AND name !~ U&'[[:cntrl:]<>\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
+    AND btrim(substring(name from 6)) ~ '[[:graph:]]'
   ),
   CONSTRAINT prospect_brands_source_check CHECK (source IN ('fixture', 'manual')),
   CONSTRAINT prospect_brands_tag_check CHECK (
@@ -415,6 +417,8 @@ CREATE TABLE IF NOT EXISTS prospect_brands (
       char_length(logo_url) BETWEEN 8 AND 300
       AND logo_url ~ '^https?://'
       AND logo_url !~ '://[^/?#]*@'
+      AND logo_url !~ '[[:space:][:cntrl:]]'
+      AND logo_url !~ '[''"`();\\<>{}]'
     )
   ),
   CONSTRAINT prospect_brands_colors_hex CHECK (
@@ -432,6 +436,27 @@ CREATE TRIGGER prospect_brands_updated_at
   BEFORE UPDATE ON prospect_brands
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
+-- Re-apply the name and logo checks so a database that already created the
+-- first version of these constraints picks up the tighter rules on boot.
+ALTER TABLE prospect_brands DROP CONSTRAINT IF EXISTS prospect_brands_name_test;
+ALTER TABLE prospect_brands ADD CONSTRAINT prospect_brands_name_test CHECK (
+  char_length(name) BETWEEN 6 AND 120
+  AND left(name, 5) = 'TEST:'
+  AND position('@' IN name) = 0
+  AND name !~ U&'[[:cntrl:]<>\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
+  AND btrim(substring(name from 6)) ~ '[[:graph:]]'
+);
+ALTER TABLE prospect_brands DROP CONSTRAINT IF EXISTS prospect_brands_logo_http;
+ALTER TABLE prospect_brands ADD CONSTRAINT prospect_brands_logo_http CHECK (
+  logo_url IS NULL OR (
+    char_length(logo_url) BETWEEN 8 AND 300
+    AND logo_url ~ '^https?://'
+    AND logo_url !~ '://[^/?#]*@'
+    AND logo_url !~ '[[:space:][:cntrl:]]'
+    AND logo_url !~ '[''"`();\\<>{}]'
+  )
+);
+
 INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
 VALUES
   ('TEST: Wasatch Heating', NULL, '["#1b4f72","#f4d03f"]'::jsonb, 'fixture', 'TEST:wasatch-heating'),
@@ -439,6 +464,8 @@ VALUES
 ON CONFLICT (test_tag) DO NOTHING;
 
 -- Scout's selection rubric (docs/PROTOTYPE_PLAY.md). One row per agent signal.
+-- Rubric versions are immutable. ON CONFLICT DO NOTHING keeps version 1 as
+-- first written. A scoring change is a new version, not an edit of v1.
 CREATE TABLE IF NOT EXISTS prototype_rubric_meta (
   version          INTEGER PRIMARY KEY,
   min_score        INTEGER NOT NULL,

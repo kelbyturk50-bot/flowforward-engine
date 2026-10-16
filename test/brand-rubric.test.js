@@ -6,16 +6,21 @@ require('./preload');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-const https = require('https');
-const dns = require('dns');
-const axios = require('axios');
+const { spawnSync } = require('child_process');
 const express = require('express');
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { BRAND_FIXTURES } = require('../src/brand/fixtures');
 const { validateBrand } = require('../src/brand/validate');
 const { RUBRIC, rubricRows } = require('../src/scoring/prototypes.config');
-const { pickPrototypes, recommendPrototypes, hoursClosedEvenings } = require('../src/scoring/prototypes');
+const {
+  pickPrototypes,
+  recommendPrototypes,
+  hoursClosedEvenings,
+  beachheadRank,
+  compareBeachhead,
+  comparePrototypeRank,
+} = require('../src/scoring/prototypes');
 const { loadRubric } = require('../src/scoring/rubric-store');
 const { computeFit } = require('../src/scoring/fit');
 const { applyMainSchema } = require('../src/db/migrate');
@@ -80,64 +85,11 @@ function topAgent(prospect, rubric) {
   return picks[0] ? picks[0].agent : null;
 }
 
-function describeCall(label, args) {
-  if (label.startsWith('dns')) return String(args[0] == null ? '' : args[0]);
-  const first = args[0];
-  if (typeof first === 'string' || first instanceof URL) return String(first).slice(0, 200);
-  if (first && typeof first === 'object') {
-    const host = first.hostname || first.host || '';
-    const reqPath = first.path || '';
-    return `${host}${reqPath}`.slice(0, 200);
-  }
-  return '';
-}
-
-function watchOutbound() {
-  const events = [];
-  const undo = [];
-  function wrap(obj, key, label) {
-    const orig = obj[key];
-    assert.equal(typeof orig, 'function', label);
-    undo.push(() => { obj[key] = orig; });
-    obj[key] = function (...args) {
-      events.push({ via: label, detail: describeCall(label, args) });
-      return orig.apply(this, args);
-    };
-  }
-  wrap(http, 'request', 'http.request');
-  wrap(http, 'get', 'http.get');
-  wrap(https, 'request', 'https.request');
-  wrap(https, 'get', 'https.get');
-  wrap(dns, 'lookup', 'dns.lookup');
-  wrap(dns, 'resolve', 'dns.resolve');
-  wrap(dns, 'resolve4', 'dns.resolve4');
-  wrap(dns, 'resolve6', 'dns.resolve6');
-  wrap(dns.promises, 'lookup', 'dns.promises.lookup');
-  wrap(dns.promises, 'resolve4', 'dns.promises.resolve4');
-  wrap(dns.promises, 'resolve6', 'dns.promises.resolve6');
-  wrap(axios, 'get', 'axios.get');
-  wrap(axios, 'request', 'axios.request');
-  const prevFetch = global.fetch;
-  undo.push(() => { global.fetch = prevFetch; });
-  global.fetch = function (...args) {
-    const target = args[0] && args[0].url ? args[0].url : args[0];
-    events.push({ via: 'fetch', detail: String(target).slice(0, 200) });
-    return prevFetch.apply(this, args);
-  };
-  return {
-    events,
-    restore() { while (undo.length) undo.pop()(); },
-  };
-}
-
-function offenders(events) {
-  return events.filter(event => {
-    if (event.via.startsWith('dns') || event.via.startsWith('https') || event.via === 'fetch' || event.via.startsWith('axios')) {
-      return true;
-    }
-    if (/fixtures\.example|logo/i.test(event.detail || '')) return true;
-    if (event.via.startsWith('http.') && !/127\.0\.0\.1|localhost/.test(event.detail || '')) return true;
-    return false;
+function runBrandGuard(args) {
+  return spawnSync(process.execPath, [path.join(__dirname, 'brand-network-guard.js'), ...args], {
+    encoding: 'utf8',
+    env: process.env,
+    timeout: 20000,
   });
 }
 
@@ -216,9 +168,44 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       assert.equal(result.field, 'logoUrl', logoUrl);
     }
 
-    const httpsLogo = validateBrand({ ...good, logoUrl: 'HTTPS://fixtures.example/test-logo.png' });
+    const httpsLogo = validateBrand({ ...good, logoUrl: 'HTTPS://Fixtures.Example/test-logo.png' });
     assert.equal(httpsLogo.ok, true);
     assert.equal(httpsLogo.brand.logoUrl, 'https://fixtures.example/test-logo.png');
+    const cssBreaks = [
+      'https://fixtures.example/);background:url(https://evil.example)',
+      'https://fixtures.example/");background:url(https://evil.example)',
+      "https://fixtures.example/');background:url(https://evil.example)",
+      'https://fixtures.example/logo.png);background:url(https://evil.example)',
+      'https://fixtures.example/a b.png',
+      'https://fixtures.example/a\\b.png',
+      'https://fixtures.example/a;b.png',
+      'https://fixtures.example/<logo>.png',
+    ];
+    for (const logoUrl of cssBreaks) {
+      const result = validateBrand({ ...good, logoUrl });
+      assert.equal(result.ok, false, logoUrl);
+      assert.equal(result.field, 'logoUrl', logoUrl);
+    }
+    const hostileNames = [
+      'TEST: <script>',
+      'TEST: >',
+      'TEST:\u0000Heating',
+      'TEST:\u202Eevil',
+      'TEST:\u2066evil',
+      'TEST:\u200B\u200B',
+      'TEST:\uFEFFHeating',
+      'TEST:   ',
+      'TEST: \t ',
+      'TEST: 801-555-1234',
+      'TEST: (801) 555-1234',
+      'TEST: 801.555.1234',
+    ];
+    for (const name of hostileNames) {
+      const result = validateBrand({ ...good, name });
+      assert.equal(result.ok, false, JSON.stringify(name));
+      assert.equal(result.field, 'name', JSON.stringify(name));
+    }
+    assert.equal(validateBrand({ ...good, name: 'TEST: A' }).ok, true);
     assert.equal(validateBrand({ ...good, name: 'Wasatch Heating' }).ok, false);
     assert.equal(validateBrand({ ...good, name: 'TEST: owner@shop.example' }).ok, false);
     assert.equal(validateBrand({ ...good, testTag: 'wasatch' }).ok, false);
@@ -425,7 +412,29 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       recommendPrototypes(estimateShop({ company: 'Service Experts Utah' })).disqualified,
       'franchise'
     );
+    assert.equal(
+      recommendPrototypes(estimateShop({ company: 'TEST: One Hour Heating' })).disqualified,
+      'franchise'
+    );
+    assert.equal(
+      recommendPrototypes(estimateShop({ company: 'TEST: Trane Heating' })).disqualified,
+      'franchise'
+    );
+    assert.equal(recommendPrototypes(estimateShop({ company: 'TEST: Constrane Heating' })).disqualified, null);
+    assert.equal(topAgent(estimateShop({ company: 'TEST: Constrane Heating' })), 'estimate_followup');
+    assert.equal(recommendPrototypes(estimateShop({ company: 'TEST: Carriero HVAC' })).disqualified, null);
+    assert.equal(topAgent(estimateShop({ company: 'TEST: Carriero HVAC' })), 'estimate_followup');
     assert.equal(recommendPrototypes(estimateShop({ state: 'CO' })).disqualified, 'out_of_state');
+    assert.equal(recommendPrototypes(estimateShop({ state: 'Utah' })).disqualified, null);
+    assert.equal(topAgent(estimateShop({ state: 'Utah' })), 'estimate_followup');
+    assert.equal(topAgent(estimateShop({ state: 'utah' })), 'estimate_followup');
+    assert.equal(topAgent(estimateShop({ state: '' })), 'estimate_followup');
+    assert.equal(beachheadRank({ industry: 'HVAC' }) < beachheadRank({ industry: 'Plumbing' }), true);
+    assert.equal(beachheadRank({ industry: 'Plumbing' }) < beachheadRank({ industry: 'Electrical' }), true);
+    assert.ok(compareBeachhead(
+      { industry: 'HVAC', company: 'TEST: B' },
+      { industry: 'Plumbing', company: 'TEST: A' },
+    ) < 0);
     assert.equal(topAgent(estimateShop({ company: 'TEST: Best Heating' })), 'estimate_followup');
 
     const hvac = pickPrototypes(estimateShop());
@@ -478,6 +487,53 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       },
     });
     assert.deepEqual(tied.map(row => row.agent), ['estimate_followup', 'speed_to_lead']);
+
+    const stSignals = {
+      signals: {
+        mentions: {
+          free_estimates: true,
+          financing: true,
+          maintenance_plan: false,
+          emergency_24_7: false,
+          online_booking_language: false,
+        },
+        field_service_software: ['ServiceTitan'],
+        online_booking: ['ServiceTitan Scheduler'],
+      },
+      reviews: [{ text: 'no answer, and they never followed up on the quote' }],
+      place: { hours: ['Monday: 8:00 AM – 5:00 PM'] },
+    };
+    const columnWins = pickPrototypes(shop({ fsm_detected: 'Jobber', research: stSignals }));
+    assert.equal(columnWins[0].agent, 'estimate_followup');
+    assert.equal(columnWins[1].agent, 'speed_to_lead');
+    const noneWins = pickPrototypes(shop({ fsm_detected: 'none', research: stSignals }));
+    assert.equal(noneWins[1].agent, 'speed_to_lead');
+    const signalOnly = pickPrototypes(shop({ fsm_detected: null, research: stSignals }));
+    assert.deepEqual(signalOnly.map(row => row.agent), ['estimate_followup', 'review_requests']);
+
+    const channelTie = pickPrototypes(shop(), {
+      version: 1,
+      minScore: 40,
+      maxPicks: 2,
+      neverAutoPick: [],
+      serviceTitanAllow: ['estimate_followup', 'review_requests'],
+      gapSignals: [],
+      agents: {
+        receptionist: { tieRank: 3, points: { hvac: 50 } },
+        scheduling: { tieRank: 4, points: { hvac: 50 } },
+      },
+    });
+    assert.deepEqual(channelTie.map(row => row.agent), ['scheduling', 'receptionist']);
+    const jobberOwn = comparePrototypeRank(
+      { agent: 'receptionist', score: 50, channel: 2, tieRank: 3, ownIt: 1 },
+      { agent: 'scheduling', score: 50, channel: 2, tieRank: 3, ownIt: 0 },
+    );
+    assert.ok(jobberOwn > 0);
+    const sameChannel = comparePrototypeRank(
+      { agent: 'receptionist', score: 50, channel: 2, tieRank: 1, ownIt: 0 },
+      { agent: 'scheduling', score: 50, channel: 2, tieRank: 4, ownIt: 0 },
+    );
+    assert.ok(sameChannel < 0);
 
     const books = pickPrototypes(shop(), {
       version: 1,
@@ -571,7 +627,7 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       'src/scoring/prototypes.config.js',
       'src/scoring/rubric-store.js',
     ];
-    const banned = /safeFetch|axios|places\.googleapis|api\.anthropic|from\s+['"]dns|require\(['"]dns|https\.request|http\.request|undici/;
+    const banned = /safeFetch|axios|places\.googleapis|api\.anthropic|from\s+['"](?:node:)?dns|require\(['"](?:node:)?(?:dns|https?|net|tls|child_process|undici)|(?:https?|net|tls)\.(?:request|get|connect)|undici|child_process/;
     for (const file of watchedFiles) {
       const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
       assert.equal(banned.test(text), false, file);
@@ -588,10 +644,8 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     const server = http.createServer(app);
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const port = server.address().port;
-    const watch = watchOutbound();
     try {
       await pool.query('SELECT 1');
-      const before = watch.events.length;
 
       const bad = await request(port, 'POST', '/api/brands', {
         name: 'TEST: Rejected Color',
@@ -725,6 +779,20 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
         ),
         err => err.code === '23514'
       );
+      await assert.rejects(
+        () => pool.query(
+          `INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
+           VALUES ('TEST: <script>', NULL, '[]'::jsonb, 'manual', 'TEST:script-name')`
+        ),
+        err => err.code === '23514'
+      );
+      await assert.rejects(
+        () => pool.query(
+          `INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
+           VALUES ('TEST: Css Logo', 'https://fixtures.example/);background:url(https://evil.example)', '[]'::jsonb, 'manual', 'TEST:css-logo')`
+        ),
+        err => err.code === '23514'
+      );
 
       validateBrand({
         name: 'TEST: No Fetch',
@@ -735,14 +803,32 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       });
       pickPrototypes(estimateShop());
       recommendPrototypes(estimateShop(), await loadRubric(pool));
-
-      const during = offenders(watch.events.slice(before));
-      assert.deepEqual(during, [], JSON.stringify(during));
-      assert.equal(watch.events.slice(before).some(event => event.via.startsWith('dns') || event.via === 'fetch'), false);
     } finally {
-      watch.restore();
       await new Promise(resolve => server.close(resolve));
     }
+  });
+
+  it('denies outbound I/O before brand modules load', () => {
+    const clean = runBrandGuard([]);
+    assert.equal(clean.status, 0, `${clean.stdout}\n${clean.stderr}`);
+    const mutated = runBrandGuard(['--mutate']);
+    assert.equal(mutated.status, 0, `${mutated.stdout}\n${mutated.stderr}`);
+    const report = JSON.parse(mutated.stdout);
+    const required = [
+      'http.request', 'http.get', 'https.request', 'https.get',
+      'net.connect', 'net.Socket.connect', 'tls.connect',
+      'dns.lookup', 'dns.resolveAny', 'dns.promises.lookup', 'dns.promises.resolveAny',
+      'dns.Resolver.resolve4', 'dns.Resolver.resolveAny',
+      'child_process.spawnSync', 'child_process.execSync', 'child_process.spawn',
+      'fetch', 'undici.fetch', 'undici.request',
+      'axios', 'axios.post', 'axios.get',
+    ];
+    for (const label of required) {
+      assert.equal(report.caught.includes(label), true, label);
+      assert.equal(report.missed.includes(label), false, label);
+    }
+    assert.deepEqual(report.missed, []);
+    assert.deepEqual(report.silent, []);
   });
 
   it('re-applies schema.sql without duplicating fixtures or rubric rows', async () => {
