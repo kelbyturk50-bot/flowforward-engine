@@ -4,7 +4,9 @@ Branded clickable prototypes of FlowForward agents (scheduling, call, bookkeepin
 
 ## 1. Theme tokens
 
-**Inputs:** `businessName`, `brandPrimary` (hex, optional), `brandSecondary` (hex, optional). There is **no logo input**: real logos are not approved (Kelby's decision), so the only brand mark is the wordmark (see §2 Brand mark). No `logo`, `logoUrl`, upload or manual-logo option exists, and nothing is fetched from the prospect's site.
+**Inputs:** `businessName`, `brandPrimary` (hex, optional), `brandSecondary` (hex, optional). There is **no logo input**: real logos are not approved (Kelby's decision), so the only brand mark is the wordmark (see §2 Brand mark). The spec defines no `logo`, `logoUrl`, upload or manual-logo option, and nothing is fetched from the prospect's site.
+
+> **Deprecation note (current code):** `logoUrl` is still accepted (https only, no credentials) and stored, and the prototype can render one bundled synthetic TEST mark (`bundled:test-wasatch-heating`); both are deprecated and unused per Kelby's Oct 16 decision (wordmark only) until a code PR removes them. Prototypes built from this spec must not use either.
 
 **Neutral FlowForward chrome (River Valley), fixed:**
 
