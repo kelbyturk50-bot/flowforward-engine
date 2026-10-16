@@ -356,14 +356,43 @@ async function fetchInbox(since) {
 }
 
 let checking = false;
-/** Sent proposals whose lead is still active. Archived leads are not replies to apply. */
+// Sent proposals, including archived leads. Opt-outs and bounces are still
+// recorded while a lead is archived. A reply or booking is not: that would
+// write status and next_action, which stay with the finisher and the send path.
 async function inboxCandidates() {
   const { rows } = await pool.query(
-    `SELECT pr.*, p.stage, p.archived_at
+    `SELECT pr.*, p.stage, p.archived_at, p.company, p.do_not_contact
        FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
-      WHERE pr.status = 'sent' AND pr.to_email IS NOT NULL
-        AND p.archived_at IS NULL`);
+      WHERE pr.status = 'sent' AND pr.to_email IS NOT NULL`);
   return rows;
+}
+
+function keepInboxOutcome(row, outcome) {
+  if (!outcome) return false;
+  if (!isArchivedLead(row)) return true;
+  return outcome.kind === 'opted_out' || outcome.kind === 'bounced';
+}
+
+function collectInboxOutcomes(rows, messages) {
+  const outcomes = [];
+  for (const msg of messages) {
+    if (msg.from === SENDER.email.toLowerCase()) continue;
+    for (const p of rows) {
+      if (p._done || (msg.date && p.sent_at && msg.date < new Date(p.sent_at))) continue;
+      const outcome = classifyMessage(msg, p);
+      if (!keepInboxOutcome(p, outcome)) continue;
+      p._done = true;
+      outcomes.push([p, outcome, msg]);
+    }
+  }
+  return outcomes;
+}
+
+async function applyInboxMessages(messages) {
+  const rows = await inboxCandidates();
+  const outcomes = collectInboxOutcomes(rows, messages);
+  for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
+  return { checked: messages.length, matched: outcomes.length };
 }
 
 /** Look through the inbox for replies, bookings, bounces and opt-outs. */
@@ -372,18 +401,12 @@ async function checkInbox() {
   const active = await inboxCandidates();
   if (!active.length) return { checked: 0 };
   checking = true;
-  const outcomes = []; let messages = [];
+  let messages = [];
+  let outcomes = [];
   try {
     const since = new Date(Math.min(...active.map(p => new Date(p.sent_at).getTime())) - 86400000);
     messages = await fetchInbox(since);
-    for (const msg of messages) {
-      if (msg.from === SENDER.email.toLowerCase()) continue;
-      for (const p of active) {
-        if (p._done || (msg.date && msg.date < new Date(p.sent_at))) continue;
-        const outcome = classifyMessage(msg, p);
-        if (outcome) { p._done = true; outcomes.push([p, outcome, msg]); }
-      }
-    }
+    outcomes = collectInboxOutcomes(active, messages);
   } catch (err) {
     console.error('[inbox] ✗ check failed:', err.message);
   } finally {
@@ -399,6 +422,6 @@ async function senderTick() {
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, checkInbox, inboxCandidates, senderTick, stopSequence, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, checkInbox, inboxCandidates, applyInboxMessages, senderTick, stopSequence, classifyMessage, applyOutcome,
   renderMessage, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

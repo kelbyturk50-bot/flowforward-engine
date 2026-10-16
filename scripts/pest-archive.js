@@ -17,10 +17,13 @@
 // it as host "base". PGHOSTADDR, a URL hostaddr, PGSERVICE, or more than
 // one host is ambiguous and is refused. Dry, apply, and undo refuse when
 // NODE_ENV trims to production in any case, or that host is not local, unless
-// PEST_ARCHIVE_CONFIRM trims to the connected database name. Empty or
-// whitespace confirm counts as unset. They print the database name and local
-// or remote, never the host, user, password, or URL. A blocked target with
-// no confirm exits before the database client loads. A database error prints
+// PEST_ARCHIVE_CONFIRM is exactly the connected database name. The confirm is
+// not trimmed. It is accepted only when it matches ^[a-z0-9_]{1,63}$. A
+// zero-width space, NBSP, pad, uppercase letter, or unicode lookalike is
+// refused before the database client loads. An empty confirm counts as unset.
+// They print the database name and local or remote, never the host, user,
+// password, or URL. A blocked target with no confirm exits before the
+// database client loads. A database error prints
 // the SQLSTATE and does not print the error text. Apply and undo set
 // lock_timeout to 5s and statement_timeout to 15s.
 //
@@ -56,8 +59,11 @@ function failureText(mode, err) {
   return line;
 }
 
-function confirmSet(env) {
-  return confirmValue(env) != null;
+function confirmAllows(env, blocked) {
+  const confirm = confirmValue(env);
+  if (confirm === false) return false;
+  if (blocked && !confirm) return false;
+  return true;
 }
 
 async function main() {
@@ -76,7 +82,7 @@ async function main() {
   }
 
   const target = archiveTarget(process.env);
-  if (target.blocked && !confirmSet(process.env)) {
+  if (!confirmAllows(process.env, target.blocked)) {
     process.stderr.write('pest-archive refused\n');
     process.exitCode = 1;
     return;

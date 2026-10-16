@@ -153,11 +153,16 @@ function archiveTarget(env) {
   };
 }
 
+// Postgres identifiers are at most 63 bytes. Accept only a lowercase name,
+// with no trim: a zero-width space, NBSP, pad, uppercase letter, or
+// lookalike is not this pattern and is refused before the client loads.
+const CONFIRM_RE = /^[a-z0-9_]{1,63}$/;
+
 function confirmValue(env) {
   const confirm = env.PEST_ARCHIVE_CONFIRM;
-  if (typeof confirm !== 'string') return null;
-  const trimmed = confirm.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  if (confirm == null || confirm === '') return null;
+  if (typeof confirm !== 'string' || !CONFIRM_RE.test(confirm)) return false;
+  return confirm;
 }
 
 function refused() {
@@ -171,7 +176,8 @@ function refused() {
 async function beginGuardedWrite(client, env) {
   const target = archiveTarget(env);
   const confirm = confirmValue(env);
-  if (target.blocked && !confirm) throw refused();
+  // false: present, but not an exact lowercase identifier. null: unset.
+  if (confirm === false || (target.blocked && !confirm)) throw refused();
   await client.query('BEGIN');
   try {
     const { rows } = await client.query('SELECT current_database() AS name');

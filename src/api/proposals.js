@@ -230,7 +230,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT pr.*, p.company, p.industry, p.city, p.fit_score, p.fit_tier, p.stage, p.phone, p.website, p.email AS lead_email,
-              p.contact_name, p.do_not_contact, p.rating, p.review_count
+              p.contact_name, p.do_not_contact, p.rating, p.review_count, p.archived_at, p.archive_reason
          FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`, [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     const versions = await pool.query(

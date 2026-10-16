@@ -38,11 +38,12 @@ const {
   confirmValue,
   beginGuardedWrite,
   runApply,
+  runUndo,
 } = require('../src/db/pest-archive');
 const { PEST_COMPANY_PATTERN, isPestCompanyName } = require('../src/scoring/industry');
 const { rescore } = require('../src/scoring/fit');
 const { pickLeads, draftProposal, _setClient } = require('../src/proposals/draft');
-const { sendDueFollowups, approveAndSend, inboxCandidates, _setTransport } = require('../src/proposals/send');
+const { sendDueFollowups, approveAndSend, inboxCandidates, applyInboxMessages, _setTransport } = require('../src/proposals/send');
 const { runDiscovery, INDUSTRIES } = require('../src/bot/discover');
 const { _setSearch } = require('../src/bot/google-places');
 
@@ -98,9 +99,43 @@ function assertRefused(result) {
   assert.equal(`${result.stdout}${result.stderr}`.includes('192.0.2.1'), false);
 }
 
+function refusedWithNoConnect(mode, extra, confirm, databaseUrl) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-archive-connect-'));
+  const log = path.join(dir, 'connects.log');
+  const preload = path.join(dir, 'preload.js');
+  fs.writeFileSync(preload, `'use strict';
+const fs = require('fs');
+const net = require('net');
+const log = ${JSON.stringify(log)};
+const connect = net.Socket.prototype.connect;
+net.Socket.prototype.connect = function () {
+  fs.appendFileSync(log, 'connect\\n');
+  return connect.apply(this, arguments);
+};
+`);
+  try {
+    const env = envWithoutDatabase({
+      DATABASE_URL: databaseUrl,
+      PEST_ARCHIVE_CONFIRM: confirm,
+      NODE_OPTIONS: `--require ${preload}`,
+    });
+    const result = runScript(mode, extra, env, { cwd: dir, timeout: 4000 });
+    const connects = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+    assertRefused(result);
+    assert.equal(connects, '', `${mode} ${JSON.stringify(confirm)}`);
+    assert.equal(`${result.stdout}${result.stderr}`.includes('secret'), false);
+    return result;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function envWithoutDatabase(overrides) {
   const env = { ...process.env, ...overrides };
   delete env.NODE_OPTIONS;
+  if (Object.prototype.hasOwnProperty.call(overrides, 'NODE_OPTIONS')) {
+    env.NODE_OPTIONS = overrides.NODE_OPTIONS;
+  }
   if (!Object.prototype.hasOwnProperty.call(overrides, 'PEST_ARCHIVE_CONFIRM')) {
     delete env.PEST_ARCHIVE_CONFIRM;
   }
@@ -961,11 +996,17 @@ describe('pest-name archive', { concurrency: false }, () => {
       NODE_ENV: 'test',
       DATABASE_URL: 'postgresql:///db?host=/tmp/.s.PGSQL.5432',
     }).local, true);
-    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: ' ' }), null);
-    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: '\n' }), null);
-    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: '\t  ' }), null);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: ' ' }), false);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: '\n' }), false);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: '\t  ' }), false);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: '\u00a0' }), false);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: '\u200b' }), false);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: ' flowforward_test ' }), false);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: 'FLOWFORWARD_TEST' }), false);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: 'flowforw\u0430rd_test' }), false);
     assert.equal(confirmValue({}), null);
-    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: ' flowforward_test ' }), 'flowforward_test');
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: '' }), null);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: 'flowforward_test' }), 'flowforward_test');
     for (const url of [' ', '\n', ' \n ', '\t']) {
       const blank = archiveTarget({ NODE_ENV: 'test', DATABASE_URL: url });
       assert.equal(blank.blocked, true);
@@ -1217,9 +1258,12 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.equal(focusBody.counts.proposal_replies_7d, 1);
 
     const activeSent = await insertProposal(active.id, 'focus-active-sent', 'sent', { sent_at: new Date() });
-    await insertProposal(archived.id, 'focus-archived-sent', 'sent', { sent_at: new Date() });
+    const archivedSent = await insertProposal(archived.id, 'focus-archived-sent', 'sent', { sent_at: new Date() });
     const candidates = await inboxCandidates();
-    assert.deepEqual(candidates.map(row => row.id), [activeSent]);
+    assert.deepEqual(
+      candidates.map(row => row.id).sort((a, b) => a - b),
+      [activeSent, archivedSent].sort((a, b) => a - b)
+    );
 
     const old = new Date(Date.now() - 20 * 86400000);
     const follow1 = new Date(Date.now() - 16 * 86400000);
@@ -1258,5 +1302,182 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.equal(actionById.get(active.id).next_action, 'No reply to emails — try a call');
     assert.equal(actionById.get(archived.id).next_action, 'Leave this');
     assert.equal(actionById.get(archived.id).next_action_at, '2026-10-01');
+  });
+
+  it('refuses a confirm that is not an exact lowercase identifier before connecting', async () => {
+    await resetDb();
+    const row = await insertProspect({
+      google_place_id: 'test-place-confirm-shape',
+      company: 'TEST: Confirm Pest Control',
+      industry: 'HVAC',
+      email: 'test+confirm-shape@example.com',
+    });
+    const remote = 'postgres://u:secret@192.0.2.1:5432/prod';
+    const local = process.env.DATABASE_URL;
+    const undoId = '44444444-4444-4444-8444-444444444444';
+    const cases = [
+      ['apply', [], '\u200b', remote],
+      ['dry', [], '\u200b', remote],
+      ['undo', [undoId], '\u200b', remote],
+      ['apply', [], 'flowforward_test\u200b', remote],
+      ['apply', [], ' flowforward_test ', remote],
+      ['apply', [], 'flowforward_test\u00a0', local],
+      ['apply', [], 'FLOWFORWARD_TEST', local],
+      ['dry', [], 'flowforw\u0430rd_test', local],
+      ['undo', [undoId], 'ｆlowforward_test', local],
+    ];
+    for (const [mode, extra, confirm, url] of cases) {
+      refusedWithNoConnect(mode, extra, confirm, url);
+    }
+    assert.equal((await stamp(row.id)).archived_at, null);
+  });
+
+  it('records an opt-out for an archived lead and does not follow up after undo', async () => {
+    await resetDb();
+    const runId = '55555555-5555-4555-8555-555555555555';
+    const control = await insertProspect({
+      google_place_id: 'test-place-opt-control',
+      company: 'TEST: Opt Control Heating',
+      industry: 'HVAC',
+      email: 'test+opt-control@example.com',
+      website: null,
+      stage: 'contacted',
+    });
+    const archived = await insertProspect({
+      google_place_id: 'test-place-opt-archived',
+      company: 'TEST: Opt Heating',
+      industry: 'HVAC',
+      email: 'test+opt-archived@example.com',
+      website: null,
+      stage: 'contacted',
+      next_action: 'Leave this',
+    });
+    await pool.query(
+      `UPDATE prospects
+          SET archived_at = NOW(), archive_reason = $2, archive_run_id = $3,
+              next_action = 'Leave this', next_action_at = DATE '2026-10-01'
+        WHERE id = $1`,
+      [archived.id, PEST_ARCHIVE_REASON, runId]
+    );
+    async function dueSent(prospectId, slug, email) {
+      const { rows } = await pool.query(
+        `INSERT INTO proposals (
+           prospect_id, version, status, slug, to_email, to_name, subject, body, followup1,
+           sent_at, followup1_due_at, message_id
+         ) VALUES (
+           $1, 1, 'sent', $2, $3, 'Dana', 'A note', 'Hello from the draft.', 'Checking back.',
+           NOW() - INTERVAL '4 days', NOW() - INTERVAL '1 hour', $4
+         ) RETURNING id`,
+        [prospectId, slug, email, `<${slug}@localhost>`]
+      );
+      return rows[0].id;
+    }
+    const controlId = await dueSent(control.id, 'opt-control', 'test+opt-control@example.com');
+    const archivedId = await dueSent(archived.id, 'opt-archived', 'test+opt-archived@example.com');
+
+    const reply = await applyInboxMessages([{
+      from: 'test+opt-archived@example.com',
+      text: 'Sounds good, let us talk next week.',
+      date: new Date(),
+      inReplyTo: '<opt-archived@localhost>',
+      references: [],
+    }]);
+    assert.equal(reply.matched, 0);
+    const stillSent = await pool.query('SELECT status FROM proposals WHERE id = $1', [archivedId]);
+    assert.equal(stillSent.rows[0].status, 'sent');
+    const stillAction = await pool.query('SELECT next_action FROM prospects WHERE id = $1', [archived.id]);
+    assert.equal(stillAction.rows[0].next_action, 'Leave this');
+
+    const recorded = await applyInboxMessages([{
+      from: 'test+opt-archived@example.com',
+      text: 'Please unsubscribe me from these emails.',
+      date: new Date(),
+      inReplyTo: '<opt-archived@localhost>',
+      references: [],
+    }]);
+    assert.equal(recorded.matched, 1);
+    const opted = await pool.query(
+      `SELECT pr.status, pr.stop_reason, p.do_not_contact, p.stage, p.archived_at, p.next_action
+         FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+        WHERE pr.id = $1`,
+      [archivedId]
+    );
+    assert.equal(opted.rows[0].status, 'opted_out');
+    assert.equal(opted.rows[0].stop_reason, 'Asked not to be contacted');
+    assert.equal(opted.rows[0].do_not_contact, true);
+    assert.equal(opted.rows[0].stage, 'lost');
+    assert.notEqual(opted.rows[0].archived_at, null);
+    assert.equal(opted.rows[0].next_action, 'Leave this');
+
+    const bouncedLead = await insertProspect({
+      google_place_id: 'test-place-bounce-archived',
+      company: 'TEST: Bounce Heating',
+      industry: 'HVAC',
+      email: 'test+bounce-archived@example.com',
+      website: null,
+      stage: 'contacted',
+    });
+    await pool.query(
+      `UPDATE prospects
+          SET archived_at = NOW(), archive_reason = $2, archive_run_id = $3
+        WHERE id = $1`,
+      [bouncedLead.id, PEST_ARCHIVE_REASON, '66666666-6666-4666-8666-666666666666']
+    );
+    const bounceId = await dueSent(bouncedLead.id, 'bounce-archived', 'test+bounce-archived@example.com');
+    const bounced = await applyInboxMessages([{
+      from: 'mailer-daemon@example.com',
+      subject: 'Delivery Status Notification (Failure)',
+      text: 'Delivery to test+bounce-archived@example.com failed',
+      date: new Date(),
+    }]);
+    assert.equal(bounced.matched, 1);
+    const bounceRow = await pool.query(
+      `SELECT pr.status, p.email, p.archived_at
+         FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+        WHERE pr.id = $1`,
+      [bounceId]
+    );
+    assert.equal(bounceRow.rows[0].status, 'bounced');
+    assert.equal(bounceRow.rows[0].email, null);
+    assert.notEqual(bounceRow.rows[0].archived_at, null);
+
+    const client = await pool.connect();
+    try {
+      const restored = await runUndo(client, runId);
+      assert.equal(restored, 1);
+    } finally {
+      client.release();
+    }
+    const afterUndo = await pool.query(
+      `SELECT archived_at, archive_reason, do_not_contact, next_action FROM prospects WHERE id = $1`,
+      [archived.id]
+    );
+    assert.equal(afterUndo.rows[0].archived_at, null);
+    assert.equal(afterUndo.rows[0].archive_reason, null);
+    assert.equal(afterUndo.rows[0].do_not_contact, true);
+    assert.equal(afterUndo.rows[0].next_action, 'Leave this');
+
+    const sentMail = [];
+    _setTransport({
+      async sendMail(mail) {
+        sentMail.push(mail);
+        return { messageId: '<opt-follow@localhost>', threadId: 'thr-opt' };
+      },
+    });
+    const follow = await sendDueFollowups();
+    assert.equal(follow.sent, 1);
+    assert.equal(sentMail.length, 1);
+    assert.equal(sentMail[0].to.address, 'test+opt-control@example.com');
+    const archivedFollow = await pool.query(
+      'SELECT status, followup1_sent_at FROM proposals WHERE id = $1',
+      [archivedId]
+    );
+    assert.equal(archivedFollow.rows[0].status, 'opted_out');
+    assert.equal(archivedFollow.rows[0].followup1_sent_at, null);
+    const controlFollow = await pool.query(
+      'SELECT followup1_sent_at FROM proposals WHERE id = $1',
+      [controlId]
+    );
+    assert.notEqual(controlFollow.rows[0].followup1_sent_at, null);
   });
 });
