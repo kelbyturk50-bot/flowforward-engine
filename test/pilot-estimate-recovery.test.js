@@ -7,7 +7,7 @@ process.env.FF_PILOT_ESTIMATE_SMS = '';
 process.env.PILOT_DEMO_BASE_URL = '';
 process.env.PILOT_DEMO_RATE_MAX = '';
 process.env.PILOT_DEMO_RATE_WINDOW_MS = '';
-process.env.CRM_API_KEY = 'test-pilot-key';
+process.env.CRM_API_KEY = 'test-pilot-key-must-be-32-chars-ok';
 
 const { describe, it, before, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -30,7 +30,7 @@ const draft = require('../src/proposals/draft');
 const places = require('../src/bot/google-places');
 const gmail = require('../src/proposals/gmail');
 
-const API_KEY = 'test-pilot-key';
+const API_KEY = 'test-pilot-key-must-be-32-chars-ok';
 const NOT_FOUND = { error: 'Not found' };
 const PROSPECT_EMAIL = 'dana@wasatchheating.test';
 const PROSPECT_PHONE = '(801) 555-0191';
@@ -965,6 +965,194 @@ describe('pilot estimate recovery', () => {
       console.warn = origWarn;
       process.env.CRM_API_KEY = saved;
       tokens._clearCacheForTests();
+    }
+  });
+
+  it('stays closed when CRM_API_KEY is shorter than 32 characters', async () => {
+    const saved = process.env.CRM_API_KEY;
+    const short = 'short-pilot-key-not-32chars!';
+    assert.ok(short.length < 32);
+    assert.ok(short.length > 0);
+    const origWarn = console.warn;
+    const lines = [];
+    console.warn = (...args) => {
+      lines.push(args.map((part) => String(part)).join(' '));
+    };
+    try {
+      process.env.CRM_API_KEY = 'x'.repeat(31);
+      tokens._clearCacheForTests();
+      assert.equal(tokens.pilotReady(), false);
+      process.env.CRM_API_KEY = 'x'.repeat(32);
+      tokens._clearCacheForTests();
+      assert.equal(tokens.pilotReady(), true);
+
+      process.env.CRM_API_KEY = short;
+      tokens._clearCacheForTests();
+      assert.equal(tokens.pilotReady(), false);
+      setFlags({ master: true, link: true });
+      const row = await insertProposal(prospect.id, { slug: 'pilot-short-secret' });
+      const before = await pool.query('SELECT COUNT(*)::int AS n FROM pilot_tokens');
+      const page = await request('GET', '/p/pilot-short-secret', {
+        headers: { 'x-forwarded-for': '203.0.113.170' },
+      });
+      assert.equal(page.status, 200);
+      assert.equal(page.text.includes('Try a live demo'), false);
+      assert.equal(page.text.includes('data-pilot'), false);
+      const demo = await request('GET', `/demo/estimate-recovery/${'b'.repeat(43)}`, {
+        headers: { 'x-forwarded-for': '203.0.113.171' },
+      });
+      assertClosed(demo);
+      const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, {
+        headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.172' },
+      });
+      assert.equal(minted.status, 404);
+      assert.deepEqual(minted.json, NOT_FOUND);
+      const after = await pool.query('SELECT COUNT(*)::int AS n FROM pilot_tokens');
+      assert.equal(after.rows[0].n, before.rows[0].n);
+      assert.ok(lines.some((line) => line.includes('32') && line.includes('[pilot]')));
+      assert.equal(lines.some((line) => line.includes(short)), false);
+      assert.equal(lines.some((line) => line.includes(saved)), false);
+    } finally {
+      console.warn = origWarn;
+      process.env.CRM_API_KEY = saved;
+      tokens._clearCacheForTests();
+    }
+  });
+
+  it('repairs duplicate active rows and null generations without rolling back boot', async () => {
+    const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
+    const blocks = schema.match(/DO \$\$[\s\S]*?END \$\$;/g) || [];
+    const repair = blocks.filter((block) => block.includes('pilot_tokens'));
+    assert.ok(repair.length >= 5);
+    const repairSql = repair.join('\n');
+    assert.match(repairSql, /generation IS NULL/);
+    assert.match(repairSql, /n\.id > t\.id/);
+    assert.match(repairSql, /SET generation = 0/);
+    assert.match(repairSql, /ALTER COLUMN generation SET NOT NULL/);
+    assert.match(repairSql, /idx_pilot_tokens_one_active/);
+    for (const block of repair) assert.match(block, /EXCEPTION WHEN OTHERS/);
+
+    const row = await insertProposal(prospect.id, { slug: 'pilot-boot-repair' });
+    const hash = () => crypto.randomBytes(32);
+    await pool.query('DROP INDEX IF EXISTS idx_pilot_tokens_one_active');
+    await pool.query('ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS generation');
+    await pool.query('ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS token TEXT');
+    await pool.query(
+      `INSERT INTO pilot_tokens (proposal_id, prospect_id, token_hash, expires_at, revoked_at, token)
+       VALUES
+         ($1, $2, $3, NOW() + interval '14 days', NULL, 'raw-legacy-token-one'),
+         ($1, $2, $4, NOW() + interval '14 days', NULL, 'raw-legacy-token-two'),
+         ($1, $2, $5, NOW() + interval '14 days', NOW(), 'raw-legacy-token-revoked')`,
+      [row.id, prospect.id, hash(), hash(), hash()]
+    );
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION ff_test_block_pilot_token_update() RETURNS trigger AS $fn$
+      BEGIN
+        RAISE EXCEPTION 'pilot boot update blocked';
+      END $fn$ LANGUAGE plpgsql;
+      CREATE TRIGGER ff_test_block_pilot_token_update
+        BEFORE UPDATE ON pilot_tokens
+        FOR EACH ROW EXECUTE FUNCTION ff_test_block_pilot_token_update();
+    `);
+    try {
+      await applySchema();
+      const during = await pool.query(
+        `SELECT column_name, is_nullable
+           FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'pilot_tokens'
+            AND column_name IN ('token', 'generation')`
+      );
+      const duringCols = Object.fromEntries(during.rows.map((item) => [item.column_name, item.is_nullable]));
+      assert.equal(duringCols.token, undefined);
+      assert.equal(duringCols.generation, 'YES');
+      const blockedIndex = await pool.query(
+        `SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pilot_tokens_one_active'`
+      );
+      assert.equal(blockedIndex.rows.length, 0);
+      const stillActive = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM pilot_tokens
+          WHERE proposal_id = $1 AND revoked_at IS NULL`,
+        [row.id]
+      );
+      assert.equal(stillActive.rows[0].n, 2);
+
+      await pool.query('DROP TRIGGER ff_test_block_pilot_token_update ON pilot_tokens');
+      await pool.query('DROP FUNCTION ff_test_block_pilot_token_update()');
+      await applySchema();
+      await applySchema();
+
+      const after = await pool.query(
+        `SELECT column_name, is_nullable
+           FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'pilot_tokens'
+            AND column_name IN ('token', 'generation')`
+      );
+      const afterCols = Object.fromEntries(after.rows.map((item) => [item.column_name, item.is_nullable]));
+      assert.equal(afterCols.token, undefined);
+      assert.equal(afterCols.generation, 'NO');
+      const index = await pool.query(
+        `SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_pilot_tokens_one_active'`
+      );
+      assert.match(index.rows[0].indexdef, /UNIQUE/);
+      const legacy = await pool.query(
+        `SELECT generation, revoked_at IS NOT NULL AS revoked
+           FROM pilot_tokens WHERE proposal_id = $1 ORDER BY id`,
+        [row.id]
+      );
+      assert.equal(legacy.rows.length, 3);
+      for (const item of legacy.rows) {
+        assert.equal(Number(item.generation), 0);
+        assert.equal(item.revoked, true);
+      }
+      const nulls = await pool.query(
+        'SELECT COUNT(*)::int AS n FROM pilot_tokens WHERE generation IS NULL'
+      );
+      assert.equal(nulls.rows[0].n, 0);
+
+      await pool.query('DROP INDEX IF EXISTS idx_pilot_tokens_one_active');
+      const older = await pool.query(
+        `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, token_hash, expires_at)
+         VALUES ($1, $2, 9, $3, NOW() + interval '14 days') RETURNING id`,
+        [row.id, prospect.id, hash()]
+      );
+      const newer = await pool.query(
+        `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, token_hash, expires_at)
+         VALUES ($1, $2, 2, $3, NOW() + interval '14 days') RETURNING id`,
+        [row.id, prospect.id, hash()]
+      );
+      assert.ok(Number(newer.rows[0].id) > Number(older.rows[0].id));
+      await applySchema();
+      const active = await pool.query(
+        `SELECT id, generation FROM pilot_tokens
+          WHERE proposal_id = $1 AND revoked_at IS NULL`,
+        [row.id]
+      );
+      assert.equal(active.rows.length, 1);
+      assert.equal(Number(active.rows[0].id), Number(newer.rows[0].id));
+      assert.equal(Number(active.rows[0].generation), 2);
+
+      setFlags({ master: true, link: true });
+      const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, {
+        headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.180' },
+      });
+      assert.equal(minted.status, 201);
+      assert.equal(minted.json.token, tokens.deriveToken(row.id, 10));
+      const page = await request('GET', '/p/pilot-boot-repair', {
+        headers: { 'x-forwarded-for': '203.0.113.181' },
+      });
+      assert.equal(page.status, 200);
+      assert.equal(ctaHref(page.text), minted.json.path);
+      assert.match(page.text, /Try a live demo/);
+      const demo = await request('GET', minted.json.path, {
+        headers: { 'x-forwarded-for': '203.0.113.182' },
+      });
+      assert.equal(demo.status, 200);
+      assert.equal(demo.json.company, 'Wasatch Heating');
+      assert.equal(demo.json.synthetic, true);
+    } finally {
+      await pool.query('DROP TRIGGER IF EXISTS ff_test_block_pilot_token_update ON pilot_tokens');
+      await pool.query('DROP FUNCTION IF EXISTS ff_test_block_pilot_token_update()');
+      await applySchema();
     }
   });
 });

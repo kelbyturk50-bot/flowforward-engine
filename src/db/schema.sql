@@ -238,6 +238,16 @@ UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND crea
 -- One active (unrevoked) row per proposal. Authenticated mint bumps
 -- generation. demo_revoked_at blocks derivation, discarded proposals included.
 -- Events store an allowlisted type, timestamps, and join ids only.
+--
+-- Upgrades from the pre-generation table can have several active rows and a
+-- nullable generation. Those rows are revoked (null generation first, then
+-- every active row except the newest id) and generation is backfilled to 0
+-- before it is set NOT NULL and the unique partial index is created.
+-- Generation 0 is only that backfill; live tokens start at 1.
+-- Each repair step is its own DO block. A caught error is a warning and does
+-- not abort this file: schema.sql runs as one statement, and an uncaught
+-- error would roll the token-column drop and the generation add back too.
+-- After the first successful boot the updates match zero rows.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS demo_revoked_at TIMESTAMPTZ;
@@ -254,10 +264,58 @@ CREATE TABLE IF NOT EXISTS pilot_tokens (
 );
 ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS generation INTEGER;
 ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS token;
+
+DO $$
+BEGIN
+  UPDATE pilot_tokens
+     SET revoked_at = NOW()
+   WHERE generation IS NULL
+     AND revoked_at IS NULL;
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'pilot_tokens: revoke null-generation rows failed: %', SQLERRM;
+END $$;
+
+DO $$
+BEGIN
+  UPDATE pilot_tokens t
+     SET revoked_at = NOW()
+   WHERE t.revoked_at IS NULL
+     AND EXISTS (
+       SELECT 1 FROM pilot_tokens n
+        WHERE n.proposal_id = t.proposal_id
+          AND n.revoked_at IS NULL
+          AND n.id > t.id
+     );
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'pilot_tokens: revoke duplicate active rows failed: %', SQLERRM;
+END $$;
+
+DO $$
+BEGIN
+  UPDATE pilot_tokens
+     SET generation = 0
+   WHERE generation IS NULL;
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'pilot_tokens: backfill generation failed: %', SQLERRM;
+END $$;
+
+DO $$
+BEGIN
+  ALTER TABLE pilot_tokens ALTER COLUMN generation SET NOT NULL;
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'pilot_tokens: generation NOT NULL failed: %', SQLERRM;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_pilot_tokens_proposal ON pilot_tokens(proposal_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_tokens_one_active
-  ON pilot_tokens (proposal_id)
-  WHERE revoked_at IS NULL;
+
+DO $$
+BEGIN
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_tokens_one_active
+    ON pilot_tokens (proposal_id)
+    WHERE revoked_at IS NULL;
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'pilot_tokens: unique active index failed: %', SQLERRM;
+END $$;
 
 CREATE TABLE IF NOT EXISTS pilot_events (
   id           SERIAL PRIMARY KEY,

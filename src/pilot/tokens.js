@@ -4,8 +4,12 @@
 // `pilot-demo:v1:${proposal_id}:${generation}`, unpadded base64url.
 // The HMAC key is HKDF-SHA256 over CRM_API_KEY with info `ff-pilot-demo`.
 // CRM_API_KEY is the API's own shared secret. No new env var is required.
-// When that secret is missing, the pilot stays closed: no one-pager CTA,
-// and the public demo routes return the same 404 as a flag that is off.
+// CRM_API_KEY must be at least 32 characters. When it is missing or shorter,
+// the pilot stays closed: no one-pager CTA, and the public demo routes
+// return the same 404 as a flag that is off. The warning does not include
+// the key. Rotating the key does not revoke links already issued — lookup
+// is by hash — so a leaked key or leaked link also needs
+// POST /api/proposals/:id/demo-token/revoke.
 //
 // The database stores the SHA-256 hash, the proposal, the generation, and
 // timestamps. It does not store the raw token. A /p/:slug render recomputes
@@ -23,6 +27,7 @@ const pool = require('../db/client');
 const flags = require('./flags');
 
 const TOKEN_BYTES = 32;
+const MIN_SECRET_LENGTH = 32;
 const TOKEN_RE = /^[A-Za-z0-9_-]{22,64}$/;
 const DEFAULT_TTL_HOURS = 24 * 14;
 const HKDF_INFO = 'ff-pilot-demo';
@@ -45,7 +50,7 @@ function ttlMs() {
 
 function serverSecret() {
   const secret = process.env.CRM_API_KEY;
-  if (typeof secret !== 'string' || secret.length === 0) return '';
+  if (typeof secret !== 'string' || secret.length < MIN_SECRET_LENGTH) return '';
   return secret;
 }
 
@@ -56,7 +61,7 @@ function pilotReady() {
   }
   if (!missingSecretWarned) {
     missingSecretWarned = true;
-    console.warn('[pilot] CRM_API_KEY is not set — the estimate-recovery demo stays off.');
+    console.warn('[pilot] CRM_API_KEY must be at least 32 characters — the estimate-recovery demo stays off.');
   }
   return false;
 }
