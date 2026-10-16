@@ -25,7 +25,7 @@ const {
 const { loadRubric } = require('../src/scoring/rubric-store');
 const { computeFit } = require('../src/scoring/fit');
 const { applyMainSchema } = require('../src/db/migrate');
-const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
+const { resetDb, insertProspect, seedBrandFixtures, closePool, pool } = require('./fixtures');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -643,6 +643,9 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
   });
 
   it('seeds TEST fixtures and a rubric table that matches the config', async () => {
+    const boot = await pool.query('SELECT COUNT(*)::int AS n FROM prospect_brands');
+    assert.equal(boot.rows[0].n, 0);
+    await seedBrandFixtures();
     const brands = await pool.query(
       `SELECT name, logo_url, colors, source, test_tag
          FROM prospect_brands
@@ -906,16 +909,14 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     assert.deepEqual(report.silent, []);
   });
 
-  it('re-applies schema.sql without duplicating fixtures or rubric rows', async () => {
+  it('boots with the default config and inserts no brand rows', async () => {
+    const schema = fs.readFileSync(path.join(ROOT, 'src/db/schema.sql'), 'utf8');
+    assert.equal(/INSERT\s+INTO\s+prospect_brands/i.test(schema), false);
     await resetDb();
-    const wiped = await pool.query('SELECT COUNT(*)::int AS n FROM prospect_brands');
-    assert.equal(wiped.rows[0].n, 0);
     await applyMainSchema();
     await applyMainSchema();
-    const brands = await pool.query(
-      `SELECT test_tag FROM prospect_brands WHERE source = 'fixture' ORDER BY test_tag`
-    );
-    assert.deepEqual(brands.rows.map(row => row.test_tag), ['TEST:canyon-plumbing', 'TEST:wasatch-heating']);
+    const brands = await pool.query('SELECT COUNT(*)::int AS n FROM prospect_brands');
+    assert.equal(brands.rows[0].n, 0);
     const rubric = await pool.query('SELECT COUNT(*)::int AS n FROM prototype_rubric');
     assert.equal(rubric.rows[0].n, rubricRows().length);
     const meta = await pool.query('SELECT COUNT(*)::int AS n FROM prototype_rubric_meta');

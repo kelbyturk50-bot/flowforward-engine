@@ -382,10 +382,12 @@ END $$;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Brand entry and prototype rubric (idempotent — applied on every boot).
--- v1 stores TEST fixtures and manual brands only. Nothing here fetches a
--- logo or copies proposals.research. prospects.research stays NULL until a
--- caller writes a cache. The picker reads it and does not fetch.
--- Inserts use ON CONFLICT DO NOTHING so a re-boot does not rewrite rows.
+-- v1 stores manual brands only. Boot does not insert TEST: brand rows.
+-- Fixtures live in src/brand/fixtures.js and are inserted by tests.
+-- Nothing here fetches a logo or copies proposals.research.
+-- prospects.research stays NULL until a caller writes a cache.
+-- The picker reads it and does not fetch.
+-- Rubric inserts use ON CONFLICT DO NOTHING so a re-boot does not rewrite rows.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS research JSONB;
@@ -456,12 +458,6 @@ ALTER TABLE prospect_brands ADD CONSTRAINT prospect_brands_logo_http CHECK (
     AND logo_url !~ '[''"`();\\<>{}]'
   )
 );
-
-INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
-VALUES
-  ('TEST: Wasatch Heating', NULL, '["#1b4f72","#f4d03f"]'::jsonb, 'fixture', 'TEST:wasatch-heating'),
-  ('TEST: Canyon Plumbing', 'https://fixtures.example/test-canyon-logo.png', '["#0e4d3a","#e8f0ec"]'::jsonb, 'fixture', 'TEST:canyon-plumbing')
-ON CONFLICT (test_tag) DO NOTHING;
 
 -- Scout's selection rubric (docs/PROTOTYPE_PLAY.md). One row per agent signal.
 -- Rubric versions are immutable. ON CONFLICT DO NOTHING keeps version 1 as
