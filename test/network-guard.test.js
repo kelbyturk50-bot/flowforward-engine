@@ -353,4 +353,145 @@ describe('network guard', () => {
       }
     );
   });
+
+  it('blocks a nodemailer connection-url proxy before any tunnel', async () => {
+    const nodemailer = require('nodemailer');
+    const hits = { n: 0 };
+    const proxy = net.createServer((socket) => {
+      hits.n += 1;
+      socket.destroy();
+    });
+    await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+    const port = proxy.address().port;
+    try {
+      const urls = [
+        `smtps://smtp.gmail.com:465?proxy=http://127.0.0.1:${port}`,
+        { url: `smtp://smtp.gmail.com:587?proxy=http://127.0.0.1:${port}` },
+      ];
+      for (const options of urls) {
+        assert.throws(
+          () => nodemailer.createTransport(options),
+          (err) => {
+            assert.ok(err instanceof TestNetworkGuardError, err && err.stack);
+            assert.equal(err.code, 'TEST_NETWORK_BLOCKED');
+            assert.match(err.message, /127\.0\.0\.1/);
+            assert.match(err.stack, /guard\.js/);
+            assert.doesNotMatch(err.stack, /setupProxy/);
+            return true;
+          }
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(hits.n, 0);
+    } finally {
+      proxy.close();
+    }
+  });
+
+  it('blocks a proxied non-loopback target before CONNECT', async () => {
+    const { ProxyAgent, EnvHttpProxyAgent, request, stream, pipeline } = require('undici');
+    const hits = { n: 0 };
+    const proxy = net.createServer((socket) => {
+      hits.n += 1;
+      socket.destroy();
+    });
+    await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+    const port = proxy.address().port;
+    const proxyUrl = `http://127.0.0.1:${port}`;
+    const agent = new ProxyAgent(proxyUrl);
+    const envAgent = new EnvHttpProxyAgent({ httpsProxy: proxyUrl, httpProxy: proxyUrl });
+    try {
+      const target = 'https://192.0.2.1/';
+      const calls = [
+        () => fetch(target, { dispatcher: agent }),
+        () => request(target, { dispatcher: agent }),
+        () => stream(target, { dispatcher: agent }, () => {}),
+        () => pipeline(target, { dispatcher: agent }, () => {}),
+        () => request(target, { dispatcher: envAgent }),
+        () => agent.dispatch({ origin: 'https://192.0.2.1', path: '/', method: 'GET' }, {
+          onRequestStart() {},
+          onHeaders() { return true; },
+          onData() { return true; },
+          onComplete() {},
+          onError(err) { throw err; },
+        }),
+      ];
+      for (const [i, start] of calls.entries()) {
+        const err = await captureGuard(start);
+        assertGuard(err, '192.0.2.1');
+        assert.doesNotMatch(String(err && err.stack), /afterConnect/, `case ${i}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(hits.n, 0);
+    } finally {
+      proxy.close();
+      await Promise.all([agent.close(), envAgent.close()]);
+    }
+  });
+
+  it('blocks UDP send and connect to a non-loopback address', async () => {
+    const dgram = require('dgram');
+    const udp4 = dgram.createSocket('udp4');
+    const udp6 = dgram.createSocket('udp6');
+    try {
+      assert.throws(
+        () => udp4.send(Buffer.from('x'), 9, '192.0.2.1'),
+        (err) => {
+          assertGuard(err, '192.0.2.1');
+          return true;
+        }
+      );
+      assert.throws(
+        () => udp6.connect(9, '2001:db8::1'),
+        (err) => {
+          assertGuard(err, '2001:db8::1');
+          return true;
+        }
+      );
+
+      const server = dgram.createSocket('udp4');
+      try {
+        await new Promise((resolve) => server.bind(0, '127.0.0.1', resolve));
+        const got = new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('loopback datagram was not delivered')), 1000);
+          server.once('message', (msg) => { clearTimeout(timer); resolve(msg.toString()); });
+        });
+        udp4.send(Buffer.from('ok'), server.address().port, '127.0.0.1');
+        assert.equal(await got, 'ok');
+      } finally {
+        server.close();
+      }
+    } finally {
+      udp4.close();
+      udp6.close();
+    }
+  });
+
+  it('passes the preload to spawned children through NODE_OPTIONS', () => {
+    const { spawnSync } = require('child_process');
+    const path = require('path');
+    const preload = path.resolve(__dirname, 'preload.js');
+    assert.match(process.env.NODE_OPTIONS || '', new RegExp(preload.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    const result = spawnSync(process.execPath, ['-e', `
+      const net = require('net');
+      let handshake = false;
+      try {
+        const socket = net.connect({ host: '192.0.2.1', port: 9 });
+        socket.on('connect', () => { handshake = true; });
+        socket.on('error', () => {});
+      } catch (err) {
+        if (err && err.code === 'TEST_NETWORK_BLOCKED' && !handshake) {
+          console.log('blocked');
+          process.exit(0);
+        }
+        console.error(err && err.stack);
+        process.exit(2);
+      }
+      console.error('no throw');
+      process.exit(3);
+    `], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /blocked/);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /handshake|ETIMEDOUT|ECONNREFUSED/i);
+  });
 });

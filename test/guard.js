@@ -460,8 +460,14 @@ function installNetworkGuard() {
   const originalFetch = globalThis.fetch;
   if (typeof originalFetch === 'function') {
     globalThis.fetch = function guardedFetch(input, init) {
-      const host = fetchHostname(input);
-      if (isBlockedHost(host)) return Promise.reject(new TestNetworkGuardError(normalizeHost(host), 'fetch'));
+      // The target host must be loopback, not merely absent from the vendor list.
+      // A proxy dispatcher would otherwise CONNECT to 192.0.2.1 through 127.0.0.1.
+      // Reject, rather than throw, so fetch keeps returning a promise.
+      try {
+        assertLoopbackTarget(input, 'fetch');
+      } catch (err) {
+        return Promise.reject(err);
+      }
       return originalFetch.call(globalThis, input, init);
     };
   }
@@ -484,6 +490,8 @@ function installNetworkGuard() {
   };
 
   installNativeConnectGuard();
+  installUdpGuard();
+  installUndiciProxyGuard();
   installNodemailerProxyGuard();
 }
 
@@ -534,17 +542,183 @@ function installNativeConnectGuard() {
   }
 }
 
+// A fetch/undici target with no parseable host is left to the original call.
+// A parsed host must be loopback. Vendor names fail this check too.
+function assertLoopbackTarget(value, via) {
+  const host = fetchHostname(value);
+  if (host && !isLocalName(host)) {
+    throw new TestNetworkGuardError(normalizeHost(host), via);
+  }
+}
+
+function installUndiciProxyGuard() {
+  let undici;
+  try { undici = require('undici'); }
+  catch { return; }
+
+  for (const name of ['request', 'stream', 'pipeline', 'connect', 'upgrade']) {
+    const original = undici[name];
+    if (typeof original !== 'function' || original.__ffGuarded) continue;
+    function guarded(url, opts, handler) {
+      assertLoopbackTarget(url, 'undici');
+      return original.call(this, url, opts, handler);
+    }
+    guarded.__ffGuarded = true;
+    undici[name] = guarded;
+  }
+
+  // ProxyAgent.dispatch does not call Dispatcher.prototype.dispatch.
+  // EnvHttpProxyAgent and Socks5ProxyAgent do, then open CONNECT to opts.origin.
+  const proxyClasses = [undici.ProxyAgent, undici.EnvHttpProxyAgent, undici.Socks5ProxyAgent];
+  for (const Ctor of proxyClasses) {
+    if (!Ctor || !Ctor.prototype) continue;
+    const original = Ctor.prototype.dispatch;
+    if (typeof original !== 'function' || original.__ffGuarded) continue;
+    // Only wrap an own method. Inherited dispatch is wrapped once below.
+    if (!Object.prototype.hasOwnProperty.call(Ctor.prototype, 'dispatch')) continue;
+    function guardedDispatch(opts, handler) {
+      if (opts && opts.origin) assertLoopbackTarget(opts.origin, 'undici-proxy');
+      return original.call(this, opts, handler);
+    }
+    guardedDispatch.__ffGuarded = true;
+    Ctor.prototype.dispatch = guardedDispatch;
+  }
+
+  const Dispatcher = undici.Dispatcher;
+  const originalDispatch = Dispatcher && Dispatcher.prototype && Dispatcher.prototype.dispatch;
+  if (typeof originalDispatch === 'function' && !originalDispatch.__ffGuarded) {
+    function guardedDispatcher(opts, handler) {
+      const name = this && this.constructor && this.constructor.name;
+      if (name === 'EnvHttpProxyAgent' || name === 'Socks5ProxyAgent' || name === 'ProxyAgent') {
+        if (opts && opts.origin) assertLoopbackTarget(opts.origin, 'undici-proxy');
+      }
+      return originalDispatch.call(this, opts, handler);
+    }
+    guardedDispatcher.__ffGuarded = true;
+    Dispatcher.prototype.dispatch = guardedDispatcher;
+  }
+}
+
+// send/send6 unconnected: (req, list, length, port, address, hasCallback).
+// Connected send omits the address (connect already checked it).
+// connect/connect6: (address, port). Throw before the native binding runs.
+function installUdpGuard() {
+  let UDP;
+  try { ({ UDP } = process.binding('udp_wrap')); }
+  catch { return; }
+  const proto = UDP.prototype;
+  const guardSend = (name) => {
+    const original = proto[name];
+    if (typeof original !== 'function' || original.__ffGuarded) return;
+    function guarded(...args) {
+      const address = args.length >= 5 ? args[4] : '';
+      if (typeof address === 'string' && address && !isLoopbackAddress(address)) {
+        throw new TestNetworkGuardError(address, 'udp');
+      }
+      return original.apply(this, args);
+    }
+    guarded.__ffGuarded = true;
+    proto[name] = guarded;
+  };
+  const guardConnect = (name) => {
+    const original = proto[name];
+    if (typeof original !== 'function' || original.__ffGuarded) return;
+    function guarded(...args) {
+      if (!isLoopbackAddress(args[0])) {
+        throw new TestNetworkGuardError(String(args[0]), 'udp');
+      }
+      return original.apply(this, args);
+    }
+    guarded.__ffGuarded = true;
+    proto[name] = guarded;
+  };
+  guardSend('send');
+  guardSend('send6');
+  guardConnect('connect');
+  guardConnect('connect6');
+
+  // dgram resolves the address, then calls the binding on a later tick.
+  // A throw from that tick is an uncaught exception. Refuse the address here,
+  // in the caller, before DNS. The binding wrap above still covers a direct call.
+  const dgram = require('dgram');
+  const socketProto = dgram.Socket.prototype;
+  const originalSend = socketProto.send;
+  if (typeof originalSend === 'function' && !originalSend.__ffGuarded) {
+    function guardedSocketSend(...args) {
+      for (const arg of args) {
+        if (typeof arg === 'string' && !isLocalName(arg)) {
+          throw new TestNetworkGuardError(normalizeHost(arg), 'udp');
+        }
+      }
+      return originalSend.apply(this, args);
+    }
+    guardedSocketSend.__ffGuarded = true;
+    socketProto.send = guardedSocketSend;
+  }
+  const originalSocketConnect = socketProto.connect;
+  if (typeof originalSocketConnect === 'function' && !originalSocketConnect.__ffGuarded) {
+    function guardedSocketConnect(...args) {
+      for (const arg of args) {
+        if (typeof arg === 'string' && !isLocalName(arg)) {
+          throw new TestNetworkGuardError(normalizeHost(arg), 'udp');
+        }
+      }
+      return originalSocketConnect.apply(this, args);
+    }
+    guardedSocketConnect.__ffGuarded = true;
+    socketProto.connect = guardedSocketConnect;
+  }
+}
+
+function proxyQuery(value) {
+  const text = String(value || '');
+  const q = text.indexOf('?');
+  if (q === -1) return '';
+  let query = text.slice(q + 1);
+  const hash = query.indexOf('#');
+  if (hash !== -1) query = query.slice(0, hash);
+  try {
+    const proxy = new URLSearchParams(query).get('proxy');
+    if (proxy) return proxy;
+  } catch { /* query string was not parseable */ }
+  const match = /(?:^|&)proxy=([^&]*)/i.exec(query);
+  if (!match) return '';
+  try { return decodeURIComponent(match[1]); }
+  catch { return match[1]; }
+}
+
+function nodemailerProxy(options) {
+  if (typeof options === 'string') return proxyQuery(options);
+  if (!options || typeof options !== 'object') return '';
+  if (options.proxy) return String(options.proxy);
+  if (typeof options.url === 'string') return proxyQuery(options.url);
+  return '';
+}
+
 function installNodemailerProxyGuard() {
   const nodemailer = require('nodemailer');
-  if (nodemailer.createTransport.__ffGuarded) return;
-  const original = nodemailer.createTransport;
-  function guardedCreateTransport(options, defaults) {
-    const proxy = options && typeof options === 'object' ? options.proxy : '';
-    if (proxy) throw new TestNetworkGuardError(String(proxy), 'nodemailer-proxy');
-    return original.call(this, options, defaults);
+  if (!nodemailer.createTransport.__ffGuarded) {
+    const original = nodemailer.createTransport;
+    function guardedCreateTransport(options, defaults) {
+      const proxy = nodemailerProxy(options);
+      if (proxy) throw new TestNetworkGuardError(proxy, 'nodemailer-proxy');
+      return original.call(this, options, defaults);
+    }
+    guardedCreateTransport.__ffGuarded = true;
+    nodemailer.createTransport = guardedCreateTransport;
   }
-  guardedCreateTransport.__ffGuarded = true;
-  nodemailer.createTransport = guardedCreateTransport;
+
+  // createTransport copies ?proxy= onto options and then calls setupProxy.
+  // Refusing here covers a proxy that only appears after that parse.
+  const Mailer = require('nodemailer/lib/mailer');
+  const setup = Mailer.prototype.setupProxy;
+  if (typeof setup === 'function' && !setup.__ffGuarded) {
+    function guardedSetupProxy(proxyUrl) {
+      throw new TestNetworkGuardError(String(proxyUrl || 'proxy'), 'nodemailer-proxy');
+    }
+    guardedSetupProxy.__ffGuarded = true;
+    Mailer.prototype.setupProxy = guardedSetupProxy;
+  }
 }
 
 module.exports = {

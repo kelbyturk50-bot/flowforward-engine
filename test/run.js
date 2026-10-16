@@ -26,6 +26,16 @@ function testFiles() {
     .sort();
 }
 
+function testEnv() {
+  const preload = path.resolve(__dirname, 'preload.js');
+  const requireFlag = `--require ${preload}`;
+  const existing = process.env.NODE_OPTIONS || '';
+  const nodeOptions = existing.includes(preload)
+    ? existing
+    : (existing ? `${existing} ${requireFlag}` : requireFlag);
+  return { ...process.env, NODE_OPTIONS: nodeOptions };
+}
+
 function runFile(file) {
   const args = [
     '--require', path.join(__dirname, 'preload.js'),
@@ -35,7 +45,7 @@ function runFile(file) {
     file,
   ];
   return new Promise(resolve => {
-    const child = spawn(process.execPath, args, { stdio: 'inherit', env: process.env });
+    const child = spawn(process.execPath, args, { stdio: 'inherit', env: testEnv() });
     child.on('exit', code => resolve(code == null ? 1 : code));
   });
 }

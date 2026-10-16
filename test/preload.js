@@ -1,7 +1,18 @@
 // Loaded before every test file. Refuses a non-local DATABASE_URL and arms
 // the network guard before application code (and dotenv) can run.
+//
+// Children started with spawn/exec inherit NODE_OPTIONS. A Worker with
+// execArgv: [] and a child that scrubs its environment do not, and are out of scope.
 
+const path = require('path');
 const { assertSafeDatabaseEnv, blankLiveCredentials, installNetworkGuard } = require('./guard');
+
+const preloadPath = path.resolve(__dirname, 'preload.js');
+const requireFlag = `--require ${preloadPath}`;
+const nodeOptions = process.env.NODE_OPTIONS || '';
+if (!nodeOptions.includes(preloadPath)) {
+  process.env.NODE_OPTIONS = nodeOptions ? `${nodeOptions} ${requireFlag}` : requireFlag;
+}
 
 blankLiveCredentials();
 process.env.NODE_ENV = 'test';
