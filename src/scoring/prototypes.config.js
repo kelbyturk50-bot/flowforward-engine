@@ -12,10 +12,14 @@
 // Plumbing has no industry points. That is a picker bias only (Summit: no
 // plumbing score tweak). HVAC's place in prospectBeachhead sorts prospects,
 // not agents inside one shop. Agent ties follow Scout's order: estimate
-// follow-up, then costTier (email 1, FSM 2, telephony 3), then ownItBundled,
-// and tieRank only when those are still tied.
-// Bookkeeping is never auto-picked. Pest control and franchise names get no
-// prototype. ServiceTitan shops only get the light prototypes.
+// follow-up, then the per-agent costTier in docs/PROTOTYPE_PLAY.md (1d3d0d8),
+// then ownItBundled, and tieRank only when those are still tied.
+// Those tiers are estimate follow-up 1, speed-to-lead 1, review requests 1,
+// scheduling 2, maintenance renewal 2, dispatch 2, bookkeeping 2, and
+// receptionist 3. Bookkeeping is tier 2 because it needs an accounting
+// integration, not an FSM. Bookkeeping is never auto-picked. A missing
+// state gets no prototype and is parked. Pest control and franchise names
+// get no prototype. ServiceTitan shops only get the light prototypes.
 //
 // pickPrototypes reads this table. It does not fetch and it does not change
 // computeFit. Unknown signals add nothing.
@@ -132,7 +136,7 @@ const RUBRIC = {
     },
     maint_renewal: {
       tieRank: 6,
-      costTier: 1,
+      costTier: 2,
       points: {
         maint_plan: 35,
         fsm_jobber_hcp: 10,

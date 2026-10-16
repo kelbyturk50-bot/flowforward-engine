@@ -604,9 +604,36 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     });
     assert.deepEqual(housecall.map(row => row.agent), ['receptionist', 'scheduling']);
     assert.deepEqual(RUBRIC.ownItBundled.jobber, ['receptionist']);
-    assert.equal(RUBRIC.agents.estimate_followup.costTier, 1);
-    assert.equal(RUBRIC.agents.scheduling.costTier, 2);
-    assert.equal(RUBRIC.agents.receptionist.costTier, 3);
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(RUBRIC.agents).map(([name, spec]) => [name, spec.costTier])),
+      {
+        estimate_followup: 1,
+        speed_to_lead: 1,
+        review_requests: 1,
+        scheduling: 2,
+        maint_renewal: 2,
+        dispatch: 2,
+        bookkeeping: 2,
+        receptionist: 3,
+      },
+    );
+    const maintVsReview = pickPrototypes(shop(), {
+      ...equal,
+      agents: {
+        maint_renewal: { tieRank: 1, costTier: 2, points: { hvac: 50 } },
+        review_requests: { tieRank: 9, costTier: 1, points: { hvac: 50 } },
+      },
+    });
+    assert.deepEqual(maintVsReview.map(row => row.agent), ['review_requests', 'maint_renewal']);
+    const missing = recommendPrototypes(estimateShop({ state: undefined }));
+    assert.deepEqual(missing.picks, []);
+    assert.equal(missing.disqualified, 'unknown_state');
+    const blank = recommendPrototypes(estimateShop({ state: '  ' }));
+    assert.deepEqual(blank.picks, []);
+    assert.equal(blank.disqualified, 'unknown_state');
+    const parked = recommendPrototypes(estimateShop({ state: 'CO' }));
+    assert.deepEqual(parked.picks, []);
+    assert.equal(parked.disqualified, 'out_of_state');
 
     assert.equal(RUBRIC.disqualify.franchisePatterns, FRANCHISE_PATTERNS);
     assert.equal(RUBRIC.disqualify.industries, EXCLUDED_INDUSTRIES);
