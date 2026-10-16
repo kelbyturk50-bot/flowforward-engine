@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
+import { PreviewDemoLink } from '../demo/DemoLinks';
 import { useAsync, ErrorNote, FitBadge, ProposalChip, money2, relDate, timeAgo, toast } from '../ui';
 import { useJobs, elapsed } from '../jobs';
 
@@ -67,6 +68,7 @@ export default function Proposals({ version, bump, openProposal }) {
             </> : ' '}
           </p>
         </div>
+        <PreviewDemoLink />
       </header>
 
       <section className="panel generate" aria-label="Generate drafts">

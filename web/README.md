@@ -28,3 +28,13 @@ The client in `src/api.js` resolves a base URL in this order:
 5. **Anything else.** Preview deployments and unknown hosts show **API not configured for this environment** and do not call `fetch`.
 
 Preview deployments cannot reach an API until a staging API exists and `VITE_API_URL` is set for those builds, or someone types an address in Settings. The per-deployment `*.vercel.app` hostname is not a production host.
+
+## Estimate-recovery demo
+
+The pilot walkthrough at `/demo/estimate-recovery/:token` is off unless the page is allowed to read `?flags=`. Defaults in the build are off. Production CRM hostnames never honor the query. Local `npm run dev` (`localhost`) does. The host check reuses `PRODUCTION_HOSTS` in `src/api-base.js`.
+
+QA on a Vercel preview:
+
+`?flags=FF_PILOT_ESTIMATE_RECOVERY,FF_PILOT_LINK_ON_ONEPAGER`
+
+`FF_PILOT_LINK_ON_ONEPAGER` adds **Try a live demo** next to one-pager links in this app. **Preview demo** on Proposals needs only the master flag. The public `/p/:slug` page is rendered by the API, not this app.
