@@ -38,9 +38,6 @@ export const RIBBON_STYLE = {
   visibility: 'visible',
   opacity: 1,
   flexShrink: 0,
-  backgroundColor: WATERMARK_BG,
-  color: WATERMARK_FG,
-  WebkitTextFillColor: WATERMARK_FG,
   boxShadow: 'none',
   filter: 'none',
   mixBlendMode: 'normal',
@@ -62,6 +59,9 @@ export const RIBBON_STYLE = {
   printColorAdjust: 'exact',
 };
 
+// Color, background, and text-fill stay out of this lock. The stylesheet owns
+// them, and the print rule has to be able to override them. An inline
+// !important color would win over @media print.
 const RIBBON_IMPORTANT = {
   position: 'sticky',
   top: '0',
@@ -70,9 +70,6 @@ const RIBBON_IMPORTANT = {
   visibility: 'visible',
   opacity: '1',
   'flex-shrink': '0',
-  'background-color': WATERMARK_BG,
-  color: WATERMARK_FG,
-  '-webkit-text-fill-color': WATERMARK_FG,
   'box-shadow': 'none',
   filter: 'none',
   'mix-blend-mode': 'normal',
@@ -198,7 +195,7 @@ function useLayoutEffectLock(declarations) {
   return ref;
 }
 
-export function PrototypeShell({ brandName, accent, onAccent, children }) {
+export function PrototypeShell({ brandName, accent, onAccent, darkAccent, darkOnAccent, children }) {
   const [message, setMessage] = useState('');
 
   useEffect(() => {
@@ -221,7 +218,14 @@ export function PrototypeShell({ brandName, accent, onAccent, children }) {
               className="prototype-screen"
               data-brand-accent={accent}
               data-on-accent={onAccent}
-              style={{ '--proto-accent': accent, '--proto-on-accent': onAccent }}
+              data-brand-accent-dark={darkAccent || accent}
+              data-on-accent-dark={darkOnAccent || onAccent}
+              style={{
+                '--proto-accent-light': accent,
+                '--proto-on-accent-light': onAccent,
+                '--proto-accent-dark': darkAccent || accent,
+                '--proto-on-accent-dark': darkOnAccent || onAccent,
+              }}
             >
               <PrototypeTile />
               <div className="prototype-foreground">

@@ -10,8 +10,8 @@ export const TEST_BRAND = Object.freeze({
   }),
 });
 
-// Proof brands. Yellow is too light for text, so the accent is darkened.
-// Navy already passes, so it stays unchanged.
+// Proof brands. Yellow is too light for text on paper, so the light accent is darkened.
+// Navy already passes on light paper, so that accent stays unchanged. Dark mode lightens it.
 export const YELLOW_BRAND = Object.freeze({
   name: 'TEST: Pale Yellow Shop',
   logoUrl: '',

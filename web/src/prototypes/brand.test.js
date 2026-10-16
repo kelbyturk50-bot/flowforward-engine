@@ -5,14 +5,18 @@ import { describe, expect, it } from 'vitest';
 import { WATERMARK_BG, WATERMARK_FG } from '../components/PrototypeWatermark';
 import {
   BUNDLED_LOGO_ID,
+  DARK_PAPER,
+  DARK_SURFACE,
   FALLBACK_NAME,
   JUNIPER_ACCENT,
+  JUNIPER_DARK,
   PAPER,
   SLATE,
   SURFACE,
   chooseLogoPlate,
   contrastRatio,
   fixAccent,
+  fixAccentDark,
   hexToOklch,
   pickOnAccent,
   presentBrand,
@@ -128,6 +132,48 @@ describe('brand sanitizer', () => {
     expect(pickOnAccent('#14213D')).toBe('#FFFFFF');
   });
 
+  it('guards step text and accents on light and dark surfaces', () => {
+    const text = 4.5;
+    const indicator = 3;
+    const modes = [
+      { name: 'light', paper: PAPER, surface: SURFACE, theme: fixAccent },
+      { name: 'dark', paper: DARK_PAPER, surface: DARK_SURFACE, theme: fixAccentDark },
+    ];
+    const sources = ['#F5E050', '#14213D', '#FFFFFF'];
+    for (const mode of modes) {
+      for (const source of sources) {
+        const theme = mode.theme(source);
+        expect(contrastRatio(theme.accent, mode.surface)).toBeGreaterThanOrEqual(text);
+        expect(contrastRatio(theme.accent, mode.paper)).toBeGreaterThanOrEqual(text);
+        expect(contrastRatio(theme.accent, mode.surface)).toBeGreaterThanOrEqual(indicator);
+        expect(contrastRatio(theme.accent, mode.paper)).toBeGreaterThanOrEqual(indicator);
+        expect(contrastRatio(theme.onAccent, theme.accent)).toBeGreaterThanOrEqual(text);
+        expect(hexToOklch(theme.accent).C).toBeLessThan(0.21);
+      }
+    }
+
+    expect(fixAccent('#F5E050')).toEqual({ accent: '#7D7000', onAccent: '#FFFFFF' });
+    expect(fixAccentDark('#F5E050')).toEqual({ accent: '#F5E050', onAccent: SLATE });
+    expect(fixAccent('#14213D')).toEqual({ accent: '#14213D', onAccent: '#FFFFFF' });
+    expect(contrastRatio('#14213D', DARK_PAPER)).toBeLessThan(text);
+    expect(fixAccentDark('#14213D')).toEqual({ accent: '#7E8FB2', onAccent: SLATE });
+    expect(fixAccent('#FFFFFF')).toEqual({ accent: '#6F6F6F', onAccent: '#FFFFFF' });
+    expect(fixAccentDark('#FFFFFF')).toEqual({ accent: '#FFFFFF', onAccent: SLATE });
+    expect(fixAccentDark('')).toEqual({ accent: JUNIPER_DARK, onAccent: SLATE });
+    expect(presentBrand(HOSTILE_BRAND).darkTheme.accent).toBe('#FFFFFF');
+    expect(presentBrand(NAVY_BRAND).darkTheme).toEqual(fixAccentDark('#14213D'));
+    expect(presentBrand(YELLOW_BRAND).darkTheme).toEqual(fixAccentDark('#F5E050'));
+
+    const css = readFileSync(path.join(webRoot, 'src/styles.css'), 'utf8');
+    const step = css.slice(css.indexOf('.prototype-screen .demo-steps li[aria-current="step"]'), css.indexOf('.prototype-screen .demo-options'));
+    expect(step).toContain('background: var(--surface)');
+    expect(step).toContain('color: var(--proto-accent, var(--accent))');
+    expect(step).toContain('border-color: var(--proto-accent, var(--accent))');
+    expect(css).toContain('--proto-accent: var(--proto-accent-dark, var(--proto-accent-light, var(--accent)))');
+    expect(css).toContain('--paper: #141C1F');
+    expect(css).toContain('--surface: #1C262A');
+  });
+
   it('strips bidi overrides and zero-width characters from names', () => {
     expect(sanitizeName('TEST: \u202ECedar\u202C Lane')).toBe('TEST: Cedar Lane');
     expect(sanitizeName('\u202A\u202B\u202C\u202D\u202ETEST: Shop')).toBe('TEST: Shop');
@@ -167,6 +213,21 @@ describe('brand sanitizer', () => {
     expect(block).toContain('-webkit-print-color-adjust: exact');
     expect(block).toContain('print-color-adjust: exact');
     expect(block).toContain('border: 2px solid #1E2A2F');
+    const printAt = block.indexOf('@media print');
+    const screenRibbon = block.slice(0, printAt);
+    const print = block.slice(printAt);
+    expect(screenRibbon).toContain('background-color: #1E2A2F !important');
+    expect(screenRibbon).toContain('color: #F3F6F5 !important');
+    expect(print).toContain('.prototype-ribbon');
+    expect(print).toContain('background-color: #FFFFFF !important');
+    expect(print).toContain('color: #1E2A2F !important');
+    expect(print).toContain('-webkit-text-fill-color: #1E2A2F !important');
+    expect(print).toContain('border: 2px solid #1E2A2F !important');
+    const source = readFileSync(path.join(webRoot, 'src/components/PrototypeWatermark.jsx'), 'utf8');
+    const lock = source.slice(source.indexOf('const RIBBON_IMPORTANT'), source.indexOf('function lockStyle'));
+    expect(lock).not.toContain('background-color');
+    expect(lock).not.toContain('-webkit-text-fill-color');
+    expect(lock).not.toMatch(/\n {2}color:/);
     expect(css).toContain("%3EPROTOTYPE%3C");
     expect(css).toContain("fill-opacity='0.05'");
     expect(css).toContain('pointer-events: none');

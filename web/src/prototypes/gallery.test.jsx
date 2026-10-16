@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import PrototypeWatermark, { ACTION_TOAST, FOOTER_BUSINESS_FALLBACK, FOOTER_LEAD, footerBusinessName, WATERMARK_TEXT, liveToast } from '../components/PrototypeWatermark';
-import { presentBrand } from './brand';
+import { DARK_PAPER, DARK_SURFACE, contrastRatio, presentBrand } from './brand';
 import GalleryGate from './GalleryGate';
 import PrototypeLayout from './PrototypeLayout';
 import { GALLERY_PREVIEW_TOKEN, galleryHref, galleryRouteFromPath, galleryTokenOk } from './route';
@@ -42,8 +42,11 @@ function expectRibbon(container) {
   expect(ribbon.style.position).toBe('sticky');
   expect(ribbon.style.top).toBe('0px');
   expect(ribbon.getAttribute('role')).toBe('note');
-  expect(paint(ribbon.style.backgroundColor)).toMatch(/#1e2a2f|rgb\(30,42,47\)/);
-  expect(paint(ribbon.style.color)).toMatch(/#f3f6f5|rgb\(243,246,245\)/);
+  expect(ribbon.style.backgroundColor).toBe('');
+  expect(ribbon.style.color).toBe('');
+  expect(ribbon.style.getPropertyPriority('background-color')).toBe('');
+  expect(ribbon.style.getPropertyPriority('color')).toBe('');
+  expect(ribbon.style.getPropertyPriority('-webkit-text-fill-color')).toBe('');
   expect(ribbon.style.fontWeight).toBe('600');
   expect(ribbon.style.fontSize).toBe('14px');
   expect(ribbon.style.fontFamily.toLowerCase()).toContain('barlow');
@@ -51,8 +54,8 @@ function expectRibbon(container) {
   expect(ribbon.getAttribute('style')).toContain('safe-area-inset-top');
   expect(ribbon.getAttribute('style')).toContain('32px');
   expect(ribbon.getAttribute('style')).not.toContain('var(');
-  expect(ribbon.style.getPropertyPriority('background-color')).toBe('important');
-  expect(ribbon.style.getPropertyPriority('color')).toBe('important');
+  expect(ribbon.getAttribute('style')).not.toContain('background');
+  expect(ribbon.style.getPropertyPriority('display')).toBe('important');
   const tile = container.querySelector('[data-prototype-tile]');
   expect(container.querySelector('.prototype-screen').contains(ribbon)).toBe(false);
   expect(container.querySelector('.prototype-screen').contains(tile)).toBe(true);
@@ -243,8 +246,8 @@ describe('prototype gallery', () => {
     expect(branded.contains(mark)).toBe(false);
     expectFooter(container, 'TEST: <script>alert(1)</script>');
     expect(mark.getAttribute('hidden')).toBeNull();
-    expect(paint(mark.style.backgroundColor)).toMatch(/#1e2a2f|rgb\(30,42,47\)/);
-    expect(paint(mark.style.color)).toMatch(/#f3f6f5|rgb\(243,246,245\)/);
+    expect(mark.style.backgroundColor).toBe('');
+    expect(mark.style.color).toBe('');
     expect(mark.style.display).toBe('block');
     expect(mark.style.visibility).toBe('visible');
     expect(mark.style.opacity).toBe('1');
@@ -254,8 +257,8 @@ describe('prototype gallery', () => {
     expect(Number(computed.opacity)).toBe(1);
     expect(branded.getAttribute('data-brand-accent')).toBe('#6F6F6F');
     expect(branded.getAttribute('data-on-accent')).toBe('#FFFFFF');
-    expect(paint(mark.style.backgroundColor)).not.toBe(paint(branded.getAttribute('data-brand-accent')));
     expect(mark.getAttribute('style')).not.toContain('6F6F6F');
+    expect(branded.getAttribute('data-brand-accent-dark')).toBe('#FFFFFF');
     expect(container.querySelector('.prototype-wordmark').textContent).toBe('TEST: <script>alert(1)</script>');
     expect(container.querySelector('svg')).toBeNull();
 
@@ -331,6 +334,7 @@ describe('prototype gallery', () => {
       expect(paint(yellowRibbon.style.backgroundColor)).not.toMatch(/f5e050|245,224,80/);
       expect(yellow.container.querySelector('.prototype-screen').getAttribute('data-brand-accent')).toBe('#7D7000');
       expect(yellow.container.querySelector('.prototype-screen').getAttribute('data-on-accent')).toBe('#FFFFFF');
+      expect(yellow.container.querySelector('.prototype-screen').getAttribute('data-brand-accent-dark')).toBe('#F5E050');
       expect(yellow.container.querySelector('[data-prototype-tile]').style.getPropertyPriority('display')).toBe('important');
       yellow.unmount();
 
@@ -338,8 +342,14 @@ describe('prototype gallery', () => {
       const navy = render(<GalleryGate route={{ token: TOKEN, screen: 'estimate-follow-up' }} />);
       expect(await screen.findByRole('heading', { name: /open estimates/ })).toBeInTheDocument();
       expectRibbon(navy.container);
-      expect(navy.container.querySelector('.prototype-screen').getAttribute('data-brand-accent')).toBe('#14213D');
-      expect(navy.container.querySelector('.prototype-screen').getAttribute('data-on-accent')).toBe('#FFFFFF');
+      const navyScreen = navy.container.querySelector('.prototype-screen');
+      expect(navyScreen.getAttribute('data-brand-accent')).toBe('#14213D');
+      expect(navyScreen.getAttribute('data-on-accent')).toBe('#FFFFFF');
+      const navyDark = navyScreen.getAttribute('data-brand-accent-dark');
+      expect(navyDark).toBe('#7E8FB2');
+      expect(contrastRatio('#14213D', DARK_PAPER)).toBeLessThan(4.5);
+      expect(contrastRatio(navyDark, DARK_PAPER)).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(navyDark, DARK_SURFACE)).toBeGreaterThanOrEqual(4.5);
       expectFooter(navy.container, 'TEST: Dark Navy Shop');
       navy.unmount();
     } finally {

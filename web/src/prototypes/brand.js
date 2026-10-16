@@ -7,8 +7,12 @@ export const BUNDLED_LOGO_ID = 'bundled:test-wasatch-heating';
 export const BRAND_NAME_MAX = 80;
 export const PAPER = '#F3F6F5';
 export const SURFACE = '#FFFFFF';
-// Same hex as the --juniper / --accent theme token.
+// Dark-mode tokens from styles.css (`prefers-color-scheme: dark`).
+export const DARK_PAPER = '#141C1F';
+export const DARK_SURFACE = '#1C262A';
+// Same hex as the --juniper / --accent theme token. Dark juniper is the dark-mode token.
 export const JUNIPER_ACCENT = '#2F6B57';
+export const JUNIPER_DARK = '#5FAE8E';
 export const SLATE = '#1E2A2F';
 export const FALLBACK_INK = SLATE;
 export const FALLBACK_NAME = 'TEST: Wasatch Heating';
@@ -16,8 +20,8 @@ export const BUNDLED_MARK_COLOR = '#1F4E79';
 const CHROMA_CAP = 0.20;
 const LOGO_PLATE_MIN = 3;
 
-const ACCENT_BACKGROUNDS = Object.freeze([SURFACE, PAPER]);
-
+const LIGHT_BACKGROUNDS = Object.freeze([SURFACE, PAPER]);
+const DARK_BACKGROUNDS = Object.freeze([DARK_SURFACE, DARK_PAPER]);
 const HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 const AA = 4.5;
 
@@ -144,8 +148,48 @@ function snapLightness(value) {
   return Math.round(value * 100) / 100;
 }
 
-function passesSurfaces(hex) {
-  return ACCENT_BACKGROUNDS.every(background => contrastRatio(hex, background) >= AA);
+function passesSurfaces(hex, backgrounds) {
+  return backgrounds.every(background => contrastRatio(hex, background) >= AA);
+}
+
+// Same-hue search. `down` darkens from the source lightness and stops at the
+// first color that clears the backgrounds. `up` lightens first, then darkens.
+function paintAccent(normalized, backgrounds, direction) {
+  const oklch = hexToOklch(normalized);
+  if (oklch.C <= CHROMA_CAP && passesSurfaces(normalized, backgrounds)) {
+    const onAccent = pickOnAccent(normalized);
+    if (onAccent) return { accent: normalized, onAccent };
+  }
+  const chroma = Math.min(oklch.C, CHROMA_CAP);
+  const start = snapLightness(oklch.L);
+  const steps = [];
+  const pushDown = () => {
+    for (let lightness = start; lightness >= 0.05 - 1e-9; lightness = snapLightness(lightness - 0.01)) {
+      steps.push(lightness);
+    }
+  };
+  const pushUp = (includeStart) => {
+    const first = includeStart ? start : snapLightness(start + 0.01);
+    for (let lightness = first; lightness <= 0.98 + 1e-9; lightness = snapLightness(lightness + 0.01)) {
+      steps.push(lightness);
+    }
+  };
+  if (direction === 'up') {
+    pushUp(true);
+    for (let lightness = snapLightness(start - 0.01); lightness >= 0.05 - 1e-9; lightness = snapLightness(lightness - 0.01)) {
+      steps.push(lightness);
+    }
+  } else {
+    pushDown();
+  }
+  for (const lightness of steps) {
+    const fitted = fitChroma(lightness, chroma, oklch.H);
+    const hex = linearToHex(oklchToLinear(lightness, fitted, oklch.H));
+    if (!passesSurfaces(hex, backgrounds)) continue;
+    const onAccent = pickOnAccent(hex);
+    if (onAccent) return { accent: hex, onAccent };
+  }
+  return null;
 }
 
 export function pickOnAccent(accent) {
@@ -163,20 +207,18 @@ const JUNIPER_THEME = Object.freeze({ accent: JUNIPER_ACCENT, onAccent: SURFACE 
 export function fixAccent(value) {
   const normalized = normalizeHex(value);
   if (!normalized) return { ...JUNIPER_THEME };
-  const oklch = hexToOklch(normalized);
-  if (oklch.C <= CHROMA_CAP && passesSurfaces(normalized)) {
-    const onAccent = pickOnAccent(normalized);
-    if (onAccent) return { accent: normalized, onAccent };
-  }
-  const chroma = Math.min(oklch.C, CHROMA_CAP);
-  for (let lightness = snapLightness(oklch.L); lightness >= 0.05 - 1e-9; lightness = snapLightness(lightness - 0.01)) {
-    const fitted = fitChroma(lightness, chroma, oklch.H);
-    const hex = linearToHex(oklchToLinear(lightness, fitted, oklch.H));
-    if (!passesSurfaces(hex)) continue;
-    const onAccent = pickOnAccent(hex);
-    if (onAccent) return { accent: hex, onAccent };
-  }
-  return { ...JUNIPER_THEME };
+  return paintAccent(normalized, LIGHT_BACKGROUNDS, 'down') || { ...JUNIPER_THEME };
+}
+
+// Dark mode uses the same hue against the dark paper and surface. Lighten
+// first. A miss falls back to the dark juniper token, then paper.
+export function fixAccentDark(value) {
+  const normalized = normalizeHex(value);
+  const found = normalized && paintAccent(normalized, DARK_BACKGROUNDS, 'up');
+  if (found) return found;
+  return paintAccent(JUNIPER_DARK, DARK_BACKGROUNDS, 'up')
+    || paintAccent(PAPER, DARK_BACKGROUNDS, 'up')
+    || { accent: PAPER, onAccent: SLATE };
 }
 
 export function chooseLogoPlate(hex) {
@@ -213,5 +255,6 @@ export function presentBrand(input, { fallbackName = FALLBACK_NAME } = {}) {
       ink: normalizeHex(colors.ink),
     },
     theme: fixAccent(normalizeHex(colors.accent) || normalizeHex(colors.primary)),
+    darkTheme: fixAccentDark(normalizeHex(colors.accent) || normalizeHex(colors.primary)),
   };
 }

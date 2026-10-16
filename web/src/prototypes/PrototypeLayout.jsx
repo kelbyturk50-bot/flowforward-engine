@@ -7,8 +7,17 @@ import { BrandMark } from './logo';
 export default function PrototypeLayout({ brand, children }) {
   const accent = brand.theme.accent;
   const onAccent = brand.theme.onAccent;
+  const darkAccent = brand.darkTheme?.accent || accent;
+  const darkOnAccent = brand.darkTheme?.onAccent || onAccent;
+  const plate = { backgroundColor: 'var(--proto-accent)', color: 'var(--proto-on-accent)' };
   return (
-    <PrototypeShell brandName={brand.name} accent={accent} onAccent={onAccent}>
+    <PrototypeShell
+      brandName={brand.name}
+      accent={accent}
+      onAccent={onAccent}
+      darkAccent={darkAccent}
+      darkOnAccent={darkOnAccent}
+    >
       <div className="prototype-frame">
         <div className="prototype-column">
           <header className="prototype-brandbar">
@@ -17,14 +26,14 @@ export default function PrototypeLayout({ brand, children }) {
             ) : (
               <span
                 className="prototype-wordmark"
-                style={{ backgroundColor: accent, color: onAccent }}
+                style={plate}
               >
                 {brand.name}
               </span>
             )}
             <p
               className="prototype-brand-name"
-              style={{ backgroundColor: accent, color: onAccent }}
+              style={plate}
             >
               <span>{brand.name}</span>
               <SampleTag>Sample business</SampleTag>
