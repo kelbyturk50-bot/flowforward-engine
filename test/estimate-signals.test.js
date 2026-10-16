@@ -770,9 +770,8 @@ describe('F-003 estimate signals', () => {
       ...peer,
       research: research("Don't wait, seriously, call for a free estimate"),
     });
-    assert.equal(seriously.fit_score - plain.fit_score, 4, "Don't wait, seriously, call for a free estimate");
-    assert.equal(seriously.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
-    assert.equal(signalPoints(seriously), 4);
+    assert.equal(seriously.fit_score, plain.fit_score, "Don't wait, seriously, call for a free estimate");
+    assert.equal(signalPoints(seriously), 0);
 
     // The comma is flush against the phrase, so main's wide window does not
     // reach it. This stays +3, the same score as main.
@@ -796,9 +795,8 @@ describe('F-003 estimate signals', () => {
       ...peer,
       research: research("Don't wait, call today, for a free estimate"),
     });
-    assert.equal(callToday.fit_score - plain.fit_score, 4, "Don't wait, call today, for a free estimate");
-    assert.equal(callToday.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
-    assert.equal(signalPoints(callToday), 4);
+    assert.equal(callToday.fit_score, plain.fit_score, "Don't wait, call today, for a free estimate");
+    assert.equal(signalPoints(callToday), 0);
 
     const imperativeBreaks = [
       ["Don't wait; call for a free estimate", 4, 'Free estimate'],
@@ -815,7 +813,6 @@ describe('F-003 estimate signals', () => {
       ["Don't worry, call for a free estimate", 4, 'Free estimate'],
       ["Don't sweat, call for a free estimate", 4, 'Free estimate'],
       ['Call now. Don\'t wait, call for a free estimate', 4, 'Free estimate'],
-      ["Don't wait, at this time, our free estimates", 4, 'Free estimate'],
       ['Don\u2019t wait \u2013 call for a free estimate', 4, 'Free estimate'],
       ['Don\u2019t wait \u2014 call for a free estimate', 4, 'Free estimate'],
     ];
@@ -942,12 +939,19 @@ describe('F-003 estimate signals', () => {
     const stillCalls = [
       ["Don't wait, call for a free estimate", 4, 'Free estimate'],
       ["Don't wait - call today for a free estimate", 4, 'Free estimate'],
-      ["Don't wait, seriously, call for a free estimate", 4, 'Free estimate'],
       ["Don't sweat it, call for a free estimate", 4, 'Free estimate'],
       ["Don't miss out, call for a free estimate", 4, 'Free estimate'],
-      // "charge" is not a negator. Main scores this 0. The comma after wait is the cut.
-      ["Don't wait, we charge for free estimates", 4, 'Free estimate'],
     ];
+    const notACta = [
+      ["Don't wait, seriously, call for a free estimate", 'seriously'],
+      ["Don't wait, we charge for free estimates", 'charge'],
+      ["Don't wait, at this time, our free estimates", 'at this time'],
+    ];
+    for (const [text, name] of notACta) {
+      const fit = computeFit({ ...peer, research: research(text) });
+      assert.equal(fit.fit_score, plain.fit_score, name);
+      assert.equal(signalPoints(fit), 0, name);
+    }
     for (const [text, weight, label] of stillCalls) {
       const fit = computeFit({ ...peer, research: research(text) });
       assert.equal(fit.fit_score - plain.fit_score, weight, text);
@@ -1016,24 +1020,97 @@ describe('F-003 estimate signals', () => {
     assert.equal(signalPoints(piped), 4, 'pipe boundary');
     assert.equal(piped.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
 
-    // First break, not the last. The comma after "seriously" is later, and the
-    // estimate still scores. The source guard fails if the cut walks to the last break.
+    // First break, not the last. "seriously," is in the tail, so the estimate
+    // stays 0. The last comma would leave "call for a" and score +4.
     const firstBreak = computeFit({
       ...peer,
       research: research("Don't wait, seriously, call for a free estimate"),
     });
-    assert.equal(firstBreak.fit_score - plain.fit_score, 4, 'first break');
-    assert.equal(signalPoints(firstBreak), 4, 'first break');
+    assert.equal(firstBreak.fit_score, plain.fit_score, 'first break');
+    assert.equal(signalPoints(firstBreak), 0, 'first break');
 
     const signalSrc = fs.readFileSync(path.join(__dirname, '../src/scoring/estimate-signals.js'), 'utf8');
     const cutStart = signalSrc.indexOf('function cutImperativeNegation');
     const cutSrc = signalSrc.slice(cutStart, signalSrc.indexOf('function isNegated'));
     assert.match(cutSrc, /const brk = after\.match\(IMPERATIVE_BREAK_RE\)/);
-    assert.match(cutSrc, /mainNegatesBefore\(tail\)/);
-    assert.match(cutSrc, /SPAN_NEGATOR_RE\.test\(tail\)/);
+    assert.match(cutSrc, /tailIsAllowedCta\(tail/);
+    assert.match(cutSrc, /mainNegatesBefore\(removed\)/);
     assert.match(cutSrc, /isSentenceStart\(/);
     assert.match(cutSrc, /lastIndexOf\('\|'\)/);
     assert.doesNotMatch(cutSrc, /matchAll|length - 1|\.pop\(\)/);
+  });
+
+  it('cuts only an allowlisted CTA and ignores abbreviation periods', () => {
+    const plain = computeFit(peer);
+    const sameAsMain = [
+      ["Don't wait, we stopped offering free estimates", 'stopped'],
+      ["Don't wait, we discontinued free estimates", 'discontinued'],
+      ["Don't wait, we ended free estimates last month", 'ended'],
+      ["Don't wait, we are out of free estimates", 'out of'],
+      ["Don't wait, out of free estimate appointments this week", 'out of appointments'],
+      ["Don't miss out, we are out of free estimates", 'miss out then out of'],
+      ["Don't wait, instead of a free estimate there is a diagnostic fee", 'instead of'],
+      ["Don't wait, rather than a free estimate we charge a trip fee", 'rather than'],
+      ["Don't wait, with the exception of free estimates, repairs are extra", 'exception'],
+      ["Don't wait, we decline financing for homes outside Utah", 'decline'],
+      ["Don't wait, we refuse financing", 'refuse'],
+      ["Don't wait, our inability to offer financing", 'inability'],
+      ["Don't wait, the unavailability of financing", 'unavailability'],
+      ["Don't wait, we lack financing", 'lack financing'],
+      ["Don't wait, we lack free estimates", 'lack estimates'],
+      ["DON'T WAIT, WE LACK FREE ESTIMATES", 'lack caps'],
+      ['Don\u2019t wait, we lack financing', 'lack curly'],
+      ["Don't wait, you shouldnt ask for a free estimate", 'shouldnt'],
+      ["DON'T WAIT, YOU SHOULDNT ASK FOR A FREE ESTIMATE", 'shouldnt caps'],
+      ["Don't pay 1,000, we lack financing", 'thousands comma'],
+      ["Call Dr. Don't wait, call for a free estimate", 'Dr'],
+      ["Call Mr. Don't wait, call for a free estimate", 'Mr'],
+      ["Call Mrs. Don't wait, call for a free estimate", 'Mrs'],
+      ["Call Ms. Don't wait, call for a free estimate", 'Ms'],
+      ["See e.g. Don't wait, call for a free estimate", 'eg'],
+      ["See i.e. Don't wait, call for a free estimate", 'ie'],
+      ["Repair vs. Don't wait, call for a free estimate", 'vs'],
+      ["Item No. Don't wait, call for a free estimate", 'No'],
+      ["On State St. Don't wait, call for a free estimate", 'St'],
+      ["Wasatch Heating Inc. Don't wait, call for a free estimate", 'Inc'],
+      ["Open 8 a.m. Don't wait, call for a free estimate", 'am'],
+    ];
+    for (const [text, name] of sameAsMain) {
+      const fit = computeFit({ ...peer, research: research(text) });
+      assert.equal(fit.fit_score, plain.fit_score, name);
+      assert.equal(signalPoints(fit), 0, name);
+    }
+
+    const metaStopped = computeFit({
+      ...peer,
+      research: research('', {
+        title: 'Acme Heating',
+        description: "Don't wait, we stopped offering free estimates",
+      }),
+    });
+    assert.equal(metaStopped.fit_score, plain.fit_score, 'meta stopped');
+    assert.equal(signalPoints(metaStopped), 0, 'meta stopped');
+
+    const charge = computeFit({
+      ...peer,
+      research: research("Don't wait, we charge for free estimates"),
+    });
+    assert.equal(charge.fit_score, plain.fit_score, 'charge');
+    assert.equal(signalPoints(charge), 0, 'charge');
+
+    const ctas = [
+      ["Don't wait, call for a free estimate", 4, 'Free estimate'],
+      ["Don't wait - call today for a free estimate", 4, 'Free estimate'],
+      ["Don't sweat it, call for a free estimate", 4, 'Free estimate'],
+      ["Don't miss out, call for a free estimate", 4, 'Free estimate'],
+      ["Meet Dr. Hansen. Don't wait, call for a free estimate", 4, 'Free estimate'],
+    ];
+    for (const [text, weight, label] of ctas) {
+      const fit = computeFit({ ...peer, research: research(text) });
+      assert.equal(fit.fit_score - plain.fit_score, weight, text);
+      assert.equal(fit.fit_reasons.find(row => row.label === label).points, weight, text);
+      assert.equal(signalPoints(fit), weight, text);
+    }
   });
 
   it('keeps n\'t, no-words, except, only, hardly, and a mid-sentence Don\'t at main', () => {

@@ -35,14 +35,16 @@
 // other trade are not boosted. A verb negation can sit well before the phrase
 // and may cross a comma. A sentence-initial "Don't" or "Do not" followed
 // directly by a non-offer verb stops at the first comma, semicolon, colon, or
-// dash after that verb only when main's own negation check finds nothing from
-// that break to the phrase. A word ending in n't, a no\w* word, except, only,
-// hardly, without, never, neither, nor, unable, or unavailable from the verb
-// to the phrase keeps that window. Sentence-initial is the start of the text
-// or the text right after . ! ? a newline, a "|", or a title, meta, or body
-// join, and the 80-character clause window does not create one. A bare "no"
-// or "without" negates only with an optional any, a, an, or the between it
-// and the phrase.
+// dash only when the tail is a CTA: optional and/just/please, a call-type
+// verb, optional us/today/now, optional for/about/to get/to request, an
+// optional article, then a free estimate, free quote, or financing. Anything
+// else, including "we charge for free estimates", keeps the wide window.
+// Sentence-initial is the start of the text or the text right after ! ? a
+// newline, a "|", or a title, meta, or body join, or a period that is not
+// Dr, Mr, Mrs, Ms, St, vs, e.g, i.e, No, Inc, or etc. An unsure period keeps
+// the wide window. The 80-character clause window does not create a start.
+// A bare "no" or "without" negates only with an optional any, a, an, or the
+// between it and the phrase.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');

@@ -28,25 +28,25 @@ const SEARCH_ADS_LABEL_RE = /google ads|\blocal services\b|\blsas?\b/i;
 // that gap.
 const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|not(?!\s+only\b)|never)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
 // Sentence-initial "Don't" / "Do not" plus one of these verbs. Sentence-initial
-// means the start of the cached text, or the text right after . ! ? a newline,
-// "|", or a title/meta/body join (cachedText joins those fields with newlines).
-// The 80-character clause window does not create that start. The first comma,
-// semicolon, colon, or dash after the verb ends the imperative only when main's
-// own before-window check (NEGATIVE_VERB, NEGATIVE_NO_MORE, NEGATIVE_BARE,
-// unchanged) finds no negator from that break to the phrase, and the span from
-// the verb to the phrase has no word ending in n't, no no\w* word (nobody,
-// nothing, nowhere, none), and none of except, only, hardly, without, never,
-// neither, nor, unable, or unavailable. A hit keeps the wide window. Offer
-// verbs are absent on purpose (offer, provide, accept, have, carry, do,
-// extend), so "Don't offer, ..." stays on the wide window above.
+// means the start of the cached text, or the text right after ! ? a newline,
+// "|", a title/meta/body join, or a period that is not an abbreviation.
+// Dr, Mr, Mrs, Ms, St, vs, e.g, i.e, No, Inc, etc, and a single letter or a
+// digit before the period are not sentence ends. When that is unsure, the cut
+// does not run. The 80-character clause window does not create a start.
+// The cut runs only when the tail from the first break to the phrase is a
+// CTA: optional and/just/please, then call, contact, schedule, book, request,
+// get, ask, reach out, text, or email, then optional us/today/now, optional
+// for/about/to get/to request, optional a/an/the/your/our, and then free
+// estimate(s), free quote(s), or financing. Nothing else may sit in that tail.
+// Anything else keeps main's window. Offer verbs are absent on purpose
+// (offer, provide, accept, have, carry, do, extend), so "Don't offer, ..."
+// stays on the wide window above.
 const IMPERATIVE_OPEN_RE = /(?:^|[\n\r])\s*(?:don['\u2019\u2018]?t|do\s+not)\s+/i;
 const IMPERATIVE_VERB_RE = /^(?:wait|settle|sweat|miss(?:\s+out)?|hesitate|delay|forget|worry|overpay|pay|stop|panic|gamble|risk|struggle|postpone|skip|scramble)\b/i;
 const IMPERATIVE_BREAK_RE = /,|;|:|\s+--\s+|\s+-\s+|\u2013|\u2014/;
-// Structural negators for the cut. n't covers shouldn't, wouldn't, haven't,
-// and the same shape, including a curly apostrophe. no\w* covers nobody,
-// nothing, nowhere, and none. Main's three before-window regexes stay as they
-// are and are applied to the same span.
-const SPAN_NEGATOR_RE = /\b(?:\w*n['\u2019\u2018]t|no\w*|except|only|hardly|without|never|neither|nor|unable|unavailable)\b/i;
+const CTA_TAIL_RE = /^\s*(?:(?:and|just|please)\s+)?(?:call|contact|schedule|book|request|get|ask|reach\s+out|text|email)(?:\s+(?:us|today|now))?(?:\s+(?:for|about|to\s+(?:get|request)))?(?:\s+(?:a|an|the|your|our))?\s*$/i;
+const CTA_PHRASE_RE = /^(?:free\s+estimates?|free\s+quotes?|financing)$/i;
+const ABBREV_WORD_RE = /^(?:dr|mr|mrs|ms|st|vs|no|inc|etc|eg|ie|am|pm)$/i;
 const NEGATIVE_NO_MORE = /\bno\s+(?:longer|more)(?:\s+(?:offer(?:s|ing|ed)?|provide(?:s|ing)?|accept(?:s|ing)?|do(?:es)?)\b)?(?:\s+(?:any|a|an|the))?\s+$/i;
 const NEGATIVE_BARE = /\b(?:no|without)(?:\s+(?:any|a|an|the))?\s+$/i;
 // A short window after the phrase: "not available", "unavailable", "none",
@@ -247,22 +247,44 @@ function isHorizontalSpace(ch) {
   return ch !== '\n' && ch !== '\r' && /\s/.test(ch);
 }
 
-// Start of the cached text, or right after . ! ? a newline, "|", or a field join.
+// A period after Dr/Mr/Mrs/Ms/St/vs/No/Inc/etc, after e.g. / i.e. / a.m., or
+// after a single letter or a digit. Unsure periods are not sentence ends.
+function periodIsAbbreviation(text, dotAt) {
+  let i = dotAt - 1;
+  while (i >= 0 && isHorizontalSpace(text[i])) i -= 1;
+  if (i < 0 || !/[A-Za-z]/.test(text[i])) return true;
+  if (text[i - 1] === '.') return true;
+  let start = i;
+  while (start > 0 && /[A-Za-z]/.test(text[start - 1])) start -= 1;
+  const word = text.slice(start, i + 1);
+  if (word.length === 1) return true;
+  return ABBREV_WORD_RE.test(word);
+}
+
+// Start of the cached text, or right after ! ? a newline, "|", a field join,
+// or a period that is not an abbreviation.
 function isSentenceStart(text, at) {
   let i = at;
   while (i > 0 && isHorizontalSpace(text[i - 1])) i -= 1;
   if (i <= 0) return true;
   const prev = text[i - 1];
-  return prev === '.' || prev === '!' || prev === '?' || prev === '\n' || prev === '\r' || prev === '|';
+  if (prev === '!' || prev === '?' || prev === '\n' || prev === '\r' || prev === '|') return true;
+  if (prev === '.') return !periodIsAbbreviation(text, i - 1);
+  return false;
 }
 
-// Main's before-window check, unchanged. The span is the text under test, so
-// the end anchor is the phrase (or the break, for the part the cut would drop).
+// Main's before-window check, unchanged. Used on the words the cut would
+// drop between the verb and the break, so a real negator there stays.
 function mainNegatesBefore(span) {
   if (NEGATIVE_VERB.test(span)) return true;
   if (NEGATIVE_NO_MORE.test(span)) return true;
   if (NEGATIVE_BARE.test(span)) return true;
   return false;
+}
+
+function tailIsAllowedCta(tail, phrase) {
+  if (!CTA_PHRASE_RE.test(String(phrase || '').trim())) return false;
+  return CTA_TAIL_RE.test(tail);
 }
 
 // Stop at . or ! and keep that mark, so "no." is visible and the next sentence
@@ -275,10 +297,10 @@ function clauseAfter(text, end) {
 }
 
 // The wide window still applies when this cut does not. No punctuation, an
-// offer verb, a negator from the verb to the phrase, a break past a newline,
-// "|", or a title/meta/body join, or a Don't that is not a real sentence start
-// leaves the clause alone.
-function cutImperativeNegation(text, span) {
+// offer verb, a tail that is not the CTA grammar, a negator between the verb
+// and the break, a break past a newline, "|", or a title/meta/body join, or a
+// Don't that is not a real sentence start leaves the clause alone.
+function cutImperativeNegation(text, span, phrase) {
   const before = span.window;
   const fenceAt = Math.max(
     before.lastIndexOf('\n'),
@@ -298,13 +320,14 @@ function cutImperativeNegation(text, span) {
   if (!brk) return before;
   const removed = after.slice(0, brk.index);
   const tail = after.slice(brk.index + brk[0].length);
-  if (mainNegatesBefore(tail) || SPAN_NEGATOR_RE.test(tail)) return before;
-  if (mainNegatesBefore(removed) || SPAN_NEGATOR_RE.test(removed)) return before;
+  if (mainNegatesBefore(removed)) return before;
+  if (!tailIsAllowedCta(tail, phrase)) return before;
   return tail;
 }
 
 function isNegated(text, index, length) {
-  const before = cutImperativeNegation(text, clauseBeforeSpan(text, index));
+  const phrase = text.slice(index, index + length);
+  const before = cutImperativeNegation(text, clauseBeforeSpan(text, index), phrase);
   if (NEGATIVE_VERB.test(before)) return true;
   if (NEGATIVE_NO_MORE.test(before)) return true;
   if (NEGATIVE_BARE.test(before)) return true;

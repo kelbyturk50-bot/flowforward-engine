@@ -81,17 +81,18 @@ const TIER_CAP_FOR = {
 // non-offer verb (wait, settle, sweat, miss out, hesitate, delay, forget,
 // worry, and the same kind of CTA verb — not offer, provide, accept, have,
 // carry, do, or extend) stops at the first comma, semicolon, colon, or dash
-// after that verb ("Don't wait, call for a free estimate", "Don't wait - call
-// today for a free estimate", "Don't wait, seriously, call for a free estimate").
-// The cut applies only when main's own before-window check finds no negator
-// from that break to the phrase. A word ending in n't, a no\w* word (nobody,
-// nothing, nowhere, none), except, only, hardly, without, never, neither, nor,
-// unable, or unavailable from the verb to the phrase keeps the wide window.
-// Sentence-initial is the start of the text, or the text right after . ! ? a
-// newline, a "|", or a title, meta, or body join. The 80-character clause
-// window does not make a mid-sentence Don't sentence-initial. A newline, a
-// "|", and the join between title, meta description, and body are boundaries
-// the cut does not cross.
+// after that verb only when the tail is a CTA. The tail may be optional
+// and/just/please, then call, contact, schedule, book, request, get, ask,
+// reach out, text, or email, then optional us/today/now, optional
+// for/about/to get/to request, optional a/an/the/your/our, and then a free
+// estimate, free quote, or financing ("Don't wait, call for a free estimate",
+// "Don't wait - call today for a free estimate"). Nothing else in that tail
+// keeps the wide window, so "Don't wait, we charge for free estimates" stays
+// with main. Sentence-initial is the start of the text, or the text right
+// after ! ? a newline, a "|", a title, meta, or body join, or a period that
+// is not an abbreviation (Dr, Mr, Mrs, Ms, St, vs, e.g, i.e, No, Inc, etc).
+// An unsure period keeps the wide window. The 80-character clause window does
+// not make a mid-sentence Don't sentence-initial.
 // "not" followed by "only" is not a verb negation. "no longer" and "no more"
 // are not in that wide window: they negate only when the phrase follows, or
 // after one offer-type verb (offer, provide, accept, do, and their
