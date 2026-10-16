@@ -30,19 +30,21 @@ const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was
 // Sentence-initial "Don't" / "Do not" plus one of these verbs. Cached page
 // text joins the title and the meta description on the lines above, so the
 // imperative may also start a line. The first comma, semicolon, colon, or
-// dash after the verb ends that negator's window only when the span between
-// them has none of the negators the wide window uses (do not, don't, cannot,
-// not, never, no, no longer, no more, without). A newline, a "|", or a
-// title/meta/body join (cachedText joins those fields with newlines) is a
-// boundary that cut does not cross. Offer verbs are absent on purpose
+// dash after the verb ends that negator's window only when the text from the
+// verb to the phrase has none of the negators the wide window uses (do not,
+// don't, cannot, not, never, no, no longer, no more, without, none, nor,
+// neither, unable, unavailable). A hit after the break counts. A newline, a
+// "|", or a title/meta/body join (cachedText joins those fields with newlines)
+// is a boundary that cut does not cross. Offer verbs are absent on purpose
 // (offer, provide, accept, have, carry, do, extend), so "Don't offer, ..."
 // stays on the wide window above.
 const IMPERATIVE_OPEN_RE = /(?:^|[\n\r])\s*(?:don['\u2019\u2018]?t|do\s+not)\s+/i;
 const IMPERATIVE_VERB_RE = /^(?:wait|settle|sweat|miss(?:\s+out)?|hesitate|delay|forget|worry|overpay|pay|stop|panic|gamble|risk|struggle|postpone|skip|scramble)\b/i;
 const IMPERATIVE_BREAK_RE = /,|;|:|\s+--\s+|\s+-\s+|\u2013|\u2014/;
-// Same set as NEGATIVE_VERB, NEGATIVE_NO_MORE, and NEGATIVE_BARE. A hit
-// between the CTA verb and the break keeps main's window.
-const IMPERATIVE_NEGATOR_RE = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|never|no\s+(?:longer|more)|not(?!\s+only\b)|no|without)\b/i;
+// Same set as NEGATIVE_VERB, NEGATIVE_NO_MORE, and NEGATIVE_BARE, plus the
+// words that block a CTA cut when they sit anywhere from the verb to the
+// phrase (none, nor, neither, unable, unavailable). A hit keeps main's window.
+const IMPERATIVE_NEGATOR_RE = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|never|no\s+(?:longer|more)|not(?!\s+only\b)|no|without|none|nor|neither|unable|unavailable)\b/i;
 const NEGATIVE_NO_MORE = /\bno\s+(?:longer|more)(?:\s+(?:offer(?:s|ing|ed)?|provide(?:s|ing)?|accept(?:s|ing)?|do(?:es)?)\b)?(?:\s+(?:any|a|an|the))?\s+$/i;
 const NEGATIVE_BARE = /\b(?:no|without)(?:\s+(?:any|a|an|the))?\s+$/i;
 // A short window after the phrase: "not available", "unavailable", "none",
@@ -243,8 +245,8 @@ function clauseAfter(text, end) {
 }
 
 // The wide window still applies when this cut does not. No punctuation, an
-// offer verb, a negator between the verb and the break, or a break past a
-// newline, "|", or a title/meta/body join leaves the clause alone.
+// offer verb, a negator anywhere from the verb to the phrase, or a break past
+// a newline, "|", or a title/meta/body join leaves the clause alone.
 function cutImperativeNegation(before) {
   const fenceAt = Math.max(
     before.lastIndexOf('\n'),
@@ -260,7 +262,7 @@ function cutImperativeNegation(before) {
   const after = rest.slice(verb[0].length);
   const brk = after.match(IMPERATIVE_BREAK_RE);
   if (!brk) return before;
-  if (IMPERATIVE_NEGATOR_RE.test(after.slice(0, brk.index))) return before;
+  if (IMPERATIVE_NEGATOR_RE.test(after)) return before;
   return after.slice(brk.index + brk[0].length);
 }
 

@@ -83,11 +83,12 @@ const TIER_CAP_FOR = {
 // carry, do, or extend) stops at the first comma, semicolon, colon, or dash
 // after that verb ("Don't wait, call for a free estimate", "Don't wait - call
 // today for a free estimate", "Don't wait, seriously, call for a free estimate").
-// The cut applies only when none of the negators above (do not, don't, cannot,
-// not, never, no, no longer, no more, without) sit between the verb and that
-// break. A newline, a "|", and the join between title, meta description, and
-// body are boundaries the cut does not cross. A negator in the span, or a
-// break past one of those boundaries, keeps the wide window.
+// The cut applies only when do not, don't, cannot, not, never, no, no longer,
+// no more, without, none, nor, neither, unable, and unavailable do not sit
+// anywhere from the verb to the phrase.
+// A hit after the break counts. A newline, a "|", and the join between title,
+// meta description, and body are boundaries the cut does not cross. A negator
+// in that span, or a break past one of those boundaries, keeps the wide window.
 // "not" followed by "only" is not a verb negation. "no longer" and "no more"
 // are not in that wide window: they negate only when the phrase follows, or
 // after one offer-type verb (offer, provide, accept, do, and their

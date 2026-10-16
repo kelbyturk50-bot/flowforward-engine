@@ -976,6 +976,64 @@ describe('F-003 estimate signals', () => {
     assert.equal(signalPoints(metaCta), 4, 'meta description CTA');
   });
 
+  it('keeps none, nor, neither, unable, and the negator-list guards at main', () => {
+    const plain = computeFit(peer);
+    const blocked = [
+      ["Don't wait, unable to offer financing", 'unable'],
+      ["Don't wait None of our plans, sadly, include financing", 'none'],
+      ["Don't wait - Neither financing nor free estimates", 'neither nor'],
+      ["Don't wait, We are unable to provide financing, sorry", 'unable after comma'],
+      ["Don't wait; Neither financing nor free estimates", 'neither after semicolon'],
+      ["Don't wait, unavailable financing", 'unavailable'],
+      // Bare "no" is in the list. Dropping it lets the cut score financing.
+      ["Don't wait, no hassle financing", 'bare no'],
+      ["Don't wait no more, call for a free estimate", 'no more'],
+      // The n't forms are in the list. Dropping them lets the cut score the estimate.
+      ["Don't wait we don't offer, call for a free estimate", 'dont'],
+      ['Don\'t wait we don\u2019t offer, call for a free estimate', 'curly dont'],
+      ["Don't wait we doesn't offer, call for a free estimate", 'doesnt'],
+      ["Don't wait we didn't offer, call for a free estimate", 'didnt'],
+      ["Don't wait we isn't offering, call for a free estimate", 'isnt'],
+      ["Don't wait we aren't offering, call for a free estimate", 'arent'],
+      ["Don't wait we wasn't offering, call for a free estimate", 'wasnt'],
+      ["Don't wait we weren't offering, call for a free estimate", 'werent'],
+      ["Don't wait we won't offer, call for a free estimate", 'wont'],
+      ["Don't wait we can't offer, call for a free estimate", 'cant'],
+    ];
+    for (const [text, name] of blocked) {
+      const fit = computeFit({ ...peer, research: research(text) });
+      assert.equal(fit.fit_score, plain.fit_score, name);
+      assert.equal(signalPoints(fit), 0, name);
+    }
+
+    // The "|" fence is its own boundary. Without it, the first Don't sees the
+    // second and the estimate stays 0. With it, the CTA after the bar scores.
+    const piped = computeFit({
+      ...peer,
+      research: research("Don't wait | Don't delay, call for a free estimate"),
+    });
+    assert.equal(piped.fit_score - plain.fit_score, 4, 'pipe boundary');
+    assert.equal(signalPoints(piped), 4, 'pipe boundary');
+    assert.equal(piped.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
+
+    // First break, not the last. The comma after "seriously" is later, and the
+    // estimate still scores. The source guard fails if the cut walks to the last break.
+    const firstBreak = computeFit({
+      ...peer,
+      research: research("Don't wait, seriously, call for a free estimate"),
+    });
+    assert.equal(firstBreak.fit_score - plain.fit_score, 4, 'first break');
+    assert.equal(signalPoints(firstBreak), 4, 'first break');
+
+    const signalSrc = fs.readFileSync(path.join(__dirname, '../src/scoring/estimate-signals.js'), 'utf8');
+    const cutStart = signalSrc.indexOf('function cutImperativeNegation');
+    const cutSrc = signalSrc.slice(cutStart, signalSrc.indexOf('function isNegated'));
+    assert.match(cutSrc, /const brk = after\.match\(IMPERATIVE_BREAK_RE\)/);
+    assert.match(cutSrc, /if \(IMPERATIVE_NEGATOR_RE\.test\(after\)\) return before;/);
+    assert.match(cutSrc, /lastIndexOf\('\|'\)/);
+    assert.doesNotMatch(cutSrc, /matchAll|length - 1|\.pop\(\)/);
+  });
+
   it('still penalizes ServiceTitan and caps it after the new boost', () => {
     const sweet = {
       company: 'Wasatch Heating',
