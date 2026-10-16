@@ -16,7 +16,7 @@ npm run lint     # ESLint
 
 The client in `src/api.js` resolves a base URL in this order:
 
-1. **Settings on this device.** `localStorage` key `ff.apiUrl`, written only when you save Settings. It is the address you typed, and it overrides everything below on that origin. Previews do not get an address filled in, so a preview reaches an API (including production) only after you type one and save. A blank save deletes the key.
+1. **Settings on this device.** `localStorage` key `ff.apiUrl`, written only when you change the address and save. Leaving the prefilled address stores nothing, so a later default still applies. The stored address must be `https`, except `http` for `localhost` or `127.0.0.1`. It overrides everything below on that origin. Previews do not get an address filled in, so a preview reaches an API only after you type one and save.
 2. **`VITE_API_URL`.** When the build set it, this wins over the defaults below.
 3. **Dev.** `vite` dev (`import.meta.env.DEV`) uses `http://localhost:3000`, the API's default port (`PORT` or 3000).
 4. **Production hosts.** A production build uses the production Railway API only when `location.hostname` is exactly one of:

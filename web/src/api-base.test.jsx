@@ -1,16 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import ApiBanner, { API_BANNER_HELP } from './ApiBanner';
-import { api } from './api';
+import { api, settings } from './api';
 import { ErrorNote } from './ui';
 import { installApiDefaults } from './test/defaults.js';
 import Today from './views/Today';
 import Leads from './views/Leads';
+import Settings from './views/Settings';
 import {
+  API_URL_SCHEME_MESSAGE,
   LOCAL_API_URL,
   PRODUCTION_API_URL,
   PRODUCTION_HOSTS,
+  apiUrlIssue,
   resolveApiBase,
+  shouldStoreApiUrl,
   UNCONFIGURED_MESSAGE,
 } from './api-base.js';
 
@@ -130,5 +135,111 @@ describe('ApiBanner', () => {
     render(<ErrorNote error={{ message: 'Request failed (500)' }} onRetry={() => {}} />);
     expect(screen.getByRole('alert')).toHaveTextContent('Request failed (500)');
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+});
+
+describe('apiUrlIssue', () => {
+  it('allows https, and http only for localhost and 127.0.0.1', () => {
+    expect(apiUrlIssue('https://staging.example.test/api')).toBe('');
+    expect(apiUrlIssue('https://flowforward-engine-production.up.railway.app')).toBe('');
+    expect(apiUrlIssue('http://localhost:3000')).toBe('');
+    expect(apiUrlIssue('http://127.0.0.1:3000/')).toBe('');
+    expect(apiUrlIssue(' HTTP://LOCALHOST:3000 ')).toBe('');
+  });
+
+  it('rejects other http hosts and non-https schemes', () => {
+    for (const value of [
+      'http://10.1.1.1:3000',
+      'http://localhost.evil.com',
+      'http://evil.localhost',
+      'http://127.0.0.1.evil.com',
+      'http://example.com',
+      'ftp://localhost',
+      'not a url',
+    ]) {
+      expect(apiUrlIssue(value)).toBe(API_URL_SCHEME_MESSAGE);
+    }
+    expect(apiUrlIssue('   ')).toBe('Enter an API address.');
+  });
+});
+
+describe('shouldStoreApiUrl', () => {
+  it('does not store a prefilled or default address', () => {
+    expect(shouldStoreApiUrl('http://localhost:3000', 'http://localhost:3000')).toBe(false);
+    expect(shouldStoreApiUrl('http://localhost:3000/', LOCAL_API_URL)).toBe(false);
+    expect(shouldStoreApiUrl(` ${PRODUCTION_API_URL} `, PRODUCTION_API_URL)).toBe(false);
+    expect(shouldStoreApiUrl('', '')).toBe(false);
+  });
+
+  it('stores an address the user changed', () => {
+    expect(shouldStoreApiUrl('https://staging.example.test', '')).toBe(true);
+    expect(shouldStoreApiUrl('https://staging.example.test', LOCAL_API_URL)).toBe(true);
+    expect(shouldStoreApiUrl(PRODUCTION_API_URL, '')).toBe(true);
+  });
+});
+
+describe('Settings API address', () => {
+  let restore = () => {};
+
+  afterEach(() => { restore(); });
+
+  function watchSettings(initialUrl) {
+    installApiDefaults();
+    const writes = [];
+    let url = initialUrl;
+    let key = '';
+    Object.defineProperty(settings, 'apiUrl', {
+      configurable: true,
+      get: () => url,
+      set: (v) => { writes.push(v); url = v; },
+    });
+    Object.defineProperty(settings, 'apiKey', {
+      configurable: true,
+      get: () => key,
+      set: (v) => { key = v; },
+    });
+    restore = () => {
+      delete settings.apiUrl;
+      delete settings.apiKey;
+      settings.apiUrl = 'http://127.0.0.1:3000';
+      settings.apiKey = 'test-key';
+      restore = () => {};
+    };
+    return writes;
+  }
+
+  it('shows an inline message and does not save a non-https address', async () => {
+    const user = userEvent.setup();
+    const writes = watchSettings('http://127.0.0.1:3000');
+    render(<Settings version={0} onSaved={() => {}} />);
+    const address = screen.getByLabelText('API address');
+    await user.clear(address);
+    await user.type(address, 'http://10.1.1.1:3000');
+    await user.click(screen.getByRole('button', { name: 'Save and connect' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(API_URL_SCHEME_MESSAGE);
+    expect(writes).toEqual([]);
+    expect(api.health).not.toHaveBeenCalled();
+  });
+
+  it('does not save the prefilled address when only the key is saved', async () => {
+    const user = userEvent.setup();
+    const writes = watchSettings(LOCAL_API_URL);
+    render(<Settings version={0} onSaved={() => {}} />);
+    expect(screen.getByLabelText('API address')).toHaveValue(LOCAL_API_URL);
+    await user.click(screen.getByRole('button', { name: 'Save and connect' }));
+    expect(await screen.findByText('Connected. Your leads are loading.')).toBeInTheDocument();
+    expect(writes).toEqual([]);
+    expect(api.health).toHaveBeenCalled();
+  });
+
+  it('saves an https address the user typed', async () => {
+    const user = userEvent.setup();
+    const writes = watchSettings('');
+    render(<Settings version={0} onSaved={() => {}} />);
+    const address = screen.getByLabelText('API address');
+    await user.type(address, 'https://staging.example.test');
+    await user.click(screen.getByRole('button', { name: 'Save and connect' }));
+    expect(await screen.findByText('Connected. Your leads are loading.')).toBeInTheDocument();
+    expect(writes).toEqual(['https://staging.example.test']);
   });
 });

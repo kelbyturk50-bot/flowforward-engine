@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
 import { api, settings } from '../api';
+import { apiUrlIssue, shouldStoreApiUrl } from '../api-base.js';
 import { useAsync, ErrorNote, timeAgo, toast, money2 } from '../ui';
 
 export default function Settings({ authProblem, onSaved, version }) {
-  const [url, setUrl] = useState(settings.apiUrl);
+  const [initialUrl] = useState(() => settings.apiUrl);
+  const [url, setUrl] = useState(initialUrl);
   const [key, setKey] = useState(settings.apiKey);
+  const [urlError, setUrlError] = useState('');
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -12,8 +15,13 @@ export default function Settings({ authProblem, onSaved, version }) {
   const runs = useAsync(() => connected ? api.runs() : Promise.resolve(null), [version, connected]);
 
   const saveAndTest = async (e) => {
-    e.preventDefault(); setBusy(true); setStatus(null);
-    settings.apiUrl = url; settings.apiKey = key;
+    e.preventDefault();
+    const issue = apiUrlIssue(url);
+    if (issue) { setUrlError(issue); setStatus(null); return; }
+    setUrlError('');
+    setBusy(true); setStatus(null);
+    if (shouldStoreApiUrl(url, initialUrl)) settings.apiUrl = url.trim();
+    settings.apiKey = key;
     try {
       await api.health();
       await api.stats();
@@ -42,8 +50,9 @@ export default function Settings({ authProblem, onSaved, version }) {
 
       <form className="panel form" onSubmit={saveAndTest}>
         <h2>Connection</h2>
-        <p className="muted">Saved on this device only, and it overrides the default for this site. Nothing is filled in on a preview, so an address is used there only after you type one and save.</p>
-        <label>API address<input className="input" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://…" required /></label>
+        <p className="muted">Saved on this device only if you change the address. https is required, except http for localhost or 127.0.0.1.</p>
+        <label>API address<input className="input" value={url} onChange={e => { setUrl(e.target.value); setUrlError(''); }} placeholder="https://…" required aria-invalid={urlError ? 'true' : undefined} aria-describedby={urlError ? 'api-url-error' : undefined} /></label>
+        {urlError && <p id="api-url-error" className="error-text" role="alert">{urlError}</p>}
         <label>API key<input className="input" type="password" value={key} onChange={e => setKey(e.target.value)} autoComplete="off" placeholder="Value of CRM_API_KEY" /></label>
         {status && <p className={status.ok ? 'ok-note' : 'error-text'} role="status">{status.msg}</p>}
         <div className="form-actions"><button className="btn" disabled={busy}>{busy ? 'Checking…' : 'Save and connect'}</button></div>

@@ -2,8 +2,8 @@
 //
 // Precedence, first match:
 // 1. Settings-saved URL (`localStorage` key `ff.apiUrl`). Written only when
-//    someone saves Settings on this origin. It is whatever they typed, including
-//    the production API. It is never filled in automatically on a preview.
+//    someone changes the address and saves. The prefilled default is not stored.
+//    The value must be https, except http for localhost or 127.0.0.1.
 // 2. `VITE_API_URL`, when the build set it. Wins over the defaults below.
 // 3. `http://localhost:3000` when `import.meta.env.DEV` (the API's default port).
 // 4. The production Railway URL when `import.meta.env.PROD` and
@@ -18,11 +18,9 @@ export const LOCAL_API_URL = 'http://localhost:3000';
 export const PRODUCTION_API_URL = 'https://flowforward-engine-production.up.railway.app';
 
 // Exact production CRM hostnames. Compare with === only.
-// Read-only from Vercel project flowforward-engine
-// (prj_zi6v5WyDucJOuiqHdGSqMdyMtkE0), production deployment
-// dpl_JpUqm88fWg7c2bH2VL14uUmESoxd (main a85d592), on 2026-10-16:
-// - project production domain (list_project_domains production=true)
-// - team production alias and the main-branch alias (deployment aliases)
+// Production aliases for the flowforward-engine project, read 2026-10-16:
+// - project production domain
+// - team production alias and the main-branch alias
 export const PRODUCTION_HOSTS = Object.freeze([
   'flowforward-engine-six.vercel.app',
   'flowforward-engine-turk11.vercel.app',
@@ -33,6 +31,24 @@ export const UNCONFIGURED_MESSAGE = 'API not configured for this environment';
 
 export function normalizeUrl(value) {
   return String(value ?? '').trim().replace(/\/+$/, '');
+}
+
+export const API_URL_SCHEME_MESSAGE = 'Use an https address. http is only allowed for localhost and 127.0.0.1.';
+
+export function apiUrlIssue(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 'Enter an API address.';
+  let parsed;
+  try { parsed = new URL(raw); }
+  catch { return API_URL_SCHEME_MESSAGE; }
+  const host = parsed.hostname;
+  if (parsed.protocol === 'https:') return '';
+  if (parsed.protocol === 'http:' && (host === 'localhost' || host === '127.0.0.1')) return '';
+  return API_URL_SCHEME_MESSAGE;
+}
+
+export function shouldStoreApiUrl(typed, prefilled) {
+  return normalizeUrl(typed) !== normalizeUrl(prefilled);
 }
 
 export function isProductionHost(hostname) {
