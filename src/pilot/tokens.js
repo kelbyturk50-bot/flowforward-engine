@@ -1,11 +1,17 @@
 // Demo tokens for the unsold-estimate recovery pilot.
 //
 // The raw token is 16 bytes from crypto.randomBytes, encoded as unpadded
-// base64url (22 characters). Only the SHA-256 hash is stored. Lookup hashes
-// the presented token and compares with crypto.timingSafeEqual, including a
-// dummy compare when no row matches, so the compare itself does not branch
-// on secret length. Unknown, expired, revoked, and malformed tokens all
-// come back as null — callers return one 404.
+// base64url (22 characters). Public lookup hashes the presented token and
+// compares with crypto.timingSafeEqual, including a dummy compare when no
+// row matches, so the compare itself does not branch on secret length.
+// The raw token is also stored on pilot_tokens.token so a cold one-pager
+// can put the same link back on the page. It is not a column on proposals
+// (GET /api/proposals/:id selects every proposal column).
+//
+// proposals.demo_revoked_at sticks after revoke, including when the proposal
+// is discarded. Anonymous /p/:slug renders do not mint while it is set.
+// Unknown, expired, revoked, discarded, and malformed tokens all come back
+// as null — callers return one 404.
 
 const crypto = require('crypto');
 const pool = require('../db/client');
@@ -16,8 +22,7 @@ const TOKEN_BYTES = 16;
 const TOKEN_RE = /^[A-Za-z0-9_-]{22,64}$/;
 const DEFAULT_TTL_HOURS = 24 * 14;
 
-// Process-local copy of a token this process just minted, so the one-pager
-// can render the link again without storing the raw token in the database.
+// Process-local copy so a warm one-pager does not read the token row again.
 const cache = new Map();
 
 const DUMMY_HASH = crypto.randomBytes(32);
@@ -60,12 +65,16 @@ function publicDemoPath(token) {
   return base ? `${base}${path}` : path;
 }
 
+function blockedProposal(proposal) {
+  return !proposal || proposal.status === 'discarded' || proposal.demo_revoked_at != null;
+}
+
 async function resolveToken(raw) {
   const wellFormed = typeof raw === 'string' && TOKEN_RE.test(raw);
   const computed = wellFormed ? hashToken(raw) : DUMMY_HASH;
   const { rows } = await pool.query(
     `SELECT t.id, t.proposal_id, t.prospect_id, t.token_hash, t.expires_at, t.revoked_at,
-            pr.status AS proposal_status
+            pr.status AS proposal_status, pr.demo_revoked_at
        FROM pilot_tokens t
        JOIN proposals pr ON pr.id = t.proposal_id
       WHERE t.token_hash = $1`,
@@ -79,6 +88,7 @@ async function resolveToken(raw) {
   if (!wellFormed || !row || !equal) return null;
   if (row.revoked_at) return null;
   if (row.proposal_status === 'discarded') return null;
+  if (row.demo_revoked_at) return null;
   if (new Date(row.expires_at).getTime() <= Date.now()) return null;
   return {
     id: row.id,
@@ -87,22 +97,23 @@ async function resolveToken(raw) {
   };
 }
 
-async function mintForProposal(proposalId) {
+async function remember(proposalId, token, expiresAt) {
+  cache.set(Number(proposalId), {
+    token,
+    expiresAt: new Date(expiresAt).getTime(),
+  });
+}
+
+async function mintForProposal(proposalId, options = {}) {
+  const fromOnePager = options.fromOnePager === true;
   const id = Number(proposalId);
   if (!Number.isInteger(id) || id < 1) return null;
-
-  const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
-  if (Buffer.from(token, 'base64url').length < TOKEN_BYTES) {
-    throw new Error('Demo token was shorter than 16 bytes');
-  }
-  const expiresAt = new Date(Date.now() + ttlMs());
-  const tokenHash = hashToken(token);
 
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
     const { rows } = await db.query(
-      `SELECT id, prospect_id, status FROM proposals WHERE id = $1 FOR UPDATE`,
+      `SELECT id, prospect_id, status, demo_revoked_at FROM proposals WHERE id = $1 FOR UPDATE`,
       [id]
     );
     const proposal = rows[0];
@@ -110,20 +121,62 @@ async function mintForProposal(proposalId) {
       await db.query('ROLLBACK');
       return null;
     }
-    // One live token per proposal. A cold one-pager view mints again; the previous link stops working.
+    if (fromOnePager && proposal.demo_revoked_at) {
+      await db.query('ROLLBACK');
+      return null;
+    }
+    if (fromOnePager) {
+      const existing = await db.query(
+        `SELECT id, token, expires_at
+           FROM pilot_tokens
+          WHERE proposal_id = $1
+            AND revoked_at IS NULL
+            AND expires_at > NOW()
+            AND token IS NOT NULL
+          ORDER BY id DESC
+          LIMIT 1`,
+        [proposal.id]
+      );
+      if (existing.rows[0]) {
+        await db.query('COMMIT');
+        const row = existing.rows[0];
+        await remember(proposal.id, row.token, row.expires_at);
+        return {
+          id: row.id,
+          token: row.token,
+          expires_at: row.expires_at,
+          proposal_id: Number(proposal.id),
+          prospect_id: Number(proposal.prospect_id),
+          reused: true,
+        };
+      }
+    }
+
+    const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
+    if (Buffer.from(token, 'base64url').length < TOKEN_BYTES) {
+      throw new Error('Demo token was shorter than 16 bytes');
+    }
+    const expiresAt = new Date(Date.now() + ttlMs());
+    const tokenHash = hashToken(token);
     await db.query(
-      `UPDATE pilot_tokens SET revoked_at = NOW()
+      `UPDATE pilot_tokens SET revoked_at = NOW(), token = NULL
         WHERE proposal_id = $1 AND revoked_at IS NULL`,
       [proposal.id]
     );
+    if (!fromOnePager) {
+      await db.query(
+        `UPDATE proposals SET demo_revoked_at = NULL WHERE id = $1 AND demo_revoked_at IS NOT NULL`,
+        [proposal.id]
+      );
+    }
     const inserted = await db.query(
-      `INSERT INTO pilot_tokens (proposal_id, prospect_id, token_hash, expires_at)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO pilot_tokens (proposal_id, prospect_id, token, token_hash, expires_at)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id, expires_at`,
-      [proposal.id, proposal.prospect_id, tokenHash, expiresAt]
+      [proposal.id, proposal.prospect_id, token, tokenHash, expiresAt]
     );
     await db.query('COMMIT');
-    cache.set(Number(proposal.id), { token, expiresAt: expiresAt.getTime() });
+    await remember(proposal.id, token, expiresAt);
     return {
       id: inserted.rows[0].id,
       token,
@@ -142,27 +195,68 @@ async function mintForProposal(proposalId) {
 async function revokeForProposal(proposalId) {
   const id = Number(proposalId);
   if (!Number.isInteger(id) || id < 1) return 0;
-  const { rowCount } = await pool.query(
-    `UPDATE pilot_tokens SET revoked_at = NOW()
-      WHERE proposal_id = $1 AND revoked_at IS NULL`,
-    [id]
-  );
-  cache.delete(id);
-  return rowCount;
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const found = await db.query('SELECT id FROM proposals WHERE id = $1 FOR UPDATE', [id]);
+    if (!found.rows.length) {
+      await db.query('ROLLBACK');
+      return 0;
+    }
+    await db.query('UPDATE proposals SET demo_revoked_at = NOW() WHERE id = $1', [id]);
+    const { rowCount } = await db.query(
+      `UPDATE pilot_tokens SET revoked_at = NOW(), token = NULL
+        WHERE proposal_id = $1 AND revoked_at IS NULL`,
+      [id]
+    );
+    await db.query('COMMIT');
+    cache.delete(id);
+    return rowCount;
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    db.release();
+  }
 }
 
 async function demoHrefForProposal(req, proposalId) {
   if (!flags.masterOn() || !flags.linkOn()) return '';
   const id = Number(proposalId);
+  if (!Number.isInteger(id) || id < 1) return '';
+
+  const gateRow = await pool.query(
+    'SELECT status, demo_revoked_at FROM proposals WHERE id = $1',
+    [id]
+  );
+  if (blockedProposal(gateRow.rows[0])) return '';
+
   const cached = cache.get(id);
   if (cached && cached.expiresAt > Date.now()) {
     const row = await resolveToken(cached.token);
     if (row && row.proposal_id === id) return publicDemoPath(cached.token);
     cache.delete(id);
   }
+
+  const active = await pool.query(
+    `SELECT token, expires_at
+       FROM pilot_tokens
+      WHERE proposal_id = $1
+        AND revoked_at IS NULL
+        AND expires_at > NOW()
+        AND token IS NOT NULL
+      ORDER BY id DESC
+      LIMIT 1`,
+    [id]
+  );
+  if (active.rows[0]) {
+    await remember(id, active.rows[0].token, active.rows[0].expires_at);
+    return publicDemoPath(active.rows[0].token);
+  }
+
   const gate = consume(clientIp(req), 'mint');
   if (gate.limited) return '';
-  const minted = await mintForProposal(id);
+  const minted = await mintForProposal(id, { fromOnePager: true });
   if (!minted) return '';
   return publicDemoPath(minted.token);
 }

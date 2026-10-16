@@ -23,7 +23,8 @@ const flags = require('../src/pilot/flags');
 const { EVENT_TYPES } = require('../src/pilot/events');
 const { buildDemo, OPEN_TOTAL, RECOVERED } = require('../src/pilot/payload');
 const tokens = require('../src/pilot/tokens');
-const { _resetForTests } = require('../src/pilot/rate-limit');
+const pilotDemo = require('../src/pilot/demo');
+const { _resetForTests, clientIp } = require('../src/pilot/rate-limit');
 const send = require('../src/proposals/send');
 const draft = require('../src/proposals/draft');
 const places = require('../src/bot/google-places');
@@ -53,9 +54,11 @@ function setFlags({ master = false, link = false, sms = false } = {}) {
   process.env.FF_PILOT_ESTIMATE_SMS = sms ? 'true' : '';
 }
 
-function request(method, reqPath, { headers = {}, body } = {}) {
+function request(method, reqPath, { headers = {}, body, rawBody } = {}) {
   return new Promise((resolve, reject) => {
-    const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+    const payload = rawBody != null
+      ? (Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody))
+      : (body === undefined ? null : Buffer.from(JSON.stringify(body)));
     const req = http.request({
       method,
       hostname: '127.0.0.1',
@@ -80,6 +83,17 @@ function request(method, reqPath, { headers = {}, body } = {}) {
     if (payload) req.end(payload);
     else req.end();
   });
+}
+
+async function tokenStats(proposalId) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS n,
+            COUNT(*) FILTER (WHERE revoked_at IS NULL)::int AS active,
+            COALESCE(MAX(id), 0)::int AS max_id
+       FROM pilot_tokens WHERE proposal_id = $1`,
+    [proposalId]
+  );
+  return rows[0];
 }
 
 function assertClosed(res) {
@@ -157,8 +171,9 @@ describe('pilot estimate recovery', () => {
     const app = express();
     app.set('trust proxy', 1);
     app.use(express.json({ limit: '1mb' }));
+    app.use(pilotDemo.payloadTooLarge);
     app.use('/p', require('../src/proposals/onepager').router);
-    app.use('/demo/estimate-recovery', require('../src/pilot/demo').router);
+    app.use('/demo/estimate-recovery', pilotDemo.router);
     app.use('/api', require('../src/api/auth'));
     app.use('/api/proposals', require('../src/api/proposals'));
     server = http.createServer(app);
@@ -245,7 +260,7 @@ describe('pilot estimate recovery', () => {
     assert.equal(rows[0].n, 0);
   });
 
-  it('mints a 16-byte token, stores only the hash, and serves the synthetic payload', async () => {
+  it('mints a 16-byte token, looks it up by hash, and serves the synthetic payload', async () => {
     setFlags({ master: true, link: true });
     const sizes = [];
     const original = crypto.randomBytes;
@@ -272,15 +287,21 @@ describe('pilot estimate recovery', () => {
     assert.equal(JSON.stringify(minted.json).includes(PROSPECT_EMAIL), false);
 
     const stored = await pool.query(
-      `SELECT id, proposal_id, prospect_id, token_hash, expires_at, revoked_at
+      `SELECT id, proposal_id, prospect_id, token, token_hash, expires_at, revoked_at
          FROM pilot_tokens WHERE proposal_id = $1`,
       [proposal.id]
     );
     assert.equal(stored.rows.length, 1);
     const hash = crypto.createHash('sha256').update(minted.json.token, 'utf8').digest();
     assert.ok(Buffer.from(stored.rows[0].token_hash).equals(hash));
+    assert.equal(stored.rows[0].token, minted.json.token);
     assert.equal(stored.rows[0].revoked_at, null);
     assert.ok(new Date(stored.rows[0].expires_at).getTime() > Date.now());
+    const revokedFlag = await pool.query(
+      'SELECT demo_revoked_at FROM proposals WHERE id = $1',
+      [proposal.id]
+    );
+    assert.equal(revokedFlag.rows[0].demo_revoked_at, null);
 
     const columns = await pool.query(
       `SELECT column_name FROM information_schema.columns
@@ -288,7 +309,7 @@ describe('pilot estimate recovery', () => {
         ORDER BY column_name`
     );
     assert.deepEqual(columns.rows.map((r) => r.column_name), [
-      'created_at', 'expires_at', 'id', 'proposal_id', 'prospect_id', 'revoked_at', 'token_hash',
+      'created_at', 'expires_at', 'id', 'proposal_id', 'prospect_id', 'revoked_at', 'token', 'token_hash',
     ]);
     const asText = await pool.query(
       `SELECT id::text || proposal_id::text || prospect_id::text || created_at::text || expires_at::text AS blob
@@ -296,6 +317,11 @@ describe('pilot estimate recovery', () => {
       [stored.rows[0].id]
     );
     assert.equal(asText.rows[0].blob.includes(minted.json.token), false);
+    const detail = await request('GET', `/api/proposals/${proposal.id}`, {
+      headers: { 'x-api-key': API_KEY },
+    });
+    assert.equal(detail.status, 200);
+    assert.equal(JSON.stringify(detail.json).includes(minted.json.token), false);
 
     const page = await request('GET', '/p/pilot-wasatch-heating');
     assert.equal(page.status, 200);
@@ -418,6 +444,9 @@ describe('pilot estimate recovery', () => {
     assert.equal(second.status, 200);
     assert.equal(third.status, 429);
     assert.deepEqual(third.json, { error: 'Too many requests' });
+    assert.equal(third.headers['x-robots-tag'], first.headers['x-robots-tag']);
+    assert.equal(third.headers['cache-control'], first.headers['cache-control']);
+    assert.equal(third.headers['content-type'], first.headers['content-type']);
     assert.equal(third.headers['x-robots-tag'], 'noindex, nofollow');
     assert.equal(third.headers['cache-control'], 'no-store');
     assert.ok(Number(third.headers['retry-after']) >= 1);
@@ -644,10 +673,13 @@ describe('pilot estimate recovery', () => {
     assert.equal(revoke.status, 200);
     assert.deepEqual(revoke.json, { ok: true });
     const revokedRow = await pool.query(
-      `SELECT revoked_at FROM pilot_tokens WHERE proposal_id = $1`,
+      `SELECT t.revoked_at, pr.demo_revoked_at
+         FROM pilot_tokens t JOIN proposals pr ON pr.id = t.proposal_id
+        WHERE t.proposal_id = $1`,
       [live.id]
     );
     assert.ok(revokedRow.rows[0].revoked_at);
+    assert.ok(revokedRow.rows[0].demo_revoked_at);
 
     const draft = await insertProposal(prospect.id, { slug: 'pilot-discard-route' });
     const second = await request('POST', `/api/proposals/${draft.id}/demo-token`, { headers: key });
@@ -660,18 +692,44 @@ describe('pilot estimate recovery', () => {
       [draft.id]
     );
     assert.equal(left.rows[0].n, 0);
+    const marked = await pool.query(
+      'SELECT demo_revoked_at FROM proposals WHERE id = $1',
+      [draft.id]
+    );
+    assert.ok(marked.rows[0].demo_revoked_at);
     const demo = await request('GET', second.json.path, {
       headers: { 'x-forwarded-for': '203.0.113.73' },
     });
     assertClosed(demo);
+
+    // Discard sticks after the page is visible again. Restore sets status
+    // back to draft and does not clear demo_revoked_at.
+    await pool.query(`UPDATE proposals SET status = 'draft' WHERE id = $1`, [draft.id]);
+    const before = await tokenStats(draft.id);
+    for (let i = 0; i < 5; i += 1) {
+      tokens._clearCacheForTests();
+      const page = await request('GET', '/p/pilot-discard-route', {
+        headers: { 'x-forwarded-for': `203.0.113.${110 + i}` },
+      });
+      assert.equal(page.status, 200);
+      assert.equal(page.text.includes('Try a live demo'), false);
+      assert.equal(page.text.includes('data-pilot'), false);
+    }
+    const after = await tokenStats(draft.id);
+    assert.deepEqual(after, before);
+    const stillClosed = await request('GET', second.json.path, {
+      headers: { 'x-forwarded-for': '203.0.113.74' },
+    });
+    assertClosed(stillClosed);
   });
 
-  it('revokes the previous token when a cold one-pager mints another', async () => {
+  it('reuses the active token when the one-pager cache is cold', async () => {
     setFlags({ master: true, link: true });
     const row = await insertProposal(prospect.id, { slug: 'pilot-one-active' });
     const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.80' };
     const first = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
     assert.equal(first.status, 201);
+    const before = await tokenStats(row.id);
     tokens._clearCacheForTests();
 
     const page = await request('GET', '/p/pilot-one-active', {
@@ -679,18 +737,9 @@ describe('pilot estimate recovery', () => {
     });
     assert.equal(page.status, 200);
     const href = ctaHref(page.text);
-    assert.ok(href);
-    assert.notEqual(tokenFromPath(href), first.json.token);
+    assert.equal(tokenFromPath(href), first.json.token);
+    assert.deepEqual(await tokenStats(row.id), before);
 
-    const active = await pool.query(
-      `SELECT COUNT(*)::int AS n FROM pilot_tokens WHERE proposal_id = $1 AND revoked_at IS NULL`,
-      [row.id]
-    );
-    assert.equal(active.rows[0].n, 1);
-    const old = await request('GET', first.json.path, {
-      headers: { 'x-forwarded-for': '203.0.113.82' },
-    });
-    assertClosed(old);
     const current = await request('GET', href, {
       headers: { 'x-forwarded-for': '203.0.113.82' },
     });
@@ -699,6 +748,7 @@ describe('pilot estimate recovery', () => {
 
     const again = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
     assert.equal(again.status, 201);
+    assert.notEqual(again.json.token, first.json.token);
     const stillOne = await pool.query(
       `SELECT COUNT(*)::int AS n FROM pilot_tokens WHERE proposal_id = $1 AND revoked_at IS NULL`,
       [row.id]
@@ -712,5 +762,125 @@ describe('pilot estimate recovery', () => {
       headers: { 'x-forwarded-for': '203.0.113.83' },
     });
     assert.equal(newest.status, 200);
+  });
+
+  it('does not mint again on twenty cold one-pager views after revoke', async () => {
+    setFlags({ master: true, link: true });
+    const row = await insertProposal(prospect.id, { slug: 'pilot-revoke-sticks' });
+    const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.90' };
+    const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
+    assert.equal(minted.status, 201);
+    const before = await tokenStats(row.id);
+    assert.equal(before.active, 1);
+
+    const revoke = await request('POST', `/api/proposals/${row.id}/demo-token/revoke`, { headers: key });
+    assert.equal(revoke.status, 200);
+    const revoked = await tokenStats(row.id);
+    assert.equal(revoked.n, before.n);
+    assert.equal(revoked.active, 0);
+    assert.equal(revoked.max_id, before.max_id);
+    const flag = await pool.query('SELECT demo_revoked_at FROM proposals WHERE id = $1', [row.id]);
+    assert.ok(flag.rows[0].demo_revoked_at);
+
+    for (let i = 0; i < 20; i += 1) {
+      tokens._clearCacheForTests();
+      const page = await request('GET', '/p/pilot-revoke-sticks', {
+        headers: { 'x-forwarded-for': `198.51.100.${i + 1}` },
+      });
+      assert.equal(page.status, 200, `view ${i}`);
+      assert.equal(page.text.includes('Try a live demo'), false, `cta ${i}`);
+      assert.equal(page.text.includes('data-pilot'), false, `pilot ${i}`);
+    }
+
+    const after = await tokenStats(row.id);
+    assert.deepEqual(after, revoked);
+    const demo = await request('GET', minted.json.path, {
+      headers: { 'x-forwarded-for': '203.0.113.91' },
+    });
+    assertClosed(demo);
+  });
+
+  it('matches the closed 404 shape for a flags-off response and a 429', async () => {
+    clearFlags();
+    const off = await request('GET', '/demo/estimate-recovery/demo-example-heating-air', {
+      headers: { 'x-forwarded-for': '203.0.113.120' },
+    });
+    setFlags({ master: true });
+    const missing = await request('GET', `/demo/estimate-recovery/${'d'.repeat(22)}`, {
+      headers: { 'x-forwarded-for': '203.0.113.121' },
+    });
+    assertClosed(off);
+    assertClosed(missing);
+    assert.equal(off.status, missing.status);
+    assert.deepEqual(off.json, missing.json);
+    assert.equal(off.headers['x-robots-tag'], missing.headers['x-robots-tag']);
+    assert.equal(off.headers['cache-control'], missing.headers['cache-control']);
+    assert.equal(off.headers['content-type'], missing.headers['content-type']);
+
+    process.env.PILOT_DEMO_RATE_MAX = '1';
+    process.env.PILOT_DEMO_RATE_WINDOW_MS = '60000';
+    _resetForTests();
+    const ip = { 'x-forwarded-for': '203.0.113.122' };
+    const first = await request('GET', `/demo/estimate-recovery/${'e'.repeat(22)}`, { headers: ip });
+    const limited = await request('GET', `/demo/estimate-recovery/${'e'.repeat(22)}`, { headers: ip });
+    assertClosed(first);
+    assert.equal(limited.status, 429);
+    assert.deepEqual(limited.json, { error: 'Too many requests' });
+    assert.equal(limited.headers['x-robots-tag'], missing.headers['x-robots-tag']);
+    assert.equal(limited.headers['cache-control'], missing.headers['cache-control']);
+    assert.equal(limited.headers['content-type'], missing.headers['content-type']);
+    assert.ok(Number(limited.headers['retry-after']) >= 1);
+    assert.equal(limited.text.includes('expired'), false);
+    assert.equal(limited.text.includes('revoked'), false);
+  });
+
+  it('stamps noindex and no-store on an oversized demo body', async () => {
+    clearFlags();
+    const body = Buffer.alloc(1024 * 1024 + 64, 0x61);
+    const res = await request('POST', '/demo/estimate-recovery/demo-example-heating-air/events', {
+      headers: { 'x-forwarded-for': '203.0.113.130' },
+      rawBody: body,
+    });
+    assert.equal(res.status, 413);
+    assert.deepEqual(res.json, { error: 'Payload too large' });
+    assert.equal(res.headers['x-robots-tag'], 'noindex, nofollow');
+    assert.equal(res.headers['cache-control'], 'no-store');
+    assert.equal(res.text.includes('PayloadTooLargeError'), false);
+    assert.equal(res.text.includes('entity.too.large'), false);
+    assert.ok(res.text.length < 200);
+  });
+
+  it('rate limits the right-most trusted hop, not a spoofed left-most address', async () => {
+    const app = express();
+    app.set('trust proxy', 1);
+    const trusted = {
+      app,
+      headers: { 'x-forwarded-for': '198.51.100.9, 203.0.113.50' },
+      socket: { remoteAddress: '10.0.0.8' },
+    };
+    assert.equal(clientIp(trusted), '203.0.113.50');
+    app.set('trust proxy', false);
+    assert.equal(clientIp(trusted), '10.0.0.8');
+    app.set('trust proxy', 1);
+
+    setFlags({ master: true });
+    process.env.PILOT_DEMO_RATE_MAX = '1';
+    process.env.PILOT_DEMO_RATE_WINDOW_MS = '60000';
+    _resetForTests();
+    const path = `/demo/estimate-recovery/${'f'.repeat(22)}`;
+    const first = await request('GET', path, {
+      headers: { 'x-forwarded-for': '198.51.100.9, 203.0.113.140' },
+    });
+    const sameClient = await request('GET', path, {
+      headers: { 'x-forwarded-for': '198.51.100.8, 203.0.113.140' },
+    });
+    const otherClient = await request('GET', path, {
+      headers: { 'x-forwarded-for': '203.0.113.140, 203.0.113.141' },
+    });
+    assertClosed(first);
+    assert.equal(sameClient.status, 429);
+    assert.equal(sameClient.headers['x-robots-tag'], 'noindex, nofollow');
+    assert.equal(sameClient.headers['cache-control'], 'no-store');
+    assertClosed(otherClient);
   });
 });

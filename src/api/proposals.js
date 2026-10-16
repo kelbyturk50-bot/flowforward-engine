@@ -357,6 +357,8 @@ router.post('/:id/discard', async (req, res) => {
       [req.params.id, req.body?.reason || 'Discarded by Kelby']);
     if (!rows.length) return res.status(409).json({ error: 'Only drafts can be discarded.' });
     await pilotTokens.revokeForProposal(rows[0].id);
+    const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [rows[0].id]);
+    rows[0] = fresh.rows[0] || rows[0];
     if (req.body?.disqualify) {
       const lead = await pool.query(`SELECT stage FROM prospects WHERE id = $1`, [rows[0].prospect_id]);
       if (lead.rows[0] && lead.rows[0].stage !== 'disqualified') {

@@ -232,19 +232,27 @@ UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND crea
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Pilot #1: unsold-estimate recovery demo (idempotent — applied on boot)
--- Tokens are stored as a SHA-256 hash. The raw token is not a column.
+-- Public lookup uses the SHA-256 hash. The raw token is also stored on
+-- pilot_tokens.token so a cold one-pager can reuse the active link.
+-- proposals.demo_revoked_at is set by revoke and by discard. While it is
+-- set, /p/:slug does not mint a replacement, discarded proposals included.
+-- An authenticated mint clears demo_revoked_at and replaces the active token.
 -- Events store an allowlisted type, timestamps, and join ids only.
 -- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS demo_revoked_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS pilot_tokens (
   id           SERIAL PRIMARY KEY,
   proposal_id  INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
   prospect_id  INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  token        TEXT,
   token_hash   BYTEA NOT NULL UNIQUE,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at   TIMESTAMPTZ NOT NULL,
   revoked_at   TIMESTAMPTZ
 );
+ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS token TEXT;
 CREATE INDEX IF NOT EXISTS idx_pilot_tokens_proposal ON pilot_tokens(proposal_id);
 
 CREATE TABLE IF NOT EXISTS pilot_events (

@@ -183,7 +183,7 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | `FF_PILOT_ESTIMATE_RECOVERY` | no | Master switch for the unsold-estimate demo. Off unless exactly `true` |
 | `FF_PILOT_LINK_ON_ONEPAGER` | no | Shows "Try a live demo" on `/p/:slug`. Off unless exactly `true` |
 | `FF_PILOT_ESTIMATE_SMS` | no | SMS touches. Off unless exactly `true`. v1 does not send SMS |
-| `PILOT_DEMO_RATE_MAX` / `PILOT_DEMO_RATE_WINDOW_MS` | no | `60` requests / `60000` ms per IP on public demo routes |
+| `PILOT_DEMO_RATE_MAX` / `PILOT_DEMO_RATE_WINDOW_MS` | no | `60` requests / `60000` ms per IP. The IP is the right-most `X-Forwarded-For` hop (`trust proxy` = 1; Railway is one reverse proxy) |
 | `PILOT_DEMO_TOKEN_TTL_HOURS` | no | `336` (14 days) |
 | `PILOT_DEMO_BASE_URL` | no | Optional origin for the one-pager demo link. Unset = relative path |
 
@@ -212,10 +212,10 @@ Drafting runs **on demand**: on the CRM's **Proposals** page, pick how many and 
 | POST | `/api/proposals/check-inbox` | Check replies + send due follow-ups now |
 | GET/POST | `/api/proposals/gmail/status` · `/gmail/connect` · `/gmail/disconnect` | Gmail connection |
 | GET | `/oauth/google/callback` | Google sign-in return (public) |
-| GET | `/p/:slug` | Public one-pager (`?preview=1` doesn't count a view). "Try a live demo" only when both pilot flags above are `true` and a token exists |
-| POST | `/api/proposals/:id/demo-token` | Mint a demo token (API key). 404 when the master flag is off. No public mint route |
-| POST | `/api/proposals/:id/demo-token/revoke` | Revoke active demo tokens for that proposal |
-| GET | `/demo/estimate-recovery/:token` | Synthetic demo JSON. 404 when the master flag is off, or the token is unknown, expired, revoked, or malformed. `X-Robots-Tag: noindex, nofollow`, `Cache-Control: no-store`, per-IP rate limit |
+| GET | `/p/:slug` | Public one-pager (`?preview=1` doesn't count a view). "Try a live demo" only when both pilot flags above are `true` and an active token can be reused. A revoked proposal, discarded included, does not get a new token from a page view |
+| POST | `/api/proposals/:id/demo-token` | Mint a demo token (API key). 404 when the master flag is off. Clears `demo_revoked_at`. No public mint route |
+| POST | `/api/proposals/:id/demo-token/revoke` | Revoke active demo tokens and set `proposals.demo_revoked_at` so `/p/:slug` will not mint another |
+| GET | `/demo/estimate-recovery/:token` | Synthetic demo JSON. 404 when the master flag is off, or the token is unknown, expired, revoked, or malformed. `X-Robots-Tag: noindex, nofollow`, `Cache-Control: no-store`, per-IP rate limit on the right-most trusted hop |
 | POST | `/demo/estimate-recovery/:token/events` | `{ "type": "demo_view" }` and the other allowlisted step types. Same token, flag, and rate-limit gates |
 
 ## Target markets
