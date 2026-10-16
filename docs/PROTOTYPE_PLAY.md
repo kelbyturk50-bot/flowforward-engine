@@ -75,6 +75,10 @@ Positive points add up. A signal that is unknown adds nothing. "Gap" means the s
 | Industry = HVAC | +10 | +5 | +5 | +5 | +5 | +10 | +5 | |
 
 ### Tie-breaks (in order)
+These numbered rules are authoritative and apply in order. `tieRank` is only the final fallback after rules 1–4 are still tied. Each agent type carries `costTier` (1 email-only, 2 needs FSM integration, 3 needs telephony). Rule 1 sorts **prospects** (queue and gallery priority), because industry is fixed within one prospect. Rules 2–4 pick among agent types for a single prospect. Own-it fit comes from a per-FSM config list of agents the FSM already bundles cheaply (starting with Jobber → receptionist).
+
+**Input rules:** `fsm_detected` wins, and research signals are used only when it's empty. A state of `Utah` or `UT` (any case) counts as Utah, and a missing state parks the lead as unknown. Franchise names use word-boundary matching. Pest, franchise and out-of-state rules live in config.
+
 1. **HVAC beachhead bias.** HVAC beats plumbing, and plumbing beats the rest. This is a picker bias only, not a fit-score change (Summit: no plumbing score tweak).
 2. **Estimate follow-up wins ties.** It is Pilot #1 and the only rung with an `estimate_recovered` proof path.
 3. **Cheapest to make real:** email-only beats needing an FSM integration, which beats needing telephony (#12 is blocked).
