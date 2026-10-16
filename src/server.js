@@ -4,17 +4,29 @@ const cors    = require('cors');
 const cron    = require('node-cron');
 
 const { applySchema } = require('./db/migrate');
+const { concludeSchemaBoot } = require('./pilot/schema');
+const pilotTokens = require('./pilot/tokens');
 const { rescore }     = require('./scoring/fit');
 const requireApiKey   = require('./api/auth');
 const { projects, tasks } = require('./api/projects');
 
 const app = express();
 
+// Railway terminates one reverse proxy in front of this process.
+// trust proxy = 1 trusts that hop only. The pilot rate limit uses the
+// right-most X-Forwarded-For address — the client Railway appended — and
+// ignores a left-most value the caller can spoof. See src/pilot/rate-limit.js.
+app.set('trust proxy', 1);
+
 // CORS — restrict to your frontend(s) with CORS_ORIGINS="https://your-app.vercel.app,http://localhost:5173".
 // Unset = allow any origin (the API key still guards access).
 const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 app.use(cors(origins.length ? { origin: origins } : undefined));
+const pilotDemo = require('./pilot/demo');
 app.use(express.json({ limit: '1mb' }));
+// A body over the JSON limit fails here, before the demo router. Stamp the
+// public demo 413 with the same noindex / no-store headers as a demo 404.
+app.use(pilotDemo.payloadTooLarge);
 
 // Health check (open — Railway uses it)
 app.get('/health', (req, res) => {
@@ -39,6 +51,10 @@ ${back ? `<p><a href="${esc(back)}" style="color:#2F6B57;font-weight:600">Back t
 
 // Public one-page proposals (no API key — the slug is unguessable)
 app.use('/p', require('./proposals/onepager').router);
+
+// Public pilot demo (no API key — the token is the credential).
+// 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly "true". No mint route.
+app.use('/demo/estimate-recovery', pilotDemo.router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
 app.use('/api', requireApiKey);
@@ -86,15 +102,26 @@ if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_CRON !== '1') {
 const PORT = process.env.PORT || 3000;
 
 async function boot() {
+  // schema.sql throws on failure, the same as before the pilot. That catch
+  // logs the startup line and skips rescore. The pilot step returns a report
+  // instead of throwing, so a pilot failure does not take this path.
+  let mainOk = false;
   try {
-    await applySchema();
-    console.log('[server] ✓ Schema up to date');
-    await require('./proposals/jobs').recover();
-    const n = await rescore();
-    console.log(`[server] ✓ Fit scores refreshed for ${n} prospects`);
+    const report = await applySchema();
+    mainOk = true;
+    await concludeSchemaBoot(report);
   } catch (err) {
-    // Keep serving /health so Railway doesn't crash-loop; errors show in logs.
+    pilotTokens.closePilot();
     console.error('[server] ✗ Startup migration/rescore failed:', err.message);
+  }
+  if (mainOk) {
+    try {
+      await require('./proposals/jobs').recover();
+      const n = await rescore();
+      console.log(`[server] ✓ Fit scores refreshed for ${n} prospects`);
+    } catch (err) {
+      console.error('[server] ✗ Startup migration/rescore failed:', err.message);
+    }
   }
   app.listen(PORT, () => {
     console.log(`[server] FlowForward Engine running on port ${PORT}`);

@@ -7,6 +7,8 @@ const { appendIndustryExclusion } = require('../scoring/industry');
 const { draftProposal, runProposalBatch, getSetting, isRunning } = require('../proposals/draft');
 const send    = require('../proposals/send');
 const jobs    = require('../proposals/jobs');
+const pilotFlags = require('../pilot/flags');
+const pilotTokens = require('../pilot/tokens');
 
 const LIST_COLS = `pr.id, pr.prospect_id, pr.version, pr.status, pr.slug, pr.to_email, pr.to_name, pr.subject,
   pr.cost_usd, pr.feedback_rating, pr.reviewed_at, pr.created_at, pr.updated_at, pr.sent_at, pr.followup1_due_at, pr.followup1_sent_at,
@@ -167,6 +169,53 @@ router.post('/', async (req, res) => {
   catch (err) { fail(res, err); }
 });
 
+function pilotProposalId(req) {
+  const raw = String(req.params.id || '');
+  if (!/^\d+$/.test(raw)) return null;
+  const id = Number(raw);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+// POST /api/proposals/:id/demo-token — mint a demo token. API key required.
+// Not a public route. 404 when the master pilot flag is off or the proposal is missing.
+router.post('/:id/demo-token', async (req, res) => {
+  if (!pilotFlags.masterOn() || !pilotTokens.pilotReady()) return res.status(404).json({ error: 'Not found' });
+  const id = pilotProposalId(req);
+  if (!id) return res.status(404).json({ error: 'Not found' });
+  try {
+    const minted = await pilotTokens.mintForProposal(id);
+    if (!minted) return res.status(404).json({ error: 'Not found' });
+    res.set('Cache-Control', 'no-store');
+    res.status(201).json({
+      token: minted.token,
+      expires_at: minted.expires_at,
+      path: pilotTokens.publicDemoPath(minted.token),
+    });
+  } catch (err) {
+    console.error('[pilot] demo token mint failed:', err.message);
+    res.set('Cache-Control', 'no-store');
+    res.status(500).json({ error: 'Something went wrong.' });
+  }
+});
+
+// POST /api/proposals/:id/demo-token/revoke — revoke active demo tokens for this proposal.
+router.post('/:id/demo-token/revoke', async (req, res) => {
+  if (!pilotFlags.masterOn() || !pilotTokens.pilotReady()) return res.status(404).json({ error: 'Not found' });
+  const id = pilotProposalId(req);
+  if (!id) return res.status(404).json({ error: 'Not found' });
+  try {
+    const found = await pool.query('SELECT id FROM proposals WHERE id = $1', [id]);
+    if (!found.rows.length) return res.status(404).json({ error: 'Not found' });
+    await pilotTokens.revokeForProposal(id);
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[pilot] demo token revoke failed:', err.message);
+    res.set('Cache-Control', 'no-store');
+    res.status(500).json({ error: 'Something went wrong.' });
+  }
+});
+
 // GET /api/proposals/:id — full proposal with lead basics and version list
 router.get('/:id', async (req, res) => {
   try {
@@ -301,22 +350,64 @@ router.post('/:id/mark-sent', async (req, res) => {
   } finally { db.release(); }
 });
 
+// Skip demo columns and token rows that this boot has not created yet.
+// Missing pilot structures are not an error: the draft still discards.
+async function revokeDemoOnDiscard(db, proposalId) {
+  const column = await db.query(
+    `SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'proposals' AND column_name = 'demo_revoked_at'`
+  );
+  if (column.rows.length) {
+    await db.query('UPDATE proposals SET demo_revoked_at = NOW() WHERE id = $1', [proposalId]);
+  }
+  const table = await db.query(
+    `SELECT 1 FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'pilot_tokens'`
+  );
+  if (table.rows.length) {
+    await db.query(
+      `UPDATE pilot_tokens SET revoked_at = NOW()
+        WHERE proposal_id = $1 AND revoked_at IS NULL`,
+      [proposalId]
+    );
+  }
+}
+
 // POST /api/proposals/:id/discard — drop a draft
 router.post('/:id/discard', async (req, res) => {
+  const db = await pool.connect();
   try {
-    const { rows } = await pool.query(`UPDATE proposals SET status = 'discarded', stop_reason = $2 WHERE id = $1 AND status = 'draft' RETURNING *`,
-      [req.params.id, req.body?.reason || 'Discarded by Kelby']);
-    if (!rows.length) return res.status(409).json({ error: 'Only drafts can be discarded.' });
+    await db.query('BEGIN');
+    const { rows } = await db.query(
+      `UPDATE proposals SET status = 'discarded', stop_reason = $2
+        WHERE id = $1 AND status = 'draft' RETURNING *`,
+      [req.params.id, req.body?.reason || 'Discarded by Kelby']
+    );
+    if (!rows.length) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: 'Only drafts can be discarded.' });
+    }
+    await revokeDemoOnDiscard(db, rows[0].id);
     if (req.body?.disqualify) {
-      const lead = await pool.query(`SELECT stage FROM prospects WHERE id = $1`, [rows[0].prospect_id]);
+      const lead = await db.query('SELECT stage FROM prospects WHERE id = $1', [rows[0].prospect_id]);
       if (lead.rows[0] && lead.rows[0].stage !== 'disqualified') {
-        await pool.query(`UPDATE prospects SET stage = 'disqualified' WHERE id = $1`, [rows[0].prospect_id]);
-        await pool.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'stage_change', $2)`,
-          [rows[0].prospect_id, `${lead.rows[0].stage} → disqualified (from proposal review)`]);
+        await db.query('UPDATE prospects SET stage = \'disqualified\' WHERE id = $1', [rows[0].prospect_id]);
+        await db.query(
+          'INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, \'stage_change\', $2)',
+          [rows[0].prospect_id, `${lead.rows[0].stage} → disqualified (from proposal review)`]
+        );
       }
     }
-    res.json(withUrl(rows[0]));
-  } catch (err) { fail(res, err); }
+    await db.query('COMMIT');
+    const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [rows[0].id]);
+    res.json(withUrl(fresh.rows[0] || rows[0]));
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {});
+    console.error('[proposals] discard failed:', err.message);
+    res.status(500).json({ error: 'Something went wrong.' });
+  } finally {
+    db.release();
+  }
 });
 
 // POST /api/proposals/:id/restore — bring a discarded/flagged version back to review
