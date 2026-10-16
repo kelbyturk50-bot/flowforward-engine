@@ -326,6 +326,7 @@ function pickPrototypes(prospect, rubric = RUBRIC) {
 module.exports = {
   pickPrototypes,
   recommendPrototypes,
+  isFranchise,
   hoursClosedEvenings,
   beachheadRank,
   compareBeachhead,

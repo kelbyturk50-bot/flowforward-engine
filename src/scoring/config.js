@@ -9,6 +9,8 @@
 // proposal research writes. computeFit and rescore never fetch a page.
 // Jobber and Housecall Pro are not penalized. A missing or unknown cache
 // is not treated as ServiceTitan, and the penalty never forces tier D.
+// TIER_CAP_FOR then caps ServiceTitan and franchise matches at tier B
+// (ceiling 77) after penalties and fit_boost. See that constant below.
 //
 // Business model being scored against: AI/workflow-automation consulting for
 // owner-operated home service businesses in Utah. The ideal client is busy
@@ -35,6 +37,26 @@ const INDUSTRY_FIT = {
 // Soft downrank when cached research says ServiceTitan. Kept inside the
 // F-002 band of −12 to −18. Applied after the 0–100 scale, same as franchise.
 const SERVICETITAN_PENALTY = -15;
+
+// After penalties and fit_boost, these signals cannot score above the named
+// tier. computeFit derives the ceiling from TIERS: one point below the next
+// higher tier, so B is 77 while A still starts at 78. The −15 and −20 still
+// apply; a score already at or below the ceiling is left alone. This is not
+// a hard exclusion and it does not force tier D.
+//
+// servicetitan: prospects.fsm_detected, case-insensitive, same match as
+// SERVICETITAN_PENALTY. Null, blank, "none", Jobber, Housecall Pro, and any
+// other value are not capped.
+// franchise: word-boundary match on company via isFranchise in
+// src/scoring/prototypes.js, the same rule as the prototype picker (#47).
+// "Trane Heating" and "Carrier HVAC" cap. "Constrane" and "Carriero" do not.
+// The −20 franchisePenalty still uses a substring includes() and can fire
+// when the cap does not. That mismatch is a follow-up; F-004 does not change
+// the penalty. Both signals are cache only. computeFit and rescore do not fetch.
+const TIER_CAP_FOR = {
+  servicetitan: 'B',
+  franchise: 'B',
+};
 
 // Cities you can meet in person (case-insensitive). Override with env
 // FIT_HOME_CITIES="Saratoga Springs,Lehi,..."
@@ -83,6 +105,6 @@ const EXCLUDED_INDUSTRIES = (process.env.EXCLUDED_INDUSTRIES ?? 'Pest Control')
   .filter(Boolean);
 
 module.exports = {
-  INDUSTRY_FIT, SERVICETITAN_PENALTY, EXCLUDED_INDUSTRIES, HOME_CITIES, HOME_STATE,
+  INDUSTRY_FIT, SERVICETITAN_PENALTY, TIER_CAP_FOR, EXCLUDED_INDUSTRIES, HOME_CITIES, HOME_STATE,
   FRANCHISE_PATTERNS, SOCIAL_HOSTS, TIERS,
 };
