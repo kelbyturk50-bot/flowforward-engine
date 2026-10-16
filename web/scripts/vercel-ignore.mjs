@@ -28,6 +28,7 @@
 import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
+import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 /** Command in web/vercel.json. cwd is the Vercel root directory, `web/`. */
@@ -107,6 +108,10 @@ export function errorText(err) {
   const raw = stderr || (err && err.message) || 'unknown error';
   const line = String(raw).split('\n').map((part) => part.trim()).filter(Boolean)[0] || 'unknown error';
   return line.replace(/https?:\/\/\S+/g, '[url]').slice(0, 240);
+}
+
+function log(line) {
+  process.stdout.write(`[vercel-ignore] ${line}\n`);
 }
 
 function summarize(paths) {
@@ -207,11 +212,11 @@ export function decide(env = process.env, cwd = process.cwd()) {
   }
 
   const { base, files, shallow } = changedFilesAgainstMain(root);
-  console.log(`[vercel-ignore] ref=${ref} (${refSource}) shallow=${shallow} merge-base=${base}`);
+  log(`ref=${ref} (${refSource}) shallow=${shallow} merge-base=${base}`);
   if (files.length > 0) {
-    console.log(`[vercel-ignore] changed: ${summarize(files)}`);
+    log(`changed: ${summarize(files)}`);
   } else {
-    console.log('[vercel-ignore] changed: (none)');
+    log('changed: (none)');
   }
   return shouldBuild({ ref, changedFiles: files, diffOk: true });
 }
@@ -220,7 +225,7 @@ function report(decision) {
   const code = exitCodeFor(decision);
   const verb = code === 0 ? 'SKIP' : 'BUILD';
   const reason = decision && decision.reason ? decision.reason : 'diff against origin/main was not computed';
-  console.log(`[vercel-ignore] ${verb} (exit ${code}): ${reason}`);
+  log(`${verb} (exit ${code}): ${reason}`);
   return code;
 }
 
@@ -228,7 +233,7 @@ export function run(env = process.env, cwd = process.cwd()) {
   try {
     return report(decide(env, cwd));
   } catch (err) {
-    console.log(`[vercel-ignore] BUILD (exit 1): ${errorText(err)}`);
+    log(`BUILD (exit 1): ${errorText(err)}`);
     return 1;
   }
 }
