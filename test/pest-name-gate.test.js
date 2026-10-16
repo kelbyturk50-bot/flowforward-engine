@@ -17,6 +17,7 @@ const https = require('https');
 const { spawnSync } = require('child_process');
 const express = require('express');
 const axios = require('axios');
+const { Client } = require('pg');
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const catalog = require('../src/bot/industries');
@@ -1037,7 +1038,9 @@ describe('pest company-name gate', { concurrency: false }, () => {
     assert.equal(COMPANY_SPACE_PATTERN.includes('\\s'), false);
     assert.equal(COMPANY_SPACE_PATTERN.includes('\\u'), false);
     assert.equal(COMPANY_NAME_LIMIT, 200);
-    assert.match(fragment, /left\(btrim\(regexp_replace\(lower\(COALESCE\(p\.company, ''\)\), \$1, ' ', 'g'\)\), 200\)/);
+    assert.match(fragment, /left\(btrim\(regexp_replace\(translate\(COALESCE\(p\.company, ''\), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'\), \$1, ' ', 'g'\)\), 200\)/);
+    assert.equal(fragment.includes('lower('), false);
+    assert.equal(fragment.includes('~*'), false);
     assert.match(fragment, /!~ \$3/);
     assert.notEqual(PEST_COMPANY_PATTERN, PEST_TEXT_PATTERN);
 
@@ -1125,6 +1128,75 @@ describe('pest company-name gate', { concurrency: false }, () => {
     const insideMs = Number(process.hrtime.bigint() - insideStarted) / 1e6;
     assert.ok(insideMs < 50, `js prefix ${insideMs}ms`);
     assert.equal(await kept(inside), false);
+  });
+
+  it('folds only ASCII A-Z and agrees on C and en_US.utf8', async () => {
+    const src = fs.readFileSync(path.join(__dirname, '../src/scoring/industry.js'), 'utf8');
+    const keyFn = src.slice(src.indexOf('function companyNameKey'), src.indexOf('function industryKey'));
+    assert.match(keyFn, /replace\(\/\[A-Z\]\/g, c => String\.fromCharCode\(c\.charCodeAt\(0\) \+ 32\)\)/);
+    assert.equal(keyFn.includes('toLowerCase'), false);
+    const sqlFn = src.slice(src.indexOf('function appendCompanyPestExclusion'), src.indexOf('function appendDraftExclusion'));
+    assert.match(sqlFn, /translate\(COALESCE\(p\.company, ''\), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'\)/);
+    assert.equal(sqlFn.includes('lower('), false);
+    assert.equal(sqlFn.includes('~*'), false);
+    assert.match(sqlFn, /left\(btrim\(regexp_replace\(translate\(/);
+
+    const kelvin = 'OR\u212AIN';
+    const dotted = `${'İ'.repeat(195)} pest`;
+    const sharp = `${'ß'.repeat(195)} pest`;
+    assert.equal([...dotted].length, 200);
+    assert.equal([...sharp].length, 200);
+    assert.equal(isPestCompanyName(kelvin), false, JSON.stringify(kelvin));
+    assert.equal(isPestCompanyName(dotted), true, JSON.stringify(dotted));
+    assert.equal(isPestCompanyName(sharp), true, JSON.stringify(sharp));
+
+    function databaseUrl(name) {
+      const url = new URL(process.env.DATABASE_URL);
+      url.pathname = `/${name}`;
+      return url.toString();
+    }
+
+    async function keptOn(client, company) {
+      const params = [];
+      const sql = appendCompanyPestExclusion(params);
+      const companyIndex = params.push(company);
+      const { rows } = await client.query(
+        `SELECT (${sql}) AS kept FROM (SELECT $${companyIndex}::text AS company) p`,
+        params
+      );
+      return rows[0].kept;
+    }
+
+    const names = [kelvin, dotted, sharp, ...BRAND_HITS, ...BRAND_MISSES];
+    const locales = [
+      ['ff_gate_c', 'C'],
+      ['ff_gate_en', 'en_US.utf8'],
+    ];
+    const created = [];
+    const clients = [];
+    try {
+      for (const [name, locale] of locales) {
+        await pool.query(`DROP DATABASE IF EXISTS ${name}`);
+        await pool.query(
+          `CREATE DATABASE ${name} WITH TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE '${locale}' LC_CTYPE '${locale}'`
+        );
+        created.push(name);
+        const client = new Client({ connectionString: databaseUrl(name) });
+        clients.push(client);
+        await client.connect();
+        const meta = await client.query(
+          `SELECT datcollate AS collate, datctype AS ctype FROM pg_database WHERE datname = current_database()`
+        );
+        assert.equal(meta.rows[0].collate, locale, name);
+        assert.equal(meta.rows[0].ctype, locale, name);
+        for (const company of names) {
+          assert.equal(await keptOn(client, company), !isPestCompanyName(company), `${locale} ${JSON.stringify(company)}`);
+        }
+      }
+    } finally {
+      for (const client of clients) await client.end().catch(() => {});
+      for (const name of created) await pool.query(`DROP DATABASE IF EXISTS ${name}`);
+    }
   });
 
   it('refuses mark-sent, draft, send, and restore for each brand and writes nothing', async () => {

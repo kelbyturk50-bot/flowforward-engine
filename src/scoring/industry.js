@@ -23,13 +23,16 @@ const PEST_TEXT_PATTERN = `(^|[^a-z0-9_])(${PEST_WORD_ALTERNATION})([^a-z0-9_]|$
 const PEST_TEXT_RE = new RegExp(PEST_TEXT_PATTERN);
 
 // Company-name gate only. These are not industry synonyms, so computeFit does
-// not change. Both sides lowercase, fold COMPANY_SPACE_PATTERN to one space,
-// trim, keep the first COMPANY_NAME_LIMIT characters, strip street-style
-// Orkin/Terminix with STREET_BRAND_PATTERN, then test PEST_COMPANY_PATTERN.
-// The space class is literal code points. Postgres \s is POSIX space and does
-// not match JS \s, so the class is not written with \s. U+200B is in the
-// class and is not part of JS \s. appendCompanyPestExclusion binds that
-// class, the street pattern, and the company pattern.
+// not change. Both sides fold ASCII A-Z only, fold COMPANY_SPACE_PATTERN to
+// one space, trim, then keep the first COMPANY_NAME_LIMIT characters. The cap
+// is after that fold so a Unicode casefold cannot change the length on one
+// side only. Then both strip street-style Orkin/Terminix with
+// STREET_BRAND_PATTERN and test PEST_COMPANY_PATTERN. The patterns are
+// case-sensitive (no /i, no ~*). The space class is literal code points.
+// Postgres \s is POSIX space and does not match JS \s, so the class is not
+// written with \s. U+200B is in the class and is not part of JS \s.
+// appendCompanyPestExclusion binds that class, the street pattern, and the
+// company pattern.
 //
 // Distinctive tokens match on their own: Terminix, Orkin, Rentokil, Truly Nolen
 // (a space or hyphen, and TrulyNolen with neither). Rollins Inc / Rollins, Inc.
@@ -110,12 +113,14 @@ function takePrefix(value, limit) {
   return i === value.length ? value : value.slice(0, i);
 }
 
-// Company gate only. industryKey stays on JS \s so scoring and industry
-// synonyms do not move. A new RegExp each call: the global flag keeps lastIndex.
+// Company gate only. industryKey stays on JS \s and toLowerCase so scoring
+// and industry synonyms do not move. ASCII A-Z only: toLowerCase() maps
+// U+212A to "k" and expands U+0130, and Postgres lower() follows the database
+// locale. A new RegExp each call: the global flag keeps lastIndex.
 function companyNameKey(value) {
   if (value == null) return '';
   const folded = String(value)
-    .toLowerCase()
+    .replace(/[A-Z]/g, c => String.fromCharCode(c.charCodeAt(0) + 32))
     .replace(new RegExp(COMPANY_SPACE_PATTERN, 'g'), ' ')
     .trim();
   return takePrefix(folded, COMPANY_NAME_LIMIT);
@@ -212,13 +217,14 @@ function isPestCompanyName(company, excluded = cfg.EXCLUDED_INDUSTRIES) {
 // SQL fragment. TRUE when the name gate is off. Placeholder numbers continue
 // from params.length. The column is the cached company name, not a request.
 // Bound parameters, in order: COMPANY_SPACE_PATTERN, STREET_BRAND_PATTERN,
-// PEST_COMPANY_PATTERN. The folded name is left(..., 200) before either match.
+// PEST_COMPANY_PATTERN. translate folds ASCII A-Z only. left(..., 200) is
+// applied after that fold and the space fold. !~ is case-sensitive.
 function appendCompanyPestExclusion(params, excluded = cfg.EXCLUDED_INDUSTRIES) {
   if (!pestCategoryExcluded(excluded)) return 'TRUE';
   const spaceIndex = params.push(COMPANY_SPACE_PATTERN);
   const streetIndex = params.push(STREET_BRAND_PATTERN);
   const patternIndex = params.push(PEST_COMPANY_PATTERN);
-  const folded = `left(btrim(regexp_replace(lower(COALESCE(p.company, '')), $${spaceIndex}, ' ', 'g')), ${COMPANY_NAME_LIMIT})`;
+  const folded = `left(btrim(regexp_replace(translate(COALESCE(p.company, ''), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), $${spaceIndex}, ' ', 'g')), ${COMPANY_NAME_LIMIT})`;
   const stripped = `regexp_replace(${folded}, $${streetIndex}, '\\1\\4', 'g')`;
   return `${stripped} !~ $${patternIndex}`;
 }
