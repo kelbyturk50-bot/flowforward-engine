@@ -145,12 +145,112 @@ def logtouch():
 <div class="field"><label>Type *</label><div class="types">{tb}</div></div>
 <div class="field"><label>Campaign</label><div class="input"><span>TEST: HVAC-Oct</span>▾</div><div class="hint">Enrolled campaigns first. “No campaign” is allowed.</div></div>
 <div class="field"><label>Variant</label><div class="input"><span>A · Free estimate follow-up</span>▾</div><div class="hint">Pre-filled from enrollment.</div></div>
-<div class="field"><label>Channel</label><div class="input"><span>Email (campaign default)</span>▾</div></div>
+<div class="field"><label>Channel</label><div class="input"><span>Email (campaign default)</span>▾</div><div class="hint">Opened is offered only when Channel is Email.</div></div>
 <div class="field"><label>When *</label><div class="input"><span>Oct 16, 2026 11:18 AM</span></div><div class="hint">Defaults to now. Change it if you're logging later.</div></div>
 <p class="muted small" style="margin-bottom:1rem">Notes go in Activity, not here.</p>
 <div class="state" style="margin-bottom:1rem"><div class="cap">Validation example</div><div class="field bad" style="margin:0"><label>When *</label><div class="input"><span>Oct 17, 2026 9:30 AM</span></div><div class="ferr">Can't be in the future.</div></div></div>
 <div style="display:flex;gap:.5rem"><span class="btn" style="flex:1">Log touch</span><span class="btn q">Cancel</span></div></div></div>
 <div class="toast" style="top:1rem;bottom:auto"><b>After save, drawer closes:</b> Logged: Replied · TEST: HVAC-Oct · A. Nothing was sent. <u>Undo</u></div>'''
     return page("Leads",bg,d)
+CSS2 = """
+.approx{display:inline-block;font-size:.75rem;font-weight:700;color:#2D5577;background:#E2ECF5;border-radius:4px;padding:.05rem .4rem;margin-left:.25rem;vertical-align:middle}
+.info{display:inline-grid;place-items:center;width:44px;height:44px;margin:-12px -10px -12px -6px;border:0;background:none;color:#2D5577;font-weight:700;font-size:1rem;vertical-align:middle}
+.info span{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;border:1.5px solid #2D5577;font-size:.8rem}
+.hl{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem;margin-bottom:1rem}
+.hl .tile{background:#fff;border:1px solid var(--line);padding:.8rem .9rem;border-top:3px solid var(--juniper)}
+.hl .tile.op{border-top-color:#4F7FA8}
+.tog{display:inline-flex;align-items:center;gap:.6rem;min-height:44px;padding:0 .9rem;border:1px solid var(--line);border-radius:999px;background:#fff;font-size:.95rem}
+.sw{width:40px;height:24px;border-radius:999px;background:#8A989C;position:relative;flex:none}.sw:after{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff}
+.tip{background:var(--ink);color:var(--paper);border-radius:8px;padding:.8rem .95rem;font-size:.88rem;line-height:1.4;margin:.25rem 0 1rem;max-width:560px}
+.tip b{color:#fff}.tip ul{margin:.35rem 0 0;padding-left:1.1rem}
+.foot{margin-top:.75rem}th.cn{min-width:210px}td.dt{min-width:96px}
+.sub{font-size:.85rem;color:var(--ink-2);font-weight:600;margin:1.25rem 0 .5rem}
+@media (max-width:600px){.hl{grid-template-columns:1fr}.tog{width:100%;justify-content:space-between}}
+"""
+CSS += CSS2
+OPLBL='Opened, no response<span class="approx">Approximate</span><button class="info" aria-label="About open counts"><span>i</span></button>'
+TIP='''<div class="tip" role="tooltip"><b>Approximate, unreliable (Apple MPP).</b> Opens are a soft signal and never count toward attribution or conversion.<ul><li>Apple Mail Privacy Protection prefetches images, so opens are inflated. Those are flagged as machine opens and excluded by default.</li><li>Gmail's image proxy usually shows only the first open.</li><li>Blocked images and plain-text clients undercount opens.</li></ul></div>'''
+TOG='<span class="tog"><span>Include machine opens</span><span class="sw" role="switch" aria-checked="false"></span></span>'
+BASE='Touched = leads with at least one Sent or Call logged touch in the range.'
+def foot(model=True):
+    s=f'<p class="muted small foot">{BASE} Opens: likely-human only (machine opens excluded). Opens are display-only and never used in attribution or conversion.'
+    if model: s+=' Booked uses last-touch attribution, 90-day window.'
+    return s+'</p>'
+# (name, channel, status, dates, enrolled, touched, responded, converted, opened_no_resp, booked)
+camps2=[("TEST: HVAC-Oct","Email","active","Sep 24 – Oct 31",8,8,3,1,1,2),
+       ("TEST: Proto-Oct furnace-tune-up estimate follow-up demo link","Prototype link","active","Oct 3 – Nov 15",1,0,0,0,0,0),
+       ("TEST: Plumbing-Sep walk-ins","In person","ended","Sep 2 – Sep 30",0,0,0,0,0,0),
+       ("TEST: HVAC-Nov","Email","draft","Nov 3 – not set",0,0,0,0,0,0)]
+NT=lambda c: 'No sent or call-logged touches yet. 1 prototype view is tracked but isn\'t a touch for these rates.' if c[4] else 'No touches logged'
+def hcells(c,d,email=True):
+    return [(c[0],"responded"),(c[1],"converted"),(c[2] if email else None,"opened, no reply"),(c[3],"booked")]
+def lst():
+    hc=lambda a,b,e: hcells(a,b,e)[:3]
+    def cell(k,w,d): return '<td class="muted small">Email only</td>' if k is None else f'<td>{rate(k,w,d)}</td>'
+    rows=''
+    for c in camps2:
+        em=c[1]=="Email"
+        rows+=f'<tr><td><div class="name">{c[0]}</div><span class="sample">Sample</span></td><td>{c[1]}</td><td><span class="pill st-{c[2]}">{c[2].title()}</span></td><td class="small dt">{c[3]}</td><td class="n">{c[4]}</td><td class="n">{c[5]}</td>'
+        rows+=(''.join(cell(k,w,c[5]) for k,w in hc(c[6:],c[5],em)) if c[5] else f'<td colspan="3" class="muted small">{NT(c)}</td>')+'</tr>'
+    cards=''
+    for c in camps2:
+        em=c[1]=="Email"
+        cards+=f'<div class="card"><div class="top"><div><div class="name">{c[0]}</div><span class="sample">Sample</span></div><span class="pill st-{c[2]}">{c[2].title()}</span></div><p class="muted small" style="margin-top:.3rem">{c[1]} · {c[3]} · {c[4]} enrolled · {c[5]} touched</p>'
+        if c[5]:
+            cards+='<div class="grid3" style="grid-template-columns:1fr 1fr">'+''.join(f'<div class="tile"><div class="k">{lbl}</div>{rate(k,w,c[5])}</div>' for (k,w),lbl in zip(hc(c[6:],c[5],em),["Responded","Converted to project",'Opened, no response <span class="approx">Approximate</span><button class="info" aria-label="About open counts"><span>i</span></button>',"Booked"]) if k is not None)+'</div>'
+        else: cards+=f'<p class="muted small" style="margin-top:.5rem">{NT(c)}</p>'
+        cards+='</div>'
+    b=f'''<header class="head"><div><h1>Campaigns</h1><p class="muted">Observed results of your own outreach. FlowForward never sends from here.</p></div><button class="btn">New campaign</button></header>
+<div class="chips"><span class="chip on">All</span><span class="chip">Active</span><span class="chip">Paused</span><span class="chip">Ended</span><span class="chip">Draft</span><span class="chip">Sep 24 – Oct 16 ▾</span>{TOG}</div>
+<div class="tw wide"><table><tr><th class="cn">Campaign</th><th>Channel</th><th>Status</th><th>Dates</th><th>Enrolled</th><th>Touched</th><th>Responded</th><th>Converted to project</th><th>{OPLBL}</th></tr>{rows}</table></div>
+<div class="cards">{cards}</div>
+{foot(False)}
+<div class="states"><div class="state"><div class="cap">Empty state</div><h3>No campaigns yet</h3><p class="muted small" style="margin:.3rem 0 .7rem">Create one to start tracking replies and booked calls from your outreach.</p><button class="btn">New campaign</button></div>
+<div class="state"><div class="cap">Loading state</div><div class="sk" style="width:70%"></div><div class="sk"></div><div class="sk" style="width:85%"></div><div class="sk" style="width:60%"></div><p class="muted small">Loading campaigns…</p></div>
+<div class="state"><div class="cap">Error state</div><div class="err"><span>Couldn't load campaigns. Check your connection.</span><button class="btn">Retry</button></div></div></div>'''
+    return page("Campaigns",b)
+def detail():
+    t=lambda k,v,of: f'<div class="tile"><div class="k">{k}</div><div class="v">{v}</div><div class="of">{of}</div></div>'
+    h=lambda k,kk,d,noun,cls="": f'<div class="tile {cls}"><div class="k">{k}</div>{rate(kk,noun,d)}</div>'
+    def var(L,hook,r,c,o,b):
+        return f'''<div class="var"><h3><span class="badge">{L}</span>Variant {L}</h3><p class="muted small" style="margin:.3rem 0 .5rem">{hook}</p><div class="row"><span>Touched</span><b>4</b></div><div class="row"><span>Responded</span>{rate(r,"responded",4,False)}</div><div class="row"><span>Converted to project</span>{rate(c,"converted",4,False)}</div><div class="row"><span>Opened, no response <span class="approx">Approximate</span></span>{rate(o,"opened, no reply",4,False)}</div><div class="row"><span>Booked</span>{rate(b,"booked",4,False)}</div><span class="dir">Directional (n&lt;30)</span></div>'''
+    fb=lambda l,n,mx: f'<div class="fbar"><span class="lbl">{l}</span>'+(f'<span class="bar" style="width:{n/mx*55}%"></span>' if n else '<span class="bar z"></span>')+f'<b>{n}</b></div>'
+    leads=[("TEST: Cedar Lane HVAC","A","MVP sold · Oct 14"),("TEST: Juniper Ridge Heating & Air","A","Replied · Sep 28"),("TEST: Bonneville Furnace and Air Conditioning Service Co.","B","Call booked · Oct 2"),("TEST: Wasatch Comfort HVAC","B","Sent · Sep 24")]
+    ll=''.join(f'<div class="opt"><div><div class="name">{n}</div><span class="sample">Sample</span> <span class="muted small">Variant {v}</span></div><span class="muted small" style="text-align:right">{s}</span></div>' for n,v,s in leads)
+    b=f'''<p class="muted small" style="min-height:44px;display:flex;align-items:center">‹ Campaigns</p>
+<header class="head"><div><h1 style="overflow-wrap:anywhere">TEST: HVAC-Oct <span class="sample">Sample</span></h1><p class="muted">Email · <span class="pill st-active">Active</span> · Sep 24 – Oct 31 · Segment hvac</p></div><button class="btn q">Edit</button></header>
+<div class="chips" style="align-items:center"><span class="chip">Sep 24 – Oct 16 ▾</span>{TOG}</div>
+<div class="hl">{h("Responded",3,8,"responded")}{h("Converted to project",1,8,"converted")}<div class="tile op"><div class="k">{OPLBL}</div>{rate(1,"opened, no reply",8)}</div></div>
+{TIP}
+<div class="note"><b>Small sample.</b> Every rate here has fewer than 30 touched leads, so it's directional. No winner is shown until each variant reaches 30.</div>
+<h2 class="sec">Variants</h2><div class="vars">{var("A","Hook: “Free estimate follow-up, 3 emails”",2,1,1,1)}{var("B","Hook: “Missed-call text-back demo”",1,0,0,1)}</div>
+<p class="sub">More metrics</p>
+<div class="tiles">{t("Enrolled","8","leads")}{t("Touched","8","sent or call logged")}{t("Booked rate","25%","2 of 8 booked")}{t("Median time to first reply","4 days","96 h, n = 3 replied")}{t("Cost per lead","$7.50","$60 of 8 enrolled")}{t("Cost per booked call","$30","$60 of 2 booked")}{t("Recorded revenue","$1,500","1 MVP sale, recorded")}</div>
+<h2 class="sec">Funnel</h2><div class="var funnel">{fb("Sent",8,8)}{fb("Responded",3,8)}{fb("Call booked",2,8)}{fb("Converted",1,8)}<p class="muted small">Counts of leads, observed. Opens aren't a funnel step.</p></div>
+<h2 class="sec">Leads (8)</h2><div class="var">{ll}<p class="muted small" style="padding-top:.5rem">Showing 4 of 8 · Show all</p></div>
+{foot()}'''
+    return page("Campaigns",b)
+def channels():
+    ch=[("Email","1 campaign",8,3,1,1,2,True),("Prototype link","1 campaign · 1 lead viewed (not a touch for these rates)",0,0,0,0,0,False),("Phone","0 campaigns",0,0,0,0,0,False)]
+    def cells(c):
+        out=[(c[3],"responded"),(c[4],"converted"),(c[5] if c[7] else None,"opened, no reply"),(c[6],"booked")]
+        return out
+    rows=''
+    for c in ch:
+        rows+=f'<tr><td class="name">{c[0]}<div class="muted small" style="font-weight:400">{c[1]}</div></td><td class="n">{c[2]}</td>'
+        rows+=(''.join(('<td class="muted small">Email only</td>' if k is None else f'<td>{rate(k,w,c[2])}</td>') for k,w in cells(c)) if c[2] else '<td colspan="4" class="muted small">No touches logged</td>')+'</tr>'
+    cards=''
+    for c in ch:
+        cards+=f'<div class="card"><div class="top"><div class="name">{c[0]}</div><span class="muted small">{c[2]} touched</span></div><p class="muted small">{c[1]}</p>'
+        cards+=('<div class="grid3" style="grid-template-columns:1fr 1fr">'+''.join(f'<div class="tile"><div class="k">{l}</div>{rate(k,w,c[2])}</div>' for (k,w),l in zip(cells(c),["Responded","Converted to project",'Opened, no response <span class="approx">Approximate</span><button class="info" aria-label="About open counts"><span>i</span></button>',"Booked"]) if k is not None)+'</div>') if c[2] else '<p class="muted small" style="margin-top:.4rem">No touches logged</p>'
+        cards+='</div>'
+    b=f'''<header class="head"><div><h1>Channels</h1><p class="muted">Observed results per channel. Converted and booked credit one channel per conversion.</p></div></header>
+<div class="chips" style="align-items:center"><div class="seg" role="radiogroup" aria-label="Attribution model"><span class="on">Last touch</span><span>First touch</span></div><span class="chip">Sep 24 – Oct 16 ▾</span>{TOG}</div>
+<p class="muted small" style="margin:-.4rem 0 .9rem">Attribution uses sent, calls, replies, bookings, prototype views and clicks, and proposals. Opens are never used.</p>
+<div class="tw wide"><table><tr><th>Channel</th><th>Touched</th><th>Responded</th><th>Converted to project</th><th>{OPLBL}</th><th>Booked</th></tr>{rows}<tr><td class="name">Unattributed<div class="muted small" style="font-weight:400">no single campaign match</div></td><td class="n">—</td><td class="muted">—</td><td>0 converted</td><td class="muted">—</td><td>0 booked</td></tr></table></div>
+<div class="cards">{cards}<div class="card"><div class="name">Unattributed</div><p class="muted small">0 converted · 0 booked</p></div></div>
+<p class="muted small foot">Responded credits the channel the reply came on; a lead touched on two channels can appear in two rows. Converted and booked credit exactly one channel, chosen by the model above, within 90 days.</p>
+{foot(False)}'''
+    return page("Campaigns",b)
 for k,f in [("list",lst),("detail",detail),("channels",channels),("leads-filter",leads),("log-touch",logtouch)]:
     open(f"{k}.html","w").write(f())
