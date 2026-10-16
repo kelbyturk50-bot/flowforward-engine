@@ -602,8 +602,9 @@ describe('pest company-name gate', { concurrency: false }, () => {
     assert.equal(sentMail.length, 2);
     assert.equal(sentMail.some(mail => mail.to.address === 'test+pestsend@example.com'), false);
     assert.equal(sentMail[1].to.address, 'test+clean-fu@example.com');
+    // The due query excludes the pest name, so this row is not selected and the
+    // JS skip does not run. Nothing about the lead is logged.
     const logged = logs.join('\n');
-    assert.match(logged, /skipped follow-up: company name matches pest control/);
     assert.equal(logged.includes('Wasatch'), false);
     assert.equal(logged.includes('test+'), false);
     assert.equal(logged.includes('@'), false);
@@ -635,6 +636,134 @@ describe('pest company-name gate', { concurrency: false }, () => {
     const cleanJson = await cleanRestore.json();
     assert.equal(cleanRestore.status, 200, JSON.stringify(cleanJson));
     assert.equal(cleanJson.status, 'draft');
+  });
+
+  it('sends normal follow-ups when 30 due pest sequences are older', async () => {
+    await resetDb();
+    const sentMail = [];
+    _setTransport({
+      async sendMail(mail) {
+        sentMail.push(mail);
+        return { messageId: '<batch@localhost>', threadId: 'thr-batch' };
+      },
+    });
+
+    const due = new Date(Date.now() - 30 * 60 * 1000);
+    // Yesterday, so these first sends do not fill today's daily cap. They are
+    // still older than the normal rows, which is what used to fill LIMIT 25.
+    const pestSentAt = new Date(Date.now() - 26 * 60 * 60 * 1000);
+    const pestProposalIds = [];
+    const pestLeadIds = [];
+    for (let i = 0; i < 30; i++) {
+      const lead = await insertProspect({
+        google_place_id: `test-place-batch-pest-${i}`,
+        company: `Shop ${i} Pest Control`,
+        industry: 'HVAC',
+        website: null,
+        email: `test+batchpest${i}@example.com`,
+      });
+      pestLeadIds.push(lead.id);
+      const { rows } = await pool.query(
+        `INSERT INTO proposals (
+           prospect_id, version, status, slug, to_email, to_name, subject, body, followup1, followup2,
+           sent_at, followup1_due_at, message_id
+         ) VALUES (
+           $1, 1, 'sent', $2, $3, 'Dana', 'A note', 'Hello from the draft.', 'Checking back.', 'Last note.',
+           $4, $5, $6
+         ) RETURNING id`,
+        [lead.id, `batch-pest-${i}`, `test+batchpest${i}@example.com`, pestSentAt, due, `<pest-${i}@localhost>`]
+      );
+      pestProposalIds.push(rows[0].id);
+    }
+
+    const normals = [
+      ['Provo Heating', 'HVAC', 'test+batch-provo@example.com', 'batch-provo'],
+      ['Pestana Plumbing', 'Plumbing', 'test+batch-pestana@example.com', 'batch-pestana'],
+      ['Tempest Heating', 'HVAC', 'test+batch-tempest@example.com', 'batch-tempest'],
+    ];
+    const normalSentAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    const normalIds = [];
+    for (let i = 0; i < normals.length; i++) {
+      const [company, industry, email, slug] = normals[i];
+      const lead = await insertProspect({
+        google_place_id: `test-place-batch-ok-${i}`,
+        company,
+        industry,
+        website: null,
+        email,
+      });
+      const { rows } = await pool.query(
+        `INSERT INTO proposals (
+           prospect_id, version, status, slug, to_email, to_name, subject, body, followup1, followup2,
+           sent_at, followup1_due_at, message_id
+         ) VALUES (
+           $1, 1, 'sent', $2, $3, 'Dana', 'A note', 'Hello from the draft.', 'Checking back.', 'Last note.',
+           $4, $5, $6
+         ) RETURNING id`,
+        [lead.id, slug, email, normalSentAt, due, `<ok-${i}@localhost>`]
+      );
+      normalIds.push(rows[0].id);
+    }
+
+    const proposalsBefore = await pool.query(
+      `SELECT id, status, followup1_sent_at, followup2_sent_at, error, stop_reason, updated_at
+         FROM proposals WHERE id = ANY($1::int[]) ORDER BY id`,
+      [pestProposalIds]
+    );
+    const leadsBefore = await pool.query(
+      `SELECT id, fit_score, fit_tier, fit_reasons::text AS reasons, stage, last_contacted_at, updated_at
+         FROM prospects WHERE id = ANY($1::int[]) ORDER BY id`,
+      [pestLeadIds]
+    );
+
+    const result = await sendDueFollowups();
+    assert.equal(result.sent, normals.length);
+    assert.equal(sentMail.length, normals.length);
+    const sentTo = sentMail.map(mail => mail.to.address).sort();
+    assert.deepEqual(sentTo, normals.map(([, , email]) => email).sort());
+
+    const proposalsAfter = await pool.query(
+      `SELECT id, status, followup1_sent_at, followup2_sent_at, error, stop_reason, updated_at
+         FROM proposals WHERE id = ANY($1::int[]) ORDER BY id`,
+      [pestProposalIds]
+    );
+    assert.equal(proposalsAfter.rows.length, 30);
+    for (let i = 0; i < proposalsBefore.rows.length; i++) {
+      const before = proposalsBefore.rows[i];
+      const after = proposalsAfter.rows[i];
+      assert.equal(after.status, 'sent');
+      assert.equal(after.followup1_sent_at, null);
+      assert.equal(after.followup2_sent_at, null);
+      assert.equal(after.error, before.error);
+      assert.equal(after.stop_reason, before.stop_reason);
+      assert.equal(new Date(after.updated_at).toISOString(), new Date(before.updated_at).toISOString());
+    }
+    const leadsAfter = await pool.query(
+      `SELECT id, fit_score, fit_tier, fit_reasons::text AS reasons, stage, last_contacted_at, updated_at
+         FROM prospects WHERE id = ANY($1::int[]) ORDER BY id`,
+      [pestLeadIds]
+    );
+    for (let i = 0; i < leadsBefore.rows.length; i++) {
+      const before = leadsBefore.rows[i];
+      const after = leadsAfter.rows[i];
+      assert.equal(after.fit_score, before.fit_score);
+      assert.equal(after.fit_tier, before.fit_tier);
+      assert.equal(after.reasons, before.reasons);
+      assert.equal(after.stage, before.stage);
+      assert.equal(after.last_contacted_at, before.last_contacted_at);
+      assert.equal(new Date(after.updated_at).toISOString(), new Date(before.updated_at).toISOString());
+    }
+
+    const normalAfter = await pool.query(
+      'SELECT followup1_sent_at FROM proposals WHERE id = ANY($1::int[])',
+      [normalIds]
+    );
+    assert.equal(normalAfter.rows.length, normals.length);
+    assert.ok(normalAfter.rows.every(row => row.followup1_sent_at));
+
+    const sendSrc = fs.readFileSync(path.join(__dirname, '../src/proposals/send.js'), 'utf8');
+    assert.match(sendSrc, /appendCompanyPestExclusion\(params\)/);
+    assert.match(sendSrc, /isPestCompanyName\(p\.company\)/);
   });
 
   it('count script prints only the number of legacy rows', async () => {

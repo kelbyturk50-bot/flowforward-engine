@@ -10,7 +10,7 @@
 const nodemailer = require('nodemailer');
 const pool = require('../db/client');
 const cfg  = require('./config');
-const { isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
+const { appendCompanyPestExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 
 const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
@@ -183,12 +183,19 @@ async function stopSequence(proposalId, reason, status = 'stopped') {
 /** Send any follow-ups that are due. Called every 15 minutes. */
 async function sendDueFollowups() {
   if (!(await mailMode()) || !SENDER.address || !inSendWindow()) return { sent: 0 };
+  // Exclude pest names in SQL. A JS skip after LIMIT 25 would fill the batch
+  // with rows that are never sent and starve every other sequence. The
+  // predicate does not update those rows.
+  const params = [];
+  const nameSql = appendCompanyPestExclusion(params);
   const { rows } = await pool.query(
     `SELECT pr.*, p.company, p.stage, p.do_not_contact FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
       WHERE pr.status = 'sent' AND (
             (pr.followup1_sent_at IS NULL AND pr.followup1_due_at <= NOW()) OR
             (pr.followup1_sent_at IS NOT NULL AND pr.followup2_sent_at IS NULL AND pr.followup2_due_at <= NOW()))
-      ORDER BY pr.sent_at LIMIT 25`);
+        AND ${nameSql}
+      ORDER BY pr.sent_at LIMIT 25`,
+    params);
   let sent = 0;
   for (const p of rows) {
     // A sequence created before the name gate can still be due. Skip it
