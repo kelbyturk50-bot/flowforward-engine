@@ -29,10 +29,11 @@
 // that is a separate follow-up. The estimate signals read prospects.research
 // only, and only for an HVAC lead. A stored non-HVAC industry scores 0 even
 // when the name or category matches. Name and category count only when the
-// industry is empty. Air Conditioning counts. Heating Oil Delivery and Pool
+// industry is empty, and only when that field has an HVAC term and no other
+// trade word. Air Conditioning counts. Heating Oil Delivery and Pool
 // Heating do not. A missing cache adds nothing. Plumbing, Plumber, and every
-// other trade are not boosted. A negated phrase, including one after the
-// phrase, adds nothing.
+// other trade are not boosted. A verb negation can sit well before the phrase.
+// A bare "no" or "without" has to sit next to it.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');

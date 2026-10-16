@@ -18,14 +18,19 @@ const FOLLOW_UP_PROMISE_RE = /\b(?:we(?:'ll|’ll| will)\s+follow\s+up|follow[- 
 const JOB_AD_RE = /\b(?:comfort|sales)\s+(?:advisors?|consultants?)\b|\bcomfort\s+sales\b|\bsales\s+comfort\b/i;
 const SEARCH_ADS_RE = /\blocal\s+services\s+ads?\b|\bgoogle\s+ads\b|\bgoogle\s+local\s+services\b|\blsas?\b/i;
 const SEARCH_ADS_LABEL_RE = /google ads|\blocal services\b|\blsas?\b/i;
-// Apostrophes: straight, U+2019 (don’t), and U+2018. The general pattern has
-// no "not only" lookahead, and a hyphen is a separator, so "not only …" and
-// "no-cost" / "no cost" match as negations unless the exceptions in isNegated
-// return first.
-const NEGATIVE_BEFORE = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|no|not|never|without)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
+// Apostrophes: straight, U+2019 (don’t), and U+2018. Verb negations keep a
+// wide window and may cross a comma. Bare "no" and "without" do not: at most
+// one word, and a hyphen is the only mark allowed in that gap, so "no-cost"
+// still matches unless the exception in isNegated returns first. "not only"
+// matches this verb pattern unless its exception returns first.
+const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|not|never)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
+const NEGATIVE_BARE = /\b(?:no|without)(?:[-\s]+[a-z0-9'\u2019\u2018]+){0,1}\s*$/i;
 // A short window after the phrase: "not available", "unavailable", "none",
 // or a bare "no" / "no." The bare "no" does not match "no obligation".
 const NEGATIVE_AFTER = /^[\s,;:?!-]*(?:(?:are|is|was|were)\s+)?(?:\bnot\s+available\b|\bunavailable\b|\bnone\b|\bno(?=\s*[.!?]|[\s]*$))/i;
+// Trade words that block a name or category fallback. A stored industry is
+// not filtered through this list, so "Plumbing & Heating" can still count.
+const NON_HVAC_TRADE_RE = /\b(?:lawns?|landscapes?|landscaping|trees?|electric(?:al|ian)?s?|pools?|roofs?|roofing|roofers?|pests?|exterminat(?:or|ors|ing|ion)?|cleaning|cleaners?|plumbing|plumbers?|painting|painters?|gutters?|windows?|construction)\b/i;
 const NOT_HVAC_TRADE_RE = /\b(?:heating\s+oil|pool\s+heating)\b/i;
 const AIR_CONDITIONING_RE = /\bair\s+conditioning\b/i;
 
@@ -108,13 +113,20 @@ function identityIsHvac(value) {
   return Boolean(re && re.test(folded));
 }
 
+// A name or category counts only when it has an HVAC term and no other trade.
+function fallbackIsHvac(value) {
+  const text = fieldText(value);
+  if (!text.trim()) return false;
+  if (NON_HVAC_TRADE_RE.test(foldIdentity(text))) return false;
+  return identityIsHvac(text);
+}
+
 // A stored non-HVAC industry is 0 no matter what the company name or category
 // says. Name and category are read only when the industry is empty.
 function isHvacLead(prospect) {
   const industry = fieldText(prospect.industry).trim();
   if (industry) return identityIsHvac(industry);
-  return [prospect.category, prospect.categories, prospect.company]
-    .some(value => identityIsHvac(fieldText(value)));
+  return [prospect.category, prospect.categories, prospect.company].some(fallbackIsHvac);
 }
 
 function signalsOf(research) {
@@ -212,10 +224,13 @@ function clauseAfter(text, end) {
 
 function isNegated(text, index, length) {
   const before = clauseBefore(text, index);
-  // Early returns are load-bearing. NEGATIVE_BEFORE matches both phrases.
+  // Early returns are load-bearing. The patterns below match these phrases.
   if (/\bnot\s+only(?:\s+\S+){0,4}\s*$/i.test(before)) return false;
   if (/\bno[-\s]+cost\s*$/i.test(before)) return false;
-  if (NEGATIVE_BEFORE.test(before)) return true;
+  // "no obligation" is one word away, which the bare pattern would negate.
+  if (/\bno[-\s]+obligation\s*$/i.test(before)) return false;
+  if (NEGATIVE_VERB.test(before)) return true;
+  if (NEGATIVE_BARE.test(before)) return true;
   return NEGATIVE_AFTER.test(clauseAfter(text, index + length));
 }
 

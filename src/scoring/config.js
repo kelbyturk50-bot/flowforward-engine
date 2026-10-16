@@ -72,18 +72,20 @@ const TIER_CAP_FOR = {
 //
 // Text matches are word-boundary matches. "preplacement", "reinstallation",
 // "refinancing", "freeestimate", and "free estimated" do not match.
-// A negated phrase does not count. The negation can sit before the phrase
-// ("no free estimates", "we do not offer financing", "we don't offer
-// financing", "not offering installation") or in a short window after it
-// ("financing not available", "free estimates are not available",
-// "financing: none", "free estimates? no."). A curly apostrophe counts
-// (don’t, doesn’t). Commas and a short clause may sit between the negation
-// and the phrase. "not only" and "no-cost" / "no cost" financing are not
-// negations. "no obligation" is not a negation of the phrase before it.
+// A negated phrase does not count. Verb negations keep a wide window and may
+// cross a comma ("we do not offer financing", "we don't offer financing",
+// "not offering installation", "we do not offer, at this time, any kind of
+// financing", and "financing not available" after the phrase). A bare "no"
+// or "without" counts only next to the phrase: at most one word between, and
+// no comma or other clause mark ("no free estimates", "without financing").
+// A curly apostrophe counts (don’t, doesn’t). "not only", "no-cost" /
+// "no cost", and "no obligation" are not negations.
 //
 // HVAC only (Scout, PR #51; Gauge on the industry gate). A stored industry
 // that is a non-HVAC trade scores 0 no matter what the company name or
-// category says. Name and category are read only when the industry is empty.
+// category says. Name and category are read only when the industry is empty,
+// and only when that field has an HVAC term and no other trade word (lawn,
+// tree, electric, pool, roofing, cleaning, and the rest).
 // An industry counts when it is HVAC, "Air Conditioning" (or
 // "air-conditioning"), or a combination that says heating, cooling, HVAC,
 // AC, or furnace on a word boundary ("Plumbing & Heating", "Heating &

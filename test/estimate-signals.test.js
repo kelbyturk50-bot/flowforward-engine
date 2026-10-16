@@ -514,7 +514,32 @@ describe('F-003 estimate signals', () => {
       company: 'Cooling Shade Trees',
       research: replacementResearch(),
     });
-    assert.equal(signalPoints(emptyName), 21);
+    assert.equal(signalPoints(emptyName), 0);
+
+    const emptyMixed = [
+      ['AC Lawn Care', null],
+      ['AC Lawn Care', ''],
+      ['AC/DC Electric', null],
+      ['AC/DC Electric', '   '],
+    ];
+    for (const [company, industry] of emptyMixed) {
+      const fit = computeFit({
+        ...neutral,
+        company,
+        industry,
+        category: undefined,
+        research: replacementResearch(),
+      });
+      assert.equal(signalPoints(fit), 0, company);
+    }
+
+    const smith = computeFit({
+      ...neutral,
+      industry: '',
+      company: 'Smith Heating & Air',
+      research: replacementResearch(),
+    });
+    assert.equal(signalPoints(smith), 21);
 
     const emptyCategory = computeFit({
       ...neutral,
@@ -634,6 +659,23 @@ describe('F-003 estimate signals', () => {
     assert.equal(obligation.fit_score - plain.fit_score, 4);
     assert.equal(obligation.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
     assert.equal(signalPoints(obligation), 4);
+
+    const obligationFirst = computeFit({ ...peer, research: research('No obligation free estimates') });
+    assert.equal(obligationFirst.fit_score - plain.fit_score, 4);
+    assert.equal(obligationFirst.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
+    assert.equal(signalPoints(obligationFirst), 4);
+
+    const hiddenFees = computeFit({ ...peer, research: research('No hidden fees, plus free estimates!') });
+    assert.equal(hiddenFees.fit_score - plain.fit_score, 4);
+    assert.equal(hiddenFees.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
+
+    const withoutDoubt = computeFit({ ...peer, research: research('Without a doubt the best financing') });
+    assert.equal(withoutDoubt.fit_score - plain.fit_score, 3);
+    assert.equal(withoutDoubt.fit_reasons.find(row => row.label === 'Financing').points, 3);
+
+    const withoutAny = computeFit({ ...peer, research: research('Service without any financing') });
+    assert.equal(withoutAny.fit_score, plain.fit_score);
+    assert.equal(signalPoints(withoutAny), 0);
 
     const afterSentence = computeFit({
       ...peer,
