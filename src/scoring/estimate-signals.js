@@ -34,9 +34,16 @@ const NEGATIVE_VERB = new RegExp(
   'i',
 );
 // First word of a comma-bounded aside that stays inside the clause.
-// A sentence adverb is any [a-z]+ly word (unfortunately, sadly, clearly).
-// "frankly" does not end in ly, so it is listed.
-const ASIDE_START_RE = /^(?:at|in|on|for|of|by|with|from|to|during|after|before|as|about|over|under|within|now|today|frankly|however|still|right|[a-z]+ly)\b/i;
+// Sentence adverbs are this list, not every word that ends in ly. "frankly"
+// does end in ly, and it is listed with the other aside openers.
+const ASIDE_START_RE = /^(?:at|in|on|for|of|by|with|from|to|during|after|before|as|about|over|under|within|now|today|frankly|however|still|right|unfortunately|sadly|regrettably|honestly|currently|typically|usually|clearly|really|presently)\b/i;
+// Drop the aside only when it interrupts the negator, or the negator plus
+// one offer verb. "Don't wait, honestly, ..." does not match: "wait" sits
+// between the negator and the comma.
+const ASIDE_HOST_RE = new RegExp(
+  `(?:^|\\s)(?:${VERB_NEGATOR})(?:\\s+(?:offer(?:s|ing|ed)?|provide(?:s|d|ing)?|accept(?:s|ed|ing)?|have|has|carry|carries|do|does))?\\s*$`,
+  'i',
+);
 // A word after that aside which opens a new clause, so the commas stay.
 const NEW_CLAUSE_RE = /^(?:call|contact|click|get|schedule|book|request|ask|visit|come|stop|text|email|reach|talk|phone|try|let|we|you|they|i|he|she|it|our|your|and|but|or|so|then)$/i;
 // Each alternative is one clause break. The verb window sees only the text
@@ -244,13 +251,14 @@ function clauseAfter(text, end) {
 
 // Drop a short comma-bounded aside (" , at this time, ") so the verb window
 // still sees one clause. Leave the commas when the next word starts a new
-// clause ("Don't wait, for a moment, call for a free estimate").
+// clause ("We do not offer, at this time, call for a free estimate").
 function dropSameClauseAsides(window) {
   return window.replace(/,([^,]{1,48}),/g, (full, inner, offset) => {
     const trimmed = inner.trim();
     const words = trimmed.split(/\s+/).filter(Boolean);
     if (words.length < 1 || words.length > 6) return full;
     if (!ASIDE_START_RE.test(trimmed)) return full;
+    if (!ASIDE_HOST_RE.test(window.slice(0, offset))) return full;
     const rest = window.slice(offset + full.length);
     const next = rest.match(/^\s*([A-Za-z\u2019\u2018']+)/);
     if (next && NEW_CLAUSE_RE.test(next[1])) return full;

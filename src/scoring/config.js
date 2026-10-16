@@ -77,8 +77,11 @@ const TIER_CAP_FOR = {
 // "not offering installation", and "financing not available" after the phrase).
 // A comma-bounded aside stays in that clause ("we do not offer, at this time,
 // any kind of financing", "we do not, unfortunately, offer financing"). An
-// aside may start with a sentence adverb: any word ending in ly
-// (unfortunately, sadly, clearly), plus frankly. A comma, semicolon, colon,
+// aside may start with a listed sentence adverb (unfortunately, sadly,
+// regrettably, honestly, currently, typically, usually, clearly, really,
+// presently; frankly ends in ly and is listed too). It is dropped only when
+// the text before it ends in the negator, or the negator plus one offer verb.
+// "Don't wait, family owned, ..." is not dropped. A comma, semicolon, colon,
 // or dash that opens a later clause does not carry the negator forward
 // ("Don't wait, call for a free estimate", "Don't wait - call today for a
 // free estimate", "Don't wait, seriously, call for a free estimate"). "not" followed

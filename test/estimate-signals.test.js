@@ -741,6 +741,14 @@ describe('F-003 estimate signals', () => {
     assert.equal(seriously.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
     assert.equal(signalPoints(seriously), 4);
 
+    const newClause = computeFit({
+      ...peer,
+      research: research('We do not offer, at this time, call for a free estimate'),
+    });
+    assert.equal(newClause.fit_score - plain.fit_score, 4, 'We do not offer, at this time, call for a free estimate');
+    assert.equal(newClause.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
+    assert.equal(signalPoints(newClause), 4);
+
     const sorry = computeFit({
       ...peer,
       research: research("We don't offer, sorry, financing"),
@@ -772,6 +780,34 @@ describe('F-003 estimate signals', () => {
     assert.equal(danglingHyphen.fit_score - plain.fit_score, 3, 'We do not -offer financing');
     assert.equal(danglingHyphen.fit_reasons.find(row => row.label === 'Financing').points, 3);
     assert.equal(signalPoints(danglingHyphen), 3);
+
+    // Two-comma copy after a CTA. Main scores these. An aside is not dropped
+    // unless it interrupts the negator itself.
+    const ctaAsides = [
+      ["Don't settle, family owned, free estimates", 4, 'Free estimate'],
+      ["Don't settle, family-owned, free estimates", 4, 'Free estimate'],
+      ["Don't overpay, family owned, financing available", 3, 'Financing'],
+      ["Don't wait, family owned and operated, financing available", 3, 'Financing'],
+      ["Don't wait, apply today, financing available", 3, 'Financing'],
+      ["Don't pay more, apply today, financing", 3, 'Financing'],
+      ["Don't wait, apply online, free estimates", 4, 'Free estimate'],
+      ["Don't wait, only $49, free estimates", 4, 'Free estimate'],
+      ["Don't sweat, locally owned, free estimates", 4, 'Free estimate'],
+      ["Don't overpay, friendly service, free estimates", 4, 'Free estimate'],
+      ["Don't wait, daily specials, financing available", 3, 'Financing'],
+      ["Don't wait, monthly payments, financing available", 3, 'Financing'],
+      ["Don't wait, July only, free estimates", 4, 'Free estimate'],
+      ["Don't wait, early, free estimates", 4, 'Free estimate'],
+      ["Don't wait, supply chain ready, replacement available", 4, 'Replacement'],
+      ["Don't wait, honestly, financing available", 3, 'Financing'],
+      ["Don't wait, really, free estimates", 4, 'Free estimate'],
+    ];
+    for (const [text, weight, label] of ctaAsides) {
+      const fit = computeFit({ ...peer, research: research(text) });
+      assert.equal(fit.fit_score - plain.fit_score, weight, text);
+      assert.equal(fit.fit_reasons.find(row => row.label === label).points, weight, text);
+      assert.equal(signalPoints(fit), weight, text);
+    }
 
     const afterSentence = computeFit({
       ...peer,
