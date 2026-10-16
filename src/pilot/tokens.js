@@ -20,7 +20,9 @@
 // proposals.demo_revoked_at sticks after revoke, including when the proposal
 // is discarded. While it is set, nothing is derived and nothing is minted
 // from a page view. Unknown, expired, revoked, discarded, and malformed
-// tokens all come back as null — callers return one 404.
+// tokens all come back as null — callers return one 404. A proposal with
+// more than one active row also comes back as null. If boot finds the
+// pilot schema unsafe, the pilot stays closed until a later boot is clean.
 
 const crypto = require('crypto');
 const pool = require('../db/client');
