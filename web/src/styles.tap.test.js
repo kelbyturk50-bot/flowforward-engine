@@ -30,6 +30,15 @@ describe('phone tap targets', () => {
     }
   });
 
+  it('styles the unconfigured banner as info, with a 44px action', () => {
+    const banner = css.slice(css.indexOf('.api-banner {'), css.indexOf('.error-note'));
+    expect(banner).toContain('background: var(--paper)');
+    expect(banner).toContain('color: var(--ink)');
+    expect(banner).toContain('border-left: 4px solid var(--juniper)');
+    expect(banner).toContain('min-height: 44px');
+    expect(banner).not.toMatch(/rust/);
+  });
+
   it('keeps the desktop control sizes in the base stylesheet', () => {
     expect(desktop).toContain('min-height: 40px; padding: 0 1rem;');
     expect(desktop).toContain('.btn-sm { min-height: 32px;');

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { localToday } from './api';
+import { UNCONFIGURED_MESSAGE } from './api-base.js';
 
 export const STAGES = [
   { id: 'found',        label: 'Found' },
@@ -196,7 +197,7 @@ export function presentError(error) {
 }
 
 export function ErrorNote({ error, onRetry }) {
-  if (!error) return null;
+  if (!error || error.message === UNCONFIGURED_MESSAGE) return null;
   return (
     <div className="error-note" role="alert">
       <p>{error.message}</p>

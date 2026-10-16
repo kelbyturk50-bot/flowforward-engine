@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
-import ApiBanner from './ApiBanner';
+import { render, screen, waitFor } from '@testing-library/react';
+import ApiBanner, { API_BANNER_HELP } from './ApiBanner';
+import { api } from './api';
+import { ErrorNote } from './ui';
+import { installApiDefaults } from './test/defaults.js';
+import Today from './views/Today';
+import Leads from './views/Leads';
 import {
   LOCAL_API_URL,
   PRODUCTION_API_URL,
@@ -82,14 +87,48 @@ describe('resolveApiBase', () => {
 });
 
 describe('ApiBanner', () => {
-  it('shows the unconfigured message', () => {
-    render(<ApiBanner configured={false} />);
-    expect(screen.getByRole('alert')).toHaveTextContent(UNCONFIGURED_MESSAGE);
+  it('shows the unconfigured message once, with a way to Settings', async () => {
+    installApiDefaults();
+    api.focus.mockRejectedValue(Object.assign(new Error(UNCONFIGURED_MESSAGE), { status: 0 }));
+    render(
+      <>
+        <ApiBanner configured={false} />
+        <Today version={0} bump={() => {}} openLead={() => {}} openProject={() => {}} />
+      </>
+    );
+    expect(await screen.findByRole('heading', { name: /Good (morning|afternoon|evening), Kelby/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('Loading your day…')).not.toBeInTheDocument());
+    expect(screen.getAllByText(UNCONFIGURED_MESSAGE)).toHaveLength(1);
+    expect(screen.getByRole('status')).toHaveTextContent(API_BANNER_HELP);
+    expect(screen.getByRole('link', { name: 'Open Settings' })).toHaveAttribute('href', '#/settings');
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  });
+
+  it('hides the same failure on other views', async () => {
+    installApiDefaults();
+    api.prospects.mockRejectedValue(Object.assign(new Error(UNCONFIGURED_MESSAGE), { status: 0 }));
+    api.meta.mockRejectedValue(Object.assign(new Error(UNCONFIGURED_MESSAGE), { status: 0 }));
+    render(
+      <>
+        <ApiBanner configured={false} />
+        <Leads version={0} bump={() => {}} openLead={() => {}} />
+      </>
+    );
+    expect(await screen.findByRole('heading', { name: 'Leads' })).toBeInTheDocument();
+    await waitFor(() => expect(api.prospects).toHaveBeenCalled());
+    expect(screen.getAllByText(UNCONFIGURED_MESSAGE)).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });
 
   it('stays hidden when an API is configured', () => {
     render(<ApiBanner configured />);
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(screen.queryByText(UNCONFIGURED_MESSAGE)).not.toBeInTheDocument();
+  });
+
+  it('still shows Try again for a real request failure', () => {
+    render(<ErrorNote error={{ message: 'Request failed (500)' }} onRetry={() => {}} />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Request failed (500)');
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });
 });

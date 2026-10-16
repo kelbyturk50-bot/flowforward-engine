@@ -389,8 +389,14 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .sequence li { min-width: min(130px, 100%); max-width: 100%; }
 
 /* ── Notes & toast ─────────────────────────────────────── */
-.api-banner { margin: 0 0 1rem; padding: .9rem 1rem; background: var(--rust-wash); color: var(--rust); border: 1px solid var(--rust); border-radius: var(--radius-s); font-weight: 700; }
+.api-banner {
+  margin: 0 0 1rem; padding: 1rem; background: var(--paper); color: var(--ink);
+  border: 1px solid var(--line); border-left: 4px solid var(--juniper); border-radius: var(--radius-s);
+}
 .api-banner p { margin: 0; }
+.api-banner-title { font-weight: 600; }
+.api-banner-help { margin-top: .35rem; }
+.api-banner .btn { margin-top: .75rem; min-height: 44px; padding: 0 1rem; }
 .error-note { display: flex; justify-content: space-between; align-items: center; gap: 1rem; background: var(--rust-wash); color: var(--rust); border-radius: var(--radius-s); padding: .7rem 1rem; margin-bottom: 1rem; }
 .error-text { color: var(--rust); }
 .ok-note { color: var(--juniper); font-weight: 600; }
