@@ -458,6 +458,12 @@ describe('network guard', () => {
         });
         udp4.send(Buffer.from('ok'), server.address().port, '127.0.0.1');
         assert.equal(await got, 'ok');
+        const text = new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('string payload was not delivered')), 1000);
+          server.once('message', (msg) => { clearTimeout(timer); resolve(msg.toString()); });
+        });
+        udp4.send('ping', server.address().port, '127.0.0.1');
+        assert.equal(await text, 'ping');
       } finally {
         server.close();
       }
@@ -467,11 +473,116 @@ describe('network guard', () => {
     }
   });
 
+  it('blocks CONNECT tunnels to a non-loopback target', async () => {
+    const { Client, connect } = require('undici');
+    const { spawnSync } = require('child_process');
+    let received = '';
+    const sockets = new Set();
+    const proxy = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+      socket.on('data', (buf) => { received += buf.toString('latin1'); });
+      socket.on('end', () => socket.destroy());
+      socket.on('error', () => socket.destroy());
+    });
+    await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+    const port = proxy.address().port;
+    const proxyUrl = `http://127.0.0.1:${port}`;
+    const saved = {
+      HTTPS_PROXY: process.env.HTTPS_PROXY,
+      https_proxy: process.env.https_proxy,
+    };
+    const client = new Client(proxyUrl);
+    try {
+      const child = spawnSync(process.execPath, ['-e', `
+        const keys = ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy'];
+        const left = keys.filter((key) => process.env[key]);
+        if (left.length) {
+          console.error(left.join(','));
+          process.exit(2);
+        }
+        console.log('cleared');
+      `], {
+        encoding: 'utf8',
+        timeout: 5000,
+        env: {
+          ...process.env,
+          HTTP_PROXY: proxyUrl,
+          HTTPS_PROXY: proxyUrl,
+          ALL_PROXY: proxyUrl,
+          NO_PROXY: 'example.com',
+          http_proxy: proxyUrl,
+          https_proxy: proxyUrl,
+          all_proxy: proxyUrl,
+          no_proxy: 'example.com',
+        },
+      });
+      assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
+      assert.match(child.stdout, /cleared/);
+
+      const calls = [
+        () => axios.get('https://192.0.2.1/', {
+          proxy: { protocol: 'http', host: '127.0.0.1', port },
+          timeout: 1000,
+        }),
+        () => {
+          process.env.HTTPS_PROXY = proxyUrl;
+          return axios.get('https://192.0.2.1/', { timeout: 1000 });
+        },
+        () => client.connect({ path: '192.0.2.1:443' }),
+        () => connect(proxyUrl, { path: '192.0.2.1:443' }),
+        () => {
+          const socket = net.connect(port, '127.0.0.1');
+          socket.on('error', () => {});
+          try {
+            socket.write('CONNECT 192.0.2.1:443 HTTP/1.1\r\nHost: 192.0.2.1:443\r\n\r\n');
+          } catch (err) {
+            socket.destroy();
+            throw err;
+          }
+          return socket;
+        },
+      ];
+      for (const [i, start] of calls.entries()) {
+        const err = await captureGuard(start);
+        assertGuard(err, '192.0.2.1');
+        assert.equal(guardError(err).message.includes('connect-tunnel') || guardError(err).message.includes('undici-connect'), true, `case ${i} ${err && err.message}`);
+      }
+
+      const allowed = net.connect(port, '127.0.0.1');
+      allowed.on('error', () => {});
+      assert.doesNotThrow(() => {
+        allowed.write('CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n');
+      });
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`loopback CONNECT was not delivered: ${JSON.stringify(received)}`)), 1000);
+        const iv = setInterval(() => {
+          if (received.includes('CONNECT 127.0.0.1:9')) {
+            clearTimeout(timer);
+            clearInterval(iv);
+            resolve();
+          }
+        }, 10);
+      });
+      allowed.destroy();
+      assert.doesNotMatch(received, /CONNECT 192\.0\.2\.1/i);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value == null) delete process.env[key];
+        else process.env[key] = value;
+      }
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => proxy.close(resolve));
+      await client.destroy();
+    }
+  });
+
   it('passes the preload to spawned children through NODE_OPTIONS', () => {
     const { spawnSync } = require('child_process');
     const path = require('path');
     const preload = path.resolve(__dirname, 'preload.js');
-    assert.match(process.env.NODE_OPTIONS || '', new RegExp(preload.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    const escaped = preload.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(process.env.NODE_OPTIONS || '', new RegExp(`--require "${escaped}"`));
     const result = spawnSync(process.execPath, ['-e', `
       const net = require('net');
       let handshake = false;

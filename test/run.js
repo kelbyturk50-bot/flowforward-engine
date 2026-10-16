@@ -28,7 +28,8 @@ function testFiles() {
 
 function testEnv() {
   const preload = path.resolve(__dirname, 'preload.js');
-  const requireFlag = `--require ${preload}`;
+  const quoted = preload.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const requireFlag = `--require "${quoted}"`;
   const existing = process.env.NODE_OPTIONS || '';
   const nodeOptions = existing.includes(preload)
     ? existing

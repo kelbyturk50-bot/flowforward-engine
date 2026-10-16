@@ -489,6 +489,7 @@ function installNetworkGuard() {
     return originalTlsConnect.apply(this, args);
   };
 
+  installTunnelGuard();
   installNativeConnectGuard();
   installUdpGuard();
   installUndiciProxyGuard();
@@ -551,6 +552,91 @@ function assertLoopbackTarget(value, via) {
   }
 }
 
+// CONNECT 192.0.2.1:443, CONNECT [2001:db8::1]:443, or a leading slash
+// added when a path is joined onto an origin.
+function connectAuthorityHost(authority) {
+  let raw = String(authority || '').trim().replace(/^\/+/, '');
+  if (!raw) return '';
+  if (raw.startsWith('[')) {
+    const end = raw.indexOf(']');
+    if (end !== -1) return raw.slice(1, end);
+  }
+  const colon = raw.lastIndexOf(':');
+  if (colon > 0 && /^\d+$/.test(raw.slice(colon + 1))) return raw.slice(0, colon);
+  return raw;
+}
+
+function chunkPrefix(chunk) {
+  if (typeof chunk === 'string') return chunk.slice(0, 512);
+  if (Buffer.isBuffer(chunk)) return chunk.subarray(0, 512).toString('latin1');
+  if (ArrayBuffer.isView(chunk)) {
+    return Buffer.from(chunk.buffer, chunk.byteOffset, Math.min(chunk.byteLength, 512)).toString('latin1');
+  }
+  return '';
+}
+
+function assertNoForeignTunnel(chunk) {
+  const match = /^CONNECT\s+(\S+)/i.exec(chunkPrefix(chunk));
+  if (!match) return;
+  const host = connectAuthorityHost(match[1]);
+  if (host && !isLocalName(host)) {
+    throw new TestNetworkGuardError(normalizeHost(host), 'connect-tunnel');
+  }
+}
+
+// Any library that opens a loopback proxy and then writes CONNECT <target>
+// hits this, including axios/https-proxy-agent and a raw socket.
+function installTunnelGuard() {
+  const proto = net.Socket.prototype;
+  const originalWrite = proto.write;
+  if (typeof originalWrite === 'function' && !originalWrite.__ffGuarded) {
+    function guardedWrite(chunk) {
+      try {
+        assertNoForeignTunnel(chunk);
+      } catch (err) {
+        // Drop the socket. A refused CONNECT must not stay open on the proxy.
+        this.destroy();
+        throw err;
+      }
+      return originalWrite.apply(this, arguments);
+    }
+    guardedWrite.__ffGuarded = true;
+    proto.write = guardedWrite;
+  }
+  const originalWritev = proto.writev;
+  if (typeof originalWritev === 'function' && !originalWritev.__ffGuarded) {
+    function guardedWritev(chunks, cb) {
+      if (Array.isArray(chunks)) {
+        let prefix = '';
+        for (const part of chunks) {
+          const piece = part && typeof part === 'object' && Object.prototype.hasOwnProperty.call(part, 'chunk')
+            ? part.chunk
+            : part;
+          prefix += chunkPrefix(piece);
+          if (prefix.length >= 512) break;
+        }
+        try {
+          assertNoForeignTunnel(prefix);
+        } catch (err) {
+          this.destroy();
+          throw err;
+        }
+      }
+      return originalWritev.call(this, chunks, cb);
+    }
+    guardedWritev.__ffGuarded = true;
+    proto.writev = guardedWritev;
+  }
+}
+
+function assertConnectPath(opts, via) {
+  if (!opts || typeof opts.path !== 'string' || !opts.path) return;
+  const host = connectAuthorityHost(opts.path);
+  if (host && !isLocalName(host)) {
+    throw new TestNetworkGuardError(normalizeHost(host), via);
+  }
+}
+
 function installUndiciProxyGuard() {
   let undici;
   try { undici = require('undici'); }
@@ -561,10 +647,22 @@ function installUndiciProxyGuard() {
     if (typeof original !== 'function' || original.__ffGuarded) continue;
     function guarded(url, opts, handler) {
       assertLoopbackTarget(url, 'undici');
+      if (name === 'connect') assertConnectPath(opts, 'undici-connect');
       return original.call(this, url, opts, handler);
     }
     guarded.__ffGuarded = true;
     undici[name] = guarded;
+  }
+
+  const Dispatcher = undici.Dispatcher;
+  const originalConnect = Dispatcher && Dispatcher.prototype && Dispatcher.prototype.connect;
+  if (typeof originalConnect === 'function' && !originalConnect.__ffGuarded) {
+    function guardedDispatcherConnect(opts, callback) {
+      assertConnectPath(opts, 'undici-connect');
+      return originalConnect.call(this, opts, callback);
+    }
+    guardedDispatcherConnect.__ffGuarded = true;
+    Dispatcher.prototype.connect = guardedDispatcherConnect;
   }
 
   // ProxyAgent.dispatch does not call Dispatcher.prototype.dispatch.
@@ -584,7 +682,6 @@ function installUndiciProxyGuard() {
     Ctor.prototype.dispatch = guardedDispatch;
   }
 
-  const Dispatcher = undici.Dispatcher;
   const originalDispatch = Dispatcher && Dispatcher.prototype && Dispatcher.prototype.dispatch;
   if (typeof originalDispatch === 'function' && !originalDispatch.__ffGuarded) {
     function guardedDispatcher(opts, handler) {
@@ -645,10 +742,16 @@ function installUdpGuard() {
   const originalSend = socketProto.send;
   if (typeof originalSend === 'function' && !originalSend.__ffGuarded) {
     function guardedSocketSend(...args) {
-      for (const arg of args) {
-        if (typeof arg === 'string' && !isLocalName(arg)) {
-          throw new TestNetworkGuardError(normalizeHost(arg), 'udp');
-        }
+      // send(msg, port[, address][, cb]) or send(msg, offset, length, port, address[, cb]).
+      // The first argument is the payload and may be a string. It is not a host.
+      let address = '';
+      if (typeof args[1] === 'number' && typeof args[2] === 'number') {
+        address = typeof args[4] === 'string' ? args[4] : '';
+      } else if (typeof args[1] === 'number' && typeof args[2] === 'string') {
+        address = args[2];
+      }
+      if (address && !isLocalName(address)) {
+        throw new TestNetworkGuardError(normalizeHost(address), 'udp');
       }
       return originalSend.apply(this, args);
     }
