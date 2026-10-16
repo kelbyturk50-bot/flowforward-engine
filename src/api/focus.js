@@ -4,6 +4,7 @@ const express = require('express');
 const router  = express.Router();
 const pool    = require('../db/client');
 const { CLOSED } = require('./prospects');
+const { appendATierPestHide } = require('../scoring/industry');
 
 router.get('/', async (req, res) => {
   const today = req.query.today || null; // YYYY-MM-DD in the viewer's timezone; defaults to server date
@@ -13,15 +14,21 @@ router.get('/', async (req, res) => {
     const d = today ? '$2::date' : 'CURRENT_DATE';
     const dOnly = today ? '$1::date' : 'CURRENT_DATE';
 
+    const topParams = [];
+    const topHide = appendATierPestHide(topParams);
+    const countParams = [CLOSED];
+    const countHide = appendATierPestHide(countParams);
     const [due, top, stale, work, counts] = await Promise.all([
       // Follow-ups due today or overdue
       pool.query(`SELECT * FROM prospects
                    WHERE stage <> ALL($1) AND next_action_at IS NOT NULL AND next_action_at <= ${d}
                    ORDER BY next_action_at, fit_score DESC NULLS LAST LIMIT 50`, withDate),
-      // Best untouched leads to reach out to
+      // Best untouched leads to reach out to. Pest-name rows stored as A are
+      // omitted here. The SELECT does not update the row.
       pool.query(`SELECT * FROM prospects
                    WHERE stage = 'found' AND fit_tier IN ('A','B') AND (phone IS NOT NULL OR website IS NOT NULL)
-                   ORDER BY fit_score DESC, review_count DESC NULLS LAST LIMIT 15`),
+                     AND ${topHide}
+                   ORDER BY fit_score DESC, review_count DESC NULLS LAST LIMIT 15`, topParams),
       // In conversation but gone quiet for 7+ days with no follow-up scheduled
       pool.query(`SELECT * FROM prospects
                    WHERE stage IN ('contacted','responded','qualified','proposal') AND next_action_at IS NULL
@@ -36,13 +43,13 @@ router.get('/', async (req, res) => {
                    ORDER BY t.due_date, t.id LIMIT 30`, today ? [today] : []),
       pool.query(`SELECT
                     (SELECT COUNT(*) FROM prospects WHERE stage <> ALL($1))::int AS open_leads,
-                    (SELECT COUNT(*) FROM prospects WHERE stage <> ALL($1) AND fit_tier = 'A')::int AS a_tier_open,
+                    (SELECT COUNT(*) FROM prospects WHERE stage <> ALL($1) AND fit_tier = 'A' AND ${countHide})::int AS a_tier_open,
                     (SELECT COUNT(*) FROM prospects WHERE stage IN ('qualified','proposal'))::int AS hot,
                     (SELECT COALESCE(SUM(est_value),0) FROM prospects WHERE stage IN ('qualified','proposal'))::float AS pipeline_value,
                     (SELECT COUNT(*) FROM projects WHERE status = 'active')::int AS active_projects,
                     (SELECT COUNT(*) FROM prospects WHERE discovered_at > NOW() - INTERVAL '24 hours')::int AS new_24h,
                     (SELECT COUNT(*) FROM proposals WHERE status = 'draft')::int AS proposals_to_review,
-                    (SELECT COUNT(*) FROM proposals WHERE status = 'replied' AND replied_at > NOW() - INTERVAL '7 days')::int AS proposal_replies_7d`, [CLOSED]),
+                    (SELECT COUNT(*) FROM proposals WHERE status = 'replied' AND replied_at > NOW() - INTERVAL '7 days')::int AS proposal_replies_7d`, countParams),
     ]);
 
     res.json({

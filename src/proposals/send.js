@@ -10,6 +10,7 @@
 const nodemailer = require('nodemailer');
 const pool = require('../db/client');
 const cfg  = require('./config');
+const { appendCompanyPestExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 
 const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
@@ -110,14 +111,19 @@ const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(x || '');
 
 /** Approve a draft and send the first email now. */
 async function approveAndSend(proposalId) {
-  const problems = await sendReadiness();
-  if (problems.length) throw Object.assign(new Error(problems.join(' ')), { status: 400 });
-
   const { rows } = await pool.query(
     `SELECT pr.*, p.company, p.stage, p.do_not_contact FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`,
     [proposalId]);
   const p = rows[0];
   if (!p) throw Object.assign(new Error('Proposal not found'), { status: 404 });
+  // Legacy drafts can belong to a pest-named lead. Refuse before the claim
+  // UPDATE and before mailer() is called.
+  if (isPestCompanyName(p.company)) {
+    throw Object.assign(new Error(`${PEST_NAME_REASON}.`), { status: 409 });
+  }
+
+  const problems = await sendReadiness();
+  if (problems.length) throw Object.assign(new Error(problems.join(' ')), { status: 400 });
   if (p.status !== 'draft') throw Object.assign(new Error(`This version is ${p.status}; only drafts can be sent.`), { status: 409 });
   if (p.do_not_contact) throw Object.assign(new Error(`${p.company} is marked do-not-contact.`), { status: 409 });
   if (!validEmail(p.to_email)) throw Object.assign(new Error('Add a valid "To" email before sending.'), { status: 400 });
@@ -177,14 +183,28 @@ async function stopSequence(proposalId, reason, status = 'stopped') {
 /** Send any follow-ups that are due. Called every 15 minutes. */
 async function sendDueFollowups() {
   if (!(await mailMode()) || !SENDER.address || !inSendWindow()) return { sent: 0 };
+  // Exclude pest names in SQL. A JS skip after LIMIT 25 would fill the batch
+  // with rows that are never sent and starve every other sequence. The
+  // predicate does not update those rows.
+  const params = [];
+  const nameSql = appendCompanyPestExclusion(params);
   const { rows } = await pool.query(
     `SELECT pr.*, p.company, p.stage, p.do_not_contact FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
       WHERE pr.status = 'sent' AND (
             (pr.followup1_sent_at IS NULL AND pr.followup1_due_at <= NOW()) OR
             (pr.followup1_sent_at IS NOT NULL AND pr.followup2_sent_at IS NULL AND pr.followup2_due_at <= NOW()))
-      ORDER BY pr.sent_at LIMIT 25`);
+        AND ${nameSql}
+      ORDER BY pr.sent_at LIMIT 25`,
+    params);
   let sent = 0;
   for (const p of rows) {
+    // A sequence created before the name gate can still be due. Skip it
+    // without claiming the row or calling the transport. The log has no name,
+    // address, or id.
+    if (isPestCompanyName(p.company)) {
+      console.error('[send] skipped follow-up: company name matches pest control');
+      continue;
+    }
     if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
       await stopSequence(p.id, p.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${p.stage}`);
       continue;

@@ -3,7 +3,7 @@ const express = require('express');
 const router  = express.Router();
 const pool    = require('../db/client');
 const cfg     = require('../proposals/config');
-const { appendIndustryExclusion } = require('../scoring/industry');
+const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 const { draftProposal, runProposalBatch, getSetting, isRunning } = require('../proposals/draft');
 const send    = require('../proposals/send');
 const jobs    = require('../proposals/jobs');
@@ -52,12 +52,12 @@ router.get('/summary', async (req, res) => {
       counts[k] = rows[0].n;
     }));
     const eligibleParams = [cfg.TIERS];
-    const industrySql = appendIndustryExclusion(eligibleParams, cfg.EXCLUDED_INDUSTRIES);
+    const gateSql = appendDraftExclusion(eligibleParams, cfg.EXCLUDED_INDUSTRIES);
     const [spend, sentToday, eligible] = await Promise.all([
       pool.query(`SELECT COALESCE(SUM(cost_usd), 0)::float AS month FROM proposals WHERE created_at >= date_trunc('month', NOW())`),
       send.sentToday(),
       pool.query(`SELECT COUNT(*)::int AS n FROM prospects p WHERE p.fit_tier = ANY($1) AND p.stage = 'found' AND NOT p.do_not_contact
-                    AND ${industrySql} AND (p.website IS NOT NULL OR p.email IS NOT NULL)
+                    AND ${gateSql} AND (p.website IS NOT NULL OR p.email IS NOT NULL)
                     AND NOT EXISTS (SELECT 1 FROM proposals pr WHERE pr.prospect_id = p.id)`, eligibleParams),
     ]);
     const [unreviewed, activeJobs] = await Promise.all([
@@ -101,9 +101,13 @@ router.post('/jobs/:jobId/dismiss', async (req, res) => {
 });
 
 async function startJob(res, { prospectId, kind, sourceProposalId, instructions, freshResearch }) {
-  if (!cfg.anthropicConfigured()) return res.status(400).json({ error: 'Add ANTHROPIC_API_KEY in Railway Variables first.' });
-  const lead = await pool.query('SELECT id, do_not_contact FROM prospects WHERE id = $1', [prospectId]);
+  const lead = await pool.query('SELECT id, do_not_contact, company FROM prospects WHERE id = $1', [prospectId]);
   if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
+  // Refuse before a job row, a research fetch, or a model call.
+  if (isPestCompanyName(lead.rows[0].company)) {
+    return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+  }
+  if (!cfg.anthropicConfigured()) return res.status(400).json({ error: 'Add ANTHROPIC_API_KEY in Railway Variables first.' });
   if (lead.rows[0].do_not_contact) return res.status(409).json({ error: 'This lead asked not to be contacted.' });
   const out = await pool.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [prospectId]);
   if (out.rows.length) return res.status(409).json({ error: 'A proposal is already out for this lead. Stop that sequence before writing a new one.' });
@@ -415,9 +419,21 @@ router.post('/:id/restore', async (req, res) => {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
-    const { rows } = await db.query(`SELECT * FROM proposals WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    const { rows } = await db.query(
+      `SELECT pr.*, p.company
+         FROM proposals pr
+         JOIN prospects p ON p.id = pr.prospect_id
+        WHERE pr.id = $1
+        FOR UPDATE OF pr`,
+      [req.params.id]
+    );
     const p = rows[0];
     if (!p) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+    // Same refusal as send. Roll back before any status change.
+    if (isPestCompanyName(p.company)) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+    }
     if (!['discarded', 'superseded'].includes(p.status)) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Only discarded or older versions can be restored.' }); }
     const out = await db.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [p.prospect_id]);
     if (out.rows.length) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Another version is already out for this lead.' }); }

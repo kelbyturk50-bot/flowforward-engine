@@ -6,7 +6,7 @@ const crypto    = require('crypto');
 const Anthropic = require('@anthropic-ai/sdk');
 const pool      = require('../db/client');
 const cfg       = require('./config');
-const { appendIndustryExclusion } = require('../scoring/industry');
+const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 const { researchLead } = require('./research');
 const { fsmDetectedFromResearch } = require('./servicetitan');
 const { rescore } = require('../scoring/fit');
@@ -141,6 +141,12 @@ async function draftProposal(prospectId, opts = {}) {
   if (!rows.length) throw Object.assign(new Error('Lead not found'), { status: 404 });
   const lead = rows[0];
 
+  // Name gate, before any research fetch or model call. Stored industry and
+  // stored fit_tier do not waive it. The message has no company name.
+  if (isPestCompanyName(lead.company)) {
+    throw Object.assign(new Error(`${PEST_NAME_REASON}.`), { status: 409 });
+  }
+
   const prev = await pool.query(
     'SELECT id, version, research, status FROM proposals WHERE prospect_id = $1 ORDER BY version DESC LIMIT 1', [lead.id]);
   const last = prev.rows[0];
@@ -208,13 +214,13 @@ let running = false;
 
 async function pickLeads(limit) {
   const params = [cfg.TIERS];
-  const industrySql = appendIndustryExclusion(params, cfg.EXCLUDED_INDUSTRIES);
+  const gateSql = appendDraftExclusion(params, cfg.EXCLUDED_INDUSTRIES);
   params.push(limit);
   const limitParam = params.length;
   const { rows } = await pool.query(
     `SELECT p.* FROM prospects p
       WHERE p.fit_tier = ANY($1) AND p.stage = 'found' AND NOT p.do_not_contact
-        AND ${industrySql}
+        AND ${gateSql}
         AND (p.website IS NOT NULL OR p.email IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM proposals pr WHERE pr.prospect_id = p.id)
       ORDER BY p.fit_score DESC NULLS LAST, p.review_count DESC NULLS LAST
