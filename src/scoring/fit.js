@@ -35,10 +35,14 @@
 // other trade are not boosted. A verb negation can sit well before the phrase
 // and may cross a comma. A sentence-initial "Don't" or "Do not" followed
 // directly by a non-offer verb stops at the first comma, semicolon, colon, or
-// dash after that verb only when no negator sits anywhere from the verb to
-// the phrase, and the break is not past a newline, a "|", or a title, meta,
-// or body join. A bare "no" or "without" negates only with an optional
-// any, a, an, or the between it and the phrase.
+// dash after that verb only when main's own negation check finds nothing from
+// that break to the phrase. A word ending in n't, a no\w* word, except, only,
+// hardly, without, never, neither, nor, unable, or unavailable from the verb
+// to the phrase keeps that window. Sentence-initial is the start of the text
+// or the text right after . ! ? a newline, a "|", or a title, meta, or body
+// join, and the 80-character clause window does not create one. A bare "no"
+// or "without" negates only with an optional any, a, an, or the between it
+// and the phrase.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');

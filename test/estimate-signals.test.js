@@ -1029,9 +1029,44 @@ describe('F-003 estimate signals', () => {
     const cutStart = signalSrc.indexOf('function cutImperativeNegation');
     const cutSrc = signalSrc.slice(cutStart, signalSrc.indexOf('function isNegated'));
     assert.match(cutSrc, /const brk = after\.match\(IMPERATIVE_BREAK_RE\)/);
-    assert.match(cutSrc, /if \(IMPERATIVE_NEGATOR_RE\.test\(after\)\) return before;/);
+    assert.match(cutSrc, /mainNegatesBefore\(tail\)/);
+    assert.match(cutSrc, /SPAN_NEGATOR_RE\.test\(tail\)/);
+    assert.match(cutSrc, /isSentenceStart\(/);
     assert.match(cutSrc, /lastIndexOf\('\|'\)/);
     assert.doesNotMatch(cutSrc, /matchAll|length - 1|\.pop\(\)/);
+  });
+
+  it('keeps n\'t, no-words, except, only, hardly, and a mid-sentence Don\'t at main', () => {
+    const plain = computeFit(peer);
+    const blocked = [
+      ["Don't wait, you shouldn't ask for a free estimate", 'shouldnt'],
+      ['Don\'t wait, you shouldn\u2019t ask for a free estimate', 'curly shouldnt'],
+      ["Don't delay, we wouldn't offer financing", 'wouldnt'],
+      ["Don't settle, we haven't offered free estimates", 'havent'],
+      ["Don't wait, nobody gets a free estimate", 'nobody'],
+      ["Don't worry, nothing covers a free estimate", 'nothing'],
+      ["Don't settle, we do everything except free estimates", 'except'],
+      ["Don't wait, only paid free estimates", 'only'],
+      ["Don't wait, we hardly offer a free estimate", 'hardly'],
+      [
+        'Please remember that Don\'t wait, absolutely positively definitely certainly completely seriously now free estimate',
+        'mid-sentence',
+      ],
+    ];
+    for (const [text, name] of blocked) {
+      const fit = computeFit({ ...peer, research: research(text) });
+      assert.equal(fit.fit_score, plain.fit_score, name);
+      assert.equal(signalPoints(fit), 0, name);
+    }
+
+    // The 80-character slice starts on Don't. The prefix is still in the
+    // sentence, and the tail has none of the span negators, so only a real
+    // sentence start would let the estimate score.
+    const core = "Don't wait, call for a ";
+    const aligned = `Please remember that ${core}${' '.repeat(80 - core.length)}free estimate`;
+    const mid = computeFit({ ...peer, research: research(aligned) });
+    assert.equal(mid.fit_score, plain.fit_score, 'aligned mid-sentence');
+    assert.equal(signalPoints(mid), 0, 'aligned mid-sentence');
   });
 
   it('still penalizes ServiceTitan and caps it after the new boost', () => {

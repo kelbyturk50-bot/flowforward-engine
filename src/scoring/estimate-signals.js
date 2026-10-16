@@ -27,24 +27,26 @@ const SEARCH_ADS_LABEL_RE = /google ads|\blocal services\b|\blsas?\b/i;
 // any/a/an/the in between. A comma after "no" ("No, free estimates") is not
 // that gap.
 const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|not(?!\s+only\b)|never)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
-// Sentence-initial "Don't" / "Do not" plus one of these verbs. Cached page
-// text joins the title and the meta description on the lines above, so the
-// imperative may also start a line. The first comma, semicolon, colon, or
-// dash after the verb ends that negator's window only when the text from the
-// verb to the phrase has none of the negators the wide window uses (do not,
-// don't, cannot, not, never, no, no longer, no more, without, none, nor,
-// neither, unable, unavailable). A hit after the break counts. A newline, a
-// "|", or a title/meta/body join (cachedText joins those fields with newlines)
-// is a boundary that cut does not cross. Offer verbs are absent on purpose
-// (offer, provide, accept, have, carry, do, extend), so "Don't offer, ..."
-// stays on the wide window above.
+// Sentence-initial "Don't" / "Do not" plus one of these verbs. Sentence-initial
+// means the start of the cached text, or the text right after . ! ? a newline,
+// "|", or a title/meta/body join (cachedText joins those fields with newlines).
+// The 80-character clause window does not create that start. The first comma,
+// semicolon, colon, or dash after the verb ends the imperative only when main's
+// own before-window check (NEGATIVE_VERB, NEGATIVE_NO_MORE, NEGATIVE_BARE,
+// unchanged) finds no negator from that break to the phrase, and the span from
+// the verb to the phrase has no word ending in n't, no no\w* word (nobody,
+// nothing, nowhere, none), and none of except, only, hardly, without, never,
+// neither, nor, unable, or unavailable. A hit keeps the wide window. Offer
+// verbs are absent on purpose (offer, provide, accept, have, carry, do,
+// extend), so "Don't offer, ..." stays on the wide window above.
 const IMPERATIVE_OPEN_RE = /(?:^|[\n\r])\s*(?:don['\u2019\u2018]?t|do\s+not)\s+/i;
 const IMPERATIVE_VERB_RE = /^(?:wait|settle|sweat|miss(?:\s+out)?|hesitate|delay|forget|worry|overpay|pay|stop|panic|gamble|risk|struggle|postpone|skip|scramble)\b/i;
 const IMPERATIVE_BREAK_RE = /,|;|:|\s+--\s+|\s+-\s+|\u2013|\u2014/;
-// Same set as NEGATIVE_VERB, NEGATIVE_NO_MORE, and NEGATIVE_BARE, plus the
-// words that block a CTA cut when they sit anywhere from the verb to the
-// phrase (none, nor, neither, unable, unavailable). A hit keeps main's window.
-const IMPERATIVE_NEGATOR_RE = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|never|no\s+(?:longer|more)|not(?!\s+only\b)|no|without|none|nor|neither|unable|unavailable)\b/i;
+// Structural negators for the cut. n't covers shouldn't, wouldn't, haven't,
+// and the same shape, including a curly apostrophe. no\w* covers nobody,
+// nothing, nowhere, and none. Main's three before-window regexes stay as they
+// are and are applied to the same span.
+const SPAN_NEGATOR_RE = /\b(?:\w*n['\u2019\u2018]t|no\w*|except|only|hardly|without|never|neither|nor|unable|unavailable)\b/i;
 const NEGATIVE_NO_MORE = /\bno\s+(?:longer|more)(?:\s+(?:offer(?:s|ing|ed)?|provide(?:s|ing)?|accept(?:s|ing)?|do(?:es)?)\b)?(?:\s+(?:any|a|an|the))?\s+$/i;
 const NEGATIVE_BARE = /\b(?:no|without)(?:\s+(?:any|a|an|the))?\s+$/i;
 // A short window after the phrase: "not available", "unavailable", "none",
@@ -226,13 +228,41 @@ function formFlag(research) {
   return null;
 }
 
-// The clause before this match, cut at the previous sentence end.
-function clauseBefore(text, index) {
+// The clause before this match, cut at the previous sentence end. `at` is the
+// index of that slice in the full text, so a sentence start is not the edge
+// of the 80-character window.
+function clauseBeforeSpan(text, index) {
   const start = Math.max(0, index - 80);
   let window = text.slice(start, index);
+  let at = start;
   const breakAt = window.search(/[.!?][^.!?]*$/);
-  if (breakAt !== -1) window = window.slice(breakAt + 1);
-  return window;
+  if (breakAt !== -1) {
+    window = window.slice(breakAt + 1);
+    at = start + breakAt + 1;
+  }
+  return { window, at };
+}
+
+function isHorizontalSpace(ch) {
+  return ch !== '\n' && ch !== '\r' && /\s/.test(ch);
+}
+
+// Start of the cached text, or right after . ! ? a newline, "|", or a field join.
+function isSentenceStart(text, at) {
+  let i = at;
+  while (i > 0 && isHorizontalSpace(text[i - 1])) i -= 1;
+  if (i <= 0) return true;
+  const prev = text[i - 1];
+  return prev === '.' || prev === '!' || prev === '?' || prev === '\n' || prev === '\r' || prev === '|';
+}
+
+// Main's before-window check, unchanged. The span is the text under test, so
+// the end anchor is the phrase (or the break, for the part the cut would drop).
+function mainNegatesBefore(span) {
+  if (NEGATIVE_VERB.test(span)) return true;
+  if (NEGATIVE_NO_MORE.test(span)) return true;
+  if (NEGATIVE_BARE.test(span)) return true;
+  return false;
 }
 
 // Stop at . or ! and keep that mark, so "no." is visible and the next sentence
@@ -245,29 +275,36 @@ function clauseAfter(text, end) {
 }
 
 // The wide window still applies when this cut does not. No punctuation, an
-// offer verb, a negator anywhere from the verb to the phrase, or a break past
-// a newline, "|", or a title/meta/body join leaves the clause alone.
-function cutImperativeNegation(before) {
+// offer verb, a negator from the verb to the phrase, a break past a newline,
+// "|", or a title/meta/body join, or a Don't that is not a real sentence start
+// leaves the clause alone.
+function cutImperativeNegation(text, span) {
+  const before = span.window;
   const fenceAt = Math.max(
     before.lastIndexOf('\n'),
     before.lastIndexOf('\r'),
     before.lastIndexOf('|'),
   );
-  const segment = fenceAt === -1 ? before : before.slice(fenceAt + 1);
+  const fenceSkip = fenceAt === -1 ? 0 : fenceAt + 1;
+  const segment = before.slice(fenceSkip);
   const open = segment.match(IMPERATIVE_OPEN_RE);
   if (!open || open.index !== 0) return before;
-  const rest = segment.slice(open.index + open[0].length);
+  if (!isSentenceStart(text, span.at + fenceSkip)) return before;
+  const rest = segment.slice(open[0].length);
   const verb = rest.match(IMPERATIVE_VERB_RE);
   if (!verb) return before;
   const after = rest.slice(verb[0].length);
   const brk = after.match(IMPERATIVE_BREAK_RE);
   if (!brk) return before;
-  if (IMPERATIVE_NEGATOR_RE.test(after)) return before;
-  return after.slice(brk.index + brk[0].length);
+  const removed = after.slice(0, brk.index);
+  const tail = after.slice(brk.index + brk[0].length);
+  if (mainNegatesBefore(tail) || SPAN_NEGATOR_RE.test(tail)) return before;
+  if (mainNegatesBefore(removed) || SPAN_NEGATOR_RE.test(removed)) return before;
+  return tail;
 }
 
 function isNegated(text, index, length) {
-  const before = cutImperativeNegation(clauseBefore(text, index));
+  const before = cutImperativeNegation(text, clauseBeforeSpan(text, index));
   if (NEGATIVE_VERB.test(before)) return true;
   if (NEGATIVE_NO_MORE.test(before)) return true;
   if (NEGATIVE_BARE.test(before)) return true;

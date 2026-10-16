@@ -83,12 +83,15 @@ const TIER_CAP_FOR = {
 // carry, do, or extend) stops at the first comma, semicolon, colon, or dash
 // after that verb ("Don't wait, call for a free estimate", "Don't wait - call
 // today for a free estimate", "Don't wait, seriously, call for a free estimate").
-// The cut applies only when do not, don't, cannot, not, never, no, no longer,
-// no more, without, none, nor, neither, unable, and unavailable do not sit
-// anywhere from the verb to the phrase.
-// A hit after the break counts. A newline, a "|", and the join between title,
-// meta description, and body are boundaries the cut does not cross. A negator
-// in that span, or a break past one of those boundaries, keeps the wide window.
+// The cut applies only when main's own before-window check finds no negator
+// from that break to the phrase. A word ending in n't, a no\w* word (nobody,
+// nothing, nowhere, none), except, only, hardly, without, never, neither, nor,
+// unable, or unavailable from the verb to the phrase keeps the wide window.
+// Sentence-initial is the start of the text, or the text right after . ! ? a
+// newline, a "|", or a title, meta, or body join. The 80-character clause
+// window does not make a mid-sentence Don't sentence-initial. A newline, a
+// "|", and the join between title, meta description, and body are boundaries
+// the cut does not cross.
 // "not" followed by "only" is not a verb negation. "no longer" and "no more"
 // are not in that wide window: they negate only when the phrase follows, or
 // after one offer-type verb (offer, provide, accept, do, and their
