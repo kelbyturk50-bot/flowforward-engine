@@ -1022,7 +1022,11 @@ describe('pilot estimate recovery', () => {
   });
 
   it('closes the pilot when boot repair is blocked, and repairs a healthy boot', async () => {
-    const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
+    const mainSchema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
+    assert.equal(mainSchema.includes('pilot_tokens'), false);
+    assert.equal(mainSchema.includes('lock_timeout'), false);
+    assert.equal(mainSchema.includes('statement_timeout'), false);
+    const schema = fs.readFileSync(path.join(__dirname, '../src/db/pilot-schema.sql'), 'utf8');
     const blocks = schema.match(/DO \$\$[\s\S]*?END \$\$;/g) || [];
     const repair = blocks.filter((block) => block.includes('pilot_tokens'));
     assert.ok(repair.length >= 4);
@@ -1379,10 +1383,11 @@ describe('pilot estimate recovery', () => {
 
   it('listens within the boot lock timeout and keeps the pilot closed', async () => {
     const migrateSrc = fs.readFileSync(path.join(__dirname, '../src/db/migrate.js'), 'utf8');
-    assert.match(migrateSrc, /SET lock_timeout = '5s'/);
-    assert.match(migrateSrc, /SET statement_timeout = '15s'/);
+    assert.match(migrateSrc, /SET LOCAL lock_timeout = '5s'/);
+    assert.match(migrateSrc, /SET LOCAL statement_timeout = '15s'/);
 
     setFlags({ master: true, link: true });
+    await pool.query(`UPDATE prospects SET stage = 'vetted' WHERE id = $1`, [prospect.id]);
     const row = await insertProposal(prospect.id, { slug: 'pilot-lock-boot' });
     const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, {
       headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.210' },
@@ -1441,7 +1446,10 @@ describe('pilot estimate recovery', () => {
       assert.ok(elapsed < 15000, `listen took ${elapsed}ms`);
       assert.match(output, /schema is not safe/);
       assert.equal(output.includes('Schema up to date'), false);
+      assert.equal(output.includes('Startup migration/rescore failed'), false);
       assert.equal(output.includes(API_KEY), false);
+      const stage = await pool.query('SELECT stage FROM prospects WHERE id = $1', [prospect.id]);
+      assert.equal(stage.rows[0].stage, 'qualified');
       await holder.query('ROLLBACK');
       const demo = await request('GET', minted.json.path, {
         port,
@@ -1468,6 +1476,141 @@ describe('pilot estimate recovery', () => {
       }
       await holder.query('ROLLBACK').catch(() => {});
       holder.release();
+    }
+  });
+
+  it('commits the main schema when a non-pilot update is slow', async () => {
+    await pool.query('ALTER TABLE prospects DROP COLUMN IF EXISTS fit_boost');
+    await pool.query('DROP TABLE IF EXISTS ff_test_slow_boot');
+    await pool.query('CREATE TABLE ff_test_slow_boot (id integer)');
+    await pool.query('INSERT INTO ff_test_slow_boot (id) VALUES (1)');
+    await pool.query(`UPDATE prospects SET stage = 'vetted' WHERE id = $1`, [prospect.id]);
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION ff_test_slow_stage() RETURNS trigger AS $fn$
+      BEGIN
+        IF OLD.stage IS DISTINCT FROM NEW.stage AND NEW.id = ${Number(prospect.id)} THEN
+          PERFORM pg_sleep(20);
+          INSERT INTO ff_test_slow_boot (id) VALUES (2);
+        END IF;
+        RETURN NEW;
+      END
+      $fn$ LANGUAGE plpgsql;
+      CREATE TRIGGER ff_test_slow_stage
+        BEFORE UPDATE ON prospects
+        FOR EACH ROW EXECUTE FUNCTION ff_test_slow_stage();
+    `);
+    try {
+      const started = Date.now();
+      const report = await applySchema();
+      const elapsed = Date.now() - started;
+      assert.ok(elapsed >= 19000, `main schema finished in ${elapsed}ms`);
+      assert.equal(report.timedOut, false);
+      assert.equal(report.rolledBack, false);
+      const column = await pool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'prospects' AND column_name = 'fit_boost'`
+      );
+      assert.equal(column.rows.length, 1);
+      const stage = await pool.query('SELECT stage FROM prospects WHERE id = $1', [prospect.id]);
+      assert.equal(stage.rows[0].stage, 'qualified');
+      const side = await pool.query('SELECT COUNT(*)::int AS n FROM ff_test_slow_boot');
+      assert.equal(side.rows[0].n, 2);
+      const concluded = await concludeSchemaBoot(report);
+      assert.equal(concluded.ok, true);
+    } finally {
+      await pool.query('DROP TRIGGER IF EXISTS ff_test_slow_stage ON prospects');
+      await pool.query('DROP FUNCTION IF EXISTS ff_test_slow_stage()');
+      await pool.query('DROP TABLE IF EXISTS ff_test_slow_boot');
+      await applySchema();
+      tokens._clearCacheForTests();
+    }
+  });
+
+  it('logs a main-schema failure without calling it a closed pilot', async () => {
+    await pool.query('ALTER TABLE prospects DROP COLUMN IF EXISTS fit_boost');
+    await pool.query(`UPDATE prospects SET stage = 'vetted' WHERE id = $1`, [prospect.id]);
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION ff_test_block_stage() RETURNS trigger AS $fn$
+      BEGIN
+        IF OLD.stage IS DISTINCT FROM NEW.stage THEN
+          RAISE EXCEPTION 'stage rename blocked';
+        END IF;
+        RETURN NEW;
+      END
+      $fn$ LANGUAGE plpgsql;
+      CREATE TRIGGER ff_test_block_stage
+        BEFORE UPDATE ON prospects
+        FOR EACH ROW EXECUTE FUNCTION ff_test_block_stage();
+    `);
+
+    const probe = http.createServer();
+    const port = await new Promise((resolve, reject) => {
+      probe.once('error', reject);
+      probe.listen(0, '127.0.0.1', () => resolve(probe.address().port));
+    });
+    await new Promise((resolve) => probe.close(resolve));
+
+    let child;
+    try {
+      const started = Date.now();
+      child = spawn(process.execPath, [path.join(__dirname, '../src/server.js')], {
+        env: {
+          ...process.env,
+          PORT: String(port),
+          NODE_ENV: 'test',
+          DISABLE_CRON: '1',
+          FF_PILOT_ESTIMATE_RECOVERY: 'true',
+          FF_PILOT_LINK_ON_ONEPAGER: 'true',
+          CRM_API_KEY: API_KEY,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let output = '';
+      child.stdout.on('data', (buf) => { output += buf.toString('utf8'); });
+      child.stderr.on('data', (buf) => { output += buf.toString('utf8'); });
+      const health = await new Promise((resolve, reject) => {
+        const deadline = Date.now() + 15000;
+        const attempt = () => {
+          const req = http.request({
+            method: 'GET', hostname: '127.0.0.1', port, path: '/health',
+          }, (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode));
+          });
+          req.on('error', () => {
+            if (Date.now() > deadline) {
+              reject(new Error(`server did not listen: ${JSON.stringify(output).slice(0, 2000)}`));
+            } else setTimeout(attempt, 100);
+          });
+          req.end();
+        };
+        attempt();
+      });
+      const elapsed = Date.now() - started;
+      assert.equal(health, 200);
+      assert.ok(elapsed < 15000, `listen took ${elapsed}ms`);
+      assert.match(output, /Startup migration\/rescore failed/);
+      assert.match(output, /stage rename blocked/);
+      assert.equal(output.includes('schema is not safe'), false);
+      assert.equal(output.includes('Schema up to date'), false);
+      assert.equal(output.includes('Fit scores refreshed'), false);
+      assert.equal(output.includes(API_KEY), false);
+      const column = await pool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'prospects' AND column_name = 'fit_boost'`
+      );
+      assert.equal(column.rows.length, 0);
+      const stage = await pool.query('SELECT stage FROM prospects WHERE id = $1', [prospect.id]);
+      assert.equal(stage.rows[0].stage, 'vetted');
+    } finally {
+      if (child && child.exitCode == null) {
+        child.kill('SIGTERM');
+        await new Promise((resolve) => child.once('exit', resolve));
+      }
+      await pool.query('DROP TRIGGER IF EXISTS ff_test_block_stage ON prospects');
+      await pool.query('DROP FUNCTION IF EXISTS ff_test_block_stage()');
+      await applySchema();
+      tokens._clearCacheForTests();
     }
   });
 });

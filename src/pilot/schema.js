@@ -1,7 +1,7 @@
-// Checks the pilot tables after schema.sql has committed.
-// schema.sql swallows a repair error so the rest of the file still applies.
-// Those errors are written to pilot_boot_errors. This module reads them and
-// the catalog. A failure closes the pilot; the rest of the API keeps serving.
+// Checks the pilot tables after pilot-schema.sql has committed.
+// That file runs in its own transaction, after schema.sql. A caught repair
+// error is written to pilot_boot_errors and does not roll back schema.sql.
+// A failure closes the pilot; the rest of the API keeps serving.
 
 const pool = require('../db/client');
 const tokens = require('./tokens');
@@ -100,12 +100,11 @@ function collectFailures(report, status) {
 }
 
 async function concludeSchemaBoot(report) {
-  // A lock or statement timeout already aborted the migration. That limit
-  // lived on the migration connection and is reset before the connection
-  // returns to the pool. Reading pilot_tokens on a fresh connection would
-  // wait on the same lock, and the process would never listen. The timeout
-  // is the repair failure; leave the pilot closed.
-  if (report && report.timedOut) {
+  // The pilot transaction rolled back (lock timeout, statement timeout, or
+  // another error). Its SET LOCAL limits are gone. Reading pilot_tokens now
+  // can wait on the same lock and the process would never listen. The
+  // failure is already in the report; leave the pilot closed.
+  if (report && (report.timedOut || report.rolledBack)) {
     const failures = collectFailures(report, { failures: [] });
     const detail = failures.join('; ').slice(0, 2000);
     tokens.closePilot();

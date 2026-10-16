@@ -102,23 +102,26 @@ if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_CRON !== '1') {
 const PORT = process.env.PORT || 3000;
 
 async function boot() {
+  // schema.sql throws on failure, the same as before the pilot. That catch
+  // logs the startup line and skips rescore. The pilot step returns a report
+  // instead of throwing, so a pilot failure does not take this path.
+  let mainOk = false;
   try {
     const report = await applySchema();
+    mainOk = true;
     await concludeSchemaBoot(report);
   } catch (err) {
-    // Keep serving /health so Railway doesn't crash-loop. A thrown migration
-    // closes the pilot; the schema-check failure path logs its own error and
-    // does not say the schema is up to date.
     pilotTokens.closePilot();
     console.error('[server] ✗ Startup migration/rescore failed:', err.message);
-    console.error('[pilot] schema is not safe — the estimate-recovery demo stays off.');
   }
-  try {
-    await require('./proposals/jobs').recover();
-    const n = await rescore();
-    console.log(`[server] ✓ Fit scores refreshed for ${n} prospects`);
-  } catch (err) {
-    console.error('[server] ✗ Startup migration/rescore failed:', err.message);
+  if (mainOk) {
+    try {
+      await require('./proposals/jobs').recover();
+      const n = await rescore();
+      console.log(`[server] ✓ Fit scores refreshed for ${n} prospects`);
+    } catch (err) {
+      console.error('[server] ✗ Startup migration/rescore failed:', err.message);
+    }
   }
   app.listen(PORT, () => {
     console.log(`[server] FlowForward Engine running on port ${PORT}`);

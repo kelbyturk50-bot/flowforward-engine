@@ -1,6 +1,10 @@
 #!/usr/bin/env node
-// Applies schema.sql to DATABASE_URL. The schema is idempotent, so this also
-// runs automatically every time the server boots (see src/server.js).
+// Applies schema.sql to DATABASE_URL, then the pilot repair in a second
+// transaction. schema.sql matches the pre-pilot boot: one implicit
+// transaction, no lock_timeout and no statement_timeout. The pilot file
+// runs only after that commit. Its SET LOCAL limits die with its
+// transaction, so a slow statement in schema.sql is not capped and a
+// pilot failure cannot roll the main schema back.
 //
 // Run manually: node src/db/migrate.js
 
@@ -15,8 +19,13 @@ function isBootTimeout(err) {
   return /lock timeout|statement timeout|canceling statement due to/i.test(String(err && err.message || ''));
 }
 
-async function applySchema() {
+async function applyMainSchema() {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+  await pool.query(sql);
+}
+
+async function applyPilotSchema() {
+  const sql = fs.readFileSync(path.join(__dirname, 'pilot-schema.sql'), 'utf8');
   const client = await pool.connect();
   const notices = [];
   function onNotice(msg) {
@@ -26,29 +35,30 @@ async function applySchema() {
   client.on('notice', onNotice);
   let failed = null;
   try {
-    // Own statements, so they commit before schema.sql runs. A SET inside
-    // that script would roll back with it, and the next boot query would
-    // wait forever on the same lock. 5s stops a held lock; 15s stops a
-    // statement that runs too long. RESET before release so the pooled
-    // connection does not keep either limit.
-    await client.query("SET lock_timeout = '5s'");
-    await client.query("SET statement_timeout = '15s'");
+    // SET LOCAL applies only until this transaction ends. 5s stops a held
+    // lock on the pilot tables; 15s stops a pilot statement that runs too
+    // long. schema.sql has already committed on another connection.
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await client.query("SET LOCAL statement_timeout = '15s'");
     await client.query(sql);
+    await client.query('COMMIT');
   } catch (err) {
     failed = err;
     await client.query('ROLLBACK').catch(() => {});
   } finally {
-    await client.query('RESET lock_timeout').catch(() => {});
-    await client.query('RESET statement_timeout').catch(() => {});
     client.removeListener('notice', onNotice);
     client.release();
   }
   if (failed) {
-    const message = String(failed.message || 'schema apply failed');
-    if (isBootTimeout(failed)) {
-      return { errors: [`boot-timeout: ${message}`], notices, timedOut: true };
-    }
-    throw failed;
+    const message = String(failed.message || 'pilot schema failed');
+    const timedOut = isBootTimeout(failed);
+    return {
+      errors: [`${timedOut ? 'boot-timeout' : 'pilot-schema'}: ${message}`],
+      notices,
+      timedOut,
+      rolledBack: true,
+    };
   }
   let errors = [];
   try {
@@ -59,10 +69,15 @@ async function applySchema() {
   } catch (err) {
     errors = [`pilot_boot_errors: ${err.message}`];
   }
-  return { errors, notices };
+  return { errors, notices, timedOut: false, rolledBack: false };
 }
 
-module.exports = { applySchema };
+async function applySchema() {
+  await applyMainSchema();
+  return applyPilotSchema();
+}
+
+module.exports = { applySchema, applyMainSchema, applyPilotSchema };
 
 if (require.main === module) {
   console.log('[migrate] Applying schema...');
