@@ -21,7 +21,6 @@
 // this script at Railway from an agent. Boot does not run either statement:
 // a boot update would archive those rows again on the next deploy.
 
-const pool = require('../src/db/client');
 const {
   isRunId,
   archiveTarget,
@@ -30,6 +29,8 @@ const {
   runApply,
   runUndo,
 } = require('../src/db/pest-archive');
+
+let pool;
 
 const USAGE = {
   dry: 'pest-archive dry-run failed\n',
@@ -62,6 +63,7 @@ async function main() {
     return;
   }
 
+  pool = require('../src/db/client');
   const client = await pool.connect();
   try {
     if (mode === 'dry') {
@@ -96,4 +98,6 @@ main()
     process.stderr.write('pest-archive failed\n');
     process.exitCode = 1;
   })
-  .finally(() => pool.end().catch(() => {}));
+  .finally(() => {
+    if (pool) return pool.end().catch(() => {});
+  });

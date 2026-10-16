@@ -917,26 +917,28 @@ describe('pest-name archive', { concurrency: false }, () => {
 
     const clean = { ...process.env };
     delete clean.PEST_ARCHIVE_CONFIRM;
-    const prod = runScript('apply', [], { ...clean, NODE_ENV: 'production' });
+    // The suite preload sets NODE_ENV=test. Drop it so this child can see production.
+    const productionEnv = { ...clean, NODE_ENV: 'production' };
+    delete productionEnv.NODE_OPTIONS;
+    const prod = runScript('apply', [], productionEnv);
     assert.notEqual(prod.status, 0);
     assert.equal(prod.stdout, '');
     assert.equal(prod.stderr, 'pest-archive refused\n');
     assert.equal((await stamp(row.id)).archived_at, null);
 
-    const far = runScript('apply', [], {
+    const farEnv = {
       ...clean,
       DATABASE_URL: 'postgres://u:secret@192.0.2.1:5432/prod',
-    });
+    };
+    delete farEnv.NODE_OPTIONS;
+    const far = runScript('apply', [], farEnv);
     assert.notEqual(far.status, 0);
     assert.equal(far.stdout, '');
     assert.equal(far.stderr, 'pest-archive refused\n');
     assert.equal(`${far.stdout}${far.stderr}`.includes('secret'), false);
     assert.equal((await stamp(row.id)).archived_at, null);
 
-    const farUndo = runScript('undo', ['33333333-3333-4333-8333-333333333333'], {
-      ...clean,
-      DATABASE_URL: 'postgres://u:secret@192.0.2.1:5432/prod',
-    });
+    const farUndo = runScript('undo', ['33333333-3333-4333-8333-333333333333'], farEnv);
     assert.notEqual(farUndo.status, 0);
     assert.equal(farUndo.stdout, '');
     assert.equal(`${farUndo.stdout}${farUndo.stderr}`.includes('secret'), false);
@@ -970,7 +972,7 @@ describe('pest-name archive', { concurrency: false }, () => {
     }
     assert.equal((await stamp(row.id)).archive_run_id, runId);
 
-    const undoProd = runScript('undo', [runId], { ...clean, NODE_ENV: 'production' });
+    const undoProd = runScript('undo', [runId], productionEnv);
     assert.notEqual(undoProd.status, 0);
     assert.equal(undoProd.stdout, '');
     assert.equal((await stamp(row.id)).archive_run_id, runId);
