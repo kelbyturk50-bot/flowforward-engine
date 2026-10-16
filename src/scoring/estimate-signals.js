@@ -19,12 +19,14 @@ const JOB_AD_RE = /\b(?:comfort|sales)\s+(?:advisors?|consultants?)\b|\bcomfort\
 const SEARCH_ADS_RE = /\blocal\s+services\s+ads?\b|\bgoogle\s+ads\b|\bgoogle\s+local\s+services\b|\blsas?\b/i;
 const SEARCH_ADS_LABEL_RE = /google ads|\blocal services\b|\blsas?\b/i;
 // Apostrophes: straight, U+2019 (don’t), and U+2018. Verb negations keep a
-// wide window and may cross a comma. That list includes "no longer" and
-// "no more". "not only" is not one of them: the next word after "not" is not
-// "only". Bare "no" and "without" negate only when the phrase follows
-// immediately, or with just any/a/an/the in between. A comma after "no"
-// ("No, free estimates") is not that gap.
-const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|not(?!\s+only\b)|never|no\s+longer|no\s+more)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
+// wide window and may cross a comma. "not only" is not one of them: the next
+// word after "not" is not "only". "no longer" and "no more" are not in that
+// window. They negate only when the phrase follows, or after one offer-type
+// verb and an optional any/a/an/the. Bare "no" and "without" negate only when
+// the phrase follows immediately, or with just any/a/an/the in between. A
+// comma after "no" ("No, free estimates") is not that gap.
+const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|not(?!\s+only\b)|never)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
+const NEGATIVE_NO_MORE = /\bno\s+(?:longer|more)(?:\s+(?:offer(?:s|ing|ed)?|provide(?:s|ing)?|accept(?:s|ing)?|do(?:es)?)\b)?(?:\s+(?:any|a|an|the))?\s+$/i;
 const NEGATIVE_BARE = /\b(?:no|without)(?:\s+(?:any|a|an|the))?\s+$/i;
 // A short window after the phrase: "not available", "unavailable", "none",
 // or a bare "no" / "no." The bare "no" does not match "no obligation".
@@ -226,6 +228,7 @@ function clauseAfter(text, end) {
 function isNegated(text, index, length) {
   const before = clauseBefore(text, index);
   if (NEGATIVE_VERB.test(before)) return true;
+  if (NEGATIVE_NO_MORE.test(before)) return true;
   if (NEGATIVE_BARE.test(before)) return true;
   return NEGATIVE_AFTER.test(clauseAfter(text, index + length));
 }
