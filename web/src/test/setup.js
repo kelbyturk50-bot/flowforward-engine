@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest';
 import { afterEach, vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
+import { resetRemoteFlags } from '../flags.js';
 
 vi.stubGlobal('fetch', () => {
   throw new Error('Tests must not call fetch. The API client is mocked.');
@@ -8,6 +9,7 @@ vi.stubGlobal('fetch', () => {
 
 afterEach(() => {
   cleanup();
+  resetRemoteFlags();
   localStorage.clear();
   sessionStorage.clear();
   window.history.pushState({}, '', '/');

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect } from 'react';
 import NotFound from '../NotFound';
 import { FF_PILOT_ESTIMATE_RECOVERY, flagEnabled } from '../flags';
+import { useLoadFeatureFlags } from '../remote-flags';
 import { isDemoToken } from './token';
 
 const EstimateRecovery = lazy(() => import('./EstimateRecovery'));
@@ -17,6 +18,7 @@ function useNoindex() {
 
 export default function DemoGate({ token }) {
   useNoindex();
+  useLoadFeatureFlags();
   const open = flagEnabled(FF_PILOT_ESTIMATE_RECOVERY) && isDemoToken(token);
   if (!open) return <NotFound />;
   return (
