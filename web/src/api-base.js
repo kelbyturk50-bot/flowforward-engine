@@ -9,8 +9,11 @@
 // 2. `VITE_API_URL`, under the same rule: https, or http for localhost or
 //    127.0.0.1, and no username or password. Any other value is treated as unset.
 // 3. `http://localhost:3000` when `import.meta.env.DEV` (the API's default port).
-// 4. The production Railway URL when `import.meta.env.PROD` and
+// 4. The production Railway URL when `import.meta.env.PROD`,
+//    `location.protocol` is `https:`, `location.port` is `''` (the default
+//    port; an explicit `:443` is reported the same way), and
 //    `location.hostname` is exactly one of `PRODUCTION_HOSTS`.
+//    `https://<host>:444/` and `http://<host>/` do not match.
 // 5. Otherwise unconfigured: no URL, and the client must not call `fetch`.
 //
 // Preview deployments are not in the allowlist and do not set `VITE_API_URL`.
@@ -62,7 +65,8 @@ export function shouldStoreApiUrl(typed, prefilled) {
   return normalizeUrl(typed) !== normalizeUrl(prefilled);
 }
 
-export function isProductionHost(hostname) {
+export function isProductionHost({ hostname, port, protocol } = {}) {
+  if (protocol !== 'https:' || port !== '') return false;
   const host = String(hostname ?? '');
   for (const allowed of PRODUCTION_HOSTS) {
     if (allowed === host) return true;
@@ -70,7 +74,7 @@ export function isProductionHost(hostname) {
   return false;
 }
 
-export function resolveApiBase({ viteApiUrl, dev, prod, hostname, savedUrl } = {}) {
+export function resolveApiBase({ viteApiUrl, dev, prod, hostname, port, protocol, savedUrl } = {}) {
   const saved = usableApiUrl(savedUrl);
   if (saved) return { url: saved, configured: true, source: 'settings' };
 
@@ -79,7 +83,7 @@ export function resolveApiBase({ viteApiUrl, dev, prod, hostname, savedUrl } = {
 
   if (dev) return { url: LOCAL_API_URL, configured: true, source: 'dev' };
 
-  if (prod && isProductionHost(hostname)) {
+  if (prod && isProductionHost({ hostname, port, protocol })) {
     return { url: PRODUCTION_API_URL, configured: true, source: 'production' };
   }
 

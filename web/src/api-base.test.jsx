@@ -28,6 +28,8 @@ function resolve(overrides) {
     dev: false,
     prod: true,
     hostname: PREVIEW_HOST,
+    port: '',
+    protocol: 'https:',
     savedUrl: '',
     ...overrides,
   });
@@ -41,6 +43,49 @@ describe('resolveApiBase', () => {
         configured: true,
         source: 'production',
       });
+    }
+  });
+
+  it('does not use the production API on port 444', () => {
+    for (const host of PRODUCTION_HOSTS) {
+      const page = new URL(`https://${host}:444/`);
+      expect(page.port).toBe('444');
+      expect(resolve({
+        hostname: page.hostname,
+        port: page.port,
+        protocol: page.protocol,
+      })).toEqual({ url: '', configured: false, source: 'unconfigured' });
+    }
+  });
+
+  it('treats an explicit :443 as the default https port', () => {
+    for (const host of PRODUCTION_HOSTS) {
+      const page = new URL(`https://${host}:443/`);
+      expect(page.hostname).toBe(host);
+      expect(page.port).toBe('');
+      expect(page.protocol).toBe('https:');
+      expect(resolve({
+        hostname: page.hostname,
+        port: page.port,
+        protocol: page.protocol,
+      })).toEqual({
+        url: PRODUCTION_API_URL,
+        configured: true,
+        source: 'production',
+      });
+    }
+  });
+
+  it('does not use the production API over http', () => {
+    for (const host of PRODUCTION_HOSTS) {
+      const page = new URL(`http://${host}/`);
+      expect(page.protocol).toBe('http:');
+      expect(page.port).toBe('');
+      expect(resolve({
+        hostname: page.hostname,
+        port: page.port,
+        protocol: page.protocol,
+      })).toEqual({ url: '', configured: false, source: 'unconfigured' });
     }
   });
 

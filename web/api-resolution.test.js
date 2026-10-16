@@ -21,10 +21,68 @@ describe('real API client', () => {
   it('fetches the production API from an exact production host', async () => {
     const fetchSpy = okFetch();
     vi.stubGlobal('fetch', fetchSpy);
-    _setRuntimeForTests({ dev: false, prod: true, hostname: PROD_HOST, viteApiUrl: '', savedUrl: '' });
+    const page = new URL(`https://${PROD_HOST}/`);
+    _setRuntimeForTests({
+      dev: false,
+      prod: true,
+      hostname: page.hostname,
+      port: page.port,
+      protocol: page.protocol,
+      viteApiUrl: '',
+      savedUrl: '',
+    });
     await expect(api.health()).resolves.toEqual({ ok: true });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(fetchSpy.mock.calls[0][0]).toBe(`${PRODUCTION_API_URL}/health`);
+  });
+
+  it('does not fetch when a production hostname is on port 444 or http', async () => {
+    const fetchSpy = vi.fn(() => { throw new Error('fetch must not run'); });
+    vi.stubGlobal('fetch', fetchSpy);
+    for (const host of PRODUCTION_HOSTS) {
+      for (const url of [`https://${host}:444/`, `http://${host}/`]) {
+        const page = new URL(url);
+        _setRuntimeForTests({
+          dev: false,
+          prod: true,
+          hostname: page.hostname,
+          port: page.port,
+          protocol: page.protocol,
+          viteApiUrl: '',
+          savedUrl: '',
+        });
+        await expect(api.health()).rejects.toMatchObject({
+          message: UNCONFIGURED_MESSAGE,
+          status: 0,
+        });
+        await expect(api.health()).rejects.toBeInstanceOf(ApiError);
+      }
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('treats an explicit https :443 as the default port and fetches production', async () => {
+    const fetchSpy = okFetch();
+    vi.stubGlobal('fetch', fetchSpy);
+    for (const host of PRODUCTION_HOSTS) {
+      const page = new URL(`https://${host}:443/`);
+      expect(page.port).toBe('');
+      expect(page.protocol).toBe('https:');
+      _setRuntimeForTests({
+        dev: false,
+        prod: true,
+        hostname: page.hostname,
+        port: page.port,
+        protocol: page.protocol,
+        viteApiUrl: '',
+        savedUrl: '',
+      });
+      await api.health();
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(PRODUCTION_HOSTS.length);
+    for (const call of fetchSpy.mock.calls) {
+      expect(call[0]).toBe(`${PRODUCTION_API_URL}/health`);
+    }
   });
 
   it('shows no fetch for a preview host', async () => {

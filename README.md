@@ -128,7 +128,7 @@ cd web && npm run lint
 
 How the CRM tests run is in `web/README.md`.
 
-Deploy: Vercel → Add New Project → import this repo → set **Root Directory** to `web` → deploy. The production CRM hostnames use the built-in API address. Preview hostnames do not call an API until `VITE_API_URL` points at a staging API (or someone types an address in Settings). On first open, enter the API key in Settings (stored per device). See `web/README.md`.
+Deploy: Vercel → Add New Project → import this repo → set **Root Directory** to `web` → deploy. The production CRM hostnames use the built-in API address on `https` with the default port. A non-default port or `http` does not. Preview hostnames do not call an API until `VITE_API_URL` points at a staging API (or someone types an address in Settings). On first open, enter the API key in Settings (stored per device). See `web/README.md`.
 
 --------|------|-------------|
 | GET | `/health` | Server health check |

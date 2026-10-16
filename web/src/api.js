@@ -15,6 +15,8 @@ function liveRuntime() {
     dev: import.meta.env.DEV,
     prod: import.meta.env.PROD,
     hostname: typeof window !== 'undefined' ? window.location.hostname : '',
+    port: typeof window !== 'undefined' ? window.location.port : '',
+    protocol: typeof window !== 'undefined' ? window.location.protocol : '',
     savedUrl: read('ff.apiUrl', ''),
   };
 }
