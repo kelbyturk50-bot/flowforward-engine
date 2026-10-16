@@ -5,6 +5,15 @@ const axios = require('axios');
 
 const BASE = 'https://places.googleapis.com/v1/places:searchText';
 
+// Tests pass a fake search so nothing calls places.googleapis.com.
+let searchOverride = null;
+function _setSearch(fn) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_setSearch is only available when NODE_ENV=test');
+  }
+  searchOverride = fn;
+}
+
 // Fields we want back — only request what we use (reduces cost)
 const FIELD_MASK = [
   'places.id',
@@ -27,6 +36,8 @@ const FIELD_MASK = [
  * @returns {Array} raw place objects
  */
 async function searchPlaces(query, location, maxResults = 20) {
+  if (searchOverride) return searchOverride(query, location, maxResults);
+
   const key = process.env.GOOGLE_PLACES_API_KEY;
   if (!key) throw new Error('GOOGLE_PLACES_API_KEY is not set');
 
@@ -87,4 +98,4 @@ function normalizePplace(place, industry, defaultScore) {
   };
 }
 
-module.exports = { searchPlaces, normalizePplace };
+module.exports = { searchPlaces, normalizePplace, _setSearch };

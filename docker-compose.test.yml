@@ -1,0 +1,18 @@
+# Disposable Postgres for `npm test` when initdb/pg_ctl are not installed.
+# Bound to localhost only. The test runner removes it with `docker compose down -v`.
+# The password is a throwaway local value, not a credential for any real service.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fftest
+      POSTGRES_PASSWORD: fftest
+      POSTGRES_DB: flowforward_test
+    ports:
+      - "127.0.0.1:54329:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fftest -d flowforward_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

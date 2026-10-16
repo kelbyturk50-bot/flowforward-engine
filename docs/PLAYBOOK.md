@@ -50,7 +50,7 @@ Rules:
 
 - A proposal draft is about **$0.10–$0.15** (model, cache, and a few web searches). The hard cap in code is `PROPOSAL_MAX_COST` (default $0.75) per draft.
 - Google Places is free inside the monthly credit. Past that tier, searches cost money. Discovery multiplies queries by markets.
-- Tests use mocks (`draft._setClient`, `send._setTransport`, and a Places mock that still has to be added). Tests do not spend.
+- Tests use mocks (`draft._setClient`, `send._setTransport`, and `_setSearch` in `src/bot/google-places.js`). Tests do not spend.
 - Any run that would spend — live Places, live Anthropic, or a real send — needs Kelby's yes first.
 
 ## Where routines stop
