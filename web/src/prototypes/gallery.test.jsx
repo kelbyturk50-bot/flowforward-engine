@@ -134,7 +134,7 @@ describe('prototype gallery', () => {
     const { container } = render(<GalleryGate route={{ token: TOKEN, screen: 'index' }} />);
 
     expect(await screen.findByRole('heading', { name: 'Prototype gallery' })).toBeInTheDocument();
-    expect(screen.getByText('TEST: Wasatch Heating')).toBeInTheDocument();
+    expect(container.querySelector('.prototype-brand-name span').textContent).toBe('TEST: Wasatch Heating');
     expectRibbon(container);
     expect(container.querySelector('.prototype-tile')).not.toBeNull();
     expectFooter(container, 'TEST: Wasatch Heating');

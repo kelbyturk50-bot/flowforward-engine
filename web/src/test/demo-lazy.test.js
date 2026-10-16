@@ -79,7 +79,9 @@ describe('demo code split', () => {
       const gallery = files.find(file => file.text.includes('TEST: Wasatch Heating'));
       expect(gallery, names.join(', ')).toBeTruthy();
       expect(gallery.name).not.toBe(entry.name);
-      expect(gallery.text).toContain('PROTOTYPE, not live');
+      const watermark = files.find(file => file.text.includes('PROTOTYPE, not live'));
+      expect(watermark, names.join(', ')).toBeTruthy();
+      expect(watermark.name).not.toBe(entry.name);
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }
