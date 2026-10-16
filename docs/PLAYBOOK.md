@@ -67,13 +67,13 @@ Nightly proposal drafting stays off (`PROPOSAL_AUTO_DRAFT` unset). Drafts are ma
 
 Kelby confirmed this on Oct 15, 2026.
 
-1. While FlowForward is pre-production, the current Railway environment is staging. There is no separate staging environment yet. A separate Railway staging environment is deferred until real production go-live.
-2. Tagged test database and API writes are allowed in this environment only when every test record is clearly marked as test, the records are cleaned up afterward, and the proof is posted on the PR.
+1. While FlowForward is pre-production, the current Railway environment is staging. There is no separate staging environment yet. A separate Railway staging environment is deferred until real production go-live. After real production go-live, never write to the production DB or API.
+2. Tagged test DB and API writes are allowed in this environment only when every test record is clearly marked as test, the records are cleaned up afterward, and the proof is posted on the PR. Marked as test means the visible name starts with `TEST:` (prospect `company` or project `name`) and any email uses a `test+…@` address; there is no `is_test` column.
 3. Still banned in this environment: sending emails, proposal sends, discovery runs, and contacting prospects.
 4. Still banned: changing Railway or Vercel settings or environment variables.
 5. Never put secrets in chat, code, PRs, issues, or templates.
 
-The allowance in item 2 is only those tagged test writes. It does not change items 3, 4, or 5, and it does not change the standing bans on live Places, live Anthropic, or real sends. Local work still defaults to a disposable Postgres. The same rule is in `AGENTS.md`.
+The allowance in item 2 is only those tagged test DB and API writes. It does not change items 3, 4, or 5, and it does not change the standing bans on live Places, live Anthropic, or real sends. Local work still defaults to a disposable Postgres. The same rule is in `AGENTS.md`.
 
 ## Postmortem
 
