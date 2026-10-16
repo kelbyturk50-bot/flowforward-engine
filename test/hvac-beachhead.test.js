@@ -18,6 +18,8 @@ const { isExcludedIndustry } = require('../src/scoring/industry');
 const { detectSignals } = require('../src/proposals/research');
 const { fsmDetectedFromResearch, htmlHasServiceTitan } = require('../src/proposals/servicetitan');
 const { draftProposal, _setClient } = require('../src/proposals/draft');
+const { _setResolver, _setTransport } = require('../src/net/safeFetch');
+const { mockTransport, requestedUrl } = require('./mock-transport');
 const { applySchema } = require('../src/db/migrate');
 const { resetDb, insertProspect, closePool, pool, fakeClaude } = require('./fixtures');
 
@@ -375,20 +377,19 @@ describe('HVAC beachhead', { concurrency: false }, () => {
       'https://hcp.example/': html.hcp,
     };
     const calls = [];
-    const originalGet = axios.get;
-    axios.get = async (url) => {
-      const key = String(url);
+    _setResolver({
+      async resolve4() { return ['8.8.8.8']; },
+      async resolve6() { return []; },
+    });
+    _setTransport(mockTransport((options) => {
+      const key = requestedUrl(options);
       calls.push(key);
       assert.equal(key.includes('places.googleapis.com'), false);
       assert.equal(key.includes('api.anthropic.com'), false);
       const body = pages[key];
       assert.ok(body, key);
-      return {
-        data: body,
-        headers: { 'content-type': 'text/html' },
-        request: { res: { responseUrl: key } },
-      };
-    };
+      return { status: 200, headers: { 'content-type': 'text/html' }, body };
+    }));
     _setClient(fakeClaude());
     try {
       const specs = [
@@ -421,7 +422,8 @@ describe('HVAC beachhead', { concurrency: false }, () => {
       }
       assert.equal(calls.length, 4);
     } finally {
-      axios.get = originalGet;
+      _setResolver(null);
+      _setTransport(null);
       _setClient(null);
     }
   });
@@ -450,19 +452,18 @@ describe('HVAC beachhead', { concurrency: false }, () => {
       'https://real-class.example/': '<html><div class="st-scheduler">Book</div></html>',
       'https://list.example/': '<html><div class="list-scheduler">Book</div></html>',
     };
-    const originalGet = axios.get;
     let mode = 'html';
-    axios.get = async (url) => {
+    _setResolver({
+      async resolve4() { return ['8.8.8.8']; },
+      async resolve6() { return []; },
+    });
+    _setTransport(mockTransport((options) => {
       if (mode === 'throw') throw new Error('homepage down');
-      const key = String(url);
+      const key = requestedUrl(options);
       const body = pages[key];
       assert.ok(body, key);
-      return {
-        data: body,
-        headers: { 'content-type': 'text/html' },
-        request: { res: { responseUrl: key } },
-      };
-    };
+      return { status: 200, headers: { 'content-type': 'text/html' }, body };
+    }));
     _setClient(fakeClaude());
     try {
       async function drafted(placeId, website) {
@@ -512,7 +513,8 @@ describe('HVAC beachhead', { concurrency: false }, () => {
       assert.equal(kept.rows[0].fit_tier, 'A');
       assert.equal(kept.rows[0].fit_reasons.some(r => r.detail === ST_REASON), true);
     } finally {
-      axios.get = originalGet;
+      _setResolver(null);
+      _setTransport(null);
       _setClient(null);
     }
   });
