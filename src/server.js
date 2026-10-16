@@ -57,6 +57,10 @@ app.use('/p', require('./proposals/onepager').router);
 app.use('/demo/estimate-recovery', pilotDemo.router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
+// Campaigns flag gate is mounted before API-key auth. When FF_CAMPAIGNS is
+// not exactly "true", /api/campaigns is the same 404 as an unknown path.
+const campaignsApi = require('./api/campaigns');
+app.use('/api/campaigns', campaignsApi.flagGate);
 app.use('/api', requireApiKey);
 app.use('/api/prospects', require('./api/prospects'));
 app.use('/api/projects',  projects);
@@ -69,6 +73,8 @@ app.use('/api/rubric',    require('./api/rubric'));
 // CSV intake for Pilot #1. 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly
 // "true". These routes do not send mail.
 app.use('/api/pilot/estimate-recovery', require('./api/pilot-estimates'));
+// Tracking only. 404 unless FF_CAMPAIGNS is exactly "true". Does not send.
+app.use('/api/campaigns', campaignsApi.router);
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────
 const CRON_SCHEDULE = process.env.DISCOVERY_CRON || '0 6 * * *';

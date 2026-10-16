@@ -670,3 +670,388 @@ CREATE TABLE IF NOT EXISTS pilot_estimate_suppressions (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_estimate_suppressions_customer_email
   ON pilot_estimate_suppressions (customer_id, email);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Campaigns slice 1 (F-006). Additive and idempotent. Applied on every boot.
+-- Tracking only: these statements do not INSERT, UPDATE, or DELETE existing
+-- rows, and they do not send mail. No pixel table and no /o route.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS campaigns (
+  id           SERIAL PRIMARY KEY,
+  name         TEXT NOT NULL,
+  channel      TEXT NOT NULL,
+  segment      TEXT,
+  offer_hook   TEXT,
+  start_date   DATE,
+  end_date     DATE,
+  status       TEXT NOT NULL DEFAULT 'draft',
+  cost_cents   INTEGER,
+  notes        TEXT,
+  created_by   TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT campaigns_channel_check CHECK (
+    channel IN ('email', 'phone', 'sms', 'prototype_link', 'in_person', 'referral', 'other')
+  ),
+  CONSTRAINT campaigns_status_check CHECK (
+    status IN ('draft', 'active', 'paused', 'ended')
+  )
+);
+
+CREATE TABLE IF NOT EXISTS campaign_variants (
+  id              SERIAL PRIMARY KEY,
+  campaign_id     INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  label           TEXT NOT NULL,
+  hook_summary    TEXT,
+  prototype_type  TEXT,
+  CONSTRAINT campaign_variants_label_unique UNIQUE (campaign_id, label)
+);
+
+CREATE TABLE IF NOT EXISTS campaign_leads (
+  id           SERIAL PRIMARY KEY,
+  lead_id      INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  variant_id   INTEGER REFERENCES campaign_variants(id) ON DELETE SET NULL,
+  enrolled_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT campaign_leads_lead_campaign_unique UNIQUE (lead_id, campaign_id)
+);
+
+-- No free-text column. external_ref is a future Gmail thread id, not a note.
+-- revenue_cents is allowed only on won / mvp_sold.
+-- machine_open is true only when type = opened.
+CREATE TABLE IF NOT EXISTS campaign_touches (
+  id             SERIAL PRIMARY KEY,
+  lead_id        INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  campaign_id    INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
+  variant_id     INTEGER REFERENCES campaign_variants(id) ON DELETE SET NULL,
+  type           TEXT NOT NULL,
+  channel        TEXT,
+  occurred_at    TIMESTAMPTZ NOT NULL,
+  source         TEXT NOT NULL,
+  machine_open   BOOLEAN NOT NULL DEFAULT FALSE,
+  external_ref   TEXT,
+  revenue_cents  INTEGER,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT campaign_touches_type_check CHECK (
+    type IN (
+      'sent', 'opened', 'replied', 'call_logged', 'call_booked',
+      'prototype_viewed', 'prototype_cta_clicked', 'proposal_sent',
+      'won', 'lost', 'mvp_sold', 'estimate_recovered'
+    )
+  ),
+  CONSTRAINT campaign_touches_channel_check CHECK (
+    channel IS NULL OR channel IN (
+      'email', 'phone', 'sms', 'prototype_link', 'in_person', 'referral', 'other'
+    )
+  ),
+  CONSTRAINT campaign_touches_source_check CHECK (
+    source IN ('manual', 'gmail_sync', 'system', 'pixel')
+  ),
+  CONSTRAINT campaign_touches_machine_open_check CHECK (
+    machine_open = FALSE OR type = 'opened'
+  ),
+  CONSTRAINT campaign_touches_revenue_check CHECK (
+    revenue_cents IS NULL OR (
+      type IN ('won', 'mvp_sold') AND revenue_cents >= 0
+    )
+  )
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaign_touches_lead_occurred
+  ON campaign_touches (lead_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_campaign_touches_campaign
+  ON campaign_touches (campaign_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_campaign_leads_campaign
+  ON campaign_leads (campaign_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_variants_campaign
+  ON campaign_variants (campaign_id);
+
+-- Channel defaults to the campaign channel when the insert leaves it null.
+CREATE OR REPLACE FUNCTION campaign_touches_default_channel()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  IF NEW.channel IS NULL AND NEW.campaign_id IS NOT NULL THEN
+    SELECT c.channel INTO NEW.channel FROM campaigns c WHERE c.id = NEW.campaign_id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS campaign_touches_default_channel ON campaign_touches;
+CREATE TRIGGER campaign_touches_default_channel
+  BEFORE INSERT ON campaign_touches
+  FOR EACH ROW EXECUTE FUNCTION campaign_touches_default_channel();
+
+-- Read-only projection of every proposal send and reply. Summit (Oct 16):
+-- real rows are in this view. sent_at, followup1_sent_at, and
+-- followup2_sent_at count as sent touches. replied_at counts as replied,
+-- which is the Responded numerator. Channel email. Source system. No campaign.
+-- This view does not INSERT, UPDATE, or DELETE proposals.
+CREATE OR REPLACE VIEW v_campaign_backfill_touches AS
+SELECT
+  'proposal'::text AS origin,
+  (p.id::bigint * 10 + 1) AS source_id,
+  p.prospect_id AS lead_id,
+  NULL::integer AS campaign_id,
+  NULL::integer AS variant_id,
+  'sent'::text AS type,
+  'email'::text AS channel,
+  p.sent_at AS occurred_at,
+  'system'::text AS source,
+  FALSE AS machine_open,
+  NULL::text AS external_ref,
+  NULL::integer AS revenue_cents
+FROM proposals p
+WHERE p.sent_at IS NOT NULL
+UNION ALL
+SELECT
+  'proposal'::text,
+  (p.id::bigint * 10 + 2),
+  p.prospect_id,
+  NULL::integer,
+  NULL::integer,
+  'sent'::text,
+  'email'::text,
+  p.followup1_sent_at,
+  'system'::text,
+  FALSE,
+  NULL::text,
+  NULL::integer
+FROM proposals p
+WHERE p.followup1_sent_at IS NOT NULL
+UNION ALL
+SELECT
+  'proposal'::text,
+  (p.id::bigint * 10 + 3),
+  p.prospect_id,
+  NULL::integer,
+  NULL::integer,
+  'sent'::text,
+  'email'::text,
+  p.followup2_sent_at,
+  'system'::text,
+  FALSE,
+  NULL::text,
+  NULL::integer
+FROM proposals p
+WHERE p.followup2_sent_at IS NOT NULL
+UNION ALL
+SELECT
+  'proposal'::text,
+  (p.id::bigint * 10 + 4),
+  p.prospect_id,
+  NULL::integer,
+  NULL::integer,
+  'replied'::text,
+  'email'::text,
+  p.replied_at,
+  'system'::text,
+  FALSE,
+  NULL::text,
+  NULL::integer
+FROM proposals p
+WHERE p.replied_at IS NOT NULL;
+
+-- pilot_events_type_check is not widened. Today only estimate_recovered is
+-- both a pilot event and a campaign touch type. demo_view and step_* stay out
+-- of the touch stream. prototype_viewed, prototype_cta_clicked, call_booked,
+-- and mvp_sold are not emitted on pilot_events yet; those rows live in
+-- campaign_touches. The UNION arm keeps this view from being auto-updatable.
+CREATE OR REPLACE VIEW v_campaign_pilot_event_touches AS
+SELECT
+  'pilot'::text AS origin,
+  e.id::bigint AS source_id,
+  e.prospect_id AS lead_id,
+  NULL::integer AS campaign_id,
+  NULL::integer AS variant_id,
+  e.event_type AS type,
+  NULL::text AS channel,
+  e.created_at AS occurred_at,
+  'system'::text AS source,
+  FALSE AS machine_open,
+  NULL::text AS external_ref,
+  NULL::integer AS revenue_cents
+FROM pilot_events e
+WHERE e.prospect_id IS NOT NULL
+  AND e.event_type = 'estimate_recovered'
+UNION ALL
+SELECT
+  'pilot'::text,
+  e.id::bigint,
+  e.prospect_id,
+  NULL::integer,
+  NULL::integer,
+  e.event_type,
+  NULL::text,
+  e.created_at,
+  'system'::text,
+  FALSE,
+  NULL::text,
+  NULL::integer
+FROM pilot_events e
+WHERE FALSE;
+
+-- Effective stream = campaign_touches UNION the read-only views.
+-- Opens are in the stream for the display metric. Attribution ignores them.
+CREATE OR REPLACE VIEW v_campaign_effective_touches AS
+SELECT
+  'touch'::text AS origin,
+  t.id::bigint AS source_id,
+  t.lead_id,
+  t.campaign_id,
+  t.variant_id,
+  t.type,
+  t.channel,
+  t.occurred_at,
+  t.source,
+  t.machine_open,
+  t.external_ref,
+  t.revenue_cents
+FROM campaign_touches t
+UNION ALL
+SELECT
+  origin, source_id, lead_id, campaign_id, variant_id, type, channel,
+  occurred_at, source, machine_open, external_ref, revenue_cents
+FROM v_campaign_backfill_touches
+UNION ALL
+SELECT
+  origin, source_id, lead_id, campaign_id, variant_id, type, channel,
+  occurred_at, source, machine_open, external_ref, revenue_cents
+FROM v_campaign_pilot_event_touches;
+
+-- Last-touch (default) or first-touch, computed on read. Not stored.
+-- Qualifying prior touches are the tie-order types only. opened and lost are
+-- never inputs. won, mvp_sold, and estimate_recovered are conversion events:
+-- they are attributed, and they are not prior-touch qualifiers, so a
+-- conversion cannot credit itself. call_booked is a conversion when it is the
+-- event being attributed (excluded by identity) and a qualifier for a later
+-- conversion. Window is 90 days, occurred_at <= the conversion.
+-- Tie order at the same timestamp: non-null campaign_id, then
+-- call_booked > replied > prototype_cta_clicked > prototype_viewed >
+-- call_logged > proposal_sent > sent, then the newer enrolled_at, then the
+-- lower source_id. A qualifier with no campaign falls back to the lead's
+-- single active campaign in that channel. Zero or several is unattributed.
+CREATE OR REPLACE FUNCTION campaign_attribute_conversion(
+  p_lead_id integer,
+  p_occurred_at timestamptz,
+  p_exclude_origin text,
+  p_exclude_id bigint,
+  p_model text
+)
+RETURNS TABLE (
+  origin text,
+  source_id bigint,
+  campaign_id integer,
+  variant_id integer,
+  channel text,
+  unattributed boolean
+)
+LANGUAGE plpgsql
+STABLE
+SET search_path = public
+AS $$
+DECLARE
+  chosen record;
+  fallback_count integer;
+  fallback_campaign integer;
+  fallback_variant integer;
+BEGIN
+  IF p_model IS NULL OR p_model NOT IN ('first', 'last') THEN
+    RAISE EXCEPTION 'invalid attribution model';
+  END IF;
+
+  SELECT
+    t.origin,
+    t.source_id,
+    t.campaign_id,
+    t.variant_id,
+    t.channel,
+    t.occurred_at,
+    t.type,
+    cl.enrolled_at
+  INTO chosen
+  FROM v_campaign_effective_touches t
+  LEFT JOIN campaign_leads cl
+    ON cl.lead_id = t.lead_id
+   AND cl.campaign_id = t.campaign_id
+  WHERE t.lead_id = p_lead_id
+    AND t.type IN (
+      'sent', 'call_logged', 'replied', 'call_booked',
+      'prototype_viewed', 'prototype_cta_clicked', 'proposal_sent'
+    )
+    AND NOT (
+      p_exclude_origin IS NOT NULL
+      AND p_exclude_id IS NOT NULL
+      AND t.origin = p_exclude_origin
+      AND t.source_id = p_exclude_id
+    )
+    AND t.occurred_at <= p_occurred_at
+    AND t.occurred_at >= p_occurred_at - INTERVAL '90 days'
+  ORDER BY
+    CASE WHEN p_model = 'first' THEN t.occurred_at END ASC,
+    CASE WHEN p_model = 'last' THEN t.occurred_at END DESC,
+    CASE WHEN t.campaign_id IS NULL THEN 1 ELSE 0 END ASC,
+    CASE t.type
+      WHEN 'call_booked' THEN 1
+      WHEN 'replied' THEN 2
+      WHEN 'prototype_cta_clicked' THEN 3
+      WHEN 'prototype_viewed' THEN 4
+      WHEN 'call_logged' THEN 5
+      WHEN 'proposal_sent' THEN 6
+      WHEN 'sent' THEN 7
+      ELSE 100
+    END ASC,
+    cl.enrolled_at DESC NULLS LAST,
+    t.source_id ASC,
+    t.origin ASC
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    origin := NULL;
+    source_id := NULL;
+    campaign_id := NULL;
+    variant_id := NULL;
+    channel := NULL;
+    unattributed := TRUE;
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
+  IF chosen.campaign_id IS NOT NULL THEN
+    origin := chosen.origin;
+    source_id := chosen.source_id;
+    campaign_id := chosen.campaign_id;
+    variant_id := chosen.variant_id;
+    channel := chosen.channel;
+    unattributed := FALSE;
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
+  SELECT COUNT(*)::int, MIN(c.id), MIN(cl.variant_id)
+    INTO fallback_count, fallback_campaign, fallback_variant
+    FROM campaigns c
+    JOIN campaign_leads cl
+      ON cl.campaign_id = c.id
+     AND cl.lead_id = p_lead_id
+   WHERE c.status = 'active'
+     AND c.channel IS NOT DISTINCT FROM chosen.channel;
+
+  origin := chosen.origin;
+  source_id := chosen.source_id;
+  channel := chosen.channel;
+  IF fallback_count = 1 THEN
+    campaign_id := fallback_campaign;
+    variant_id := fallback_variant;
+    unattributed := FALSE;
+  ELSE
+    campaign_id := NULL;
+    variant_id := NULL;
+    unattributed := TRUE;
+  END IF;
+  RETURN NEXT;
+END;
+$$;
