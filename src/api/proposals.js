@@ -33,13 +33,13 @@ router.get('/', async (req, res) => {
   try {
     if (req.query.prospect_id) {
       const { rows } = await pool.query(`SELECT ${LIST_COLS} FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
-        WHERE pr.prospect_id = $1 ORDER BY pr.version DESC`, [req.query.prospect_id]);
+        WHERE pr.prospect_id = $1 AND p.archived_at IS NULL ORDER BY pr.version DESC`, [req.query.prospect_id]);
       return res.json({ proposals: rows.map(withUrl) });
     }
     const where = VIEWS[req.query.view] || VIEWS.review;
     const order = req.query.view === 'out' ? 'pr.sent_at DESC' : req.query.view === 'review' ? 'p.fit_score DESC NULLS LAST, pr.created_at DESC' : 'pr.updated_at DESC';
     const { rows } = await pool.query(`SELECT ${LIST_COLS} FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
-      WHERE ${where} ORDER BY ${order} LIMIT 200`);
+      WHERE ${where} AND p.archived_at IS NULL ORDER BY ${order} LIMIT 200`);
     res.json({ proposals: rows.map(withUrl) });
   } catch (err) { fail(res, err); }
 });
@@ -49,7 +49,7 @@ router.get('/summary', async (req, res) => {
   try {
     const counts = {};
     await Promise.all(Object.entries(VIEWS).map(async ([k, w]) => {
-      const { rows } = await pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr WHERE ${w}`);
+      const { rows } = await pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE ${w} AND p.archived_at IS NULL`);
       counts[k] = rows[0].n;
     }));
     const eligibleParams = [cfg.TIERS];
@@ -63,7 +63,7 @@ router.get('/summary', async (req, res) => {
                     AND NOT EXISTS (SELECT 1 FROM proposals pr WHERE pr.prospect_id = p.id)`, eligibleParams),
     ]);
     const [unreviewed, activeJobs] = await Promise.all([
-      pool.query(`SELECT COUNT(*)::int AS n FROM proposals WHERE status = 'draft' AND reviewed_at IS NULL`),
+      pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'draft' AND pr.reviewed_at IS NULL AND p.archived_at IS NULL`),
       pool.query(`SELECT COUNT(*)::int AS n FROM proposal_jobs WHERE status IN ('queued', 'running')`),
     ]);
     counts.unreviewed = unreviewed.rows[0].n;
@@ -92,7 +92,7 @@ router.get('/jobs', async (req, res) => {
   try {
     const [list, unreviewed] = await Promise.all([
       jobs.list({ prospectId: req.query.prospect_id ? parseInt(req.query.prospect_id, 10) : null }),
-      pool.query(`SELECT COUNT(*)::int AS n FROM proposals WHERE status = 'draft' AND reviewed_at IS NULL`),
+      pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'draft' AND pr.reviewed_at IS NULL AND p.archived_at IS NULL`),
     ]);
     res.json({ jobs: list, unreviewed: unreviewed.rows[0].n });
   }

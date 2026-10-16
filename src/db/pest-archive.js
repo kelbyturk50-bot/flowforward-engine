@@ -5,10 +5,13 @@
 //
 // The match is appendCompanyPestExclusion, which is companyNameKeptSql on
 // p.company. A folded name longer than 200 code points is included. Rows
-// already archived for any other reason are not updated.
+// already archived for any other reason are not updated. Each apply stamps
+// a new archive_run_id. Undo restores that run only.
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const parseConnectionString = require('pg-connection-string').parse;
 const {
   PEST_CANONICAL,
   PEST_TEXT_PATTERN,
@@ -17,6 +20,7 @@ const {
 
 const PEST_ARCHIVE_REASON = 'pest-name gate (#39)';
 const ARCHIVED_LEAD_REASON = 'This lead is archived';
+const RUN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const CATEGORIES = ['would_archive', 'already_pest_archived', 'skipped_other_reason', 'active_other'];
 const BUCKETS = ['other_industry', 'pest_industry'];
@@ -26,6 +30,10 @@ const INDUSTRY_KEY = "lower(regexp_replace(btrim(COALESCE(p.industry, '')), '\\s
 
 function pestIndustryKey() {
   return String(PEST_CANONICAL).trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function isRunId(value) {
+  return typeof value === 'string' && RUN_ID_RE.test(value);
 }
 
 function isArchivedLead(row) {
@@ -40,16 +48,122 @@ function notArchivedSql(alias = '') {
   return `${prefix}archived_at IS NULL`;
 }
 
-function archiveStatement() {
+function splitHostList(value) {
+  const hosts = [];
+  let current = '';
+  let brackets = 0;
+  for (const ch of String(value || '')) {
+    if (ch === '[') brackets += 1;
+    else if (ch === ']') brackets = Math.max(0, brackets - 1);
+    else if (ch === ',' && brackets === 0) {
+      if (current.trim()) hosts.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) hosts.push(current.trim());
+  return hosts;
+}
+
+function normalizeHost(host) {
+  let value = String(host || '').trim().toLowerCase();
+  if (value.startsWith('[') && value.endsWith(']')) value = value.slice(1, -1);
+  return value.replace(/\.$/, '');
+}
+
+function isLocalHost(host) {
+  const value = normalizeHost(host);
+  if (!value) return false;
+  if (value.startsWith('/') && !value.startsWith('//')) return true;
+  if (value === 'localhost' || value === '::1' || value === '0:0:0:0:0:0:0:1') return true;
+  if (value.startsWith('::ffff:')) return isLocalHost(value.slice('::ffff:'.length));
+  const parts = value.split('.');
+  if (parts.length !== 4 || !parts.every(part => /^\d{1,3}$/.test(part))) return false;
+  const nums = parts.map(Number);
+  if (nums.some(n => n > 255)) return false;
+  return nums[0] === 127;
+}
+
+function printHost(host) {
+  let value = String(host || '').trim();
+  if (value.startsWith('[') && value.endsWith(']')) value = value.slice(1, -1);
+  return value;
+}
+
+// The host node-postgres dials from DATABASE_URL. A missing host is localhost.
+// hostaddr is the dial target when it is set. A service name can point anywhere.
+function archiveTarget(env) {
+  const production = env.NODE_ENV === 'production';
+  let parsed = {};
+  if (env.DATABASE_URL != null && String(env.DATABASE_URL).trim() !== '') {
+    try {
+      parsed = parseConnectionString(String(env.DATABASE_URL));
+    } catch {
+      return { blocked: true, local: false, production, host: 'invalid' };
+    }
+  }
+  if (parsed.service) {
+    return { blocked: true, local: false, production, host: 'service' };
+  }
+  const dial = parsed.hostaddr ? splitHostList(parsed.hostaddr) : splitHostList(parsed.host || '');
+  const hosts = dial.length ? dial : ['localhost'];
+  const local = hosts.every(isLocalHost);
+  return {
+    blocked: production || !local,
+    local,
+    production,
+    host: hosts.map(printHost).join(','),
+  };
+}
+
+function confirmValue(env) {
+  const confirm = env.PEST_ARCHIVE_CONFIRM;
+  return typeof confirm === 'string' && confirm.length > 0 ? confirm : null;
+}
+
+function refused() {
+  const err = new Error('pest-archive refused');
+  err.code = 'PEST_ARCHIVE_REFUSED';
+  return err;
+}
+
+// Opens a transaction and allows the write, or rolls back and throws.
+// A blocked target with no confirm throws before any query.
+async function beginGuardedWrite(client, env) {
+  const target = archiveTarget(env);
+  const confirm = confirmValue(env);
+  if (target.blocked && !confirm) throw refused();
+  await client.query('BEGIN');
+  try {
+    const { rows } = await client.query('SELECT current_database() AS name');
+    const database = rows[0] && rows[0].name;
+    if (typeof database !== 'string' || !database) throw new Error('database name rejected');
+    if (target.blocked && confirm !== database) {
+      await client.query('ROLLBACK');
+      throw refused();
+    }
+    return { host: target.host, database };
+  } catch (err) {
+    if (err.code !== 'PEST_ARCHIVE_REFUSED') await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  }
+}
+
+function archiveStatement(runId) {
+  if (!isRunId(runId)) throw new Error('archive run id rejected');
   const params = [];
   const kept = appendCompanyPestExclusion(params);
   const reasonIndex = params.push(PEST_ARCHIVE_REASON);
+  const runIndex = params.push(runId);
   const text = `WITH updated AS (
     UPDATE prospects p
        SET archived_at = NOW(),
-           archive_reason = $${reasonIndex}
+           archive_reason = $${reasonIndex},
+           archive_run_id = $${runIndex}
      WHERE p.archived_at IS NULL
        AND p.archive_reason IS NULL
+       AND p.archive_run_id IS NULL
        AND NOT (${kept})
     RETURNING 1
   )
@@ -60,6 +174,7 @@ function archiveStatement() {
 function unarchiveSql() {
   const sql = fs.readFileSync(path.join(__dirname, 'pest-archive-undo.sql'), 'utf8');
   if (!sql.includes(PEST_ARCHIVE_REASON)) throw new Error('undo sql rejected');
+  if (!sql.includes('archive_run_id = $1')) throw new Error('undo sql rejected');
   if (/DELETE\s+FROM/i.test(sql)) throw new Error('undo sql rejected');
   return sql;
 }
@@ -71,9 +186,9 @@ function dryRunQuery() {
   const patternIndex = params.push(PEST_TEXT_PATTERN);
   const keyIndex = params.push(pestIndustryKey());
   const category = `CASE
-    WHEN p.archived_at IS NULL AND p.archive_reason IS NULL AND NOT (${kept}) THEN 'would_archive'
+    WHEN p.archived_at IS NULL AND p.archive_reason IS NULL AND p.archive_run_id IS NULL AND NOT (${kept}) THEN 'would_archive'
     WHEN p.archive_reason = $${reasonIndex} THEN 'already_pest_archived'
-    WHEN p.archived_at IS NOT NULL OR p.archive_reason IS NOT NULL THEN 'skipped_other_reason'
+    WHEN p.archived_at IS NOT NULL OR p.archive_reason IS NOT NULL OR p.archive_run_id IS NOT NULL THEN 'skipped_other_reason'
     ELSE 'active_other'
   END`;
   const bucket = `CASE
@@ -117,31 +232,35 @@ async function runDry(client) {
   }
 }
 
-async function runApply(client) {
-  await client.query('BEGIN');
+async function runApply(client, opts = {}) {
+  const own = !opts.joined;
+  if (own) await client.query('BEGIN');
   try {
-    const { text, values } = archiveStatement();
+    const runId = crypto.randomUUID();
+    const { text, values } = archiveStatement(runId);
     const { rows } = await client.query(text, values);
     const n = rows[0] && rows[0].n;
     if (!Number.isInteger(n) || n < 0) throw new Error('archive count rejected');
-    await client.query('COMMIT');
-    return n;
+    if (own) await client.query('COMMIT');
+    return { n, runId };
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    if (own) await client.query('ROLLBACK').catch(() => {});
     throw err;
   }
 }
 
-async function runUndo(client) {
-  await client.query('BEGIN');
+async function runUndo(client, runId, opts = {}) {
+  if (!isRunId(runId)) throw new Error('archive run id rejected');
+  const own = !opts.joined;
+  if (own) await client.query('BEGIN');
   try {
-    const { rows } = await client.query(unarchiveSql());
+    const { rows } = await client.query(unarchiveSql(), [runId]);
     const n = rows[0] && rows[0].n;
     if (!Number.isInteger(n) || n < 0) throw new Error('undo count rejected');
-    await client.query('COMMIT');
+    if (own) await client.query('COMMIT');
     return n;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    if (own) await client.query('ROLLBACK').catch(() => {});
     throw err;
   }
 }
@@ -152,8 +271,11 @@ module.exports = {
   CATEGORIES,
   BUCKETS,
   TIERS,
+  isRunId,
   isArchivedLead,
   notArchivedSql,
+  archiveTarget,
+  beginGuardedWrite,
   archiveStatement,
   unarchiveSql,
   dryRunQuery,

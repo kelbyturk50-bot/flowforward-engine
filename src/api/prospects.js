@@ -72,8 +72,8 @@ router.get('/stats', async (req, res) => {
 router.get('/meta', async (req, res) => {
   try {
     const [ind, city] = await Promise.all([
-      pool.query(`SELECT DISTINCT industry FROM prospects WHERE industry IS NOT NULL ORDER BY industry`),
-      pool.query(`SELECT city, COUNT(*)::int AS n FROM prospects WHERE city <> '' GROUP BY city ORDER BY n DESC`),
+      pool.query(`SELECT DISTINCT industry FROM prospects WHERE industry IS NOT NULL AND archived_at IS NULL ORDER BY industry`),
+      pool.query(`SELECT city, COUNT(*)::int AS n FROM prospects WHERE city <> '' AND archived_at IS NULL GROUP BY city ORDER BY n DESC`),
     ]);
     res.json({ stages: STAGES, industries: ind.rows.map(r => r.industry), cities: city.rows.map(r => r.city) });
   } catch (err) {

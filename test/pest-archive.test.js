@@ -32,6 +32,9 @@ const {
   TIERS,
   archiveStatement,
   unarchiveSql,
+  dryRunQuery,
+  archiveTarget,
+  beginGuardedWrite,
   runApply,
 } = require('../src/db/pest-archive');
 const { PEST_COMPANY_PATTERN, isPestCompanyName } = require('../src/scoring/industry');
@@ -57,8 +60,29 @@ function grid(overrides) {
   return lines.join('\n') + '\n';
 }
 
-function runScript(mode) {
-  return spawnSync(process.execPath, [SCRIPT, mode], { encoding: 'utf8', env: process.env });
+function runScript(mode, extra = [], env = process.env) {
+  return spawnSync(process.execPath, [SCRIPT, mode, ...extra], { encoding: 'utf8', env });
+}
+
+function parseWrite(stdout, label) {
+  const lines = stdout.split('\n');
+  assert.equal(lines[lines.length - 1], '');
+  const body = lines.slice(0, -1);
+  const expected = archiveTarget(process.env);
+  assert.equal(body[0], `host ${expected.host}`);
+  assert.equal(body[1], 'database flowforward_test');
+  assert.match(body[2], new RegExp(`^${label} \\d+$`));
+  const n = Number(body[2].slice(label.length + 1));
+  let runId = null;
+  if (label === 'archived') {
+    assert.equal(body.length, 4);
+    assert.match(body[3], /^run [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    runId = body[3].slice(4);
+  } else {
+    assert.equal(body.length, 3);
+  }
+  assert.doesNotMatch(stdout, /postgres:|password|secret|@/);
+  return { n, runId };
 }
 
 function assertCountsOnly(stdout) {
@@ -69,7 +93,7 @@ function assertCountsOnly(stdout) {
 async function stamp(id) {
   const { rows } = await pool.query(
     `SELECT id, company, industry, email, phone, stage, fit_score, fit_tier,
-            archived_at, archive_reason, updated_at
+            archived_at, archive_reason, archive_run_id, updated_at
        FROM prospects WHERE id = $1`,
     [id]
   );
@@ -97,6 +121,7 @@ describe('pest-name archive', { concurrency: false }, () => {
     app.use('/api/prospects', require('../src/api/prospects'));
     app.use('/api/focus', require('../src/api/focus'));
     app.use('/api/proposals', require('../src/api/proposals'));
+    app.use('/p', require('../src/proposals/onepager').router);
     server = http.createServer(app);
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     apiBase = `http://127.0.0.1:${server.address().port}`;
@@ -117,31 +142,51 @@ describe('pest-name archive', { concurrency: false }, () => {
     const undo = unarchiveSql();
     assert.match(schema, /ADD COLUMN IF NOT EXISTS archived_at/);
     assert.match(schema, /ADD COLUMN IF NOT EXISTS archive_reason/);
+    assert.match(schema, /ADD COLUMN IF NOT EXISTS archive_run_id/);
     assert.doesNotMatch(schema, /SET archived_at/);
     assert.doesNotMatch(schema, /archive_reason\s*=/);
+    assert.doesNotMatch(schema, /archive_run_id\s*=/);
     assert.doesNotMatch(migrate, /pest-archive/);
     assert.doesNotMatch(serverSrc, /pest-archive/);
     assert.match(undo, /WHERE archive_reason = 'pest-name gate \(#39\)'/);
+    assert.match(undo, /AND archive_run_id = \$1/);
+    assert.match(undo, /archive_run_id = NULL/);
     assert.doesNotMatch(undo, /DELETE/i);
     assert.doesNotMatch(undo, /LIKE/i);
 
-    const stmt = archiveStatement();
+    const stmt = archiveStatement('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
     assert.match(stmt.text, /RETURNING 1/);
     assert.match(stmt.text, /char_length/);
     assert.match(stmt.text, /NOT \(/);
+    assert.match(stmt.text, /p\.archived_at IS NULL/);
+    assert.match(stmt.text, /p\.archive_reason IS NULL/);
+    assert.match(stmt.text, /p\.archive_run_id IS NULL/);
     assert.equal(stmt.text.includes('DELETE'), false);
     assert.equal(stmt.values.includes(PEST_ARCHIVE_REASON), true);
     assert.equal(stmt.values.includes(PEST_COMPANY_PATTERN), true);
+    assert.equal(stmt.values.at(-1), 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+    assert.match(dryRunQuery().text, /p\.archive_run_id IS NULL/);
+
+    const archiveSrc = fs.readFileSync(path.join(__dirname, '../src/db/pest-archive.js'), 'utf8');
+    const fitSrc = fs.readFileSync(path.join(__dirname, '../src/scoring/fit.js'), 'utf8');
+    const sendSrc = fs.readFileSync(path.join(__dirname, '../src/proposals/send.js'), 'utf8');
+    assert.match(archiveSrc, /BEGIN READ ONLY/);
+    const rescoreUpdate = fitSrc.slice(fitSrc.indexOf('UPDATE prospects p SET fit_score'), fitSrc.indexOf('return rows.length'));
+    assert.match(rescoreUpdate, /archived_at IS NULL/);
+    const followStart = sendSrc.indexOf('for (const p of rows)');
+    const followLoop = sendSrc.slice(followStart, sendSrc.indexOf('if (p.do_not_contact', followStart));
+    assert.match(followLoop, /isArchivedLead\(p\)/);
 
     const cols = await pool.query(
       `SELECT column_name, data_type, is_nullable
          FROM information_schema.columns
         WHERE table_schema = 'public' AND table_name = 'prospects'
-          AND column_name IN ('archived_at', 'archive_reason')
+          AND column_name IN ('archived_at', 'archive_reason', 'archive_run_id')
         ORDER BY column_name`
     );
     assert.deepEqual(cols.rows, [
       { column_name: 'archive_reason', data_type: 'text', is_nullable: 'YES' },
+      { column_name: 'archive_run_id', data_type: 'text', is_nullable: 'YES' },
       { column_name: 'archived_at', data_type: 'timestamp with time zone', is_nullable: 'YES' },
     ]);
 
@@ -156,6 +201,7 @@ describe('pest-name archive', { concurrency: false }, () => {
     const after = await stamp(row.id);
     assert.equal(after.archived_at, null);
     assert.equal(after.archive_reason, null);
+    assert.equal(after.archive_run_id, null);
     assert.equal(after.company, row.company);
 
     const dry = runScript('dry');
@@ -222,14 +268,37 @@ describe('pest-name archive', { concurrency: false }, () => {
     const theta = await add('test-place-arch-theta', 'TEST: Theta Pest', 'Pest Control', 'A', {
       email: 'test+theta@example.com',
     });
+    const onlyAt = await add('test-place-arch-only-at', 'TEST: Iota Pest Control', 'HVAC', 'A', {
+      email: 'test+only-at@example.com',
+    });
+    const onlyReason = await add('test-place-arch-only-reason', 'TEST: Kappa Exterminators', 'HVAC', 'B', {
+      email: 'test+only-reason@example.com',
+    });
+    const onlyRun = await add('test-place-arch-only-run', 'TEST: Lambda Pest', 'HVAC', 'C', {
+      email: 'test+only-run@example.com',
+    });
+    const thetaRun = '11111111-1111-4111-8111-111111111111';
+    const priorRun = '22222222-2222-4222-8222-222222222222';
 
     await pool.query(
       `UPDATE prospects SET archived_at = TIMESTAMPTZ '2020-01-02T00:00:00Z', archive_reason = 'manual hold' WHERE id = $1`,
       [zeta]
     );
     await pool.query(
-      `UPDATE prospects SET archived_at = TIMESTAMPTZ '2020-03-04T00:00:00Z', archive_reason = $2 WHERE id = $1`,
-      [theta, PEST_ARCHIVE_REASON]
+      `UPDATE prospects SET archived_at = TIMESTAMPTZ '2020-03-04T00:00:00Z', archive_reason = $2, archive_run_id = $3 WHERE id = $1`,
+      [theta, PEST_ARCHIVE_REASON, thetaRun]
+    );
+    await pool.query(
+      `UPDATE prospects SET archived_at = TIMESTAMPTZ '2020-05-06T00:00:00Z' WHERE id = $1`,
+      [onlyAt]
+    );
+    await pool.query(
+      `UPDATE prospects SET archive_reason = 'manual hold' WHERE id = $1`,
+      [onlyReason]
+    );
+    await pool.query(
+      `UPDATE prospects SET archive_run_id = $2 WHERE id = $1`,
+      [onlyRun, priorRun]
     );
     const zetaBefore = await stamp(zeta);
     const thetaBefore = await stamp(theta);
@@ -241,7 +310,9 @@ describe('pest-name archive', { concurrency: false }, () => {
       'would_archive other_industry C': 1,
       'would_archive pest_industry D': 1,
       'already_pest_archived pest_industry A': 1,
-      'skipped_other_reason other_industry A': 1,
+      'skipped_other_reason other_industry A': 2,
+      'skipped_other_reason other_industry B': 1,
+      'skipped_other_reason other_industry C': 1,
       'active_other other_industry A': 2,
       'active_other other_industry B': 1,
       'active_other other_industry D': 1,
@@ -255,21 +326,23 @@ describe('pest-name archive', { concurrency: false }, () => {
 
     const apply = runScript('apply');
     assert.equal(apply.status, 0, apply.stderr);
-    assert.equal(apply.stdout, 'archived 4\n');
+    const applied = parseWrite(apply.stdout, 'archived');
+    assert.equal(applied.n, 4);
     assert.doesNotMatch(apply.stdout, /@|TEST:|555/);
     const afterCount = await pool.query('SELECT COUNT(*)::int AS n FROM prospects');
     assert.equal(afterCount.rows[0].n, beforeCount.rows[0].n);
 
     const matched = new Set([alpha, beta, longId, terminix]);
-    const pre = new Set([zeta, theta]);
+    const pre = new Set([zeta, theta, onlyAt, onlyReason, onlyRun]);
     const { rows: judged } = await pool.query(
-      `SELECT id, company, archived_at, archive_reason, fit_score, email, stage, industry FROM prospects`
+      `SELECT id, company, archived_at, archive_reason, archive_run_id, fit_score, email, stage, industry FROM prospects`
     );
     for (const row of judged) {
       if (pre.has(row.id)) continue;
       assert.equal(Boolean(row.archived_at), isPestCompanyName(row.company));
       if (matched.has(row.id)) {
         assert.equal(row.archive_reason, PEST_ARCHIVE_REASON);
+        assert.equal(row.archive_run_id, applied.runId);
         assert.equal(row.fit_score, 80);
         assert.equal(row.email.endsWith('@example.com'), true);
       } else {
@@ -281,70 +354,103 @@ describe('pest-name archive', { concurrency: false }, () => {
     const alphaOnce = await stamp(alpha);
     const zetaOnce = await stamp(zeta);
     const thetaOnce = await stamp(theta);
+    const onlyAtOnce = await stamp(onlyAt);
+    const onlyReasonOnce = await stamp(onlyReason);
+    const onlyRunOnce = await stamp(onlyRun);
     assert.equal(zetaOnce.archive_reason, 'manual hold');
     assert.equal(new Date(zetaOnce.archived_at).toISOString(), new Date(zetaBefore.archived_at).toISOString());
     assert.equal(new Date(zetaOnce.updated_at).toISOString(), new Date(zetaBefore.updated_at).toISOString());
     assert.equal(thetaOnce.archive_reason, PEST_ARCHIVE_REASON);
+    assert.equal(thetaOnce.archive_run_id, thetaRun);
     assert.equal(new Date(thetaOnce.archived_at).toISOString(), new Date(thetaBefore.archived_at).toISOString());
     assert.equal(new Date(thetaOnce.updated_at).toISOString(), new Date(thetaBefore.updated_at).toISOString());
+    assert.equal(onlyAtOnce.archive_reason, null);
+    assert.equal(onlyAtOnce.archive_run_id, null);
+    assert.equal(new Date(onlyAtOnce.archived_at).toISOString(), '2020-05-06T00:00:00.000Z');
+    assert.equal(onlyReasonOnce.archived_at, null);
+    assert.equal(onlyReasonOnce.archive_reason, 'manual hold');
+    assert.equal(onlyReasonOnce.archive_run_id, null);
+    assert.equal(onlyRunOnce.archived_at, null);
+    assert.equal(onlyRunOnce.archive_reason, null);
+    assert.equal(onlyRunOnce.archive_run_id, priorRun);
     assert.notEqual(alphaOnce.archived_at, null);
 
     const again = runScript('apply');
     assert.equal(again.status, 0, again.stderr);
-    assert.equal(again.stdout, 'archived 0\n');
+    const appliedAgain = parseWrite(again.stdout, 'archived');
+    assert.equal(appliedAgain.n, 0);
+    assert.notEqual(appliedAgain.runId, applied.runId);
     const alphaTwice = await stamp(alpha);
     const zetaTwice = await stamp(zeta);
     assert.equal(new Date(alphaTwice.archived_at).toISOString(), new Date(alphaOnce.archived_at).toISOString());
     assert.equal(new Date(alphaTwice.updated_at).toISOString(), new Date(alphaOnce.updated_at).toISOString());
+    assert.equal(alphaTwice.archive_run_id, applied.runId);
     assert.equal(alphaTwice.fit_score, 80);
     assert.equal(alphaTwice.email, 'test+alpha@example.com');
     assert.equal(zetaTwice.archive_reason, 'manual hold');
     assert.equal(new Date(zetaTwice.archived_at).toISOString(), new Date(zetaBefore.archived_at).toISOString());
 
-    const undo = runScript('undo');
+    const missing = runScript('undo');
+    assert.notEqual(missing.status, 0);
+    assert.equal(missing.stdout, '');
+    assert.equal(missing.stderr, 'pest-archive undo failed\n');
+    const otherRun = runScript('undo', ['00000000-0000-4000-8000-000000000000']);
+    assert.equal(otherRun.status, 0, otherRun.stderr);
+    assert.equal(parseWrite(otherRun.stdout, 'restored').n, 0);
+    assert.equal((await stamp(alpha)).archive_run_id, applied.runId);
+    assert.equal((await stamp(theta)).archive_run_id, thetaRun);
+
+    const undo = runScript('undo', [applied.runId]);
     assert.equal(undo.status, 0, undo.stderr);
-    assert.equal(undo.stdout, 'restored 5\n');
+    assert.equal(parseWrite(undo.stdout, 'restored').n, 4);
     assert.doesNotMatch(undo.stdout, /@|TEST:/);
-    for (const id of [...matched, theta]) {
+    for (const id of matched) {
       const row = await stamp(id);
       assert.equal(row.archived_at, null);
       assert.equal(row.archive_reason, null);
+      assert.equal(row.archive_run_id, null);
       assert.equal(row.fit_score, 80);
     }
+    const thetaUndone = await stamp(theta);
+    assert.equal(thetaUndone.archive_reason, PEST_ARCHIVE_REASON);
+    assert.equal(thetaUndone.archive_run_id, thetaRun);
+    assert.equal(new Date(thetaUndone.archived_at).toISOString(), new Date(thetaBefore.archived_at).toISOString());
+    assert.equal(thetaUndone.fit_score, 80);
     const zetaUndone = await stamp(zeta);
     assert.equal(zetaUndone.archive_reason, 'manual hold');
     assert.equal(new Date(zetaUndone.archived_at).toISOString(), new Date(zetaBefore.archived_at).toISOString());
     assert.equal(zetaUndone.email, 'test+zeta@example.com');
+    const onlyAtUndone = await stamp(onlyAt);
+    assert.equal(new Date(onlyAtUndone.archived_at).toISOString(), '2020-05-06T00:00:00.000Z');
+    assert.equal(onlyAtUndone.archive_reason, null);
+    assert.equal((await stamp(onlyReason)).archive_reason, 'manual hold');
+    assert.equal((await stamp(onlyRun)).archive_run_id, priorRun);
 
     const afterUndo = runScript('dry');
     assert.equal(afterUndo.status, 0, afterUndo.stderr);
     assertCountsOnly(afterUndo.stdout);
-    assert.equal(afterUndo.stdout, grid({
-      'would_archive other_industry A': 1,
-      'would_archive other_industry B': 1,
-      'would_archive other_industry C': 1,
-      'would_archive pest_industry A': 1,
-      'would_archive pest_industry D': 1,
-      'skipped_other_reason other_industry A': 1,
-      'active_other other_industry A': 2,
-      'active_other other_industry B': 1,
-      'active_other other_industry D': 1,
-      'active_other other_industry none': 1,
-    }));
+    assert.equal(afterUndo.stdout, initial);
 
     const redo = runScript('apply');
-    assert.equal(redo.stdout, 'archived 5\n');
+    const redone = parseWrite(redo.stdout, 'archived');
+    assert.equal(redone.n, 4);
+    assert.notEqual(redone.runId, applied.runId);
     const zetaRedo = await stamp(zeta);
     assert.equal(zetaRedo.archive_reason, 'manual hold');
     assert.equal(new Date(zetaRedo.archived_at).toISOString(), new Date(zetaBefore.archived_at).toISOString());
-    const secondUndo = runScript('undo');
-    assert.equal(secondUndo.stdout, 'restored 5\n');
-    const thirdUndo = runScript('undo');
+    assert.equal((await stamp(theta)).archive_run_id, thetaRun);
+    const secondUndo = runScript('undo', [redone.runId]);
+    assert.equal(parseWrite(secondUndo.stdout, 'restored').n, 4);
+    const thirdUndo = runScript('undo', [redone.runId]);
     assert.equal(thirdUndo.status, 0, thirdUndo.stderr);
-    assert.equal(thirdUndo.stdout, 'restored 0\n');
+    assert.equal(parseWrite(thirdUndo.stdout, 'restored').n, 0);
     const zetaFinal = await stamp(zeta);
     assert.equal(zetaFinal.archive_reason, 'manual hold');
     assert.equal(new Date(zetaFinal.archived_at).toISOString(), new Date(zetaBefore.archived_at).toISOString());
+    const thetaFinal = await stamp(theta);
+    assert.equal(thetaFinal.archive_reason, PEST_ARCHIVE_REASON);
+    assert.equal(thetaFinal.archive_run_id, thetaRun);
+    assert.equal(new Date(thetaFinal.archived_at).toISOString(), new Date(thetaBefore.archived_at).toISOString());
   });
 
   it('omits archived leads from lists, Today, scoring, and proposals', async () => {
@@ -375,7 +481,7 @@ describe('pest-name archive', { concurrency: false }, () => {
     );
     const client = await pool.connect();
     try {
-      assert.equal(await runApply(client), 1);
+      assert.equal((await runApply(client)).n, 1);
     } finally {
       client.release();
     }
@@ -494,6 +600,7 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.equal(ids(tierA).has(twin.id), true);
     assert.equal(ids(tierA).has(archivedPest.id), false);
     assert.equal(one.archive_reason, PEST_ARCHIVE_REASON);
+    assert.notEqual(one.archived_at, null);
     assert.equal(one.fit_score, 1);
     assert.equal(String(one.company).includes('@'), false);
 
@@ -513,10 +620,44 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.equal(stats.stages.found.count, 2);
     assert.equal(stats.stages.qualified.count, 1);
 
+    const archivedFound = await insertProspect({
+      google_place_id: 'test-place-hide-found-archived',
+      company: 'TEST: Found Archived Heating',
+      industry: 'HVAC',
+      email: 'test+found-archived@example.com',
+      website: 'https://found-archived.example',
+      stage: 'found',
+    });
+    await pool.query(
+      `UPDATE prospects SET fit_tier = 'A', fit_score = 100, archived_at = NOW(), archive_reason = 'manual hold' WHERE id = $1`,
+      [archivedFound.id]
+    );
     const picked = await pickLeads(50);
     assert.deepEqual(picked.map(row => row.id), [twin.id]);
     const summary = await get('/api/proposals/summary');
     assert.equal(summary.eligible_leads, 1);
+    assert.equal(picked.some(row => row.id === archivedFound.id), false);
+
+    const noted = await fetch(apiBase + `/api/prospects/${archivedPest.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note: 'review note' }),
+    });
+    const notedBody = await noted.json();
+    assert.equal(noted.status, 200);
+    assert.equal(notedBody.note, 'review note');
+    assert.equal(notedBody.archive_reason, PEST_ARCHIVE_REASON);
+    assert.notEqual(notedBody.archived_at, null);
+
+    await pool.query(
+      `UPDATE prospects SET industry = 'Archived Trade', city = 'Archivedville' WHERE id = $1`,
+      [archivedQualified.id]
+    );
+    const meta = await get('/api/prospects/meta');
+    assert.equal(meta.industries.includes('Archived Trade'), false);
+    assert.equal(meta.industries.includes('HVAC'), true);
+    assert.equal(meta.cities.includes('Archivedville'), false);
+    assert.equal(meta.cities.includes('Provo'), true);
 
     await assert.rejects(() => draftProposal(archivedBenign.id), (err) => {
       assert.equal(err.status, 409);
@@ -549,6 +690,20 @@ describe('pest-name archive', { concurrency: false }, () => {
     }
     const draftId = await insertProposal(archivedBenign.id, 'arch-draft', 'draft');
     const discardedId = await insertProposal(archivedBenign.id, 'arch-discarded', 'discarded');
+    const liveDraftId = await insertProposal(twin.id, 'live-draft', 'draft');
+    const review = await get('/api/proposals?view=review');
+    const reviewIds = new Set(review.proposals.map(row => row.id));
+    assert.equal(reviewIds.has(liveDraftId), true);
+    assert.equal(reviewIds.has(draftId), false);
+    const hiddenForLead = await get(`/api/proposals?prospect_id=${archivedBenign.id}`);
+    assert.deepEqual(hiddenForLead.proposals, []);
+    const shownForLead = await get(`/api/proposals?prospect_id=${twin.id}`);
+    assert.deepEqual(shownForLead.proposals.map(row => row.id), [liveDraftId]);
+    const reviewSummary = await get('/api/proposals/summary');
+    assert.equal(reviewSummary.counts.review, 1);
+    assert.equal(reviewSummary.counts.unreviewed, 1);
+    const jobsBody = await get('/api/proposals/jobs');
+    assert.equal(jobsBody.unreviewed, 1);
 
     const sentMail = [];
     _setTransport({
@@ -583,6 +738,21 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.equal(restoredBody.error, `${ARCHIVED_LEAD_REASON}.`);
     const discardedStatus = await pool.query('SELECT status FROM proposals WHERE id = $1', [discardedId]);
     assert.equal(discardedStatus.rows[0].status, 'discarded');
+
+    await pool.query(
+      `UPDATE proposals SET status = 'sent', sent_at = NOW(), views = 0 WHERE id = $1`,
+      [draftId]
+    );
+    const hiddenPage = await fetch(apiBase + '/p/arch-draft');
+    assert.equal(hiddenPage.status, 404);
+    const hiddenViews = await pool.query('SELECT views FROM proposals WHERE id = $1', [draftId]);
+    assert.equal(hiddenViews.rows[0].views, 0);
+    const livePageId = await insertProposal(twin.id, 'live-page', 'sent');
+    await pool.query(`UPDATE proposals SET sent_at = NOW(), views = 0 WHERE id = $1`, [livePageId]);
+    const livePage = await fetch(apiBase + '/p/live-page?preview=1');
+    assert.equal(livePage.status, 200);
+    const liveViews = await pool.query('SELECT views FROM proposals WHERE id = $1', [livePageId]);
+    assert.equal(liveViews.rows[0].views, 0);
 
     const keeper = await insertProspect({
       google_place_id: 'test-place-follow-keeper',
@@ -710,5 +880,99 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.equal(created.rows[0].fit_score, 100);
     assert.equal(created.rows[0].fit_tier, 'A');
     assert.equal(created.rows[0].archived_at, null);
+  });
+
+  it('refuses a production or non-local write unless the confirm matches', async () => {
+    await resetDb();
+    const row = await insertProspect({
+      google_place_id: 'test-place-guard',
+      company: 'TEST: Guard Pest Control',
+      industry: 'HVAC',
+      email: 'test+guard@example.com',
+    });
+    const remote = archiveTarget({
+      NODE_ENV: 'test',
+      DATABASE_URL: 'postgres://u:secret@192.0.2.1:5432/prod',
+    });
+    assert.equal(remote.blocked, true);
+    assert.equal(remote.local, false);
+    assert.equal(remote.host, '192.0.2.1');
+    assert.equal(remote.host.includes('secret'), false);
+    assert.equal(archiveTarget({
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://u@127.0.0.1/flowforward_test',
+    }).blocked, true);
+    assert.equal(archiveTarget({
+      NODE_ENV: 'test',
+      DATABASE_URL: 'postgres://u@127.0.0.1/flowforward_test',
+    }).blocked, false);
+    assert.equal(archiveTarget({
+      NODE_ENV: 'test',
+      DATABASE_URL: 'postgres://u@localhost/db?hostaddr=10.1.1.1',
+    }).local, false);
+    assert.equal(archiveTarget({
+      NODE_ENV: 'test',
+      DATABASE_URL: 'postgresql:///db?host=/tmp/.s.PGSQL.5432',
+    }).local, true);
+
+    const clean = { ...process.env };
+    delete clean.PEST_ARCHIVE_CONFIRM;
+    const prod = runScript('apply', [], { ...clean, NODE_ENV: 'production' });
+    assert.notEqual(prod.status, 0);
+    assert.equal(prod.stdout, '');
+    assert.equal(prod.stderr, 'pest-archive refused\n');
+    assert.equal((await stamp(row.id)).archived_at, null);
+
+    const far = runScript('apply', [], {
+      ...clean,
+      DATABASE_URL: 'postgres://u:secret@192.0.2.1:5432/prod',
+    });
+    assert.notEqual(far.status, 0);
+    assert.equal(far.stdout, '');
+    assert.equal(far.stderr, 'pest-archive refused\n');
+    assert.equal(`${far.stdout}${far.stderr}`.includes('secret'), false);
+    assert.equal((await stamp(row.id)).archived_at, null);
+
+    const farUndo = runScript('undo', ['33333333-3333-4333-8333-333333333333'], {
+      ...clean,
+      DATABASE_URL: 'postgres://u:secret@192.0.2.1:5432/prod',
+    });
+    assert.notEqual(farUndo.status, 0);
+    assert.equal(farUndo.stdout, '');
+    assert.equal(`${farUndo.stdout}${farUndo.stderr}`.includes('secret'), false);
+
+    const client = await pool.connect();
+    let runId;
+    try {
+      await assert.rejects(
+        () => beginGuardedWrite(client, {
+          NODE_ENV: 'production',
+          DATABASE_URL: process.env.DATABASE_URL,
+          PEST_ARCHIVE_CONFIRM: 'not-this-database',
+        }),
+        (err) => err.code === 'PEST_ARCHIVE_REFUSED'
+      );
+      assert.equal((await stamp(row.id)).archived_at, null);
+      const name = (await pool.query('SELECT current_database() AS name')).rows[0].name;
+      const allowed = await beginGuardedWrite(client, {
+        NODE_ENV: 'production',
+        DATABASE_URL: process.env.DATABASE_URL,
+        PEST_ARCHIVE_CONFIRM: name,
+      });
+      assert.equal(allowed.database, name);
+      const applied = await runApply(client, { joined: true });
+      await client.query('COMMIT');
+      runId = applied.runId;
+      assert.equal(applied.n, 1);
+    } finally {
+      await client.query('ROLLBACK').catch(() => {});
+      client.release();
+    }
+    assert.equal((await stamp(row.id)).archive_run_id, runId);
+
+    const undoProd = runScript('undo', [runId], { ...clean, NODE_ENV: 'production' });
+    assert.notEqual(undoProd.status, 0);
+    assert.equal(undoProd.stdout, '');
+    assert.equal((await stamp(row.id)).archive_run_id, runId);
   });
 });
