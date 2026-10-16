@@ -137,7 +137,7 @@ def leads():
 <div class="opt"><span>Not in any campaign</span><span class="radio"></span></div></div></div>'''
     return page("Leads",b,sheet)
 def logtouch():
-    types=["Sent","Replied","Call logged","Call booked","Proposal sent","Won","Lost","MVP sold","Estimate recovered"]
+    types=["Sent","Opened","Replied","Call logged","Call booked","Proposal sent","Won","Lost","MVP sold","Estimate recovered"]
     tb=''.join(f'<span class="chip{" on" if x=="Replied" else ""}">{x}</span>' for x in types)
     bg='<header class="head"><div><h1>Leads</h1></div></header>'+''.join(f'<div class="card"><div class="name">{n}</div></div>' for n,*_ in leadsd)
     d=f'''<div class="overlay"><div class="drawer"><div class="lead"><div><p class="muted small">Log touch for</p><h2 style="overflow-wrap:anywhere">TEST: Juniper Ridge Heating &amp; Air <span class="sample">Sample</span></h2></div><span class="btn q" style="width:44px;padding:0">✕</span></div>

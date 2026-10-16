@@ -113,12 +113,12 @@ Mocks: `log-touch-390.png` (bottom sheet) and `log-touch-1280.png` (side drawer)
 
 | Field | Control | Default | Validation |
 |---|---|---|---|
-| Type * | 44px chips, single select: Sent, Replied, Call logged, Call booked, Proposal sent, Won, Lost, MVP sold, Estimate recovered | none, must pick | required: "Pick what happened." |
+| Type * | 44px chips, single select: Sent, Opened, Replied, Call logged, Call booked, Proposal sent, Won, Lost, MVP sold, Estimate recovered | none, must pick | required: "Pick what happened." |
 | Campaign | select: the lead's enrolled campaigns first, then other Active ones, then "No campaign" | the lead's single Active enrolled campaign, else "No campaign" | optional; must exist. Choosing a campaign the lead isn't in shows "Also enroll this lead in TEST: …" (checked) |
 | Variant | select of that campaign's variants + "None" | the lead's enrolled variant | optional; disabled when Campaign is "No campaign"; must belong to the chosen campaign |
 | Channel | select of the 7 channels | the campaign's channel ("Email (campaign default)") | required; editable |
 | When * | native `datetime-local` | now (America/Denver) | required; not in the future ("Can't be in the future."); no more than 365 days back |
-| Recorded revenue | money input, dollars | empty | shown only for Won / MVP sold; optional; whole number ≥ 0 |
+| Recorded revenue | money input, dollars | empty | shown only for Won / MVP sold; optional; actual revenue only; whole number ≥ 0 |
 
 - Errors appear inline under the field (rust text, 2px rust border, `aria-describedby`). Focus moves to the first invalid field. **Log touch** stays enabled so the error can show. Source is always `manual`.
 - **Toast** (slate background, paper text): "Logged: Replied · TEST: HVAC-Oct · A. Nothing was sent." with **Undo**, which deletes that manual touch within 6 s. If saving fails, a rust error note in the form says "Couldn't log this touch. Try again." and the form keeps its values.
@@ -128,11 +128,12 @@ Mocks: `log-touch-390.png` (bottom sheet) and `log-touch-1280.png` (side drawer)
 
 1. **"Small sample" vs. the spec's guardrail.** #67 §3 defines "Directional (n<30)" with n = leads touched (30 confirmed Oct 16). This design uses that label as the small-sample note on every rate with n < 30, not only on variants, and keeps those rates visible.
 2. **List metrics.** §4 lists enrolled plus reply/booked/win rate, and the brief mentions sent. The list shows Enrolled, Touched (the rate denominator), and Replied/Booked/Won rates. Sent is the first funnel step on detail rather than a rate.
-3. **Which touch types can be logged by hand.** §1 lists 12 types. `opened`, `prototype_viewed` and `prototype_cta_clicked` aren't something Kelby can observe; they come from `pilot_events`/system. Log touch offers the other 9, and the API should accept `source = manual` only for those 9 (Canyon to confirm).
+3. **Which touch types can be logged by hand.** §1 lists 12 types. **Summit ruling (Oct 16):** `opened` is manually loggable (opens come from a manual log or the optional pixel), so Log touch offers **10** types. `prototype_viewed` and `prototype_cta_clicked` stay system-only (from `pilot_events`). The API should accept `source = manual` only for those 10.
 4. **Campaign is optional on a touch.** §1 allows a NULL `campaign_id` and §2 has a fallback rule, so "No campaign" is allowed. It defaults to the lead's single active campaign.
 5. **Timestamp limits.** The spec only says "defaulting to now". Added: not in the future and no more than 365 days back. Canyon may tighten this.
-6. **Revenue on Log touch.** §4's field list is type, campaign, variant and timestamp, but `revenue_cents` exists only on won/mvp_sold, and Recorded revenue needs a source. Added it as an optional field that appears only for those types. Drop it if Summit wants revenue entered elsewhere.
+6. **Revenue on Log touch.** §4's field list is type, campaign, variant and timestamp, but `revenue_cents` exists only on won/mvp_sold, and Recorded revenue needs a source. Added it as an optional field that appears only for those types. **Summit ruling (Oct 16):** keep it; it records actual revenue only (never estimated or expected).
 7. **Cost metrics vs. "no ROI".** Cost per lead and per booked call are in §3 as observed ratios, so they show when cost was entered, with numerator and denominator. There is no ROI or revenue-minus-cost figure anywhere.
 8. **SMS/phone channels vs. #40 email-only.** The channel enum includes sms and phone. These only label what Kelby did himself; nothing is sent. Pilot follow-up stays email-only.
-9. **Pipeline.** §4 names only the Leads view. Pipeline reuses the same filter chip/sheet and a campaign line on cards, with no kanban column.
-10. **Fixture dates.** The §3 fixture uses relative days (won on day 20). The mocks put day 0 on Sep 24, 2026 so no event falls after today (Oct 16).
+9. **Pipeline.** §4 names only the Leads view. Pipeline reuses the same filter chip/sheet and a campaign line on cards, with no kanban column. **Summit ruling (Oct 16):** the Pipeline chip is approved.
+10. **Phone tab order.** Campaigns takes a tab-bar slot (§1). **Summit ruling (Oct 16):** Delta confirms the final phone tab order.
+11. **Fixture dates.** The §3 fixture uses relative days (won on day 20). The mocks put day 0 on Sep 24, 2026 so no event falls after today (Oct 16).
