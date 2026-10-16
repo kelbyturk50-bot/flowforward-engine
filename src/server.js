@@ -64,6 +64,8 @@ app.use('/api/tasks',     tasks);
 app.use('/api/focus',     require('./api/focus'));
 app.use('/api/runs',      require('./api/runs'));
 app.use('/api/proposals', require('./api/proposals'));
+app.use('/api/brands',    require('./api/brands'));
+app.use('/api/rubric',    require('./api/rubric'));
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────
 const CRON_SCHEDULE = process.env.DISCOVERY_CRON || '0 6 * * *';
@@ -103,8 +105,9 @@ const PORT = process.env.PORT || 3000;
 
 async function boot() {
   // schema.sql throws on failure, the same as before the pilot. That catch
-  // logs the startup line and skips rescore. The pilot step returns a report
-  // instead of throwing, so a pilot failure does not take this path.
+  // logs the startup line and skips rescore. The brand-check step and the
+  // pilot step return reports instead of throwing, so those failures do not
+  // take this path. A brand-check failure is a warning. The server still boots.
   let mainOk = false;
   try {
     const report = await applySchema();

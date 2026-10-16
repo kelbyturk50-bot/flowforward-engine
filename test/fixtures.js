@@ -1,6 +1,7 @@
 // Rows and a fake Claude client for the smoke tests. Nothing here calls a network.
 
 const pool = require('../src/db/client');
+const { BRAND_FIXTURES } = require('../src/brand/fixtures');
 
 const HVAC_LEAD = {
   google_place_id: 'test-place-wasatch-heating',
@@ -28,6 +29,7 @@ async function resetDb() {
       proposal_runs,
       proposals,
       prospect_activities,
+      prospect_brands,
       tasks,
       projects,
       discovery_runs,
@@ -108,8 +110,21 @@ function fakeClaude() {
   };
 }
 
+async function seedBrandFixtures(db = pool) {
+  for (const fixture of BRAND_FIXTURES) {
+    await db.query(
+      `INSERT INTO prospect_brands (name, logo_url, colors, source, test_tag)
+       VALUES ($1, $2, $3::jsonb, $4, $5)
+       ON CONFLICT (test_tag) DO NOTHING`,
+      [fixture.name, fixture.logoUrl, JSON.stringify(fixture.colors), fixture.source, fixture.testTag]
+    );
+  }
+}
+
 async function closePool() {
   await pool.end();
 }
 
-module.exports = { pool, HVAC_LEAD, FAKE_PROPOSAL, resetDb, insertProspect, fakeClaude, closePool };
+module.exports = {
+  pool, HVAC_LEAD, FAKE_PROPOSAL, resetDb, insertProspect, seedBrandFixtures, fakeClaude, closePool,
+};
