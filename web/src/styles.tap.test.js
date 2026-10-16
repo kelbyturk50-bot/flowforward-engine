@@ -22,6 +22,7 @@ describe('phone tap targets', () => {
       'input[type="range"] { min-height: 44px;',
       '.skip { min-height: 44px;',
       '.preview summary, .raw summary { display: flex; align-items: center; min-height: 44px;',
+      '.raw .soc { display: inline-flex; align-items: center; min-height: 44px;',
     ];
     for (const rule of rules) {
       expect(phone).toContain(rule);
@@ -38,7 +39,9 @@ describe('phone tap targets', () => {
     expect(desktop).toContain('.drawer-close { position: absolute; top: .8rem; right: .8rem; width: 36px; height: 36px;');
     expect(desktop).toContain('.task input[type="checkbox"] { width: 20px; height: 20px;');
     expect(desktop).toContain('.raw summary, .preview summary { cursor: pointer; color: var(--juniper); font-weight: 500; }');
+    expect(desktop).toContain('.raw .soc { margin-right: .6rem; text-transform: capitalize; }');
     expect(desktop).not.toMatch(/summary \{[^}]*min-height/);
+    expect(desktop).not.toMatch(/\.soc \{[^}]*min-height/);
     expect(desktop).not.toMatch(/\.mini-select \{[^}]*min-height/);
     expect(desktop).not.toMatch(/\.task-body \{[^}]*min-height/);
   });
