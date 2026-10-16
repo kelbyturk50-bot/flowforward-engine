@@ -1,5 +1,8 @@
-// Pure WHERE / ORDER BY builder for GET /api/prospects. No database import.
+// WHERE / ORDER BY builder for GET /api/prospects. No database import.
+// A tier filter that includes A also hides pest-name rows from that result.
+// The stored fit_tier is not updated.
 const SORTS = require('./prospect-sorts');
+const { appendATierPestHide } = require('../scoring/industry');
 
 const CLOSED = ['won', 'lost', 'disqualified'];
 
@@ -60,7 +63,15 @@ function buildProspectListQuery(query = {}) {
   else if (stage) add('stage = ANY(?)', String(stage).split(','));
   if (industry) add('industry = ANY(?)', String(industry).split(','));
   if (city) add('city = ANY(?)', String(city).split(','));
-  if (tier) add('fit_tier = ANY(?)', String(tier).split(','));
+  if (tier) {
+    const tiers = String(tier).split(',').map(s => s.trim()).filter(Boolean);
+    add('fit_tier = ANY(?)', tiers);
+    // A-tier queue only. tier=B and an unfiltered list still return the row.
+    if (tiers.includes('A')) {
+      const hide = appendATierPestHide(params);
+      if (hide !== 'TRUE') where.push(hide);
+    }
+  }
   if (q) {
     params.push(`%${q}%`);
     const i = params.length;

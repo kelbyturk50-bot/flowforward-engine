@@ -28,6 +28,7 @@ const {
 } = require('../src/scoring/industry');
 const { FRANCHISE_PATTERNS } = require('../src/scoring/config');
 const { draftProposal, pickLeads, _setClient } = require('../src/proposals/draft');
+const { buildProspectListQuery } = require('../src/api/prospect-query');
 const { resetDb, insertProspect, closePool, pool, fakeClaude } = require('./fixtures');
 
 // Post-F-004 Places catalog. This gate must not add a query type.
@@ -95,6 +96,10 @@ const SNAPSHOT = [
   ['Best', { ...sweet, company: 'Best', industry: 'Plumbing' }, 97, 'A'],
   ['Pestana', { ...sweet, company: 'Pestana', industry: 'HVAC' }, 100, 'A'],
   ['Pesticide Solutions', { ...sweet, company: 'Pesticide Solutions', industry: 'HVAC' }, 100, 'A'],
+  ['pest name under HVAC scores like HVAC', { ...sweet, company: 'Wasatch Pest Control', industry: 'HVAC' }, 100, 'A'],
+  ['pest name under plumbing scores like plumbing', { ...sweet, company: 'ACME EXTERMINATORS', industry: 'Plumbing' }, 97, 'A'],
+  ['termite name under HVAC', { ...sweet, company: 'Valley Termite', industry: 'HVAC' }, 100, 'A'],
+  ['exterminating name under plumbing', { ...sweet, company: 'Provo Exterminating', industry: 'Plumbing' }, 97, 'A'],
 ];
 
 const GATED = [
@@ -155,6 +160,8 @@ describe('pest company-name gate', { concurrency: false }, () => {
     const app = express();
     app.use(express.json());
     app.use('/api', require('../src/api/auth'));
+    app.use('/api/prospects', require('../src/api/prospects'));
+    app.use('/api/focus', require('../src/api/focus'));
     app.use('/api/proposals', require('../src/api/proposals'));
     server = http.createServer(app);
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -167,7 +174,7 @@ describe('pest company-name gate', { concurrency: false }, () => {
     await closePool();
   });
 
-  it('gates pest names stored as HVAC or plumbing, and keeps word-boundary lookalikes', () => {
+  it('matches pest names on a word boundary and does not change their score', () => {
     const guard = armNoFetch();
     try {
       for (const name of LOOKALIKES) {
@@ -177,20 +184,16 @@ describe('pest company-name gate', { concurrency: false }, () => {
       for (const [company, industry] of GATED) {
         assert.equal(isPestText(company), true, company);
         assert.equal(isPestCompanyName(company), true, company);
-        const fit = computeFit({
-          ...sweet,
-          company,
-          industry,
-          fit_boost: 20,
-          fsm_detected: 'ServiceTitan',
+        const fields = { ...sweet, industry, fit_boost: 20, fsm_detected: 'ServiceTitan' };
+        const fit = computeFit({ ...fields, company });
+        const twin = computeFit({
+          ...fields,
+          company: industry === 'Plumbing' ? 'Provo Plumbing' : 'Wasatch Heating',
         });
-        assert.notEqual(fit.fit_tier, 'A', company);
-        assert.equal(fit.fit_tier, 'D', company);
-        assert.equal(fit.fit_score, 0, company);
-        assert.equal(fit.fit_reasons.length, 1, company);
-        assert.equal(fit.fit_reasons[0].label, 'Company', company);
-        assert.equal(fit.fit_reasons[0].detail, PEST_NAME_REASON, company);
-        assert.match(fit.fit_reasons[0].detail, /pest control/i, company);
+        assert.equal(fit.fit_score, twin.fit_score, company);
+        assert.equal(fit.fit_tier, twin.fit_tier, company);
+        assert.equal(JSON.stringify(fit.fit_reasons), JSON.stringify(twin.fit_reasons), company);
+        assert.equal(fit.fit_reasons.some(r => r.detail === PEST_NAME_REASON), false, company);
       }
 
       const industryFirst = computeFit({
@@ -230,7 +233,7 @@ describe('pest company-name gate', { concurrency: false }, () => {
     assert.equal(INDUSTRIES.length, PLACES_QUERY_COUNT);
     assert.equal(catalog.some(row => /pest|exterminator|termite/i.test(`${row.query} ${row.industry}`)), false);
     const fitSrc = fs.readFileSync(path.join(__dirname, '../src/scoring/fit.js'), 'utf8');
-    assert.doesNotMatch(fitSrc, /axios|fetch\(|searchPlaces|google-places|researchLead/);
+    assert.doesNotMatch(fitSrc, /axios|fetch\(|searchPlaces|google-places|researchLead|isPestCompanyName|PEST_NAME_REASON/);
     const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
     const pilot = fs.readFileSync(path.join(__dirname, '../src/db/pilot-schema.sql'), 'utf8');
     assert.doesNotMatch(schema, /PEST_NAME_REASON|legacy pest/);
@@ -309,15 +312,6 @@ describe('pest company-name gate', { concurrency: false }, () => {
     assert.equal(drafted.status, 'draft');
     assert.equal(claudeCalls, before + 1);
 
-    await rescore([pest.id]);
-    const rescored = await pool.query(
-      'SELECT fit_score, fit_tier, fit_reasons FROM prospects WHERE id = $1',
-      [pest.id]
-    );
-    assert.equal(rescored.rows[0].fit_score, 0);
-    assert.equal(rescored.rows[0].fit_tier, 'D');
-    assert.equal(rescored.rows[0].fit_reasons[0].detail, PEST_NAME_REASON);
-
     const res = await fetch(apiBase + '/api/proposals', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -329,6 +323,133 @@ describe('pest company-name gate', { concurrency: false }, () => {
     const jobs = await pool.query('SELECT id FROM proposal_jobs WHERE prospect_id = $1', [exterminator.id]);
     assert.equal(jobs.rows.length, 0);
     assert.equal(claudeCalls, before + 1);
+  });
+
+  it('a boot-shaped rescore leaves pest-name rows byte-identical to main', async () => {
+    await resetDb();
+    const pest = await insertProspect({
+      google_place_id: 'test-place-boot-pest',
+      company: 'Wasatch Pest Control',
+      industry: 'HVAC',
+      website: 'https://wasatch-pest.example',
+      email: 'test+bootpest@example.com',
+    });
+    const twin = await insertProspect({
+      google_place_id: 'test-place-boot-twin',
+      company: 'Wasatch Heating',
+      industry: 'HVAC',
+      website: 'https://wasatchheating.example',
+      email: 'test+boottwin@example.com',
+    });
+    const low = await insertProspect({
+      google_place_id: 'test-place-boot-b',
+      company: 'Valley Termite',
+      industry: 'HVAC',
+      website: null,
+      email: 'test+bootb@example.com',
+      review_count: 0,
+      rating: null,
+      city: 'Denver',
+      state: 'CO',
+    });
+    const lookalike = await insertProspect({
+      google_place_id: 'test-place-boot-pestana',
+      company: 'Pestana Plumbing',
+      industry: 'Plumbing',
+      website: null,
+      email: 'test+bootpestana@example.com',
+    });
+
+    const mainPest = computeFit({ ...sweet, company: 'Wasatch Pest Control' });
+    const mainTwin = computeFit(sweet);
+    assert.equal(mainPest.fit_score, 100);
+    assert.equal(mainPest.fit_tier, 'A');
+    assert.equal(JSON.stringify(mainPest.fit_reasons), JSON.stringify(mainTwin.fit_reasons));
+
+    await rescore();
+    const read = () => pool.query(
+      `SELECT id, fit_score, fit_tier, fit_reasons::text AS reasons, updated_at
+         FROM prospects ORDER BY id`
+    );
+    const before = await read();
+    const byId = (rows, id) => rows.find(row => row.id === id);
+    const pestBefore = byId(before.rows, pest.id);
+    const twinBefore = byId(before.rows, twin.id);
+    assert.equal(pestBefore.fit_score, twinBefore.fit_score);
+    assert.equal(pestBefore.fit_tier, twinBefore.fit_tier);
+    assert.equal(pestBefore.reasons, twinBefore.reasons);
+    assert.equal(pestBefore.fit_score, 100);
+    assert.equal(pestBefore.fit_tier, 'A');
+
+    await rescore();
+    const after = await read();
+    for (const row of before.rows) {
+      const next = byId(after.rows, row.id);
+      assert.equal(next.fit_score, row.fit_score, row.id);
+      assert.equal(next.fit_tier, row.fit_tier, row.id);
+      assert.equal(next.reasons, row.reasons, row.id);
+      assert.equal(new Date(next.updated_at).toISOString(), new Date(row.updated_at).toISOString(), row.id);
+    }
+
+    // A stored B is not the A-tier queue. The read filter must leave it visible.
+    await pool.query(`UPDATE prospects SET fit_tier = 'B' WHERE id = $1`, [low.id]);
+
+    const aOnly = buildProspectListQuery({ tier: 'A' });
+    assert.match(aOnly.listSql, /fit_tier = 'A'/);
+    assert.equal(aOnly.params.includes(PEST_TEXT_PATTERN), true);
+    const anyTier = buildProspectListQuery({});
+    const bOnly = buildProspectListQuery({ tier: 'B' });
+    assert.equal(anyTier.params.includes(PEST_TEXT_PATTERN), false);
+    assert.equal(bOnly.params.includes(PEST_TEXT_PATTERN), false);
+
+    const stamp = await read();
+    async function get(path) {
+      const res = await fetch(apiBase + path);
+      const json = await res.json();
+      assert.equal(res.status, 200, path + ' ' + JSON.stringify(json));
+      return json;
+    }
+    const tierA = await get('/api/prospects?tier=A');
+    const tierAB = await get('/api/prospects?tier=A,B');
+    const tierB = await get('/api/prospects?tier=B');
+    const all = await get('/api/prospects');
+    const one = await get(`/api/prospects/${pest.id}`);
+    const focus = await get('/api/focus');
+    const summary = await get('/api/proposals/summary');
+
+    const ids = (body) => new Set((body.prospects || []).map(row => row.id));
+    assert.equal(ids(tierA).has(pest.id), false);
+    assert.equal(ids(tierA).has(twin.id), true);
+    assert.equal(ids(tierA).has(lookalike.id), true);
+    assert.equal(ids(tierAB).has(pest.id), false);
+    assert.equal(ids(tierAB).has(twin.id), true);
+    assert.equal(ids(tierB).has(low.id), true);
+    assert.equal(ids(tierAB).has(low.id), true);
+    assert.equal(ids(all).has(pest.id), true);
+    const listed = all.prospects.find(row => row.id === pest.id);
+    assert.equal(listed.fit_score, 100);
+    assert.equal(listed.fit_tier, 'A');
+    assert.equal(one.fit_score, 100);
+    assert.equal(one.fit_tier, 'A');
+    assert.deepEqual(one.fit_reasons, mainPest.fit_reasons);
+
+    assert.equal(focus.top_new_leads.some(row => row.id === pest.id), false);
+    assert.equal(focus.top_new_leads.some(row => row.id === twin.id), true);
+    assert.equal(focus.counts.a_tier_open, tierA.total);
+
+    const eligibleIds = new Set((await pickLeads(50)).map(row => row.id));
+    assert.equal(eligibleIds.has(pest.id), false);
+    assert.equal(eligibleIds.has(twin.id), true);
+    assert.equal(summary.eligible_leads, eligibleIds.size);
+
+    const untouched = await read();
+    for (const row of stamp.rows) {
+      const next = byId(untouched.rows, row.id);
+      assert.equal(next.fit_score, row.fit_score);
+      assert.equal(next.fit_tier, row.fit_tier);
+      assert.equal(next.reasons, row.reasons);
+      assert.equal(new Date(next.updated_at).toISOString(), new Date(row.updated_at).toISOString());
+    }
   });
 
   it('count script prints only the number of legacy rows', async () => {

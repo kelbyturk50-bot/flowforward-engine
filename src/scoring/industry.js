@@ -116,11 +116,25 @@ function appendCompanyPestExclusion(params, excluded = cfg.EXCLUDED_INDUSTRIES) 
 
 // Industry exclusion plus the company-name gate. pickLeads and the eligible
 // count both use this, so a legacy HVAC row with a pest name is not a draft
-// candidate even while its stored fit_tier is still A.
+// candidate. This is a read filter. It does not write fit_score or fit_tier.
 function appendDraftExclusion(params, excluded = cfg.EXCLUDED_INDUSTRIES) {
   const industrySql = appendIndustryExclusion(params, excluded);
   const nameSql = appendCompanyPestExclusion(params, excluded);
   return `${industrySql} AND ${nameSql}`;
+}
+
+// Read-time hide for an A-tier queue. A stored tier of A is left in the
+// database; the SELECT drops a pest-name row from that result. TRUE when
+// Pest Control is not excluded. alias is '' or a SQL identifier such as 'p'.
+function appendATierPestHide(params, alias = '', excluded = cfg.EXCLUDED_INDUSTRIES) {
+  if (!pestCategoryExcluded(excluded)) return 'TRUE';
+  if (alias !== '' && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) {
+    throw new Error('bad alias');
+  }
+  const prefix = alias ? `${alias}.` : '';
+  const patternIndex = params.push(PEST_TEXT_PATTERN);
+  const key = `lower(regexp_replace(btrim(COALESCE(${prefix}company, '')), '\\s+', ' ', 'g'))`;
+  return `NOT (${prefix}fit_tier = 'A' AND ${key} ~ $${patternIndex})`;
 }
 
 // Count of rows the name gate newly covers: the company matches, and the
@@ -153,6 +167,7 @@ module.exports = {
   appendIndustryExclusion,
   appendCompanyPestExclusion,
   appendDraftExclusion,
+  appendATierPestHide,
   legacyPestNameCountQuery,
   isPestPlaceType,
   isPestDiscoveryPlace,

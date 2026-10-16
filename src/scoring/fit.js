@@ -10,8 +10,6 @@
 //   ServiceTitan   −15    only when prospects.fsm_detected says ServiceTitan (no fetch)
 //   Manual boost  ±20     your own adjustment (fit_boost)
 //   Tier cap             TIER_CAP_FOR: ServiceTitan, and a word-boundary franchise, cannot exceed tier B
-//   Pest name          excluded  company name matches the pest word-boundary pattern
-//                                → score 0, tier D, whatever industry is stored
 //   Excluded industry      EXCLUDED_INDUSTRIES (default Pest Control) → score 0, tier D
 //
 // Key insight: businesses with 600+ reviews and 4.7+ stars are already systemized.
@@ -25,7 +23,7 @@
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');
 const cfg = require('./config');
-const { isExcludedIndustry, isPestCompanyName, normalizeIndustry, PEST_NAME_REASON } = require('./industry');
+const { isExcludedIndustry, normalizeIndustry } = require('./industry');
 const { isFranchise } = require('./prototypes');
 
 const industryDefaults = {};
@@ -192,22 +190,6 @@ function computeFit(p) {
         points: 0,
         max: 30,
         detail: `${industry} — out of scope`,
-      }],
-    };
-  }
-
-  // Legacy rows can store a pest-control name under HVAC or plumbing.
-  // The cached company string is the only input. Other factors and fit_boost
-  // do not apply, and the row cannot rank as tier A. No fetch.
-  if (isPestCompanyName(p.company)) {
-    return {
-      fit_score: 0,
-      fit_tier: 'D',
-      fit_reasons: [{
-        label: 'Company',
-        points: 0,
-        max: 30,
-        detail: PEST_NAME_REASON,
       }],
     };
   }
