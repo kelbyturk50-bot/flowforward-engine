@@ -73,7 +73,7 @@ Mobile-first at **390px**, desktop at **1280px**. On desktop the flow sits in a 
 
 Rendered by `PrototypeWatermark` from the prototype shell, **outside theme/brand props**. Nothing gates it: `FF_PROTOTYPE_GALLERY` gates only the gallery, never the watermark.
 
-- **Ribbon:** "PROTOTYPE · Not a live system · Sample data". `position: sticky; top: 0`, min-height 32px, Barlow 600 at 13–14px, slate #1E2A2F background, paper #F3F6F5 text (never brand colors), `role="note"`, no close button.
+- **Ribbon:** exactly "PROTOTYPE, not live. FlowForward can make this real in days." (Summit-required wording; do not paraphrase). `position: sticky; top: 0`, min-height 32px and grows to fit up to two lines at 390px (padding 6px 12px, centered, line-height 1.3), Barlow 600 at 13–14px, slate #1E2A2F background, paper #F3F6F5 text (never brand colors), `role="note"`, no close button.
 - **Tiled pattern:** diagonal (−30°) "PROTOTYPE" SVG tile behind content at ~5% opacity (range 4–6%), `pointer-events: none`.
 - **Sample tags:** every fake datum (customer, amount, phone, business) carries a "Sample" tag or a "(sample)" suffix. Phone numbers use the 555-01xx range.
 - **Footer:** "Concept by FlowForward, sample data, not affiliated with or endorsed by <Business>."
