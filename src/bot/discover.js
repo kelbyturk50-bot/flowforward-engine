@@ -9,9 +9,9 @@
 require('dotenv').config();
 const pool = require('../db/client');
 const { searchPlaces, normalizePplace } = require('./google-places');
-const { EXCLUDED_INDUSTRIES } = require('../scoring/config');
-// Industries listed in EXCLUDED_INDUSTRIES (default: Pest Control) aren't searched.
-const INDUSTRIES = require('./industries').filter(i => !EXCLUDED_INDUSTRIES.includes(i.industry));
+const { isExcludedIndustry, isPestDiscoveryPlace } = require('../scoring/industry');
+// Industries on EXCLUDED_INDUSTRIES (default: Pest Control, including synonyms) aren't searched.
+const INDUSTRIES = require('./industries').filter(i => !isExcludedIndustry(i.industry));
 const { rescore } = require('../scoring/fit');
 
 const TARGET_MARKETS = (process.env.TARGET_MARKETS || 'Salt Lake City UT')
@@ -69,18 +69,24 @@ async function runDiscovery() {
         totalFound += places.length;
 
         let marketNew = 0;
+        let skippedPest = 0;
         for (const place of places) {
           // Skip permanently closed
           if (place.businessStatus === 'CLOSED_PERMANENTLY') continue;
           // Skip below minimum rating
           if (MIN_RATING > 0 && place.rating && place.rating < MIN_RATING) continue;
+          // A pest-control business can come back for another trade's query.
+          // Name and Places type are screened before insert.
+          if (isPestDiscoveryPlace(place)) { skippedPest++; continue; }
 
           const normalized = normalizePplace(place, industry, score);
+          if (isExcludedIndustry(normalized.industry)) { skippedPest++; continue; }
           const isNew = await upsertProspect(normalized);
           if (isNew) { newAdded++; marketNew++; }
         }
 
-        console.log(`[bot]   → ${places.length} found, ${marketNew} new`);
+        const skipped = skippedPest ? `, ${skippedPest} pest skipped` : '';
+        console.log(`[bot]   → ${places.length} found, ${marketNew} new${skipped}`);
 
         // Polite delay between API calls (avoid rate limits)
         await sleep(300);

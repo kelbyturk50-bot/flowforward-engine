@@ -6,6 +6,7 @@ const crypto    = require('crypto');
 const Anthropic = require('@anthropic-ai/sdk');
 const pool      = require('../db/client');
 const cfg       = require('./config');
+const { appendIndustryExclusion } = require('../scoring/industry');
 const { researchLead } = require('./research');
 const { systemPrompt, userPrompt, SUBMIT_TOOL } = require('./prompt');
 
@@ -197,15 +198,19 @@ async function draftProposal(prospectId, opts = {}) {
 let running = false;
 
 async function pickLeads(limit) {
+  const params = [cfg.TIERS];
+  const industrySql = appendIndustryExclusion(params, cfg.EXCLUDED_INDUSTRIES);
+  params.push(limit);
+  const limitParam = params.length;
   const { rows } = await pool.query(
     `SELECT p.* FROM prospects p
       WHERE p.fit_tier = ANY($1) AND p.stage = 'found' AND NOT p.do_not_contact
-        AND p.industry <> ALL($2)
+        AND ${industrySql}
         AND (p.website IS NOT NULL OR p.email IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM proposals pr WHERE pr.prospect_id = p.id)
       ORDER BY p.fit_score DESC NULLS LAST, p.review_count DESC NULLS LAST
-      LIMIT $3`,
-    [cfg.TIERS, cfg.EXCLUDED_INDUSTRIES, limit]
+      LIMIT $${limitParam}`,
+    params
   );
   return rows;
 }

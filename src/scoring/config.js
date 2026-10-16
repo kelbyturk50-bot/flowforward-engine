@@ -7,6 +7,7 @@
 
 // Industry fit, 1–10. Defaults come from src/bot/industries.js; override here.
 // Pest Control is intentionally absent: it is out of scope (see EXCLUDED_INDUSTRIES).
+// Synonyms are normalized to that name in src/scoring/industry.js.
 const INDUSTRY_FIT = {
   'HVAC':         9,   // high ticket, dispatch + maintenance agreements
   'Plumbing':     8,

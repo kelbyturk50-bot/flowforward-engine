@@ -17,6 +17,7 @@
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');
 const cfg = require('./config');
+const { isExcludedIndustry, normalizeIndustry } = require('./industry');
 
 const industryDefaults = {};
 for (const { industry, score } of INDUSTRIES) {
@@ -92,9 +93,12 @@ function tierFor(score) {
 
 /** Compute fit for one prospect row. Pure function. */
 function computeFit(p) {
+  const industry = normalizeIndustry(p.industry);
   // Out-of-scope trades cannot rank as a fit. Other factors and fit_boost
   // do not apply; the row stays in the database and sorts to the bottom.
-  if (cfg.EXCLUDED_INDUSTRIES.includes(p.industry)) {
+  // Pest synonyms (pest control, exterminator, termite control, …) normalize
+  // to Pest Control before this check.
+  if (isExcludedIndustry(industry)) {
     return {
       fit_score: 0,
       fit_tier: 'D',
@@ -102,15 +106,15 @@ function computeFit(p) {
         label: 'Industry',
         points: 0,
         max: 30,
-        detail: `${p.industry} — out of scope`,
+        detail: `${industry} — out of scope`,
       }],
     };
   }
 
   const reasons = [];
-  const ind = industryFit(p.industry);
+  const ind = industryFit(industry);
   const indPts = Math.round((ind / 10) * 30);
-  reasons.push({ label: 'Industry', points: indPts, max: 30, detail: `${p.industry} — ${ind}/10 automation fit` });
+  reasons.push({ label: 'Industry', points: indPts, max: 30, detail: `${industry} — ${ind}/10 automation fit` });
 
   const [sz, szD] = sizePoints(p.review_count);
   reasons.push({ label: 'Size', points: sz, max: 25, detail: szD });
