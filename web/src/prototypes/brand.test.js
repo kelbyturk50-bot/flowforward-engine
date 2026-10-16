@@ -229,6 +229,17 @@ describe('brand sanitizer', () => {
     expect(print).toContain('color: #1E2A2F !important');
     expect(print).toContain('-webkit-text-fill-color: #1E2A2F !important');
     expect(print).toContain('border: 2px solid #1E2A2F !important');
+    expect(print).toContain('.prototype-root');
+    expect(print).toContain('.prototype-scroll');
+    expect(print).toMatch(/height:\s*auto\s*!important/);
+    expect(print).toMatch(/overflow:\s*visible\s*!important/);
+    expect(print).not.toMatch(/100dvh|100vh/);
+    expect(print).not.toMatch(/overflow:\s*hidden/);
+    expect(screenRibbon).toContain('html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note"]');
+    expect(print).toContain('html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note"]');
+    for (const selector of ['.prototype-wordmark', '.prototype-brand-name', '.prototype-open', '.demo-btn', '.prototype-cta-link', '.prototype-toast']) {
+      expect(print).toContain(selector);
+    }
     const source = readFileSync(path.join(webRoot, 'src/components/PrototypeWatermark.jsx'), 'utf8');
     const lock = source.slice(source.indexOf('const RIBBON_IMPORTANT'), source.indexOf('function lockStyle'));
     expect(lock).not.toContain('background-color');

@@ -635,16 +635,52 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   font-weight: 600 !important;
   line-height: 1.3 !important;
 }
+/* Screen color lock. Beats [role=note] and a later .prototype-ribbon override.
+   Print uses the same selector so this !important does not survive into print. */
+html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note"] {
+  background: #1E2A2F !important;
+  background-color: #1E2A2F !important;
+  background-image: none !important;
+  color: #F3F6F5 !important;
+  -webkit-text-fill-color: #F3F6F5 !important;
+  border: 0 !important;
+}
 @media print {
-  .prototype-ribbon,
-  .prototype-footer {
+  html body .prototype-root,
+  html body .prototype-root .prototype-scroll {
+    height: auto !important;
+    max-height: none !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    flex: none !important;
+  }
+  html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note"],
+  html body .prototype-root .prototype-footer {
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
+    background: #FFFFFF !important;
     background-color: #FFFFFF !important;
     background-image: none !important;
     color: #1E2A2F !important;
     -webkit-text-fill-color: #1E2A2F !important;
     border: 2px solid #1E2A2F !important;
+  }
+  /* White type sits on accent or slate fills. Those fills drop out when
+     background graphics are off, so the type prints as slate ink. */
+  html body .prototype-root .prototype-wordmark,
+  html body .prototype-root .prototype-brand-name,
+  html body .prototype-root .prototype-open,
+  html body .prototype-root .demo-btn,
+  html body .prototype-root .prototype-cta-link,
+  html body .prototype-root .prototype-toast {
+    color: #1E2A2F !important;
+    -webkit-text-fill-color: #1E2A2F !important;
+    background-color: #FFFFFF !important;
+    background-image: none !important;
+    border: 2px solid #1E2A2F !important;
+    opacity: 1 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 }
 .prototype-toast {

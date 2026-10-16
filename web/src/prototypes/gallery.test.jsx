@@ -318,6 +318,28 @@ describe('prototype gallery', () => {
     }
   });
 
+  it('keeps ribbon slate and paper under a hostile role=note stylesheet', () => {
+    const css = readFileSync(path.join(webRoot, 'src/styles.css'), 'utf8');
+    const sheet = document.createElement('style');
+    sheet.textContent = css.slice(css.indexOf('/* prototype-watermark:'), css.indexOf('/* ── Mobile'));
+    const hostile = document.createElement('style');
+    hostile.textContent = '[role=note]{background:#fff;color:#fff}';
+    document.head.append(sheet, hostile);
+    try {
+      const brand = presentBrand({ name: 'TEST: Wasatch Heating', colors: { accent: '#FFFFFF' } });
+      const { container } = render(<PrototypeLayout brand={brand}><h1>Color lock</h1></PrototypeLayout>);
+      const mark = container.querySelector('[role=note]');
+      const computed = getComputedStyle(mark);
+      expect(paint(computed.backgroundColor)).toBe('rgb(30,42,47)');
+      expect(paint(computed.color)).toBe('rgb(243,246,245)');
+      const fill = paint(computed.getPropertyValue('-webkit-text-fill-color'));
+      if (fill) expect(fill).toBe('rgb(243,246,245)');
+    } finally {
+      sheet.remove();
+      hostile.remove();
+    }
+  });
+
   it('keeps the ribbon under theme overrides for pale yellow and dark navy', async () => {
     const style = document.createElement('style');
     style.textContent = [
