@@ -17,6 +17,7 @@ const {
   INDUSTRY_FIT, SERVICETITAN_PENALTY, TIER_CAP_FOR, TIERS, FRANCHISE_PATTERNS,
 } = require('../src/scoring/config');
 const { computeFit, rescore } = require('../src/scoring/fit');
+const { isFranchise } = require('../src/scoring/prototypes');
 const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
 
 // Post-F-002 Places catalog. F-004 must not add a query type.
@@ -203,6 +204,29 @@ describe('F-004 tier cap', () => {
     assert.equal(under.fit_score, 57);
     assert.equal(under.fit_tier, 'C');
     assert.equal(under.fit_reasons.some(r => r.label === 'Tier cap'), false);
+  });
+
+  it('does not cap substring lookalikes, and still caps whole-word franchise names', () => {
+    assert.equal(isFranchise('TEST: Constrane Heating', FRANCHISE_PATTERNS), false);
+    assert.equal(isFranchise('TEST: Carriero HVAC', FRANCHISE_PATTERNS), false);
+    assert.equal(isFranchise('TEST: Trane Heating', FRANCHISE_PATTERNS), true);
+    assert.equal(isFranchise('TEST: Carrier HVAC', FRANCHISE_PATTERNS), true);
+
+    for (const company of ['TEST: Constrane Heating', 'TEST: Carriero HVAC']) {
+      const fit = computeFit({ ...sweet, company });
+      assert.equal(fit.fit_reasons.find(r => r.label === 'Franchise').points, -20, company);
+      assert.equal(fit.fit_reasons.some(r => r.label === 'Tier cap'), false, company);
+      assert.equal(fit.fit_score, 80, company);
+      assert.equal(fit.fit_tier, 'A', company);
+    }
+
+    for (const company of ['TEST: Trane Heating', 'TEST: Carrier HVAC', 'Terminix of Provo', 'Service Experts Utah']) {
+      const fit = computeFit({ ...sweet, company });
+      assert.equal(fit.fit_reasons.find(r => r.label === 'Franchise').points, -20, company);
+      assert.equal(fit.fit_score, 77, company);
+      assert.equal(fit.fit_tier, 'B', company);
+      assert.match(fit.fit_reasons.find(r => r.label === 'Tier cap').detail, /franchise/);
+    }
   });
 
   it('keeps ServiceTitan plus franchise at or below 77', () => {

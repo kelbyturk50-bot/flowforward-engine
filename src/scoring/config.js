@@ -47,8 +47,12 @@ const SERVICETITAN_PENALTY = -15;
 // servicetitan: prospects.fsm_detected, case-insensitive, same match as
 // SERVICETITAN_PENALTY. Null, blank, "none", Jobber, Housecall Pro, and any
 // other value are not capped.
-// franchise: FRANCHISE_PATTERNS on company, the same match as the −20.
-// Both read the cache only. computeFit and rescore do not fetch.
+// franchise: word-boundary match on company via isFranchise in
+// src/scoring/prototypes.js, the same rule as the prototype picker (#47).
+// "Trane Heating" and "Carrier HVAC" cap. "Constrane" and "Carriero" do not.
+// The −20 franchisePenalty still uses a substring includes() and can fire
+// when the cap does not. That mismatch is a follow-up; F-004 does not change
+// the penalty. Both signals are cache only. computeFit and rescore do not fetch.
 const TIER_CAP_FOR = {
   servicetitan: 'B',
   franchise: 'B',

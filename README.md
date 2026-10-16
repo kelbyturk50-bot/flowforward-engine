@@ -114,7 +114,7 @@ Every lead gets a 0–100 fit score and an A–D tier, recomputed on boot, after
 | Franchise | −20 | National brands / franchises |
 | ServiceTitan | −15 | Only when proposal research cached ServiceTitan on the lead (`fsm_detected`). Not a hard exclusion. Jobber and Housecall Pro are not penalized. |
 | Your boost | ±20 | Manual adjustment per lead |
-| Tier cap | ceiling | After the rows above, ServiceTitan and a franchise name match cannot score above tier B (77). `TIER_CAP_FOR` in `src/scoring/config.js`. |
+| Tier cap | ceiling | After the rows above, ServiceTitan and a word-boundary franchise name cannot score above tier B (77). `TIER_CAP_FOR` in `src/scoring/config.js`. The −20 row still uses a substring match. |
 
 Tiers: A ≥ 78, B ≥ 62, C ≥ 47, D below. Tune everything in `src/scoring/config.js`, then hit "Re-rank all leads" in Settings. The tier cap is applied after penalties and the manual boost. A missing `fsm_detected`, Jobber, and Housecall Pro are not capped.
 

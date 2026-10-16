@@ -9,7 +9,7 @@
 //   Franchise        -20  national brands / franchises
 //   ServiceTitan   −15    only when prospects.fsm_detected says ServiceTitan (no fetch)
 //   Manual boost  ±20     your own adjustment (fit_boost)
-//   Tier cap             TIER_CAP_FOR: ServiceTitan and franchise cannot exceed tier B
+//   Tier cap             TIER_CAP_FOR: ServiceTitan, and a word-boundary franchise, cannot exceed tier B
 //   Excluded industry      EXCLUDED_INDUSTRIES (default Pest Control) → score 0, tier D
 //
 // Key insight: businesses with 600+ reviews and 4.7+ stars are already systemized.
@@ -17,12 +17,14 @@
 // and a 3.8–4.3 rating (good enough to keep getting work, bad enough to feel the pain).
 // ServiceTitan is a weaker fit for an owned build. The −15 is soft and does not
 // force tier D. Jobber / Housecall Pro are not penalized. After penalties and
-// fit_boost, ServiceTitan and a franchise name match are capped at tier B.
+// fit_boost, ServiceTitan and a word-boundary franchise match are capped at
+// tier B. The −20 still uses a substring match; that is a separate follow-up.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');
 const cfg = require('./config');
 const { isExcludedIndustry, normalizeIndustry } = require('./industry');
+const { isFranchise } = require('./prototypes');
 
 const industryDefaults = {};
 for (const { industry, score } of INDUSTRIES) {
@@ -99,6 +101,10 @@ function locationPoints(city, state) {
   return [2, `${city || 'Unknown'}${s ? ', ' + s : ''} — out of market`];
 }
 
+// Substring match, unchanged. The tier cap does not use this. It uses
+// isFranchise, the word-boundary check from the prototype picker. A name
+// such as "Constrane" or "Carriero" still takes the −20 and is not capped.
+// Aligning the penalty with word boundaries is out of scope for F-004.
 function franchisePenalty(company) {
   const name = (company || '').toLowerCase();
   const hit = cfg.FRANCHISE_PATTERNS.find(p => name.includes(p));
@@ -217,9 +223,11 @@ function computeFit(p) {
 
   // Base max is 90; scale to 100 so a perfect lead reads 100.
   // The tier cap runs after penalties and the boost, including a positive one.
+  // Franchise cap is the picker's word-boundary match, not the −20 substring.
   const base = indPts + sz + rep + rch + loc;
   const raw = Math.max(0, Math.min(100, Math.round(base * (100 / 90)) + fr + st + boost));
-  const score = applyTierCap(raw, reasons, { serviceTitan: st !== 0, franchise: fr !== 0 });
+  const franchiseCap = isFranchise(p.company, cfg.FRANCHISE_PATTERNS);
+  const score = applyTierCap(raw, reasons, { serviceTitan: st !== 0, franchise: franchiseCap });
   return { fit_score: score, fit_tier: tierFor(score), fit_reasons: reasons };
 }
 
