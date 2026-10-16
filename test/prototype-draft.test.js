@@ -1,4 +1,5 @@
-process.env.CRM_API_KEY = 'test-prototype-key-32chars-minimum!!';
+const STRONG_KEY = 'test-prototype-key-32chars-minimum!!';
+process.env.CRM_API_KEY = STRONG_KEY;
 delete process.env.FF_PROTOTYPE_ON_DRAFT;
 
 require('./preload');
@@ -10,6 +11,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const { spawn } = require('child_process');
 const express = require('express');
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -18,7 +20,8 @@ const { _setTransport } = require('../src/proposals/send');
 const jobs = require('../src/proposals/jobs');
 const scoring = require('../src/scoring/prototypes');
 const { recommendPrototypes } = scoring;
-const { deriveToken, hashToken } = require('../src/prototypes/tokens');
+const { hashToken } = require('../src/prototypes/tokens');
+const { _clearIssuedForTests } = require('../src/prototypes/store');
 const { applySchema } = require('../src/db/migrate');
 const { clientIp, consume, _resetForTests } = require('../src/pilot/rate-limit');
 const { resetDb, insertProspect, fakeClaude, closePool, pool } = require('./fixtures');
@@ -79,7 +82,7 @@ function stResearch() {
   };
 }
 
-function request(port, method, reqPath, { body = undefined, key = process.env.CRM_API_KEY } = {}) {
+function request(port, method, reqPath, { body = undefined, key = process.env.CRM_API_KEY, headers: extra } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body == null ? null : Buffer.from(JSON.stringify(body));
     const headers = { accept: 'application/json' };
@@ -88,6 +91,7 @@ function request(port, method, reqPath, { body = undefined, key = process.env.CR
       headers['content-length'] = String(payload.length);
     }
     if (key) headers['x-api-key'] = key;
+    if (extra) Object.assign(headers, extra);
     const req = http.request({
       hostname: '127.0.0.1',
       port,
@@ -351,7 +355,9 @@ describe('prototype on draft', () => {
     const lead = await seedLead({ google_place_id: 'test-place-proto-expiry' });
     const proposal = await draftProposal(lead.id);
     const created = await request(port, 'GET', `/api/proposals/${proposal.id}`);
+    const token = tokenOf(created.json.prototype.url);
     const id = (await prototypeRows(lead.id))[0].id;
+    assert.equal(Buffer.from(token, 'base64url').length, 32);
 
     async function shift(issuedSql) {
       const { rows } = await pool.query(
@@ -359,11 +365,9 @@ describe('prototype on draft', () => {
             SET issued_at = ${issuedSql},
                 expires_at = (${issuedSql}) + INTERVAL '14 days'
           WHERE id = $1
-          RETURNING prospect_id, issued_at, expires_at`,
+          RETURNING expires_at`,
         [id]
       );
-      const token = deriveToken(rows[0].prospect_id, rows[0].issued_at);
-      await pool.query('UPDATE prototypes SET token_hash = $2 WHERE id = $1', [id, hashToken(token)]);
       return { token, expires_at: new Date(rows[0].expires_at).toISOString() };
     }
 
@@ -371,11 +375,13 @@ describe('prototype on draft', () => {
     const earlyRes = await request(port, 'GET', `/api/public/prototypes/${early.token}`, { key: '' });
     assert.equal(earlyRes.status, 200);
     assert.equal(earlyRes.json.expires_at, early.expires_at);
+    assert.equal(earlyRes.headers['x-content-type-options'], 'nosniff');
 
     const due = await shift("NOW() - INTERVAL '14 days'");
     const dueRes = await request(port, 'GET', `/api/public/prototypes/${due.token}`, { key: '' });
     assert.equal(dueRes.status, 410);
     assert.deepEqual(dueRes.json, { error: 'link_expired', expires_at: due.expires_at });
+    assert.equal(dueRes.headers['x-content-type-options'], 'nosniff');
     console.log(`[prototype] expiry 14d-1s => ${earlyRes.status}; at 14d => ${dueRes.status} ${dueRes.json.error} ${dueRes.json.expires_at}`);
   });
 
@@ -449,6 +455,16 @@ describe('prototype on draft', () => {
     const after = await request(port, 'GET', `/api/public/prototypes/${token}`, { key: '' });
     assert.equal(after.status, 404);
     assert.deepEqual(after.json, { error: 'not_found' });
+    await pool.query(
+      `UPDATE prototypes
+          SET issued_at = NOW() - INTERVAL '14 days',
+              expires_at = NOW() - INTERVAL '14 days' + INTERVAL '14 days'
+        WHERE id = $1`,
+      [row.id]
+    );
+    const expiredRevoked = await request(port, 'GET', `/api/public/prototypes/${token}`, { key: '' });
+    assert.equal(expiredRevoked.status, 404);
+    assert.deepEqual(expiredRevoked.json, { error: 'not_found' });
     const unknown = await request(port, 'GET', `/api/public/prototypes/${'a'.repeat(43)}`, { key: '' });
     assert.equal(unknown.status, 404);
     assert.deepEqual(unknown.json, { error: 'not_found' });
@@ -563,20 +579,35 @@ describe('prototype on draft', () => {
     console.log(`[prototype] schema boot 2 row check: prototypes ${before.rows.length} -> ${after.rows.length} (unchanged)`);
   });
 
-  it('prototype: public read is rate limited with the demo limiter', async () => {
+  it('prototype: public read uses its own rate-limit bucket', async () => {
     const previousMax = process.env.PILOT_DEMO_RATE_MAX;
     process.env.PILOT_DEMO_RATE_MAX = '2';
     _resetForTests();
     try {
-      const first = await request(port, 'GET', `/api/public/prototypes/${'b'.repeat(43)}`, { key: '' });
-      const second = await request(port, 'GET', `/api/public/prototypes/${'c'.repeat(43)}`, { key: '' });
-      const third = await request(port, 'GET', `/api/public/prototypes/${'d'.repeat(43)}`, { key: '' });
+      const ip = '203.0.113.77';
+      assert.equal(consume(ip, 'demo').limited, false);
+      assert.equal(consume(ip, 'demo').limited, false);
+      assert.equal(consume(ip, 'demo').limited, true);
+      const forwarded = { 'x-forwarded-for': ip };
+      const first = await request(port, 'GET', `/api/public/prototypes/${'b'.repeat(43)}`, { key: '', headers: forwarded });
+      const second = await request(port, 'GET', `/api/public/prototypes/${'c'.repeat(43)}`, { key: '', headers: forwarded });
+      const third = await request(port, 'GET', `/api/public/prototypes/${'d'.repeat(43)}`, { key: '', headers: forwarded });
       assert.equal(first.status, 404);
       assert.equal(second.status, 404);
       assert.equal(third.status, 429);
       assert.equal(third.json.error, 'Too many requests');
+      assert.equal(third.headers['x-content-type-options'], 'nosniff');
       assert.ok(third.headers['retry-after']);
-      console.log(`[prototype] rate limit third request => ${third.status} retry-after ${third.headers['retry-after']}`);
+      const other = await request(port, 'GET', `/api/public/prototypes/${'e'.repeat(43)}`, {
+        key: '',
+        headers: { 'x-forwarded-for': '203.0.113.78' },
+      });
+      assert.equal(other.status, 404);
+      assert.equal(consume(ip, 'demo').limited, true);
+      const publicSrc = fs.readFileSync(path.join(ROOT, 'src/prototypes/public.js'), 'utf8');
+      assert.match(publicSrc, /consume\(clientIp\(req\), 'prototype'\)/);
+      assert.equal(publicSrc.includes("'demo'"), false);
+      console.log(`[prototype] rate limit third request => ${third.status} retry-after ${third.headers['retry-after']} (prototype bucket)`);
     } finally {
       if (previousMax == null) delete process.env.PILOT_DEMO_RATE_MAX;
       else process.env.PILOT_DEMO_RATE_MAX = previousMax;
@@ -590,5 +621,319 @@ describe('prototype on draft', () => {
     const revokeAt = serverSrc.indexOf("app.use('/api/prototypes'");
     assert.ok(publicAt > -1 && publicAt < guardAt);
     assert.ok(revokeAt > guardAt);
+  });
+
+  it('prototype: token is random bytes and creation does not need CRM_API_KEY', async () => {
+    process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
+    const saved = process.env.CRM_API_KEY;
+    const tokenSrc = fs.readFileSync(path.join(ROOT, 'src/prototypes/tokens.js'), 'utf8');
+    const storeSrc = fs.readFileSync(path.join(ROOT, 'src/prototypes/store.js'), 'utf8');
+    assert.match(tokenSrc, /crypto\.randomBytes\(TOKEN_BYTES\)/);
+    assert.equal(tokenSrc.includes('process.env.CRM_API_KEY'), false);
+    assert.equal(tokenSrc.includes('createHmac'), false);
+    assert.equal(tokenSrc.includes('hkdf'), false);
+    assert.equal(tokenSrc.includes('deriveToken'), false);
+    assert.equal(storeSrc.includes('deriveToken'), false);
+    assert.equal(storeSrc.includes('process.env.CRM_API_KEY'), false);
+    assert.equal(storeSrc.includes('createHmac'), false);
+    try {
+      delete process.env.CRM_API_KEY;
+      const lead = await seedLead({ google_place_id: 'test-place-proto-random' });
+      const proposal = await draftProposal(lead.id);
+      const row = (await prototypeRows(lead.id))[0];
+      assert.ok(row);
+      const got = await request(port, 'GET', `/api/proposals/${proposal.id}`, { key: STRONG_KEY });
+      const token = tokenOf(got.json.prototype.url);
+      assert.equal(Buffer.from(token, 'base64url').length, 32);
+      assert.equal(Buffer.from(row.token_hash).equals(hashToken(token)), true);
+      process.env.CRM_API_KEY = ' '.repeat(32);
+      const spaces = await seedLead({ google_place_id: 'test-place-proto-spaces-key' });
+      await draftProposal(spaces.id);
+      const second = (await prototypeRows(spaces.id))[0];
+      const secondGot = await request(port, 'GET', `/api/proposals/${(await pool.query('SELECT id FROM proposals WHERE prospect_id = $1 ORDER BY id DESC LIMIT 1', [spaces.id])).rows[0].id}`, { key: STRONG_KEY });
+      const other = tokenOf(secondGot.json.prototype.url);
+      assert.notEqual(other, token);
+      assert.equal(Buffer.from(second.token_hash).equals(hashToken(other)), true);
+      const pub = await request(port, 'GET', `/api/public/prototypes/${token}`, { key: '' });
+      assert.equal(pub.status, 200);
+      console.log(`[prototype] random token bytes 32; created with CRM_API_KEY unset and with 32 spaces; prototype ${row.id}`);
+    } finally {
+      process.env.CRM_API_KEY = saved;
+    }
+  });
+
+  it('prototype: url is not recomputed after this process forgets the token', async () => {
+    process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
+    const lead = await seedLead({ google_place_id: 'test-place-proto-forget' });
+    const proposal = await draftProposal(lead.id);
+    const got = await request(port, 'GET', `/api/proposals/${proposal.id}`);
+    const token = tokenOf(got.json.prototype.url);
+    assert.equal(Buffer.from(token, 'base64url').length, 32);
+    _clearIssuedForTests();
+    const again = await request(port, 'GET', `/api/proposals/${proposal.id}`);
+    assert.equal(again.json.prototype.url, null);
+    assert.equal(again.json.prototype.agent_type, 'estimate_followup');
+    const pub = await request(port, 'GET', `/api/public/prototypes/${token}`, { key: '' });
+    assert.equal(pub.status, 200);
+    console.log('[prototype] forgotten token: GET url is null; public read still 200');
+  });
+
+  it('prototype: revoke fails closed unless the API key has 32 non-whitespace characters', async () => {
+    process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
+    const saved = process.env.CRM_API_KEY;
+    const lead = await seedLead({ google_place_id: 'test-place-proto-writes-off' });
+    await draftProposal(lead.id);
+    const row = (await prototypeRows(lead.id))[0];
+    const weak = [undefined, '', 'short', 'x'.repeat(31), ' '.repeat(32), `${'x'.repeat(31)} `];
+    try {
+      for (const value of weak) {
+        if (value === undefined) delete process.env.CRM_API_KEY;
+        else process.env.CRM_API_KEY = value;
+        const res = await request(port, 'POST', `/api/prototypes/${row.id}/revoke`, { key: STRONG_KEY });
+        assert.equal(res.status, 503, `value ${JSON.stringify(value)}`);
+        assert.deepEqual(res.json, { error: 'writes_disabled' });
+        const nope = await request(port, 'POST', '/api/prototypes/nope/revoke', { key: STRONG_KEY });
+        assert.equal(nope.status, 503);
+        assert.deepEqual(nope.json, { error: 'writes_disabled' });
+      }
+      const still = await pool.query('SELECT revoked_at FROM prototypes WHERE id = $1', [row.id]);
+      assert.equal(still.rows[0].revoked_at, null);
+      process.env.CRM_API_KEY = 'y'.repeat(32);
+      const stale = await request(port, 'POST', `/api/prototypes/${row.id}/revoke`, { key: STRONG_KEY });
+      assert.equal(stale.status, 401);
+      assert.deepEqual(stale.json, { error: 'Missing or invalid API key' });
+      process.env.CRM_API_KEY = STRONG_KEY;
+      const missing = await request(port, 'POST', `/api/prototypes/${row.id}/revoke`, { key: '' });
+      assert.equal(missing.status, 401);
+      const wrong = await request(port, 'POST', `/api/prototypes/${row.id}/revoke`, { key: 'not-the-key' });
+      assert.equal(wrong.status, 401);
+      const still2 = await pool.query('SELECT revoked_at FROM prototypes WHERE id = $1', [row.id]);
+      assert.equal(still2.rows[0].revoked_at, null);
+      console.log(`[prototype] revoke closed for weak keys; prototype ${row.id} stayed active`);
+    } finally {
+      process.env.CRM_API_KEY = saved;
+    }
+  });
+
+  it('prototype: public responses set X-Content-Type-Options nosniff', async () => {
+    process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
+    const previousMax = process.env.PILOT_DEMO_RATE_MAX;
+    process.env.PILOT_DEMO_RATE_MAX = '1';
+    _resetForTests();
+    try {
+      const lead = await seedLead({ google_place_id: 'test-place-proto-nosniff' });
+      const proposal = await draftProposal(lead.id);
+      const link = await request(port, 'GET', `/api/proposals/${proposal.id}`);
+      const token = tokenOf(link.json.prototype.url);
+      const ip = '203.0.113.90';
+      const ok = await request(port, 'GET', `/api/public/prototypes/${token}`, {
+        key: '',
+        headers: { 'x-forwarded-for': ip },
+      });
+      assert.equal(ok.status, 200);
+      assert.equal(ok.headers['x-content-type-options'], 'nosniff');
+      const missing = await request(port, 'GET', `/api/public/prototypes/${'f'.repeat(43)}`, {
+        key: '',
+        headers: { 'x-forwarded-for': '203.0.113.91' },
+      });
+      assert.equal(missing.status, 404);
+      assert.equal(missing.headers['x-content-type-options'], 'nosniff');
+      const limited = await request(port, 'GET', `/api/public/prototypes/${token}`, {
+        key: '',
+        headers: { 'x-forwarded-for': ip },
+      });
+      assert.equal(limited.status, 429);
+      assert.equal(limited.headers['x-content-type-options'], 'nosniff');
+      console.log('[prototype] nosniff on 200, 404, and 429');
+    } finally {
+      if (previousMax == null) delete process.env.PILOT_DEMO_RATE_MAX;
+      else process.env.PILOT_DEMO_RATE_MAX = previousMax;
+      _resetForTests();
+    }
+  });
+
+  it('prototype: errors log err.code and not err.message', async () => {
+    process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
+    const watched = [
+      'src/prototypes/store.js',
+      'src/prototypes/public.js',
+      'src/api/prototypes.js',
+    ];
+    for (const file of watched) {
+      const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
+      assert.equal(text.includes('err.message'), false, file);
+    }
+    const draftSrc = fs.readFileSync(path.join(ROOT, 'src/proposals/draft.js'), 'utf8');
+    assert.equal(draftSrc.includes("[prototype] hook failed:', err.message"), false);
+    assert.match(draftSrc, /\[prototype\] hook failed:', err && err\.code/);
+
+    const sentinel = 'LEAK_SENTINEL_do_not_log';
+    const lines = [];
+    const originalError = console.error;
+    const originalQuery = pool.query.bind(pool);
+    console.error = (...args) => { lines.push(args.map((part) => String(part)).join(' ')); };
+    pool.query = async () => {
+      const err = new Error(sentinel);
+      err.code = 'PTEST';
+      throw err;
+    };
+    try {
+      const pub = await request(port, 'GET', `/api/public/prototypes/${'a'.repeat(43)}`, { key: '' });
+      assert.equal(pub.status, 500);
+      const revoked = await request(port, 'POST', '/api/prototypes/1/revoke', { key: STRONG_KEY });
+      assert.equal(revoked.status, 500);
+      pool.query = originalQuery;
+      const lead = await seedLead({ google_place_id: 'test-place-proto-log-code' });
+      scoring.recommendPrototypes = () => {
+        const err = new Error(sentinel);
+        err.code = 'PTEST';
+        throw err;
+      };
+      console.error = (...args) => { lines.push(args.map((part) => String(part)).join(' ')); };
+      const proposal = await draftProposal(lead.id);
+      assert.equal(proposal.status, 'draft');
+    } finally {
+      console.error = originalError;
+      pool.query = originalQuery;
+      scoring.recommendPrototypes = originalRecommend;
+    }
+    assert.ok(lines.some((line) => line.includes('PTEST')));
+    assert.equal(lines.some((line) => line.includes(sentinel)), false);
+    console.log(`[prototype] error logs include code; message absent (${lines.length} lines)`);
+  });
+
+  it('prototype: revoke on the server.js mount fails closed when CRM_API_KEY is weak or unset', async () => {
+    process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
+    const saved = process.env.CRM_API_KEY;
+    process.env.CRM_API_KEY = STRONG_KEY;
+    const lead = await seedLead({ google_place_id: 'test-place-proto-mount-weak' });
+    await draftProposal(lead.id);
+    const weakRow = (await prototypeRows(lead.id))[0];
+    const strongLead = await seedLead({ google_place_id: 'test-place-proto-mount-strong' });
+    await draftProposal(strongLead.id);
+    const strongRow = (await prototypeRows(strongLead.id))[0];
+    const padded = `  ${'y'.repeat(32)}  `;
+    const paddedLead = await seedLead({ google_place_id: 'test-place-proto-mount-padded' });
+    await draftProposal(paddedLead.id);
+    const paddedRow = (await prototypeRows(paddedLead.id))[0];
+
+    async function freePort() {
+      return new Promise((resolve, reject) => {
+        const probe = http.createServer();
+        probe.once('error', reject);
+        probe.listen(0, '127.0.0.1', () => {
+          const chosen = probe.address().port;
+          probe.close(() => resolve(chosen));
+        });
+      });
+    }
+
+    async function boot(key) {
+      const listenPort = await freePort();
+      const env = { ...process.env, PORT: String(listenPort), NODE_ENV: 'test', DISABLE_CRON: '1' };
+      if (key === undefined) delete env.CRM_API_KEY;
+      else env.CRM_API_KEY = key;
+      let output = '';
+      const child = spawn(process.execPath, [path.join(ROOT, 'src/server.js')], {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child.stdout.on('data', (buf) => { output += buf.toString('utf8'); });
+      child.stderr.on('data', (buf) => { output += buf.toString('utf8'); });
+      const getOutput = () => output;
+      try {
+        await new Promise((resolve, reject) => {
+          const deadline = Date.now() + 20000;
+          const attempt = () => {
+            if (child.exitCode != null) {
+              reject(new Error(`server exited ${child.exitCode}: ${getOutput().slice(0, 500)}`));
+              return;
+            }
+            const req = http.request({
+              method: 'GET', hostname: '127.0.0.1', port: listenPort, path: '/health',
+            }, (res) => {
+              res.resume();
+              res.on('end', () => resolve(res.statusCode));
+            });
+            req.on('error', () => {
+              if (Date.now() > deadline) reject(new Error(`server did not listen: ${getOutput().slice(0, 500)}`));
+              else setTimeout(attempt, 100);
+            });
+            req.end();
+          };
+          attempt();
+        });
+        return { listenPort, child, output: getOutput };
+      } catch (err) {
+        child.kill('SIGKILL');
+        throw err;
+      }
+    }
+
+    async function stop(child) {
+      if (!child || child.exitCode != null) return;
+      child.kill('SIGTERM');
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => { child.kill('SIGKILL'); }, 2000);
+        child.once('exit', () => { clearTimeout(timer); resolve(); });
+      });
+    }
+
+    const cases = [
+      { name: 'unset', key: undefined, header: '' },
+      { name: 'empty', key: '', header: '' },
+      { name: 'short', key: 'short', header: 'short' },
+      { name: '31', key: 'x'.repeat(31), header: 'x'.repeat(31) },
+      { name: 'spaces', key: ' '.repeat(32), header: ' '.repeat(32) },
+    ];
+    try {
+      for (const item of cases) {
+        const started = await boot(item.key);
+        try {
+          const res = await request(started.listenPort, 'POST', `/api/prototypes/${weakRow.id}/revoke`, { key: item.header });
+          assert.equal(res.status, 503, item.name);
+          assert.deepEqual(res.json, { error: 'writes_disabled' });
+          const secret = String(item.header || '').trim();
+          if (secret) assert.equal(started.output().includes(secret), false, item.name);
+        } finally {
+          await stop(started.child);
+        }
+      }
+      const untouched = await pool.query('SELECT revoked_at FROM prototypes WHERE id = $1', [weakRow.id]);
+      assert.equal(untouched.rows[0].revoked_at, null);
+
+      const strong = await boot(STRONG_KEY);
+      try {
+        const missing = await request(strong.listenPort, 'POST', `/api/prototypes/${strongRow.id}/revoke`, { key: '' });
+        assert.equal(missing.status, 401);
+        const wrong = await request(strong.listenPort, 'POST', `/api/prototypes/${strongRow.id}/revoke`, { key: 'short' });
+        assert.equal(wrong.status, 401);
+        const ok = await request(strong.listenPort, 'POST', `/api/prototypes/${strongRow.id}/revoke`, { key: STRONG_KEY });
+        assert.equal(ok.status, 200);
+        assert.equal(ok.json.id, strongRow.id);
+        assert.ok(ok.json.revoked_at);
+      } finally {
+        await stop(strong.child);
+      }
+      const revoked = await pool.query('SELECT revoked_at FROM prototypes WHERE id = $1', [strongRow.id]);
+      assert.ok(revoked.rows[0].revoked_at);
+
+      const paddedBoot = await boot(padded);
+      try {
+        // Node drops leading and trailing spaces on the header, so the raw
+        // padded key cannot be presented. The route is open (not 503) and
+        // still refuses the trimmed header.
+        const trimmed = await request(paddedBoot.listenPort, 'POST', `/api/prototypes/${paddedRow.id}/revoke`, { key: padded });
+        assert.equal(trimmed.status, 401);
+        assert.notEqual(trimmed.json.error, 'writes_disabled');
+      } finally {
+        await stop(paddedBoot.child);
+      }
+      const paddedStill = await pool.query('SELECT revoked_at FROM prototypes WHERE id = $1', [paddedRow.id]);
+      assert.equal(paddedStill.rows[0].revoked_at, null);
+      console.log(`[prototype] server.js mount: weak/unset => 503; strong key required; prototype ${weakRow.id} stayed active`);
+    } finally {
+      process.env.CRM_API_KEY = saved;
+    }
   });
 });

@@ -11,6 +11,10 @@ const PRIMARY_FALLBACK = '#2f6b57';
 const SECONDARY_FALLBACK = '#1e2a2f';
 const HEX = /^#[0-9a-fA-F]{6}$/;
 
+// Raw tokens from inserts in this process. The database keeps only the hash,
+// so a restart or another instance cannot rebuild the URL.
+const issued = new Map();
+
 function isServiceTitan(prospect) {
   return String(prospect && prospect.fsm_detected || '').trim().toLowerCase() === 'servicetitan';
 }
@@ -86,31 +90,30 @@ async function loadActive(prospectId) {
 
 function linkFor(row) {
   if (!row || row.revoked_at) return null;
-  const token = tokens.deriveToken(row.prospect_id, row.issued_at);
-  if (!token) return null;
-  const stored = row.token_hash ? Buffer.from(row.token_hash) : null;
-  if (!tokens.hashesEqual(stored, tokens.hashToken(token))) return null;
-  return {
-    url: tokens.publicPath(token),
+  const base = {
+    url: null,
     agent_type: row.agent_type,
     issued_at: row.issued_at,
     expires_at: row.expires_at,
-    token,
   };
+  const token = issued.get(row.id);
+  if (!token) return base;
+  const stored = row.token_hash ? Buffer.from(row.token_hash) : null;
+  if (!tokens.hashesEqual(stored, tokens.hashToken(token))) return base;
+  return { ...base, url: tokens.publicPath(token), token };
 }
 
 async function insertRow(prospect, agent, colors) {
   const name = brandNameOf(prospect);
   if (!name) throw new Error('prototype brand name missing');
   for (let attempt = 0; attempt < 3; attempt++) {
-    const issuedAt = new Date(Date.now() + attempt);
-    const token = tokens.deriveToken(prospect.id, issuedAt);
-    if (!token || Buffer.from(token, 'base64url').length < 16) {
-      throw new Error('prototype token was shorter than 16 bytes');
+    const minted = tokens.mintToken();
+    if (Buffer.from(minted.token, 'base64url').length !== tokens.TOKEN_BYTES) {
+      throw new Error('prototype token was not 32 bytes');
     }
     try {
       const { rows } = await pool.query(
-        `WITH stamp AS (SELECT $7::timestamptz AS issued_at)
+        `WITH stamp AS (SELECT NOW() AS issued_at)
          INSERT INTO prototypes (
            prospect_id, agent_type, brand_name, color_primary, color_secondary,
            token_hash, issued_at, expires_at
@@ -118,15 +121,10 @@ async function insertRow(prospect, agent, colors) {
          SELECT $1, $2, $3, $4, $5, $6, issued_at, issued_at + INTERVAL '14 days'
            FROM stamp
          RETURNING ${ROW_COLS}`,
-        [prospect.id, agent, name, colors.primary, colors.secondary, tokens.hashToken(token), issuedAt]
+        [prospect.id, agent, name, colors.primary, colors.secondary, minted.hash]
       );
       const row = rows[0];
-      const resigned = tokens.deriveToken(row.prospect_id, row.issued_at);
-      if (resigned && resigned !== token) {
-        const hash = tokens.hashToken(resigned);
-        await pool.query('UPDATE prototypes SET token_hash = $2 WHERE id = $1', [row.id, hash]);
-        row.token_hash = hash;
-      }
+      issued.set(row.id, minted.token);
       return row;
     } catch (err) {
       if (err.code !== '23505') throw err;
@@ -163,7 +161,7 @@ async function attachPrototype({ prospectId, research }) {
     console.log(`[prototype] prospect ${prospect.id} agent ${row.agent_type} prototype ${row.id}`);
     return row;
   } catch (err) {
-    console.error('[prototype] hook failed:', err.message);
+    console.error('[prototype] hook failed:', err && err.code);
     return null;
   }
 }
@@ -194,11 +192,8 @@ async function readByToken(raw) {
   );
   const row = rows[0] || null;
   const stored = row && row.token_hash ? Buffer.from(row.token_hash) : null;
-  const recomputed = row ? tokens.deriveToken(row.prospect_id, row.issued_at) : null;
-  const recomputedHash = recomputed ? tokens.hashToken(recomputed) : tokens.DUMMY_HASH;
   const equal = tokens.hashesEqual(stored, computed);
-  const macOk = tokens.hashesEqual(stored, recomputedHash);
-  if (!wellFormed || !row || !equal || !macOk || row.revoked_at) {
+  if (!wellFormed || !row || !equal || row.revoked_at) {
     return { status: 404, body: { error: 'not_found' } };
   }
   if (row.expired === true) {
@@ -231,7 +226,15 @@ async function revoke(id) {
       RETURNING id, revoked_at`,
     [id]
   );
+  if (rows[0]) issued.delete(id);
   return rows[0] || null;
+}
+
+function _clearIssuedForTests() {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_clearIssuedForTests is only available when NODE_ENV=test');
+  }
+  issued.clear();
 }
 
 module.exports = {
@@ -240,4 +243,5 @@ module.exports = {
   readByToken,
   revoke,
   resolvePick,
+  _clearIssuedForTests,
 };

@@ -1,7 +1,7 @@
 // Public prototype read. No API key: the unguessable token is the credential.
-// The pilot demo limiter keys this route (same max, window, and client IP).
-// watermark is fixed in the payload. This router does not read a query
-// string or FF_HIDE_WATERMARK.
+// The limiter uses the prototype bucket (same max and window as the pilot
+// demo, separate counters). watermark is fixed in the payload. This router
+// does not read a query string or FF_HIDE_WATERMARK.
 
 const express = require('express');
 const { clientIp, consume } = require('../pilot/rate-limit');
@@ -10,12 +10,13 @@ const { readByToken } = require('./store');
 const router = express.Router();
 
 function stamp(res) {
+  res.set('X-Content-Type-Options', 'nosniff');
   res.set('X-Robots-Tag', 'noindex, nofollow');
   res.set('Cache-Control', 'no-store');
 }
 
 router.use((req, res, next) => {
-  const hit = consume(clientIp(req), 'demo');
+  const hit = consume(clientIp(req), 'prototype');
   if (hit.limited) {
     res.set('Retry-After', String(hit.retryAfter));
     stamp(res);
@@ -30,7 +31,7 @@ router.get('/:token', async (req, res) => {
     stamp(res);
     res.status(result.status).json(result.body);
   } catch (err) {
-    console.error('[prototype] public read failed:', err.message);
+    console.error('[prototype] public read failed:', err && err.code);
     stamp(res);
     res.status(500).json({ error: 'Something went wrong.' });
   }

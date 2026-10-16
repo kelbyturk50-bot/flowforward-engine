@@ -206,7 +206,7 @@ async function draftProposal(prospectId, opts = {}) {
     try {
       await attachPrototype({ prospectId: lead.id, research });
     } catch (err) {
-      console.error('[prototype] hook failed:', err.message);
+      console.error('[prototype] hook failed:', err && err.code);
     }
     return ins.rows[0];
   } catch (err) {

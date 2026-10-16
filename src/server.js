@@ -57,8 +57,9 @@ app.use('/p', require('./proposals/onepager').router);
 app.use('/demo/estimate-recovery', pilotDemo.router);
 
 // Public prototype read (no API key — the token is the credential).
-// Mounted before the API-key guard. Uses the pilot demo rate limit.
-// The page at /demo/prototype/<token> is a later UI change; this route is the data read.
+// Mounted before the API-key guard. Rate limit uses the prototype bucket,
+// separate from the pilot demo. The page at /demo/prototype/<token> is a
+// later UI change; this route is the data read.
 app.use('/api/public/prototypes', require('./prototypes/public').router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
