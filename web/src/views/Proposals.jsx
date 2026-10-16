@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
+import { PreviewDemoLink } from '../demo/DemoLinks';
 import { useAsync, ErrorNote, FitBadge, ProposalChip, money2, relDate, timeAgo, toast } from '../ui';
 import { useJobs, elapsed } from '../jobs';
 
@@ -67,17 +68,18 @@ export default function Proposals({ version, bump, openProposal }) {
             </> : ' '}
           </p>
         </div>
+        <PreviewDemoLink />
       </header>
 
       <section className="panel generate" aria-label="Generate drafts">
         <div className="gen-copy">
           <h2>Generate drafts</h2>
           <p className="muted">
-            Researches your top {s?.config?.tiers?.join('/') || 'A'}-tier leads that don't have a proposal yet and writes drafts for you to review.
+            Researches your top {s?.config?.tiers?.join('/') || 'A'}-tier leads that don{"'"}t have a proposal yet and writes drafts for you to review.
             Nothing is sent. About $0.10–0.15 each.{s ? ` ${s.eligible_leads} ${s.eligible_leads === 1 ? 'lead' : 'leads'} ready.` : ''}
             {s?.config && !s.config.auto_draft ? ' Runs only when you click.' : ''}
           </p>
-          <p className="muted small">To draft for one specific lead, open it from Leads and click "Draft a proposal".</p>
+          <p className="muted small">{"To draft for one specific lead, open it from Leads and click \"Draft a proposal\"."}</p>
         </div>
         <div className="gen-controls">
           <label className="gen-count">How many
@@ -110,7 +112,7 @@ export default function Proposals({ version, bump, openProposal }) {
                 <span className="muted small">{j.kind === 'rewrite' ? 'new version' : 'first draft'} · {j.status === 'queued' ? 'waiting its turn' : `running ${elapsed(j.started_at)}`}</span></li>
             ))}
             {failed.map(j => (
-              <li key={j.id} className="job-failed-row"><span className="warn-text">Didn't finish:</span> {j.company} <span className="muted small">{j.error}</span>
+              <li key={j.id} className="job-failed-row"><span className="warn-text">{"Didn't finish:"}</span> {j.company} <span className="muted small">{j.error}</span>
                 <button className="btn btn-quiet btn-sm" onClick={() => dismiss(j.id)}>Dismiss</button></li>
             ))}
           </ul>

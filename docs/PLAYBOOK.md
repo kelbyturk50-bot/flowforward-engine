@@ -2,7 +2,7 @@
 
 How the Grok Bot team ships work on FlowForward. Coding agents follow `AGENTS.md` at the repo root. This file is the human process around them.
 
-Kelby owns the product and is the only person who merges to `main`.
+Kelby owns the product. Who presses merge, and when, is Change flow step 8.
 
 ## Roles
 
@@ -10,19 +10,14 @@ Kelby owns the product and is the only person who merges to `main`.
 |---|---|---|---|
 | Summit | Head of Engineering | Front door. Routes work, keeps the roadmap, writes or accepts the spec before anyone builds. | Code. Merge. |
 | Juniper | Chief of Staff | Ops. Morning brief, board hygiene, daily 1:1s, postmortems. | — |
-| Canyon | Backend Engineer | Ships API, bot, proposals, and database work by launching cloud agents with a spec. | Merge. Touch production. |
+| Canyon | Backend Engineer | Ships API, bot, proposals, and database work by launching cloud agents with a spec. May press merge on backend PRs (step 8). | Touch production. |
 | Gauge | QA Lead | Checks the proof on every PR. Runs tests only against previews and a test database. | Test against production data or the production API. |
+| Warden | Security Lead | Reviews auth, send paths, OAuth, secrets, and schema changes that run on boot. | — |
+| Scout | Product Lead | Specs and acceptance for CRM behavior. | — |
+| Delta | Frontend Engineer | CRM in `web/`. May press merge on frontend PRs (step 8). | — |
+| Ochre | UX and Product Designer | UI and one-pager presentation. | — |
 
-Later waves, not staffed yet:
-
-| Person | Role |
-|---|---|
-| Warden | Security. Reviews auth, send paths, OAuth, secrets, and schema changes that run on boot. |
-| Scout | Product. Specs and acceptance for CRM behavior. |
-| Delta | Frontend. CRM in `web/`. |
-| Ochre | Designer. UI and one-pager presentation. |
-
-Until a later wave is staffed, Summit routes that work to the closest current owner and says so on the card.
+Merging follows Change flow step 8.
 
 ## Board
 
@@ -31,40 +26,54 @@ One GitHub Project. Columns, in order:
 1. **Todo** — accepted, not started.
 2. **Working** — an owner is driving it.
 3. **Blocked** — cannot move. The owner says why in one line.
-4. **Ready for Review** — branch is up, proof is attached, PR is open. Waiting on Kelby.
-5. **Done** — Kelby merged, or the card was closed without a merge and the reason is on the card.
+4. **Ready for Review** — branch is up, proof is attached, PR is open. Waiting on merge per step 8.
+5. **Done** — Merged per step 8, or the card was closed without a merge and the reason is on the card.
 
 Rules:
 
-- One owner per card. The owner is a person (Summit, Juniper, Canyon, Gauge), not "the agent."
+- One owner per card. The owner is a person (Summit, Juniper, Canyon, Gauge, Warden, Scout, Delta, Ochre), not "the agent."
 - Stuck means the card is in **Blocked** and the owner sends Kelby a one-line ping: what is stuck, what they need.
 - Juniper keeps the board honest in the morning brief: every Working card has an owner, every Blocked card has a reason, nothing sits in Ready for Review without a PR link.
 
 ## Change flow
 
 1. **Spec.** Summit (or the person Summit assigns) writes what to build, what not to touch, and the proof the PR must include. Proof is the list in `AGENTS.md`: tests, backend logs, and before/after screenshots for UI.
-2. **Launch.** The engineer (Canyon for backend; Delta once staffed for frontend) starts a cloud agent with that spec and the required proof. The agent does not get production credentials.
+2. **Launch.** The engineer (Canyon for backend; Delta for frontend) starts a cloud agent with that spec and the required proof. The agent does not get production credentials.
 3. **Branch.** The agent pushes a branch. It does not push to `main` and does not merge.
 4. **Adversarial review.** A fresh agent, one that did not write the change, reviews the diff against the spec and `AGENTS.md`.
 5. **QA.** Gauge checks the proof on a preview and a test database only. Warden also reviews when the diff touches auth, send paths, OAuth, secrets, or `src/db/schema.sql`.
 6. **PR.** The PR opens against `main` with the proof in the description.
 7. **Board.** The owner moves the card to **Ready for Review** and links the PR.
-8. **Merge.** Kelby merges. Nobody else does.
+8. **Merge.** The coding agent that wrote the change never merges. The owning engineer bot for that PR (Canyon for backend, Delta for frontend) may press merge as flowForward50, but only after proof + an independent fresh-agent review and QA pass (and Security when relevant), and it never counts as one of those passes. Never push directly to `main`. Merging deploys to Railway/Vercel.
 
 ## Cost
 
 - A proposal draft is about **$0.10–$0.15** (model, cache, and a few web searches). The hard cap in code is `PROPOSAL_MAX_COST` (default $0.75) per draft.
 - Google Places is free inside the monthly credit. Past that tier, searches cost money. Discovery multiplies queries by markets.
-- Tests use mocks (`draft._setClient`, `send._setTransport`, and a Places mock that still has to be added). Tests do not spend.
+- Tests use mocks (`draft._setClient`, `send._setTransport`, and `_setSearch` in `src/bot/google-places.js`). Tests do not spend.
 - Any run that would spend — live Places, live Anthropic, or a real send — needs Kelby's yes first.
 
 ## Where routines stop
 
 Scheduled and agent routines stop at a **draft, an issue, or a PR**.
 
-They do not send email, contact a prospect, run discovery against live Places, approve a proposal, merge, or change Railway or Vercel settings. A person does those, and only Kelby merges or approves spend.
+They do not send email, contact a prospect, run discovery against live Places, approve a proposal, or change Railway or Vercel settings or env vars. A person does those. Kelby approves spend.
+
+Routines never merge. Merging is always a deliberate step by the owning engineer bot, never automated by a routine. See step 8.
 
 Nightly proposal drafting stays off (`PROPOSAL_AUTO_DRAFT` unset). Drafts are made on demand.
+
+## Pre-production Railway
+
+Kelby confirmed this on Oct 15, 2026.
+
+1. While FlowForward is pre-production, the current Railway environment is staging. There is no separate staging environment yet. A separate Railway staging environment is deferred until real production go-live. After real production go-live, never write to the production DB or API.
+2. Tagged test DB and API writes are allowed in this environment only when every test record is clearly marked as test, the records are cleaned up afterward, and the proof is posted on the PR. Marked as test means the visible name starts with `TEST:` (prospect `company` or project `name`) and any email uses a `test+…@` address; there is no `is_test` column.
+3. Still banned in this environment: sending emails, proposal sends, discovery runs, and contacting prospects.
+4. Still banned: changing Railway or Vercel settings or env vars.
+5. Never put secrets in chat, code, PRs, issues, or templates.
+
+The allowance in item 2 is only those tagged test DB and API writes. It does not change items 3, 4, or 5, and it does not change the standing bans on live Places, live Anthropic, or real sends. Local work still defaults to a disposable Postgres. The same rule is in `AGENTS.md`.
 
 ## Postmortem
 

@@ -200,7 +200,7 @@ function LeadBody({ lead, save, setLead, bump, openProject, openProposal }) {
   );
 }
 
-function ProposalBlock({ lead, bump, openProposal }) {
+function ProposalBlock({ lead, openProposal }) {
   const { activeFor, refresh } = useJobs();
   const job = activeFor(lead.id);
   const [list, setList] = useState(null);

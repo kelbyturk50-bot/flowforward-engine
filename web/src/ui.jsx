@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { localToday } from './api';
+import { UNCONFIGURED_MESSAGE } from './api-base.js';
 
 export const STAGES = [
   { id: 'found',        label: 'Found' },
@@ -69,10 +70,90 @@ export function timeAgo(ts) {
   return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+/** True when the viewport is at or under the CRM phone breakpoint. */
+export function useNarrow(query = '(max-width: 860px)') {
+  const get = () => typeof window.matchMedia === 'function' && window.matchMedia(query).matches;
+  const [matches, setMatches] = useState(get);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return undefined;
+    const mq = window.matchMedia(query);
+    const on = () => setMatches(mq.matches);
+    on();
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, [query]);
+  return matches;
+}
+
 export const addDays = (n) => {
   const d = new Date(); d.setDate(d.getDate() + n);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
+
+const TABBABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])';
+
+function tabbables(root) {
+  return [...root.querySelectorAll(TABBABLE)].filter((el) => el.tabIndex !== -1);
+}
+
+/** Phone bottom sheet. Focus enters on open, stays inside while open, and returns to the opener on close. */
+export function BottomSheet({ open, onClose, title, children }) {
+  const ref = useRef(null);
+  const onCloseRef = useRef(onClose);
+  const returnFocus = useRef(null);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    if (!open) return undefined;
+    returnFocus.current = document.activeElement;
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== 'Tab' || !ref.current) return;
+      const items = tabbables(ref.current);
+      if (items.length === 0) {
+        e.preventDefault();
+        ref.current.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || active === ref.current || !ref.current.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !ref.current.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    ref.current?.focus();
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+      const back = returnFocus.current;
+      if (back instanceof HTMLElement) back.focus();
+    };
+  }, [open]);
+  if (!open) return null;
+  return (
+    <div className="sheet-wrap" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="sheet" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} ref={ref}>
+        <div className="sheet-grab" aria-hidden="true" />
+        <header className="sheet-head">
+          <h2>{title}</h2>
+          <button type="button" className="btn btn-quiet btn-sm" onClick={onClose}>Done</button>
+        </header>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 export function Drawer({ open, onClose, children, label, wide }) {
   const ref = useRef(null);
@@ -108,8 +189,15 @@ export function useAsync(fn, deps) {
   return { ...state, reload: () => setTick(t => t + 1) };
 }
 
-export function ErrorNote({ error, onRetry }) {
+/** A 400 from the leads or pipeline list is a bad filter, not a crash. */
+export function presentError(error) {
   if (!error) return null;
+  if (error.status === 400) return { message: 'Those filters are not valid. Clear them and try again.' };
+  return error;
+}
+
+export function ErrorNote({ error, onRetry }) {
+  if (!error || error.message === UNCONFIGURED_MESSAGE) return null;
   return (
     <div className="error-note" role="alert">
       <p>{error.message}</p>

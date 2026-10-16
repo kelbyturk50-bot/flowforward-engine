@@ -43,7 +43,13 @@ async function mailer() {
   }
   throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
 }
-function _setTransport(t) { testTransport = t; } // tests
+// Tests swap in a fake transport. Refuses to run outside the test process.
+function _setTransport(t) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_setTransport is only available when NODE_ENV=test');
+  }
+  testTransport = t;
+}
 
 const onepagerUrl = (p) => `${cfg.PUBLIC_BASE_URL}/p/${p.slug}`;
 

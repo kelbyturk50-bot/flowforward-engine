@@ -1,9 +1,16 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { useAsync, ErrorNote, FitBadge, StageChip, Stars, STAGES, relDate, isOverdue, Drawer, toast } from '../ui';
+import { useAsync, ErrorNote, FitBadge, StageChip, Stars, STAGES, relDate, isOverdue, Drawer, BottomSheet, useNarrow, toast, presentError } from '../ui';
+import { compactMoney } from '../format';
 
 const PAGE = 100;
-const DEFAULTS = { q: '', stage: 'open', tier: '', industry: '', city: '', sort: 'fit' };
+const DEFAULTS = { q: '', stage: 'open', tier: '', industry: '', city: '', sort: 'fit', min_value: '' };
+
+function leadSubtitle(data) {
+  const total = data?.total;
+  if (typeof total !== 'number' || !Number.isFinite(total)) return 'No leads loaded yet';
+  return `${total.toLocaleString()} match, ranked by fit for your business`;
+}
 
 function loadFilters() {
   try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('ff.leadFilters') || '{}') }; } catch { return DEFAULTS; }
@@ -14,6 +21,8 @@ export default function Leads({ version, bump, openLead }) {
   const [q, setQ] = useState(f.q);
   const [pages, setPages] = useState(1);
   const [adding, setAdding] = useState(false);
+  const [sheet, setSheet] = useState(false);
+  const narrow = useNarrow();
   const meta = useAsync(() => api.meta(), []);
 
   useEffect(() => { try { localStorage.setItem('ff.leadFilters', JSON.stringify(f)); } catch { /* ignore */ } }, [f]);
@@ -24,56 +33,86 @@ export default function Leads({ version, bump, openLead }) {
     () => api.prospects({ ...f, limit: PAGE * pages }), [f, pages, version]);
 
   const set = (k) => (e) => setF(x => ({ ...x, [k]: e.target.value }));
-  const filtered = Object.entries(f).some(([k, v]) => k !== 'sort' && v !== DEFAULTS[k]);
+  const filtered = Object.entries(f).some(([k, v]) => v !== DEFAULTS[k]);
+  const sheetCount = ['stage', 'tier', 'industry', 'city', 'sort', 'min_value'].filter(k => f[k] !== DEFAULTS[k]).length;
 
   return (
     <div className="page">
       <header className="page-head">
         <div>
           <h1>Leads</h1>
-          <p className="muted">{data ? `${data.total.toLocaleString()} match` : ' '}, ranked by fit for your business</p>
+          <p className="muted">{leadSubtitle(data)}</p>
         </div>
         <button className="btn" onClick={() => setAdding(true)}>Add lead</button>
       </header>
 
       <div className="filters" role="search">
         <input className="input grow" type="search" placeholder="Search company, contact or phone" value={q} onChange={e => setQ(e.target.value)} aria-label="Search leads" />
-        <select className="input" value={f.stage} onChange={set('stage')} aria-label="Stage">
-          <option value="open">All open</option>
-          <option value="">All stages</option>
-          {STAGES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-          <option value="closed">Closed</option>
-        </select>
-        <select className="input" value={f.tier} onChange={set('tier')} aria-label="Fit tier">
-          <option value="">Any fit</option>
-          <option value="A">A only</option>
-          <option value="A,B">A and B</option>
-          <option value="C,D">C and D</option>
-        </select>
-        <select className="input" value={f.industry} onChange={set('industry')} aria-label="Industry">
-          <option value="">All trades</option>
-          {meta.data?.industries.map(i => <option key={i}>{i}</option>)}
-        </select>
-        <select className="input" value={f.city} onChange={set('city')} aria-label="City">
-          <option value="">All cities</option>
-          {meta.data?.cities.map(c => <option key={c}>{c}</option>)}
-        </select>
-        <select className="input" value={f.sort} onChange={set('sort')} aria-label="Sort">
-          <option value="fit">Best fit</option>
-          <option value="next_action">Next follow-up</option>
-          <option value="recent">Newest</option>
-          <option value="reviews">Most reviews</option>
-          <option value="rating">Rating</option>
-          <option value="updated">Recently updated</option>
-          <option value="company">A–Z</option>
-        </select>
-        {filtered && <button className="btn btn-quiet" onClick={() => { setQ(''); setF(DEFAULTS); }}>Clear</button>}
+        <div className="filters-inline">
+          <select className="input" value={f.stage} onChange={set('stage')} aria-label="Stage">
+            <option value="open">All open</option>
+            <option value="">All stages</option>
+            {STAGES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+            <option value="closed">Closed</option>
+          </select>
+          <select className="input" value={f.tier} onChange={set('tier')} aria-label="Fit tier">
+            <option value="">Any fit</option>
+            <option value="A">A only</option>
+            <option value="A,B">A and B</option>
+            <option value="C,D">C and D</option>
+          </select>
+          <select className="input" value={f.industry} onChange={set('industry')} aria-label="Trade">
+            <option value="">All trades</option>
+            {meta.data?.industries.map(i => <option key={i}>{i}</option>)}
+          </select>
+          <select className="input" value={f.city} onChange={set('city')} aria-label="City">
+            <option value="">All cities</option>
+            {meta.data?.cities.map(c => <option key={c}>{c}</option>)}
+          </select>
+          <select className="input" value={f.sort} onChange={set('sort')} aria-label="Sort">
+            <option value="fit">Best fit</option>
+            <option value="revenue">Revenue</option>
+            <option value="next_action">Next follow-up</option>
+            <option value="recent">Newest</option>
+            <option value="reviews">Most reviews</option>
+            <option value="rating">Rating</option>
+            <option value="updated">Recently updated</option>
+            <option value="company">A–Z</option>
+          </select>
+          {filtered && <button className="btn btn-quiet" onClick={() => { setQ(''); setF(DEFAULTS); }}>Clear</button>}
+        </div>
+        <button type="button" className="btn btn-quiet filters-launch" onClick={() => setSheet(true)} aria-haspopup="dialog">
+          Filter{sheetCount ? ` · ${sheetCount}` : ''}
+        </button>
       </div>
 
-      <ErrorNote error={error} onRetry={reload} />
+      <BottomSheet open={sheet} onClose={() => setSheet(false)} title="Filter leads">
+        <div className="sheet-filters">
+          <LeadFilters f={f} set={set} meta={meta.data} revenue />
+        </div>
+        {filtered && <button className="btn btn-quiet" onClick={() => { setQ(''); setF(DEFAULTS); }}>Clear filters</button>}
+      </BottomSheet>
+
+      <ErrorNote error={presentError(error)} onRetry={reload} />
 
       <div className="table-wrap">
-        <table className="leads">
+        {narrow && <ul className="lead-cards">
+          {data?.prospects.map(l => (
+            <li key={l.id}>
+              <button type="button" className="lead-card" onClick={() => openLead(l.id)}>
+                <span className="lead-card-main">
+                  <span className="lead-card-line">
+                    <span className="lead-name">{l.company}</span>
+                    {l.fit_tier && <span className={`tier-mark fit-${l.fit_tier}`}>{l.fit_tier}</span>}
+                  </span>
+                  <span className="lead-trade">{l.industry} · {compactMoney(l.est_value)}</span>
+                </span>
+                <span className={`lead-score fit-${l.fit_tier || 'none'}`}>{l.fit_score ?? '–'}</span>
+              </button>
+            </li>
+          ))}
+        </ul>}
+        {!narrow && <table className="leads">
           <thead>
             <tr><th>Fit</th><th>Company</th><th>Trade</th><th>City</th><th>Reviews</th><th>Stage</th><th>Next step</th></tr>
           </thead>
@@ -95,7 +134,7 @@ export default function Leads({ version, bump, openLead }) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table>}
         {data && data.prospects.length === 0 && (
           <p className="empty pad">No leads match these filters. {filtered && 'Clear filters to see everything.'}</p>
         )}
@@ -110,6 +149,64 @@ export default function Leads({ version, bump, openLead }) {
       <AddLead open={adding} onClose={() => setAdding(false)} industries={meta.data?.industries || []}
         onCreated={(lead) => { setAdding(false); bump(); openLead(lead.id); toast(`Added ${lead.company}.`); }} />
     </div>
+  );
+}
+
+function LeadFilters({ f, set, meta, revenue = false }) {
+  return (
+    <>
+      <label>Stage
+        <select className="input" value={f.stage} onChange={set('stage')}>
+          <option value="open">All open</option>
+          <option value="">All stages</option>
+          {STAGES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+          <option value="closed">Closed</option>
+        </select>
+      </label>
+      <label>Fit
+        <select className="input" value={f.tier} onChange={set('tier')}>
+          <option value="">Any fit</option>
+          <option value="A">A only</option>
+          <option value="A,B">A and B</option>
+          <option value="C,D">C and D</option>
+        </select>
+      </label>
+      <label>Trade
+        <select className="input" value={f.industry} onChange={set('industry')}>
+          <option value="">All trades</option>
+          {meta?.industries.map(i => <option key={i}>{i}</option>)}
+        </select>
+      </label>
+      <label>City
+        <select className="input" value={f.city} onChange={set('city')}>
+          <option value="">All cities</option>
+          {meta?.cities.map(c => <option key={c}>{c}</option>)}
+        </select>
+      </label>
+      {revenue && (
+        <label>Revenue
+          <select className="input" value={f.min_value} onChange={set('min_value')}>
+            <option value="">Any revenue</option>
+            <option value="10000">$10k and up</option>
+            <option value="50000">$50k and up</option>
+            <option value="250000">$250k and up</option>
+            <option value="1000000">$1M and up</option>
+          </select>
+        </label>
+      )}
+      <label>Sort
+        <select className="input" value={f.sort} onChange={set('sort')}>
+          <option value="fit">Best fit</option>
+          <option value="revenue">Revenue</option>
+          <option value="next_action">Next follow-up</option>
+          <option value="recent">Newest</option>
+          <option value="reviews">Most reviews</option>
+          <option value="rating">Rating</option>
+          <option value="updated">Recently updated</option>
+          <option value="company">A–Z</option>
+        </select>
+      </label>
+    </>
   );
 }
 
@@ -130,7 +227,7 @@ function AddLead({ open, onClose, onCreated, industries }) {
     <Drawer open={open} onClose={onClose} label="Add lead">
       <form className="drawer-body form" onSubmit={submit}>
         <h2>Add a lead</h2>
-        <p className="muted">For referrals and anyone discovery didn't find. It gets a fit score as soon as you save.</p>
+        <p className="muted">{"For referrals and anyone discovery didn't find. It gets a fit score as soon as you save."}</p>
         <label>Company<input className="input" required value={b.company} onChange={set('company')} /></label>
         <label>Trade
           <input className="input" required list="trade-list" value={b.industry} onChange={set('industry')} placeholder="HVAC, Plumbing…" />

@@ -1,19 +1,36 @@
 import { useEffect, useState } from 'react';
 import { api, settings } from '../api';
+import { acceptedApiUrl, apiUrlIssue, shouldStoreApiUrl } from '../api-base.js';
 import { useAsync, ErrorNote, timeAgo, toast, money2 } from '../ui';
 
 export default function Settings({ authProblem, onSaved, version }) {
-  const [url, setUrl] = useState(settings.apiUrl);
+  const [baseline, setBaseline] = useState(() => settings.apiUrl);
+  const [url, setUrl] = useState(baseline);
   const [key, setKey] = useState(settings.apiKey);
+  const [urlError, setUrlError] = useState('');
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const connected = !!settings.apiKey;
   const runs = useAsync(() => connected ? api.runs() : Promise.resolve(null), [version, connected]);
 
+  const onAddress = (e) => {
+    const next = e.target.value;
+    setUrl(next);
+    setUrlError(next.trim() ? apiUrlIssue(next) : '');
+    setStatus(null);
+  };
+
   const saveAndTest = async (e) => {
-    e.preventDefault(); setBusy(true); setStatus(null);
-    settings.apiUrl = url; settings.apiKey = key;
+    e.preventDefault();
+    const trimmed = url.trim();
+    const accepted = acceptedApiUrl(trimmed);
+    if (trimmed && !accepted) { setUrlError(apiUrlIssue(trimmed)); setStatus(null); return; }
+    setUrlError('');
+    setBusy(true); setStatus(null);
+    if (!trimmed) settings.apiUrl = '';
+    else if (shouldStoreApiUrl(trimmed, baseline)) settings.apiUrl = accepted;
+    settings.apiKey = key;
     try {
       await api.health();
       await api.stats();
@@ -23,6 +40,16 @@ export default function Settings({ authProblem, onSaved, version }) {
     } catch (err) {
       setStatus({ ok: false, msg: err.status === 401 ? 'The API rejected that key. Check CRM_API_KEY in Railway Variables.' : err.message });
     } finally { setBusy(false); }
+  };
+
+  const resetAddress = () => {
+    settings.apiUrl = '';
+    const next = settings.apiUrl;
+    setBaseline(next);
+    setUrl(next);
+    setUrlError('');
+    setStatus(null);
+    onSaved?.();
   };
 
   const trigger = async () => {
@@ -42,11 +69,15 @@ export default function Settings({ authProblem, onSaved, version }) {
 
       <form className="panel form" onSubmit={saveAndTest}>
         <h2>Connection</h2>
-        <p className="muted">Saved on this device only. Enter it once on each phone or computer you use.</p>
-        <label>API address<input className="input" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://…up.railway.app" required /></label>
+        <p className="muted">{"Saved on this device only. Use an https address (http is fine for localhost). Reset goes back to this environment's default."}</p>
+        <label>API address<input className="input" value={url} onChange={onAddress} placeholder="https://…" aria-invalid={urlError ? 'true' : undefined} aria-describedby={urlError ? 'api-url-error' : undefined} /></label>
+        {urlError && <p id="api-url-error" className="error-text" role="alert">{urlError}</p>}
         <label>API key<input className="input" type="password" value={key} onChange={e => setKey(e.target.value)} autoComplete="off" placeholder="Value of CRM_API_KEY" /></label>
-        {status && <p className={status.ok ? 'ok-note' : 'error-text'} role="status">{status.msg}</p>}
-        <div className="form-actions"><button className="btn" disabled={busy}>{busy ? 'Checking…' : 'Save and connect'}</button></div>
+        {status && !urlError && <p className={status.ok ? 'ok-note' : 'error-text'} role="status">{status.msg}</p>}
+        <div className="form-actions">
+          <button type="button" className="btn btn-quiet" onClick={resetAddress} disabled={busy}>Reset</button>
+          <button className="btn" disabled={busy || !!urlError}>{busy ? 'Checking…' : 'Save and connect'}</button>
+        </div>
       </form>
 
       {connected && (
@@ -59,6 +90,7 @@ export default function Settings({ authProblem, onSaved, version }) {
           </div>
           <ErrorNote error={runs.error} />
           {runs.data?.length > 0 && (
+            <div className="runs-scroll">
             <table className="runs">
               <thead><tr><th>Started</th><th>Status</th><th>Queries</th><th>Found</th><th>New</th><th>Errors</th></tr></thead>
               <tbody>
@@ -71,6 +103,7 @@ export default function Settings({ authProblem, onSaved, version }) {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </section>
       )}
@@ -104,7 +137,7 @@ function ProposalSettings({ version }) {
     <>
       <form className="panel form" onSubmit={saveNotes}>
         <h2>Proposal voice</h2>
-        <p className="muted">Standing notes the bot follows on every draft. Write them the way you'd brief a new hire.</p>
+        <p className="muted">{"Standing notes the bot follows on every draft. Write them the way you'd brief a new hire."}</p>
         <textarea className="input" rows={7} value={notes} onChange={e => setNotes(e.target.value)}
           placeholder={'e.g.\n- Never open with "I hope this finds you well."\n- Mention I grew up working in the trades.\n- Roofers: lead with storm-season lead follow-up.\n- Keep first emails under 90 words.'} />
         <div className="form-actions"><button className="btn" disabled={saving || !st.data}>{saving ? 'Saving…' : 'Save notes'}</button></div>
@@ -172,7 +205,7 @@ function EmailSettings() {
   return (
     <section className="panel">
       <h2>Email sending</h2>
-      <p className="muted">Proposals go out from your Gmail through Google's API, and replies are picked up from its inbox.</p>
+      <p className="muted">{"Proposals go out from your Gmail through Google's API, and replies are picked up from its inbox."}</p>
       <ErrorNote error={st.error} onRetry={st.reload} />
       {g && (
         <>

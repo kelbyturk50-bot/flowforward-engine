@@ -6,52 +6,29 @@ const { rescore } = require('../scoring/fit');
 
 const STAGES = ['found', 'contacted', 'responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const CLOSED = ['won', 'lost', 'disqualified'];
-const SORTS = {
-  fit:         'fit_score DESC NULLS LAST, review_count DESC NULLS LAST',
-  recent:      'discovered_at DESC',
-  rating:      'rating DESC NULLS LAST, review_count DESC NULLS LAST',
-  reviews:     'review_count DESC NULLS LAST',
-  next_action: 'next_action_at ASC NULLS LAST, fit_score DESC NULLS LAST',
-  company:     'company ASC',
-  updated:     'updated_at DESC',
-};
+const { buildProspectListQuery, ProspectQueryError } = require('./prospect-query');
 
 // GET /api/prospects
 //   ?stage= (comma list | open | closed) &industry= &city= &tier= (comma list)
-//   &q= (company search) &min_fit= &has_website=1 &sort=fit|recent|rating|reviews|next_action|company|updated
+//   &q= (company search) &min_fit= &min_value= &has_website=1
+//   &sort=fit|recent|rating|reviews|revenue|next_action|company|updated
 //   &limit= (default 200, max 1000) &offset=
+// Unknown sort (including constructor / toString / __proto__) and invalid
+// min_value return 400 { error: 'bad_request' }. A missing sort defaults to fit.
+// min_value filters with est_value >= $n, so NULL estimates are excluded.
+// min_value=0 is accepted and still excludes those NULL rows.
 router.get('/', async (req, res) => {
   try {
-    const { stage, industry, city, tier, q, min_fit, has_website, sort = 'fit' } = req.query;
-    const limit  = Math.min(parseInt(req.query.limit || '200', 10) || 200, 1000);
-    const offset = parseInt(req.query.offset || '0', 10) || 0;
-    const where = []; const params = [];
-    const add = (sql, val) => { params.push(val); where.push(sql.replace('?', `$${params.length}`)); };
-
-    if (stage === 'open')        add('stage <> ALL(?)', CLOSED);
-    else if (stage === 'closed') add('stage = ANY(?)', CLOSED);
-    else if (stage)              add('stage = ANY(?)', stage.split(','));
-    if (industry) add('industry = ANY(?)', industry.split(','));
-    if (city)     add('city = ANY(?)', city.split(','));
-    if (tier)     add('fit_tier = ANY(?)', tier.split(','));
-    if (q) {
-      params.push(`%${q}%`);
-      const i = params.length;
-      where.push(`(company ILIKE $${i} OR contact_name ILIKE $${i} OR phone ILIKE $${i})`);
-    }
-    if (min_fit)  add('fit_score >= ?', parseInt(min_fit, 10));
-    if (has_website === '1') where.push('website IS NOT NULL');
-
-    const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
-    const order = SORTS[sort] || SORTS.fit;
-
+    const q = buildProspectListQuery(req.query);
     const [rows, count] = await Promise.all([
-      pool.query(`SELECT * FROM prospects ${whereSql} ORDER BY ${order}, id LIMIT ${limit} OFFSET ${offset}`, params),
-      pool.query(`SELECT COUNT(*)::int AS n FROM prospects ${whereSql}`, params),
+      pool.query(q.listSql, q.params),
+      pool.query(q.countSql, q.params),
     ]);
-    res.json({ prospects: rows.rows, total: count.rows[0].n, limit, offset });
+    res.json({ prospects: rows.rows, total: count.rows[0].n, limit: q.limit, offset: q.offset });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (err instanceof ProspectQueryError) return res.status(400).json({ error: 'bad_request' });
+    console.error('[prospects] list failed:', err.message);
+    res.status(500).json({ error: 'server_error' });
   }
 });
 

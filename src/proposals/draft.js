@@ -17,8 +17,13 @@ function claude() {
   }
   return client;
 }
-// Tests swap in a fake client.
-function _setClient(c) { client = c; }
+// Tests swap in a fake client. Refuses to run outside the test process.
+function _setClient(c) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_setClient is only available when NODE_ENV=test');
+  }
+  client = c;
+}
 
 function makeSlug(company) {
   const base = String(company || 'proposal').toLowerCase().normalize('NFKD')
