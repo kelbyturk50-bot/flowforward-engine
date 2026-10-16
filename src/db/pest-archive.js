@@ -85,35 +85,67 @@ function isLocalHost(host) {
   return nums[0] === 127;
 }
 
-function printHost(host) {
-  let value = String(host || '').trim();
-  if (value.startsWith('[') && value.endsWith(']')) value = value.slice(1, -1);
-  return value;
+function envText(env, key) {
+  if (env[key] == null) return '';
+  return String(env[key]).trim();
 }
 
-// The host node-postgres dials from DATABASE_URL. A missing host is localhost.
-// hostaddr is the dial target when it is set. A service name can point anywhere.
+function oneHost(value) {
+  const hosts = splitHostList(value);
+  if (hosts.length !== 1) return null;
+  return hosts[0];
+}
+
+// node-postgres (ConnectionParameters): a truthy connection-string host wins,
+// otherwise PGHOST, otherwise localhost. It does not read PGHOSTADDR.
+// PGDATABASE supplies the database name only when the URL has none.
+// A service name, more than one host, or a hostaddr that is not that same
+// host can point somewhere else. Those are ambiguous and fail closed.
 function archiveTarget(env) {
   const production = env.NODE_ENV === 'production';
+  const closed = (ambiguous) => ({
+    blocked: true,
+    local: false,
+    production,
+    ambiguous,
+    place: 'remote',
+  });
+  const url = envText(env, 'DATABASE_URL');
   let parsed = {};
-  if (env.DATABASE_URL != null && String(env.DATABASE_URL).trim() !== '') {
+  if (url) {
     try {
-      parsed = parseConnectionString(String(env.DATABASE_URL));
+      parsed = parseConnectionString(url);
     } catch {
-      return { blocked: true, local: false, production, host: 'invalid' };
+      return closed(true);
     }
   }
-  if (parsed.service) {
-    return { blocked: true, local: false, production, host: 'service' };
+  if (envText(env, 'PGSERVICE') || (parsed.service && String(parsed.service).trim())) {
+    return closed(true);
   }
-  const dial = parsed.hostaddr ? splitHostList(parsed.hostaddr) : splitHostList(parsed.host || '');
-  const hosts = dial.length ? dial : ['localhost'];
-  const local = hosts.every(isLocalHost);
+
+  const urlHost = String(parsed.host || '').trim();
+  const pgHost = envText(env, 'PGHOST');
+  const chosenText = urlHost || pgHost || 'localhost';
+  const chosen = oneHost(chosenText);
+  if (!chosen) return closed(true);
+
+  const extras = [];
+  const pgHostAddr = envText(env, 'PGHOSTADDR');
+  const urlHostAddr = String(parsed.hostaddr || '').trim();
+  if (pgHostAddr) extras.push(pgHostAddr);
+  if (urlHostAddr) extras.push(urlHostAddr);
+  for (const extra of extras) {
+    const host = oneHost(extra);
+    if (!host || normalizeHost(host) !== normalizeHost(chosen)) return closed(true);
+  }
+
+  const local = isLocalHost(chosen);
   return {
     blocked: production || !local,
     local,
     production,
-    host: hosts.map(printHost).join(','),
+    ambiguous: false,
+    place: local ? 'local' : 'remote',
   };
 }
 
@@ -143,7 +175,7 @@ async function beginGuardedWrite(client, env) {
       await client.query('ROLLBACK');
       throw refused();
     }
-    return { host: target.host, database };
+    return { place: target.place, database };
   } catch (err) {
     if (err.code !== 'PEST_ARCHIVE_REFUSED') await client.query('ROLLBACK').catch(() => {});
     throw err;
@@ -219,23 +251,30 @@ function renderDryRun(rows) {
   return [...counts.keys()].map(key => `${key} ${counts.get(key)}`).join('\n') + '\n';
 }
 
-async function runDry(client) {
-  await client.query('BEGIN READ ONLY');
+async function runDry(client, opts = {}) {
+  const own = !opts.joined;
+  if (own) await client.query('BEGIN READ ONLY');
   try {
     const { text, values } = dryRunQuery();
     const { rows } = await client.query(text, values);
-    await client.query('COMMIT');
+    if (own) await client.query('COMMIT');
     return renderDryRun(rows);
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    if (own) await client.query('ROLLBACK').catch(() => {});
     throw err;
   }
+}
+
+async function setWriteTimeouts(client) {
+  await client.query("SET LOCAL lock_timeout = '5s'");
+  await client.query("SET LOCAL statement_timeout = '15s'");
 }
 
 async function runApply(client, opts = {}) {
   const own = !opts.joined;
   if (own) await client.query('BEGIN');
   try {
+    await setWriteTimeouts(client);
     const runId = crypto.randomUUID();
     const { text, values } = archiveStatement(runId);
     const { rows } = await client.query(text, values);
@@ -254,6 +293,7 @@ async function runUndo(client, runId, opts = {}) {
   const own = !opts.joined;
   if (own) await client.query('BEGIN');
   try {
+    await setWriteTimeouts(client);
     const { rows } = await client.query(unarchiveSql(), [runId]);
     const n = rows[0] && rows[0].n;
     if (!Number.isInteger(n) || n < 0) throw new Error('undo count rejected');
@@ -275,6 +315,7 @@ module.exports = {
   isArchivedLead,
   notArchivedSql,
   archiveTarget,
+  confirmValue,
   beginGuardedWrite,
   archiveStatement,
   unarchiveSql,

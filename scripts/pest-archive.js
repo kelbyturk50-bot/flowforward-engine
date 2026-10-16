@@ -7,23 +7,30 @@
 //
 // Dry-run prints counts only. No names, emails, or ids.
 // Apply stamps archived_at, archive_reason, and a new archive_run_id, then
-// prints the host, the database name, the count, and the run id.
+// prints the database name, local or remote, the count, and the run id.
 // Undo requires that run id. It restores rows with this reason and this run
 // id only. Another reason, or the same reason from another run, stays archived.
 //
-// Apply and undo refuse to write when NODE_ENV is production or the database
-// host is not local, unless PEST_ARCHIVE_CONFIRM equals the connected
-// database name. They print the host and database name before the update.
-// The user, password, and URL are not printed. A blocked target with no
-// confirm exits before connecting.
+// .env is loaded first. An already-set variable wins. The host is the one
+// node-postgres dials: a non-empty DATABASE_URL host, otherwise PGHOST,
+// otherwise localhost. PGHOSTADDR, a URL hostaddr, PGSERVICE, or more than
+// one host is ambiguous and is refused. Dry, apply, and undo refuse when
+// NODE_ENV is production or that host is not local, unless
+// PEST_ARCHIVE_CONFIRM equals the connected database name. They print the
+// database name and local or remote, never the host, user, password, or URL.
+// A blocked target with no confirm exits before the database client loads.
+// Apply and undo set lock_timeout to 5s and statement_timeout to 15s.
 //
 // Uses DATABASE_URL. Tests point that at a disposable database. Do not point
 // this script at Railway from an agent. Boot does not run either statement:
 // a boot update would archive those rows again on the next deploy.
 
+require('dotenv').config();
+
 const {
   isRunId,
   archiveTarget,
+  confirmValue,
   beginGuardedWrite,
   runDry,
   runApply,
@@ -39,7 +46,7 @@ const USAGE = {
 };
 
 function confirmSet(env) {
-  return typeof env.PEST_ARCHIVE_CONFIRM === 'string' && env.PEST_ARCHIVE_CONFIRM.length > 0;
+  return confirmValue(env) != null;
 }
 
 async function main() {
@@ -57,7 +64,8 @@ async function main() {
     return;
   }
 
-  if (mode !== 'dry' && archiveTarget(process.env).blocked && !confirmSet(process.env)) {
+  const target = archiveTarget(process.env);
+  if (target.blocked && !confirmSet(process.env)) {
     process.stderr.write('pest-archive refused\n');
     process.exitCode = 1;
     return;
@@ -67,13 +75,28 @@ async function main() {
   const client = await pool.connect();
   try {
     if (mode === 'dry') {
+      if (target.blocked) {
+        await client.query('BEGIN READ ONLY');
+        const { rows } = await client.query('SELECT current_database() AS name');
+        const name = rows[0] && rows[0].name;
+        if (confirmValue(process.env) !== name) {
+          await client.query('ROLLBACK');
+          process.stderr.write('pest-archive refused\n');
+          process.exitCode = 1;
+          return;
+        }
+        const text = await runDry(client, { joined: true });
+        await client.query('COMMIT');
+        process.stdout.write(text);
+        return;
+      }
       const text = await runDry(client);
       process.stdout.write(text);
       return;
     }
     const preface = await beginGuardedWrite(client, process.env);
-    process.stdout.write(`host ${preface.host}\n`);
     process.stdout.write(`database ${preface.database}\n`);
+    process.stdout.write(`${preface.place}\n`);
     if (mode === 'apply') {
       const { n, runId } = await runApply(client, { joined: true });
       await client.query('COMMIT');

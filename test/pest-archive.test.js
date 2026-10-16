@@ -16,6 +16,7 @@ process.env.SENDER_ADDRESS = '1 Test Street, Provo, UT 84601';
 process.env.CRM_API_KEY = '';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const http = require('http');
 const { spawnSync } = require('child_process');
@@ -60,17 +61,21 @@ function grid(overrides) {
   return lines.join('\n') + '\n';
 }
 
-function runScript(mode, extra = [], env = process.env) {
-  return spawnSync(process.execPath, [SCRIPT, mode, ...extra], { encoding: 'utf8', env });
+function runScript(mode, extra = [], env = process.env, opts = {}) {
+  return spawnSync(process.execPath, [SCRIPT, mode, ...extra], {
+    encoding: 'utf8',
+    env,
+    cwd: opts.cwd,
+    timeout: opts.timeout,
+  });
 }
 
 function parseWrite(stdout, label) {
   const lines = stdout.split('\n');
   assert.equal(lines[lines.length - 1], '');
   const body = lines.slice(0, -1);
-  const expected = archiveTarget(process.env);
-  assert.equal(body[0], `host ${expected.host}`);
-  assert.equal(body[1], 'database flowforward_test');
+  assert.equal(body[0], 'database flowforward_test');
+  assert.equal(body[1], 'local');
   assert.match(body[2], new RegExp(`^${label} \\d+$`));
   const n = Number(body[2].slice(label.length + 1));
   let runId = null;
@@ -81,8 +86,25 @@ function parseWrite(stdout, label) {
   } else {
     assert.equal(body.length, 3);
   }
-  assert.doesNotMatch(stdout, /postgres:|password|secret|@/);
+  assert.doesNotMatch(stdout, /127\.0\.0\.1|postgres:|password|secret|@/);
   return { n, runId };
+}
+
+function assertRefused(result) {
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, 'pest-archive refused\n');
+  assert.equal(`${result.stdout}${result.stderr}`.includes('192.0.2.1'), false);
+}
+
+function envWithoutDatabase(overrides) {
+  const env = { ...process.env, ...overrides };
+  delete env.NODE_OPTIONS;
+  delete env.PEST_ARCHIVE_CONFIRM;
+  for (const key of ['DATABASE_URL', 'PGHOST', 'PGHOSTADDR', 'PGDATABASE', 'PGSERVICE', 'PGPORT']) {
+    if (!Object.prototype.hasOwnProperty.call(overrides, key)) delete env[key];
+  }
+  return env;
 }
 
 function assertCountsOnly(stdout) {
@@ -171,6 +193,12 @@ describe('pest-name archive', { concurrency: false }, () => {
     const fitSrc = fs.readFileSync(path.join(__dirname, '../src/scoring/fit.js'), 'utf8');
     const sendSrc = fs.readFileSync(path.join(__dirname, '../src/proposals/send.js'), 'utf8');
     assert.match(archiveSrc, /BEGIN READ ONLY/);
+    assert.match(archiveSrc, /SET LOCAL lock_timeout = '5s'/);
+    assert.match(archiveSrc, /SET LOCAL statement_timeout = '15s'/);
+    const applyFn = archiveSrc.slice(archiveSrc.indexOf('async function runApply'), archiveSrc.indexOf('async function runUndo'));
+    const undoFn = archiveSrc.slice(archiveSrc.indexOf('async function runUndo'));
+    assert.match(applyFn, /setWriteTimeouts\(client\)/);
+    assert.match(undoFn, /setWriteTimeouts\(client\)/);
     const rescoreUpdate = fitSrc.slice(fitSrc.indexOf('UPDATE prospects p SET fit_score'), fitSrc.indexOf('return rows.length'));
     assert.match(rescoreUpdate, /archived_at IS NULL/);
     const followStart = sendSrc.indexOf('for (const p of rows)');
@@ -896,8 +924,24 @@ describe('pest-name archive', { concurrency: false }, () => {
     });
     assert.equal(remote.blocked, true);
     assert.equal(remote.local, false);
-    assert.equal(remote.host, '192.0.2.1');
-    assert.equal(remote.host.includes('secret'), false);
+    assert.equal(remote.place, 'remote');
+    assert.equal(JSON.stringify(remote).includes('secret'), false);
+    assert.equal(archiveTarget({ NODE_ENV: 'test', PGHOST: '192.0.2.1' }).local, false);
+    assert.equal(archiveTarget({
+      NODE_ENV: 'test',
+      DATABASE_URL: 'postgres:///railway',
+      PGHOST: '192.0.2.1',
+    }).blocked, true);
+    assert.equal(archiveTarget({
+      NODE_ENV: 'test',
+      DATABASE_URL: 'postgres://u@127.0.0.1/db',
+      PGHOST: '192.0.2.1',
+    }).local, true);
+    assert.equal(archiveTarget({
+      NODE_ENV: 'test',
+      DATABASE_URL: 'postgres://u@127.0.0.1/db',
+      PGSERVICE: 'prod',
+    }).ambiguous, true);
     assert.equal(archiveTarget({
       NODE_ENV: 'production',
       DATABASE_URL: 'postgres://u@127.0.0.1/flowforward_test',
@@ -942,6 +986,8 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.notEqual(farUndo.status, 0);
     assert.equal(farUndo.stdout, '');
     assert.equal(`${farUndo.stdout}${farUndo.stderr}`.includes('secret'), false);
+    const farDry = runScript('dry', [], farEnv);
+    assertRefused(farDry);
 
     const client = await pool.connect();
     let runId;
@@ -976,5 +1022,65 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.notEqual(undoProd.status, 0);
     assert.equal(undoProd.stdout, '');
     assert.equal((await stamp(row.id)).archive_run_id, runId);
+
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-archive-empty-'));
+    const envDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-archive-dotenv-'));
+    try {
+      const pgHostOnly = runScript('apply', [], envWithoutDatabase({ PGHOST: '192.0.2.1' }), {
+        cwd: emptyDir,
+        timeout: 4000,
+      });
+      assertRefused(pgHostOnly);
+      const urlPlusHost = runScript('apply', [], envWithoutDatabase({
+        DATABASE_URL: 'postgres:///railway',
+        PGHOST: '192.0.2.1',
+      }), { cwd: emptyDir, timeout: 4000 });
+      assertRefused(urlPlusHost);
+      fs.writeFileSync(path.join(envDir, '.env'), 'PGHOST=192.0.2.1\n');
+      const fromFile = runScript('apply', [], envWithoutDatabase({}), { cwd: envDir, timeout: 4000 });
+      assertRefused(fromFile);
+      const fromFileDry = runScript('dry', [], envWithoutDatabase({}), { cwd: envDir, timeout: 4000 });
+      assertRefused(fromFileDry);
+      assert.equal((await stamp(row.id)).archive_run_id, runId);
+    } finally {
+      fs.rmSync(emptyDir, { recursive: true, force: true });
+      fs.rmSync(envDir, { recursive: true, force: true });
+    }
+  });
+
+  it('stops an apply that waits on a row lock and rolls it back', async () => {
+    await resetDb();
+    const first = await insertProspect({
+      google_place_id: 'test-place-lock-1',
+      company: 'TEST: Lock Pest Control',
+      industry: 'HVAC',
+      email: 'test+lock1@example.com',
+    });
+    const second = await insertProspect({
+      google_place_id: 'test-place-lock-2',
+      company: 'TEST: Lock Exterminators',
+      industry: 'HVAC',
+      email: 'test+lock2@example.com',
+    });
+    const before = await stamp(first.id);
+    const locker = await pool.connect();
+    const writer = await pool.connect();
+    const started = Date.now();
+    try {
+      await locker.query('BEGIN');
+      await locker.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [first.id]);
+      await assert.rejects(() => runApply(writer), (err) => err.code === '55P03');
+    } finally {
+      await locker.query('ROLLBACK').catch(() => {});
+      locker.release();
+      await writer.query('ROLLBACK').catch(() => {});
+      writer.release();
+    }
+    assert.ok(Date.now() - started < 12000);
+    const after = await stamp(first.id);
+    assert.equal(after.archived_at, null);
+    assert.equal(after.archive_reason, null);
+    assert.equal(new Date(after.updated_at).toISOString(), new Date(before.updated_at).toISOString());
+    assert.equal((await stamp(second.id)).archived_at, null);
   });
 });
