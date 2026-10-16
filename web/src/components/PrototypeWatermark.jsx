@@ -1,7 +1,8 @@
 // Shared prototype chrome. The gallery flag can hide the gallery.
 // Nothing in props, flags, query params, or brand data can hide this watermark.
-// Barlow is used when the app has already loaded it. Otherwise the system font.
-// This file does not add a font stylesheet.
+// Barlow 600 latin is loaded with this module, which only the code-split
+// prototype and demo chunks import. The system font is the fallback.
+import '@fontsource/barlow/latin-600.css';
 
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
@@ -99,7 +100,7 @@ export function usePrototypeChrome() {
 }
 
 export function SampleTag({ children = 'Sample' }) {
-  return <span className="prototype-sample" aria-hidden="true">{children}</span>;
+  return <span className="prototype-sample">{children}</span>;
 }
 
 export function SampleValue({ children }) {

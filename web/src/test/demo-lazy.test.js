@@ -31,6 +31,10 @@ describe('demo code split', () => {
     expect(main).not.toMatch(/GalleryApp/);
     expect(main).not.toMatch(/fixture-brand/);
     expect(main).not.toMatch(/PrototypeWatermark/);
+    const watermark = readFileSync(path.join(webRoot, 'src/components/PrototypeWatermark.jsx'), 'utf8');
+    const galleryApp = readFileSync(path.join(webRoot, 'src/prototypes/GalleryApp.jsx'), 'utf8');
+    expect(watermark).toContain("import '@fontsource/barlow/latin-600.css'");
+    expect(galleryApp).not.toContain('fontsource');
     expect(galleryGate).toMatch(/import\(\s*['"]\.\/GalleryApp\.jsx['"]\s*\)/);
     expect(galleryGate).not.toMatch(/fixture-brand/);
     expect(galleryGate).not.toMatch(/EstimateRecovery/);

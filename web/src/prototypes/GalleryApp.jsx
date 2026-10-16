@@ -1,4 +1,3 @@
-import '@fontsource/barlow/latin-600.css';
 import { useEffect, useMemo, useState } from 'react';
 import { buildDemo } from '../demo/fixture.js';
 import { EstimateRecoveryFlow } from '../demo/EstimateRecovery';

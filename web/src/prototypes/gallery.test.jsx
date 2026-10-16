@@ -160,7 +160,8 @@ describe('prototype gallery', () => {
     expect(open).toHaveAttribute('href', galleryHref(TOKEN, 'estimate-follow-up', '?flags=FF_PROTOTYPE_GALLERY'));
 
     await user.click(open);
-    expect(await screen.findByRole('heading', { name: 'TEST: Wasatch Heating: 3 open estimates, $38,400' })).toBeInTheDocument();
+    const estimates = await screen.findByRole('heading', { name: /TEST: Wasatch Heating/ });
+    expect(estimates).toHaveAccessibleName('TEST: Wasatch HeatingSample: 3Sample open estimates, $38,400Sample');
     expectRibbon(container);
     expect(container.querySelector('img')).toBeNull();
     for (const row of container.querySelectorAll('.demo-estimates > li')) {
@@ -172,10 +173,11 @@ describe('prototype gallery', () => {
 
     await user.click(screen.getByRole('button', { name: 'Send estimate' }));
     expect(screen.getByRole('heading', { name: 'Preview — nothing is sent' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Thanks for asking' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Still open' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Reminder to you' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Sequence stopped' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /Thanks for asking/ })).toHaveAccessibleName(/Sample/);
+    expect(screen.getByRole('heading', { name: /Still open/ })).toHaveAccessibleName(/Sample/);
+    expect(screen.getByRole('heading', { name: /Reminder to you/ })).toHaveAccessibleName(/Sample/);
+    expect(screen.getByRole('heading', { name: /Sequence stopped/ })).toHaveAccessibleName(/Sample/);
+    expect(container.querySelector('.prototype-sample')).not.toHaveAttribute('aria-hidden');
     expect(screen.getByText(/· Stopped/)).toBeInTheDocument();
     expect(screen.getAllByText(/Email from your mailbox/)).toHaveLength(3);
     expect(container.querySelectorAll('.demo-mail-stopped')).toHaveLength(1);
@@ -190,7 +192,7 @@ describe('prototype gallery', () => {
     }
 
     await user.click(screen.getByRole('button', { name: 'See the homeowner reply' }));
-    expect(screen.getByRole('heading', { name: 'Is there financing?' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /Is there financing\?/ })).toHaveAccessibleName(/Sample/);
     expect(screen.getByText('Sequence stopped. They replied, so the Day 12 email does not send.')).toBeInTheDocument();
     expectRibbon(container);
     expect(container.querySelector('.demo-quote .prototype-sample')).not.toBeNull();

@@ -46,6 +46,13 @@ describe('phone tap targets', () => {
     expect(banner).not.toMatch(/rust/);
   });
 
+  it('keeps .demo-btn at least 44px tall', () => {
+    const heights = [...css.matchAll(/\.demo-btn[^{]*\{[^}]*min-height:\s*(\d+)px/g)].map(match => Number(match[1]));
+    expect(heights.length).toBeGreaterThan(0);
+    for (const height of heights) expect(height).toBeGreaterThanOrEqual(44);
+    expect(desktop).toContain('.demo-btn {\n  display: flex; align-items: center; justify-content: center; width: 100%; min-height: 48px;');
+  });
+
   it('keeps the desktop control sizes in the base stylesheet', () => {
     expect(desktop).toContain('min-height: 40px; padding: 0 1rem;');
     expect(desktop).toContain('.btn-sm { min-height: 32px;');
