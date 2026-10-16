@@ -20,7 +20,7 @@ One repo, two apps.
 | Proposals | `src/proposals` | Research, Claude drafts, Gmail send, one-pagers. |
 | HTTP API | `src/api` | Prospects, projects, focus, runs, proposals, API-key auth. |
 | DB | `src/db` | `client.js`, `migrate.js`, `schema.sql`. |
-| CRM views | `web/src/views` | Today, Leads, Pipeline, Projects, Proposals, Settings, and the lead/proposal/project drawers. |
+| CRM views | `web/src/views` | Today, Leads, Pipeline, Projects, Proposals, Settings, More (phone tab), and the lead/proposal/project drawers. |
 
 `npm start` and Railway both run `node src/server.js`. Do not add a second server entry.
 
@@ -85,6 +85,8 @@ If `DATABASE_URL` is already a local `flowforward_test` database (as in CI), the
 The runner sets `NODE_ENV=test` and `DISABLE_CRON=1`, points `PUBLIC_BASE_URL` at `http://127.0.0.1:3000`, and blanks Places, Anthropic, and Gmail credentials (including `GMAIL_USER`) so `.env` cannot refill them. Each test file runs in its own process. A network guard then throws on any HTTP or socket call to Places (`places.googleapis.com`, `maps.googleapis.com`, `www.googleapis.com`), Anthropic (`api.anthropic.com`), or Gmail (`gmail.googleapis.com`, `smtp.gmail.com`, `imap.gmail.com`, `oauth2.googleapis.com`). `https.request(url, options)` uses the merged host (`options` override the URL, and `hostname` wins over `host`). `fetch` checks a string, a `URL`, or a `Request`, and the target host must be loopback (`127.0.0.0/8`, `::1`, or `localhost`), not merely absent from the vendor list. `fetch('https://192.0.2.1/')` throws even when a proxy dispatcher is passed. The same loopback rule applies to `undici` `request`, `stream`, and `pipeline`, and to `ProxyAgent` / `EnvHttpProxyAgent` dispatch, so a CONNECT through a local proxy cannot name a non-loopback origin. A socket is blocked when the dialed `host`, `hostname`, IPC `path`, or remote address is not loopback, and when `servername` is not loopback. `servername` is SNI only and never stands in for the host that is dialed. The guard also wraps the native TCP connect (`connect` and `connect6`): every address actually dialed must be loopback (`127.0.0.0/8` or `::1`) or a single-slash Unix socket. A custom `lookup` or a replaced `dns.lookup` cannot point `localhost` at another address. `http2.connect` uses the same check. UDP `send` / `send6` and `connect` / `connect6` throw before a datagram is sent to a non-loopback address. `dgram.Socket` `send` and `connect` throw in the caller, before DNS, for the same reason. Nodemailer refuses a `proxy` option, a connection string such as `smtps://smtp.gmail.com:465?proxy=http://127.0.0.1:9`, and `{ url: 'smtp://...?proxy=' }` before `setupProxy` opens a tunnel. The runner puts `--require` plus the absolute path of `test/preload.js` in `NODE_OPTIONS`, so `spawn` / `exec` children inherit the guard. A Worker thread (`execArgv: []` does not re-apply `NODE_OPTIONS`) and a child whose environment drops `NODE_OPTIONS` are out of scope. Throws are `TestNetworkGuardError` before the native connect.
 
 Needs Node >= 20.18.1. A disposable database needs PostgreSQL command-line tools or Docker; CI supplies Postgres as a service instead. No API keys. Fixtures live in `test/fixtures.js`. Do not claim tests passed if you did not run `npm test`.
+
+The revenue-sort allowlist and the prospect list query checks (unknown sort, invalid `min_value`) are plain Node checks outside that suite: `node --test src/api/prospect-sorts.test.js src/api/prospect-query.test.js`.
 
 ## Crons and how to turn them off
 
