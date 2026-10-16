@@ -26,7 +26,7 @@ function expectFooter(container, name) {
   expect(footer.querySelector('.prototype-sample').textContent).toBe('Sample');
   const sentence = footer.cloneNode(true);
   sentence.querySelector('.prototype-sample').remove();
-  expect(sentence.textContent).toBe(`${FOOTER_LEAD}${name}`);
+  expect(sentence.textContent).toBe(`${FOOTER_LEAD}${name}.`);
 }
 
 function expectRibbon(container) {
@@ -39,9 +39,25 @@ function expectRibbon(container) {
   expect(scroll.contains(container.querySelector('.prototype-screen'))).toBe(true);
   expect(ribbon.style.position).toBe('sticky');
   expect(ribbon.style.top).toBe('0px');
+  expect(ribbon.getAttribute('role')).toBe('note');
   expect(paint(ribbon.style.backgroundColor)).toMatch(/#1e2a2f|rgb\(30,42,47\)/);
-  expect(paint(ribbon.style.color)).toMatch(/#ffffff|rgb\(255,255,255\)/);
+  expect(paint(ribbon.style.color)).toMatch(/#f3f6f5|rgb\(243,246,245\)/);
+  expect(ribbon.style.fontWeight).toBe('600');
+  expect(ribbon.style.fontSize).toBe('14px');
+  expect(ribbon.style.fontFamily.toLowerCase()).toContain('barlow');
+  expect(ribbon.style.fontFamily.toLowerCase()).toContain('system-ui');
+  expect(ribbon.getAttribute('style')).toContain('safe-area-inset-top');
+  expect(ribbon.getAttribute('style')).toContain('32px');
   expect(ribbon.getAttribute('style')).not.toContain('var(');
+  expect(ribbon.style.getPropertyPriority('background-color')).toBe('important');
+  expect(ribbon.style.getPropertyPriority('color')).toBe('important');
+  const tile = container.querySelector('[data-prototype-tile]');
+  expect(container.querySelector('.prototype-screen').contains(ribbon)).toBe(false);
+  expect(container.querySelector('.prototype-screen').contains(tile)).toBe(true);
+  expect(tile.style.pointerEvents).toBe('none');
+  expect(tile.style.zIndex).toBe('1');
+  expect(tile.getAttribute('style')).toContain('0.05');
+  expect(tile.getAttribute('style')).toContain('PROTOTYPE');
   expect(container.querySelector('.prototype-brand-name .prototype-sample').textContent).toBe('Sample');
   return ribbon;
 }
@@ -212,7 +228,7 @@ describe('prototype gallery', () => {
     expectFooter(container, 'TEST: <script>alert(1)</script>');
     expect(mark.getAttribute('hidden')).toBeNull();
     expect(paint(mark.style.backgroundColor)).toMatch(/#1e2a2f|rgb\(30,42,47\)/);
-    expect(paint(mark.style.color)).toMatch(/#ffffff|rgb\(255,255,255\)/);
+    expect(paint(mark.style.color)).toMatch(/#f3f6f5|rgb\(243,246,245\)/);
     expect(mark.style.display).toBe('block');
     expect(mark.style.visibility).toBe('visible');
     expect(mark.style.opacity).toBe('1');
@@ -235,6 +251,66 @@ describe('prototype gallery', () => {
     expect(mark.style.display).toBe('block');
     expect(mark.style.opacity).toBe('1');
     expect(mark.hidden).toBe(false);
+  });
+
+  it('renders the exact ribbon on every prototype route', async () => {
+    const cases = [
+      {
+        path: `/demo/gallery/${TOKEN}?flags=FF_PROTOTYPE_GALLERY,FF_HIDE_WATERMARK&watermark=0`,
+        screen: 'index',
+        heading: 'Prototype gallery',
+      },
+      {
+        path: `/demo/gallery/${TOKEN}/estimate-follow-up?flags=FF_PROTOTYPE_GALLERY,0,no&watermark=0`,
+        screen: 'estimate-follow-up',
+        heading: /open estimates/,
+      },
+      {
+        path: `/demo/gallery/${TOKEN}/not-in-this-build?flags=FF_PROTOTYPE_GALLERY&watermark=0&hideWatermark=1`,
+        screen: 'unknown',
+        heading: 'Prototype not in this build',
+      },
+    ];
+    for (const item of cases) {
+      at(item.path);
+      const { container, unmount } = render(<GalleryGate route={{ token: TOKEN, screen: item.screen }} />);
+      expect(await screen.findByRole('heading', { name: item.heading })).toBeInTheDocument();
+      expectRibbon(container);
+      expectFooter(container, 'TEST: Wasatch Heating');
+      unmount();
+    }
+  });
+
+  it('keeps the ribbon under theme overrides for pale yellow and dark navy', async () => {
+    const style = document.createElement('style');
+    style.textContent = [
+      ':root { --paper: #F5E050; --ink: #F5E050; --juniper: #F5E050; --accent: #F5E050; }',
+      '.prototype-ribbon, [data-prototype-ribbon] { background: #F5E050 !important; color: #14213D !important; display: none !important; visibility: hidden !important; opacity: 0 !important; min-height: 0 !important; }',
+      '.prototype-tile { display: none !important; pointer-events: auto !important; opacity: 0 !important; }',
+    ].join('\n');
+    document.head.appendChild(style);
+    try {
+      at(`/demo/gallery/${TOKEN}?flags=FF_PROTOTYPE_GALLERY,FF_HIDE_WATERMARK&fixture=yellow&watermark=0`);
+      const yellow = render(<GalleryGate route={{ token: TOKEN, screen: 'index' }} />);
+      expect(await screen.findByRole('heading', { name: 'Prototype gallery' })).toBeInTheDocument();
+      const yellowRibbon = expectRibbon(yellow.container);
+      expect(paint(yellowRibbon.style.backgroundColor)).not.toMatch(/f5e050|245,224,80/);
+      expect(yellow.container.querySelector('[data-brand-swatch]').getAttribute('data-brand-swatch')).toBe('#F5E050');
+      expect(yellow.container.querySelector('.prototype-screen').getAttribute('data-brand-accent')).toBe('#2F6B57');
+      expect(yellow.container.querySelector('[data-prototype-tile]').style.getPropertyPriority('display')).toBe('important');
+      yellow.unmount();
+
+      at(`/demo/gallery/${TOKEN}/estimate-follow-up?flags=anything,FF_PROTOTYPE_GALLERY&fixture=navy&watermark=0`);
+      const navy = render(<GalleryGate route={{ token: TOKEN, screen: 'estimate-follow-up' }} />);
+      expect(await screen.findByRole('heading', { name: /open estimates/ })).toBeInTheDocument();
+      expectRibbon(navy.container);
+      expect(navy.container.querySelector('[data-brand-swatch]').getAttribute('data-brand-swatch')).toBe('#14213D');
+      expect(navy.container.querySelector('.prototype-screen').getAttribute('data-brand-accent')).toBe('#14213D');
+      expectFooter(navy.container, 'TEST: Dark Navy Shop');
+      navy.unmount();
+    } finally {
+      style.remove();
+    }
   });
 
   it('shows the ribbon on the unknown prototype screen', async () => {

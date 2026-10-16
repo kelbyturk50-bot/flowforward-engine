@@ -102,6 +102,7 @@ export function presentBrand(input, { fallbackName = FALLBACK_NAME } = {}) {
       accent: normalizeHex(colors.accent),
       ink: normalizeHex(colors.ink),
     },
+    swatch: normalizeHex(colors.accent) || normalizeHex(colors.primary),
     theme: {
       accent: resolveAccent(colors),
     },

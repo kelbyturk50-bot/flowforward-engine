@@ -3,13 +3,19 @@ import { buildDemo } from '../demo/fixture.js';
 import { EstimateRecoveryFlow } from '../demo/EstimateRecovery';
 import { SampleTag } from '../components/PrototypeWatermark';
 import { presentBrand } from './brand';
-import { HOSTILE_BRAND, TEST_BRAND } from './fixture-brand';
+import { HOSTILE_BRAND, NAVY_BRAND, TEST_BRAND, YELLOW_BRAND } from './fixture-brand';
 import PrototypeLayout from './PrototypeLayout';
 import { followGalleryLink, galleryHref, galleryRouteFromPath } from './route';
 
+const FIXTURES = {
+  hostile: HOSTILE_BRAND,
+  yellow: YELLOW_BRAND,
+  navy: NAVY_BRAND,
+};
+
 function brandFromSearch(search) {
   const fixture = new URLSearchParams(String(search || '')).get('fixture');
-  return presentBrand(fixture === 'hostile' ? HOSTILE_BRAND : TEST_BRAND);
+  return presentBrand(FIXTURES[fixture] || TEST_BRAND);
 }
 
 function useGalleryLocation() {

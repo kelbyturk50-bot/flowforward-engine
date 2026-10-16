@@ -43,7 +43,10 @@ export function galleryHref(token = GALLERY_PREVIEW_TOKEN, screen = 'index', sea
   const parts = [];
   const flags = current.get('flags');
   if (flags) parts.push(`flags=${encodeList(flags)}`);
-  if (current.get('fixture') === 'hostile') parts.push('fixture=hostile');
+  const fixture = current.get('fixture');
+  if (fixture === 'hostile' || fixture === 'yellow' || fixture === 'navy') {
+    parts.push(`fixture=${fixture}`);
+  }
   const query = parts.join('&');
   return `${path}${query ? `?${query}` : ''}`;
 }
