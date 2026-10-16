@@ -369,12 +369,15 @@ describe('F-003 estimate signals', () => {
     const plumbing = { ...peer, company: 'Denver Plumbing', industry: 'Plumbing' };
     const plain = computeFit(plumbing);
     const cached = computeFit({ ...plumbing, research: replacementResearch() });
-    const cased = computeFit({ ...plumbing, industry: 'plumbing', research: replacementResearch() });
+    const lower = { ...plumbing, industry: 'plumbing' };
+    const lowerPlain = computeFit(lower);
+    const cased = computeFit({ ...lower, research: replacementResearch() });
     assert.equal(plain.fit_score, 76);
     assert.equal(cached.fit_score, plain.fit_score);
     assert.equal(cached.fit_tier, plain.fit_tier);
     assert.equal(signalPoints(cached), 0);
-    assert.equal(cased.fit_score, plain.fit_score);
+    assert.equal(cased.fit_score, lowerPlain.fit_score);
+    assert.equal(cased.fit_tier, lowerPlain.fit_tier);
     assert.equal(signalPoints(cased), 0);
 
     const sweet = computeFit({
