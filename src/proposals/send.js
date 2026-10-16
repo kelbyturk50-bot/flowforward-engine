@@ -11,6 +11,7 @@ const nodemailer = require('nodemailer');
 const pool = require('../db/client');
 const cfg  = require('./config');
 const { appendCompanyPestExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
+const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 
 const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
@@ -112,7 +113,7 @@ const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(x || '');
 /** Approve a draft and send the first email now. */
 async function approveAndSend(proposalId) {
   const { rows } = await pool.query(
-    `SELECT pr.*, p.company, p.stage, p.do_not_contact FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`,
+    `SELECT pr.*, p.company, p.stage, p.do_not_contact, p.archived_at FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`,
     [proposalId]);
   const p = rows[0];
   if (!p) throw Object.assign(new Error('Proposal not found'), { status: 404 });
@@ -120,6 +121,9 @@ async function approveAndSend(proposalId) {
   // UPDATE and before mailer() is called.
   if (isPestCompanyName(p.company)) {
     throw Object.assign(new Error(`${PEST_NAME_REASON}.`), { status: 409 });
+  }
+  if (isArchivedLead(p)) {
+    throw Object.assign(new Error(`${ARCHIVED_LEAD_REASON}.`), { status: 409 });
   }
 
   const problems = await sendReadiness();
@@ -189,11 +193,12 @@ async function sendDueFollowups() {
   const params = [];
   const nameSql = appendCompanyPestExclusion(params);
   const { rows } = await pool.query(
-    `SELECT pr.*, p.company, p.stage, p.do_not_contact FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+    `SELECT pr.*, p.company, p.stage, p.do_not_contact, p.archived_at FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
       WHERE pr.status = 'sent' AND (
             (pr.followup1_sent_at IS NULL AND pr.followup1_due_at <= NOW()) OR
             (pr.followup1_sent_at IS NOT NULL AND pr.followup2_sent_at IS NULL AND pr.followup2_due_at <= NOW()))
         AND ${nameSql}
+        AND p.archived_at IS NULL
       ORDER BY pr.sent_at LIMIT 25`,
     params);
   let sent = 0;
@@ -203,6 +208,10 @@ async function sendDueFollowups() {
     // address, or id.
     if (isPestCompanyName(p.company)) {
       console.error('[send] skipped follow-up: company name matches pest control');
+      continue;
+    }
+    if (isArchivedLead(p)) {
+      console.error('[send] skipped follow-up: lead is archived');
       continue;
     }
     if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
@@ -234,12 +243,19 @@ async function sendDueFollowups() {
     }
   }
   // Sequences with no reply two weeks after the last follow-up are finished.
+  // Archived leads stay sent. This update does not write their status or
+  // next_action.
   const done = await pool.query(
-    `UPDATE proposals SET status = 'finished', stop_reason = 'No reply after the follow-ups'
-      WHERE status = 'sent' AND COALESCE(followup2_sent_at, followup1_sent_at, sent_at) < NOW() - INTERVAL '14 days'
-        AND (followup2_due_at IS NULL OR followup2_sent_at IS NOT NULL)
-        AND (followup1_due_at IS NULL OR followup1_sent_at IS NOT NULL)
-      RETURNING prospect_id`);
+    `UPDATE proposals pr
+        SET status = 'finished', stop_reason = 'No reply after the follow-ups'
+       FROM prospects p
+      WHERE pr.prospect_id = p.id
+        AND p.archived_at IS NULL
+        AND pr.status = 'sent'
+        AND COALESCE(pr.followup2_sent_at, pr.followup1_sent_at, pr.sent_at) < NOW() - INTERVAL '14 days'
+        AND (pr.followup2_due_at IS NULL OR pr.followup2_sent_at IS NOT NULL)
+        AND (pr.followup1_due_at IS NULL OR pr.followup1_sent_at IS NOT NULL)
+      RETURNING pr.prospect_id`);
   for (const r of done.rows) {
     await pool.query(`UPDATE prospects SET next_action = COALESCE(NULLIF(next_action, ''), 'No reply to emails — try a call'),
                              next_action_at = COALESCE(next_action_at, CURRENT_DATE) WHERE id = $1`, [r.prospect_id]);
@@ -340,25 +356,57 @@ async function fetchInbox(since) {
 }
 
 let checking = false;
+// Sent proposals, including archived leads. Opt-outs and bounces are still
+// recorded while a lead is archived. A reply or booking is not: that would
+// write status and next_action, which stay with the finisher and the send path.
+async function inboxCandidates() {
+  const { rows } = await pool.query(
+    `SELECT pr.*, p.stage, p.archived_at, p.company, p.do_not_contact
+       FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+      WHERE pr.status = 'sent' AND pr.to_email IS NOT NULL`);
+  return rows;
+}
+
+function keepInboxOutcome(row, outcome) {
+  if (!outcome) return false;
+  if (!isArchivedLead(row)) return true;
+  return outcome.kind === 'opted_out' || outcome.kind === 'bounced';
+}
+
+function collectInboxOutcomes(rows, messages) {
+  const outcomes = [];
+  for (const msg of messages) {
+    if (msg.from === SENDER.email.toLowerCase()) continue;
+    for (const p of rows) {
+      if (p._done || (msg.date && p.sent_at && msg.date < new Date(p.sent_at))) continue;
+      const outcome = classifyMessage(msg, p);
+      if (!keepInboxOutcome(p, outcome)) continue;
+      p._done = true;
+      outcomes.push([p, outcome, msg]);
+    }
+  }
+  return outcomes;
+}
+
+async function applyInboxMessages(messages) {
+  const rows = await inboxCandidates();
+  const outcomes = collectInboxOutcomes(rows, messages);
+  for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
+  return { checked: messages.length, matched: outcomes.length };
+}
+
 /** Look through the inbox for replies, bookings, bounces and opt-outs. */
 async function checkInbox() {
   if (checking || !(await mailMode()) || (await mailMode()) === 'test') return { checked: 0 };
-  const { rows: active } = await pool.query(
-    `SELECT pr.*, p.stage FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'sent' AND pr.to_email IS NOT NULL`);
+  const active = await inboxCandidates();
   if (!active.length) return { checked: 0 };
   checking = true;
-  const outcomes = []; let messages = [];
+  let messages = [];
+  let outcomes = [];
   try {
     const since = new Date(Math.min(...active.map(p => new Date(p.sent_at).getTime())) - 86400000);
     messages = await fetchInbox(since);
-    for (const msg of messages) {
-      if (msg.from === SENDER.email.toLowerCase()) continue;
-      for (const p of active) {
-        if (p._done || (msg.date && msg.date < new Date(p.sent_at))) continue;
-        const outcome = classifyMessage(msg, p);
-        if (outcome) { p._done = true; outcomes.push([p, outcome, msg]); }
-      }
-    }
+    outcomes = collectInboxOutcomes(active, messages);
   } catch (err) {
     console.error('[inbox] ✗ check failed:', err.message);
   } finally {
@@ -374,6 +422,6 @@ async function senderTick() {
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, checkInbox, senderTick, stopSequence, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, checkInbox, inboxCandidates, applyInboxMessages, senderTick, stopSequence, classifyMessage, applyOutcome,
   renderMessage, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

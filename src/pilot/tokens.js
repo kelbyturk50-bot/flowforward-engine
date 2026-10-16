@@ -147,9 +147,11 @@ async function resolveToken(raw) {
   const { rows } = await pool.query(
     `SELECT t.id, t.proposal_id, t.prospect_id, t.generation, t.derived, t.token_hash,
             t.expires_at, t.revoked_at,
-            pr.status AS proposal_status, pr.demo_revoked_at
+            pr.status AS proposal_status, pr.demo_revoked_at,
+            p.archived_at
        FROM pilot_tokens t
        JOIN proposals pr ON pr.id = t.proposal_id
+       JOIN prospects p ON p.id = t.prospect_id
       WHERE t.token_hash = $1`,
     [computed]
   );
@@ -167,6 +169,7 @@ async function resolveToken(raw) {
   if (row.derived !== true) return null;
   if (row.proposal_status === 'discarded') return null;
   if (row.demo_revoked_at) return null;
+  if (row.archived_at != null) return null;
   if (new Date(row.expires_at).getTime() <= Date.now()) return null;
   const siblings = await pool.query(
     `SELECT COUNT(*)::int AS n, MAX(generation) AS generation,
@@ -280,10 +283,14 @@ async function demoHrefForProposal(req, proposalId) {
   if (!Number.isInteger(id) || id < 1) return '';
 
   const gateRow = await pool.query(
-    'SELECT status, demo_revoked_at FROM proposals WHERE id = $1',
+    `SELECT pr.status, pr.demo_revoked_at, p.archived_at
+       FROM proposals pr
+       JOIN prospects p ON p.id = pr.prospect_id
+      WHERE pr.id = $1`,
     [id]
   );
-  if (blockedProposal(gateRow.rows[0])) return '';
+  const gate = gateRow.rows[0];
+  if (blockedProposal(gate) || (gate && gate.archived_at != null)) return '';
 
   const active = await pool.query(
     `SELECT generation, token_hash, expires_at, derived

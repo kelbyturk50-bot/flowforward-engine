@@ -114,7 +114,7 @@ async function runDiscovery() {
     [new Date(), queriesRun, totalFound, newAdded, errors, errors > 0 ? 'done_with_errors' : 'done', runId]
   );
 
-  // Rank everything (new leads + any config changes)
+  // Rank active leads. rescore leaves archived rows and their stored scores alone.
   try {
     const n = await rescore();
     console.log(`[bot] Fit scores refreshed for ${n} prospects`);

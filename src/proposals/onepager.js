@@ -164,9 +164,9 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
 router.get('/:slug', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT pr.*, p.company, p.city FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.slug = $1`, [req.params.slug]);
+      `SELECT pr.*, p.company, p.city, p.archived_at FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.slug = $1`, [req.params.slug]);
     const p = rows[0];
-    if (!p || p.status === 'discarded') return res.status(404).type('html').send('<!doctype html><title>Not found</title><p style="font-family:sans-serif;padding:2rem">This page isn\'t available.</p>');
+    if (!p || p.status === 'discarded' || p.archived_at != null) return res.status(404).type('html').send('<!doctype html><title>Not found</title><p style="font-family:sans-serif;padding:2rem">This page isn\'t available.</p>');
     const preview = req.query.preview === '1';
     if (!preview && p.sent_at && !BOT_UA.test(req.get('user-agent') || '')) {
       pool.query(`UPDATE proposals SET views = views + 1, last_viewed_at = NOW() WHERE id = $1`, [p.id]).catch(() => {});
