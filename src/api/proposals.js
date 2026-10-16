@@ -191,7 +191,11 @@ router.post('/:id/demo-token', async (req, res) => {
       expires_at: minted.expires_at,
       path: pilotTokens.publicDemoPath(minted.token),
     });
-  } catch (err) { fail(res, err); }
+  } catch (err) {
+    console.error('[pilot] demo token mint failed:', err.message);
+    res.set('Cache-Control', 'no-store');
+    res.status(500).json({ error: 'Something went wrong.' });
+  }
 });
 
 // POST /api/proposals/:id/demo-token/revoke — revoke active demo tokens for this proposal.
@@ -200,12 +204,16 @@ router.post('/:id/demo-token/revoke', async (req, res) => {
   const id = pilotProposalId(req);
   if (!id) return res.status(404).json({ error: 'Not found' });
   try {
-    const found = await pool.query('SELECT id FROM proposals WHERE id = $1 AND status <> \'discarded\'', [id]);
+    const found = await pool.query('SELECT id FROM proposals WHERE id = $1', [id]);
     if (!found.rows.length) return res.status(404).json({ error: 'Not found' });
     await pilotTokens.revokeForProposal(id);
     res.set('Cache-Control', 'no-store');
     res.json({ ok: true });
-  } catch (err) { fail(res, err); }
+  } catch (err) {
+    console.error('[pilot] demo token revoke failed:', err.message);
+    res.set('Cache-Control', 'no-store');
+    res.status(500).json({ error: 'Something went wrong.' });
+  }
 });
 
 // GET /api/proposals/:id — full proposal with lead basics and version list
@@ -348,6 +356,7 @@ router.post('/:id/discard', async (req, res) => {
     const { rows } = await pool.query(`UPDATE proposals SET status = 'discarded', stop_reason = $2 WHERE id = $1 AND status = 'draft' RETURNING *`,
       [req.params.id, req.body?.reason || 'Discarded by Kelby']);
     if (!rows.length) return res.status(409).json({ error: 'Only drafts can be discarded.' });
+    await pilotTokens.revokeForProposal(rows[0].id);
     if (req.body?.disqualify) {
       const lead = await pool.query(`SELECT stage FROM prospects WHERE id = $1`, [rows[0].prospect_id]);
       if (lead.rows[0] && lead.rows[0].stage !== 'disqualified') {

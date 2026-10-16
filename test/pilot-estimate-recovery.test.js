@@ -581,4 +581,136 @@ describe('pilot estimate recovery', () => {
     assert.equal(calls.gmail, 0);
     assert.equal(calls.approve, 0);
   });
+
+  it('returns a generic message when mint or revoke throws', async () => {
+    setFlags({ master: true });
+    const secret = 'pilot-secret-db-detail-9f3c';
+    const origMint = tokens.mintForProposal;
+    const origRevoke = tokens.revokeForProposal;
+    const origError = console.error;
+    const lines = [];
+    console.error = (...args) => {
+      lines.push(args.map((part) => String(part)).join(' '));
+    };
+    const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.70' };
+    try {
+      tokens.mintForProposal = async () => { throw new Error(secret); };
+      const minted = await request('POST', `/api/proposals/${proposal.id}/demo-token`, { headers: key });
+      assert.equal(minted.status, 500);
+      assert.deepEqual(minted.json, { error: 'Something went wrong.' });
+      assert.equal(minted.text.includes(secret), false);
+      assert.equal(minted.headers['cache-control'], 'no-store');
+
+      tokens.mintForProposal = origMint;
+      tokens.revokeForProposal = async () => { throw new Error(secret); };
+      const revoked = await request('POST', `/api/proposals/${proposal.id}/demo-token/revoke`, { headers: key });
+      assert.equal(revoked.status, 500);
+      assert.deepEqual(revoked.json, { error: 'Something went wrong.' });
+      assert.equal(revoked.text.includes(secret), false);
+      assert.equal(revoked.headers['cache-control'], 'no-store');
+      assert.equal(lines.filter((line) => line.includes(secret)).length, 2);
+    } finally {
+      tokens.mintForProposal = origMint;
+      tokens.revokeForProposal = origRevoke;
+      console.error = origError;
+    }
+  });
+
+  it('closes a discarded proposal token and still revokes it', async () => {
+    setFlags({ master: true });
+    const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.71' };
+    const live = await insertProposal(prospect.id, { slug: 'pilot-discard-live' });
+    const minted = await request('POST', `/api/proposals/${live.id}/demo-token`, { headers: key });
+    assert.equal(minted.status, 201);
+
+    await pool.query(`UPDATE proposals SET status = 'discarded' WHERE id = $1`, [live.id]);
+    const unrevoked = await pool.query(
+      `SELECT revoked_at FROM pilot_tokens WHERE proposal_id = $1`,
+      [live.id]
+    );
+    assert.equal(unrevoked.rows.length, 1);
+    assert.equal(unrevoked.rows[0].revoked_at, null);
+    const closed = await request('GET', minted.json.path, {
+      headers: { 'x-forwarded-for': '203.0.113.72' },
+    });
+    assertClosed(closed);
+    const event = await request('POST', `${minted.json.path}/events`, {
+      headers: { 'x-forwarded-for': '203.0.113.72' },
+      body: { type: 'demo_view' },
+    });
+    assertClosed(event);
+
+    const revoke = await request('POST', `/api/proposals/${live.id}/demo-token/revoke`, { headers: key });
+    assert.equal(revoke.status, 200);
+    assert.deepEqual(revoke.json, { ok: true });
+    const revokedRow = await pool.query(
+      `SELECT revoked_at FROM pilot_tokens WHERE proposal_id = $1`,
+      [live.id]
+    );
+    assert.ok(revokedRow.rows[0].revoked_at);
+
+    const draft = await insertProposal(prospect.id, { slug: 'pilot-discard-route' });
+    const second = await request('POST', `/api/proposals/${draft.id}/demo-token`, { headers: key });
+    assert.equal(second.status, 201);
+    const dropped = await request('POST', `/api/proposals/${draft.id}/discard`, { headers: key, body: {} });
+    assert.equal(dropped.status, 200);
+    assert.equal(dropped.json.status, 'discarded');
+    const left = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM pilot_tokens WHERE proposal_id = $1 AND revoked_at IS NULL`,
+      [draft.id]
+    );
+    assert.equal(left.rows[0].n, 0);
+    const demo = await request('GET', second.json.path, {
+      headers: { 'x-forwarded-for': '203.0.113.73' },
+    });
+    assertClosed(demo);
+  });
+
+  it('revokes the previous token when a cold one-pager mints another', async () => {
+    setFlags({ master: true, link: true });
+    const row = await insertProposal(prospect.id, { slug: 'pilot-one-active' });
+    const key = { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.80' };
+    const first = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
+    assert.equal(first.status, 201);
+    tokens._clearCacheForTests();
+
+    const page = await request('GET', '/p/pilot-one-active', {
+      headers: { 'x-forwarded-for': '203.0.113.81' },
+    });
+    assert.equal(page.status, 200);
+    const href = ctaHref(page.text);
+    assert.ok(href);
+    assert.notEqual(tokenFromPath(href), first.json.token);
+
+    const active = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM pilot_tokens WHERE proposal_id = $1 AND revoked_at IS NULL`,
+      [row.id]
+    );
+    assert.equal(active.rows[0].n, 1);
+    const old = await request('GET', first.json.path, {
+      headers: { 'x-forwarded-for': '203.0.113.82' },
+    });
+    assertClosed(old);
+    const current = await request('GET', href, {
+      headers: { 'x-forwarded-for': '203.0.113.82' },
+    });
+    assert.equal(current.status, 200);
+    assert.equal(current.json.company, 'Wasatch Heating');
+
+    const again = await request('POST', `/api/proposals/${row.id}/demo-token`, { headers: key });
+    assert.equal(again.status, 201);
+    const stillOne = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM pilot_tokens WHERE proposal_id = $1 AND revoked_at IS NULL`,
+      [row.id]
+    );
+    assert.equal(stillOne.rows[0].n, 1);
+    const replaced = await request('GET', href, {
+      headers: { 'x-forwarded-for': '203.0.113.83' },
+    });
+    assertClosed(replaced);
+    const newest = await request('GET', again.json.path, {
+      headers: { 'x-forwarded-for': '203.0.113.83' },
+    });
+    assert.equal(newest.status, 200);
+  });
 });

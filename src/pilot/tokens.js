@@ -64,8 +64,11 @@ async function resolveToken(raw) {
   const wellFormed = typeof raw === 'string' && TOKEN_RE.test(raw);
   const computed = wellFormed ? hashToken(raw) : DUMMY_HASH;
   const { rows } = await pool.query(
-    `SELECT id, proposal_id, prospect_id, token_hash, expires_at, revoked_at
-       FROM pilot_tokens WHERE token_hash = $1`,
+    `SELECT t.id, t.proposal_id, t.prospect_id, t.token_hash, t.expires_at, t.revoked_at,
+            pr.status AS proposal_status
+       FROM pilot_tokens t
+       JOIN proposals pr ON pr.id = t.proposal_id
+      WHERE t.token_hash = $1`,
     [computed]
   );
   const row = rows[0] || null;
@@ -75,6 +78,7 @@ async function resolveToken(raw) {
   const equal = hashesEqual(stored, computed);
   if (!wellFormed || !row || !equal) return null;
   if (row.revoked_at) return null;
+  if (row.proposal_status === 'discarded') return null;
   if (new Date(row.expires_at).getTime() <= Date.now()) return null;
   return {
     id: row.id,
@@ -86,32 +90,53 @@ async function resolveToken(raw) {
 async function mintForProposal(proposalId) {
   const id = Number(proposalId);
   if (!Number.isInteger(id) || id < 1) return null;
-  const { rows } = await pool.query(
-    `SELECT id, prospect_id, status FROM proposals WHERE id = $1`,
-    [id]
-  );
-  const proposal = rows[0];
-  if (!proposal || proposal.status === 'discarded') return null;
 
   const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
   if (Buffer.from(token, 'base64url').length < TOKEN_BYTES) {
     throw new Error('Demo token was shorter than 16 bytes');
   }
   const expiresAt = new Date(Date.now() + ttlMs());
-  const inserted = await pool.query(
-    `INSERT INTO pilot_tokens (proposal_id, prospect_id, token_hash, expires_at)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id, expires_at`,
-    [proposal.id, proposal.prospect_id, hashToken(token), expiresAt]
-  );
-  cache.set(Number(proposal.id), { token, expiresAt: expiresAt.getTime() });
-  return {
-    id: inserted.rows[0].id,
-    token,
-    expires_at: inserted.rows[0].expires_at,
-    proposal_id: Number(proposal.id),
-    prospect_id: Number(proposal.prospect_id),
-  };
+  const tokenHash = hashToken(token);
+
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const { rows } = await db.query(
+      `SELECT id, prospect_id, status FROM proposals WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+    const proposal = rows[0];
+    if (!proposal || proposal.status === 'discarded') {
+      await db.query('ROLLBACK');
+      return null;
+    }
+    // One live token per proposal. A cold one-pager view mints again; the previous link stops working.
+    await db.query(
+      `UPDATE pilot_tokens SET revoked_at = NOW()
+        WHERE proposal_id = $1 AND revoked_at IS NULL`,
+      [proposal.id]
+    );
+    const inserted = await db.query(
+      `INSERT INTO pilot_tokens (proposal_id, prospect_id, token_hash, expires_at)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, expires_at`,
+      [proposal.id, proposal.prospect_id, tokenHash, expiresAt]
+    );
+    await db.query('COMMIT');
+    cache.set(Number(proposal.id), { token, expiresAt: expiresAt.getTime() });
+    return {
+      id: inserted.rows[0].id,
+      token,
+      expires_at: inserted.rows[0].expires_at,
+      proposal_id: Number(proposal.id),
+      prospect_id: Number(proposal.prospect_id),
+    };
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    db.release();
+  }
 }
 
 async function revokeForProposal(proposalId) {
