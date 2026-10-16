@@ -14,12 +14,14 @@ export const FF_PILOT_ESTIMATE_RECOVERY = 'FF_PILOT_ESTIMATE_RECOVERY';
 export const FF_PILOT_LINK_ON_ONEPAGER = 'FF_PILOT_LINK_ON_ONEPAGER';
 export const FF_PILOT_ESTIMATE_SMS = 'FF_PILOT_ESTIMATE_SMS';
 export const FF_PROTOTYPE_GALLERY = 'FF_PROTOTYPE_GALLERY';
+export const FF_CAMPAIGNS = 'FF_CAMPAIGNS';
 
 export const PILOT_FLAG_NAMES = Object.freeze([
   FF_PILOT_ESTIMATE_RECOVERY,
   FF_PILOT_LINK_ON_ONEPAGER,
   FF_PILOT_ESTIMATE_SMS,
   FF_PROTOTYPE_GALLERY,
+  FF_CAMPAIGNS,
 ]);
 
 const DEFAULTS = Object.freeze({
@@ -27,6 +29,7 @@ const DEFAULTS = Object.freeze({
   [FF_PILOT_LINK_ON_ONEPAGER]: false,
   [FF_PILOT_ESTIMATE_SMS]: false,
   [FF_PROTOTYPE_GALLERY]: false,
+  [FF_CAMPAIGNS]: false,
 });
 
 // Fully anchored. An extra label, a suffix, or a prefix does not match.
