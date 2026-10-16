@@ -55,7 +55,8 @@ The surfaces are always light, so in practice this darkens. Hue is preserved, so
 - **Allowed logo sources in v1:** checked-in fixtures, or an image Kelby enters manually (uploaded or committed as an asset). **No fetching from a prospect's website.** That waits for #30 plus a Warden review.
 - **No server-side remote fetch, ever.** Logo luminance sampling (for the plate decision) must never fetch a remote URL on the server, because that's an SSRF risk. Sample only local fixture or uploaded bytes, or precompute at fixture-authoring time and store `logoPlate: "light" | "dark" | "none"` with the fixture.
 - **Sizing:** max height 32px (mobile) / 40px (desktop), max width 160px, `object-fit: contain`. If the image fails to load, fall back to the name wordmark.
-- **Plate:** if the logo's contrast against the white header is < 3:1, put it on a slate plate (for a light logo) or a paper plate with a 1px slate inset border. Plate padding is 4px 8px, radius 6px.
+- **Wordmark plate:** the name wordmark always sits on the corrected `accent` with `onAccent` text, never on the raw brand color (e.g. yellow #F5E050 renders as #846E00 with white text).
+- **Logo plate:** if the logo's contrast against the white header is < 3:1, put it on a slate plate (for a light logo) or a paper plate with a 1px slate inset border. Plate padding is 4px 8px, radius 6px.
 
 ## 3. Layout
 
@@ -71,12 +72,14 @@ Mobile-first at **390px**, desktop at **1280px**. On desktop the flow sits in a 
 
 ## 4. Watermark (non-removable)
 
-Rendered by `PrototypeWatermark` from the prototype shell, **outside theme/brand props**. Nothing gates it: `FF_PROTOTYPE_GALLERY` gates only the gallery, never the watermark.
+Rendered by `PrototypeWatermark` from the prototype shell, **outside theme/brand props**. **Flag (per #40):** `FF_PROTOTYPE_GALLERY` gates **all** prototype routes and generators and defaults to **OFF in production**. It never affects the watermark: whenever a prototype renders, the watermark renders. No flag, theme or query param can turn it off.
 
 - **Ribbon:** exactly "PROTOTYPE, not live. FlowForward can make this real in days." (Summit-required wording; do not paraphrase). `position: sticky; top: 0`, min-height 32px and grows to fit up to two lines at 390px (padding 6px 12px, centered, line-height 1.3), Barlow 600 at 13–14px, slate #1E2A2F background, paper #F3F6F5 text (never brand colors), `role="note"`, no close button.
 - **Tiled pattern:** diagonal (−30°) "PROTOTYPE" SVG tile behind content at ~5% opacity (range 4–6%), `pointer-events: none`.
-- **Fixture naming:** fixture business names use a `TEST:` prefix (e.g. `TEST: Cedar Lane HVAC`). Real prospect names and logos never go into fixtures.
-- **Sample tags:** every fake datum (customer, amount, phone, business) carries a "Sample" tag or a "(sample)" suffix. Phone numbers use the 555-01xx range.
+- **No ROI or close-rate promises** (from #40), anywhere: copy, demo, or proposal. No invented ROI, revenue-recovered, or savings figures in prototypes. Use conditional wording only ("could", "shops like yours often").
+- **No real names:** vendors, brands, companies and people in mockups and fixtures are fictional (e.g. "Sample Pipe Supply", "Sample Fuel Stop"). Every ledger row, call record, message and booked job carries a Sample tag.
+- **Fixture naming:** fixture business names use a `TEST:` prefix (e.g. `TEST: Cedar Lane HVAC`). Fixtures prefer HVAC (primary) and plumbing (secondary), per #40's target. Real prospect names and logos never go into fixtures.
+- **Sample tags:** every fake datum (customer, amount, phone, business) carries a "Sample" tag or a "(sample)" suffix. Phone numbers use the 555-01xx range, e.g. (801) 555-0142.
 - **Footer:** "Concept by FlowForward, sample data, not affiliated with or endorsed by <Business>."
 - **No real actions:** every acting button shows a toast, "In the live version this would …". No network sends.
 - **Injection-safe:** `businessName` and all brand strings are rendered as escaped text, never as HTML. A business name containing markup must not be able to remove or hide the watermark.
@@ -100,7 +103,9 @@ One primary button, **"Talk to Kelby"**, which is a plain link (`<a href>`, e.g.
 - [ ] Logo max height, plate logic, and load-failure fallback.
 - [ ] **Required test:** a business name containing `<style>.ribbon{display:none}</style>` or `</div><script>` is escaped (appears as literal text), and the ribbon, tile and footer remain present and visible.
 - [ ] Estimate follow-up demo is email-only (3–4 touches, stops on reply, call shown only as an owner reminder).
-- [ ] Fixture names use the `TEST:` prefix.
+- [ ] Fixture names use the `TEST:` prefix; no real vendor, brand, company or person names; Sample tags on all fake data rows.
+- [ ] No ROI, revenue-recovered, savings or close-rate claims anywhere in prototype copy.
+- [ ] `FF_PROTOTYPE_GALLERY` gates all prototype routes and generators, defaults OFF in prod; the watermark renders regardless of flag state whenever a prototype renders.
 - [ ] Watermark ribbon + tile + footer present; tests cover hostile colors, `?watermark=0`, flags, and theme overrides.
 - [ ] Ribbon has `role="note"` and no close control.
 - [ ] Every action button shows a toast; no outbound requests (asserted in the test).
