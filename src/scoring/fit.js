@@ -32,9 +32,11 @@
 // industry is empty, and only when that field has an HVAC term and no other
 // trade word. Air Conditioning counts. Heating Oil Delivery and Pool
 // Heating do not. A missing cache adds nothing. Plumbing, Plumber, and every
-// other trade are not boosted. A verb negation can sit well before the phrase.
-// A bare "no" or "without" negates only with an optional any, a, an, or the
-// between it and the phrase.
+// other trade are not boosted. A verb negation can sit well before the phrase
+// inside the same clause, including a comma-bounded aside. A comma or dash
+// that opens a later clause does not carry it forward. A bare "no" or
+// "without" negates only with an optional any, a, an, or the between it and
+// the phrase.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');

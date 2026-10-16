@@ -19,13 +19,21 @@ const JOB_AD_RE = /\b(?:comfort|sales)\s+(?:advisors?|consultants?)\b|\bcomfort\
 const SEARCH_ADS_RE = /\blocal\s+services\s+ads?\b|\bgoogle\s+ads\b|\bgoogle\s+local\s+services\b|\blsas?\b/i;
 const SEARCH_ADS_LABEL_RE = /google ads|\blocal services\b|\blsas?\b/i;
 // Apostrophes: straight, U+2019 (don’t), and U+2018. Verb negations keep a
-// wide window and may cross a comma. "not only" is not one of them: the next
+// wide window inside the same clause, including a comma-bounded aside
+// ("we do not offer, at this time, any kind of financing"). A comma,
+// semicolon, colon, or dash that opens a later clause does not carry the
+// negator forward ("Don't wait, call for a free estimate", "Don't wait -
+// call today for a free estimate"). "not only" is not one of them: the next
 // word after "not" is not "only". "no longer" and "no more" are not in that
 // window. They negate only when the phrase follows, or after one offer-type
 // verb and an optional any/a/an/the. Bare "no" and "without" negate only when
 // the phrase follows immediately, or with just any/a/an/the in between. A
 // comma after "no" ("No, free estimates") is not that gap.
-const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|not(?!\s+only\b)|never)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
+const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|not(?!\s+only\b)|never)\b(?:\s+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
+// First word of a comma-bounded aside that stays inside the clause.
+const ASIDE_START_RE = /^(?:at|in|on|for|of|by|with|from|to|during|after|before|as|about|over|under|within|currently|now|today|frankly|however|still|right)\b/i;
+// A word after that aside which opens a new clause, so the commas stay.
+const NEW_CLAUSE_RE = /^(?:call|contact|click|get|schedule|book|request|ask|visit|come|stop|text|email|reach|talk|phone|try|let|we|you|they|i|he|she|it|our|your|and|but|or|so|then)$/i;
 const NEGATIVE_NO_MORE = /\bno\s+(?:longer|more)(?:\s+(?:offer(?:s|ing|ed)?|provide(?:s|ing)?|accept(?:s|ing)?|do(?:es)?)\b)?(?:\s+(?:any|a|an|the))?\s+$/i;
 const NEGATIVE_BARE = /\b(?:no|without)(?:\s+(?:any|a|an|the))?\s+$/i;
 // A short window after the phrase: "not available", "unavailable", "none",
@@ -225,9 +233,36 @@ function clauseAfter(text, end) {
   return window;
 }
 
+// Drop a short comma-bounded aside (" , at this time, ") so the verb window
+// still sees one clause. Leave the commas when the next word starts a new
+// clause ("Don't wait, for a moment, call for a free estimate").
+function dropSameClauseAsides(window) {
+  return window.replace(/,([^,]{1,48}),/g, (full, inner, offset) => {
+    const trimmed = inner.trim();
+    const words = trimmed.split(/\s+/).filter(Boolean);
+    if (words.length < 1 || words.length > 6) return full;
+    if (!ASIDE_START_RE.test(trimmed)) return full;
+    const rest = window.slice(offset + full.length);
+    const next = rest.match(/^\s*([A-Za-z\u2019\u2018']+)/);
+    if (next && NEW_CLAUSE_RE.test(next[1])) return full;
+    return ' ';
+  });
+}
+
+// The clause that contains the phrase. A leftover comma, semicolon, colon,
+// spaced hyphen, en dash, or em dash opens a later clause, and a negator
+// before that break does not reach the phrase.
+function sameClauseBefore(window) {
+  const text = dropSameClauseAsides(window);
+  const breaks = [...text.matchAll(/[,;:]|\s+--?\s+|[\u2013\u2014]/g)];
+  if (!breaks.length) return text;
+  const last = breaks[breaks.length - 1];
+  return text.slice(last.index + last[0].length);
+}
+
 function isNegated(text, index, length) {
   const before = clauseBefore(text, index);
-  if (NEGATIVE_VERB.test(before)) return true;
+  if (NEGATIVE_VERB.test(sameClauseBefore(before))) return true;
   if (NEGATIVE_NO_MORE.test(before)) return true;
   if (NEGATIVE_BARE.test(before)) return true;
   return NEGATIVE_AFTER.test(clauseAfter(text, index + length));

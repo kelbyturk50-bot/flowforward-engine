@@ -617,6 +617,7 @@ describe('F-003 estimate signals', () => {
       ['without financing', research('Pay without financing today')],
       ['cannot installation', research('We cannot offer installation')],
       ['shouted no estimates', research('NO  FREE ESTIMATES')],
+      ['dont offer free estimates', research("We don't offer free estimates")],
       ['financing mention after', {
         signals: { mentions: { financing: true } },
         site: { pages: [{ url: 'https://shop.example/', title: 'Home', text: 'Financing not available.' }], signals: {} },
@@ -702,6 +703,22 @@ describe('F-003 estimate signals', () => {
       assert.equal(fit.fit_reasons.find(row => row.label === label).points, weight, text);
       assert.equal(signalPoints(fit), weight, text);
     }
+
+    const dontWaitComma = computeFit({
+      ...peer,
+      research: research("Don't wait, call for a free estimate"),
+    });
+    assert.equal(dontWaitComma.fit_score - plain.fit_score, 4, "Don't wait, call for a free estimate");
+    assert.equal(dontWaitComma.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
+    assert.equal(signalPoints(dontWaitComma), 4);
+
+    const dontWaitDash = computeFit({
+      ...peer,
+      research: research("Don't wait - call today for a free estimate"),
+    });
+    assert.equal(dontWaitDash.fit_score - plain.fit_score, 4, "Don't wait - call today for a free estimate");
+    assert.equal(dontWaitDash.fit_reasons.find(row => row.label === 'Free estimate').points, 4);
+    assert.equal(signalPoints(dontWaitDash), 4);
 
     const afterSentence = computeFit({
       ...peer,
