@@ -21,8 +21,11 @@
 // is discarded. While it is set, nothing is derived and nothing is minted
 // from a page view. Unknown, expired, revoked, discarded, and malformed
 // tokens all come back as null — callers return one 404. A proposal with
-// more than one active row also comes back as null. If boot finds the
-// pilot schema unsafe, the pilot stays closed until a later boot is clean.
+// more than one active row also comes back as null. resolveToken also
+// requires derived = true, the proposal's current active generation, and a
+// stored hash equal to sha256 of the recomputed HMAC. A legacy random token
+// stays null even if its row is still active. If boot finds the pilot schema
+// unsafe, the pilot stays closed until a later boot is clean.
 
 const crypto = require('crypto');
 const pool = require('../db/client');
@@ -140,7 +143,8 @@ async function resolveToken(raw) {
   const wellFormed = typeof raw === 'string' && TOKEN_RE.test(raw);
   const computed = wellFormed ? hashToken(raw) : DUMMY_HASH;
   const { rows } = await pool.query(
-    `SELECT t.id, t.proposal_id, t.prospect_id, t.token_hash, t.expires_at, t.revoked_at,
+    `SELECT t.id, t.proposal_id, t.prospect_id, t.generation, t.derived, t.token_hash,
+            t.expires_at, t.revoked_at,
             pr.status AS proposal_status, pr.demo_revoked_at
        FROM pilot_tokens t
        JOIN proposals pr ON pr.id = t.proposal_id
@@ -149,21 +153,30 @@ async function resolveToken(raw) {
   );
   const row = rows[0] || null;
   const stored = row && row.token_hash ? Buffer.from(row.token_hash) : null;
+  const recomputed = row ? deriveToken(row.proposal_id, row.generation) : null;
+  const recomputedHash = recomputed ? hashToken(recomputed) : DUMMY_HASH;
   // Always compare, including the miss path, so a missing row still runs
-  // timingSafeEqual against the dummy hash.
+  // timingSafeEqual against the dummy hash. The second compare is the
+  // recomputed HMAC, so a legacy random hash cannot pass.
   const equal = hashesEqual(stored, computed);
-  if (!wellFormed || !row || !equal) return null;
+  const macOk = hashesEqual(stored, recomputedHash);
+  if (!wellFormed || !row || !equal || !macOk) return null;
   if (row.revoked_at) return null;
+  if (row.derived !== true) return null;
   if (row.proposal_status === 'discarded') return null;
   if (row.demo_revoked_at) return null;
   if (new Date(row.expires_at).getTime() <= Date.now()) return null;
   const siblings = await pool.query(
-    `SELECT COUNT(*)::int AS n
+    `SELECT COUNT(*)::int AS n, MAX(generation) AS generation,
+            BOOL_AND(derived) AS derived
        FROM pilot_tokens
       WHERE proposal_id = $1 AND revoked_at IS NULL`,
     [row.proposal_id]
   );
-  if (Number(siblings.rows[0].n) > 1) return null;
+  const active = siblings.rows[0];
+  if (Number(active.n) !== 1) return null;
+  if (active.derived !== true) return null;
+  if (Number(active.generation) !== Number(row.generation)) return null;
   return {
     id: row.id,
     proposal_id: Number(row.proposal_id),
@@ -210,8 +223,8 @@ async function mintForProposal(proposalId) {
       [proposal.id]
     );
     const inserted = await db.query(
-      `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, token_hash, expires_at)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, token_hash, expires_at, derived)
+       VALUES ($1, $2, $3, $4, $5, TRUE)
        RETURNING id, expires_at, generation`,
       [proposal.id, proposal.prospect_id, generation, tokenHash, expiresAt]
     );
@@ -271,7 +284,7 @@ async function demoHrefForProposal(req, proposalId) {
   if (blockedProposal(gateRow.rows[0])) return '';
 
   const active = await pool.query(
-    `SELECT generation, token_hash, expires_at
+    `SELECT generation, token_hash, expires_at, derived
        FROM pilot_tokens
       WHERE proposal_id = $1
         AND revoked_at IS NULL
@@ -280,6 +293,7 @@ async function demoHrefForProposal(req, proposalId) {
   );
   if (active.rows.length !== 1) return '';
   const row = active.rows[0];
+  if (row.derived !== true) return '';
   if (new Date(row.expires_at).getTime() <= Date.now()) return '';
   const token = deriveToken(id, row.generation);
   if (!token) return '';

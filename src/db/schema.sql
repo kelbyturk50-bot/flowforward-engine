@@ -240,18 +240,17 @@ UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND crea
 -- Events store an allowlisted type, timestamps, and join ids only.
 --
 -- Upgrades from the pre-generation table can have several active rows and a
--- nullable generation. Those rows are revoked (null generation first, then
--- every active row except the newest id) and generation is backfilled to 0
--- before it is set NOT NULL and the unique partial index is created.
--- Generation 0 is only that backfill; live tokens start at 1.
--- Each repair step is its own DO block. A caught error does not abort this
--- file: schema.sql runs as one statement, and an uncaught error would roll
--- the token-column drop and the generation add back too. The handler writes
--- the error into pilot_boot_errors (and raises a warning) so the server can
--- read it after the transaction commits. Boot then checks the index,
--- generation, and active-row invariants in JavaScript and closes the pilot
--- when any of them fail. After the first successful boot the updates match
--- zero rows and pilot_boot_errors is empty.
+-- nullable generation. derived is true only for rows inserted by the HMAC
+-- mint. Existing rows are derived false. Any row with a null generation, or
+-- any still-active row that is not derived, is revoked in the same statement
+-- that fills generation, so a failed revoke cannot leave a live generation-0
+-- hash. Generation 0 is only that backfill. Duplicate derived rows then keep
+-- the newest id. generation is set NOT NULL and the unique partial index is
+-- created. Each repair step is its own DO block. A caught error does not
+-- abort this file. The handler writes the error into pilot_boot_errors so
+-- boot can read it after commit. Boot also requires zero active rows that
+-- are underived or have a null generation. After the first successful boot
+-- the updates match zero rows and pilot_boot_errors is empty.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS demo_revoked_at TIMESTAMPTZ;
@@ -261,12 +260,14 @@ CREATE TABLE IF NOT EXISTS pilot_tokens (
   proposal_id  INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
   prospect_id  INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
   generation   INTEGER NOT NULL,
+  derived      BOOLEAN NOT NULL DEFAULT FALSE,
   token_hash   BYTEA NOT NULL UNIQUE,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at   TIMESTAMPTZ NOT NULL,
   revoked_at   TIMESTAMPTZ
 );
 ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS generation INTEGER;
+ALTER TABLE pilot_tokens ADD COLUMN IF NOT EXISTS derived BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS token;
 
 -- Repair failures from this boot only. Cleared at the start of every boot.
@@ -278,23 +279,28 @@ CREATE TABLE IF NOT EXISTS pilot_boot_errors (
 );
 DELETE FROM pilot_boot_errors;
 
+-- Fill generation and revoke legacy rows together. A trigger that blocks
+-- only revoked_at rejects this whole statement, so generation stays null
+-- instead of becoming a live 0. The next boot retries the same statement.
 DO $$
 DECLARE
   err text;
 BEGIN
   UPDATE pilot_tokens
-     SET revoked_at = NOW()
+     SET generation = COALESCE(generation, 0),
+         derived = FALSE,
+         revoked_at = COALESCE(revoked_at, NOW())
    WHERE generation IS NULL
-     AND revoked_at IS NULL;
+      OR (derived IS NOT TRUE AND revoked_at IS NULL);
 EXCEPTION WHEN OTHERS THEN
   err := SQLERRM;
   BEGIN
     INSERT INTO pilot_boot_errors (step, message)
-    VALUES ('revoke-null-generation', err);
+    VALUES ('revoke-legacy', err);
   EXCEPTION WHEN OTHERS THEN
     NULL;
   END;
-  RAISE WARNING 'pilot_tokens: revoke null-generation rows failed: %', err;
+  RAISE WARNING 'pilot_tokens: revoke legacy rows failed: %', err;
 END $$;
 
 DO $$
@@ -319,24 +325,6 @@ EXCEPTION WHEN OTHERS THEN
     NULL;
   END;
   RAISE WARNING 'pilot_tokens: revoke duplicate active rows failed: %', err;
-END $$;
-
-DO $$
-DECLARE
-  err text;
-BEGIN
-  UPDATE pilot_tokens
-     SET generation = 0
-   WHERE generation IS NULL;
-EXCEPTION WHEN OTHERS THEN
-  err := SQLERRM;
-  BEGIN
-    INSERT INTO pilot_boot_errors (step, message)
-    VALUES ('backfill-generation', err);
-  EXCEPTION WHEN OTHERS THEN
-    NULL;
-  END;
-  RAISE WARNING 'pilot_tokens: backfill generation failed: %', err;
 END $$;
 
 DO $$

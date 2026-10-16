@@ -14,6 +14,7 @@ const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
+const { spawn } = require('child_process');
 const path = require('path');
 const express = require('express');
 
@@ -55,7 +56,7 @@ function setFlags({ master = false, link = false, sms = false } = {}) {
   process.env.FF_PILOT_ESTIMATE_SMS = sms ? 'true' : '';
 }
 
-function request(method, reqPath, { headers = {}, body, rawBody } = {}) {
+function request(method, reqPath, { headers = {}, body, rawBody, port } = {}) {
   return new Promise((resolve, reject) => {
     const payload = rawBody != null
       ? (Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody))
@@ -63,7 +64,7 @@ function request(method, reqPath, { headers = {}, body, rawBody } = {}) {
     const req = http.request({
       method,
       hostname: '127.0.0.1',
-      port: server.address().port,
+      port: port || server.address().port,
       path: reqPath,
       headers: {
         'x-forwarded-for': '203.0.113.10',
@@ -98,7 +99,7 @@ async function tokenStats(proposalId) {
 }
 
 const HASH_ONLY_COLUMNS = [
-  'created_at', 'expires_at', 'generation', 'id', 'proposal_id', 'prospect_id', 'revoked_at', 'token_hash',
+  'created_at', 'derived', 'expires_at', 'generation', 'id', 'proposal_id', 'prospect_id', 'revoked_at', 'token_hash',
 ];
 
 async function assertHashOnly(proposalId, rawTokens) {
@@ -1024,14 +1025,20 @@ describe('pilot estimate recovery', () => {
     const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
     const blocks = schema.match(/DO \$\$[\s\S]*?END \$\$;/g) || [];
     const repair = blocks.filter((block) => block.includes('pilot_tokens'));
-    assert.ok(repair.length >= 5);
+    assert.ok(repair.length >= 4);
     const repairSql = repair.join('\n');
     assert.match(repairSql, /generation IS NULL/);
     assert.match(repairSql, /n\.id > t\.id/);
-    assert.match(repairSql, /SET generation = 0/);
+    assert.match(repairSql, /COALESCE\(generation, 0\)/);
+    assert.match(repairSql, /derived IS NOT TRUE/);
+    assert.match(repairSql, /revoked_at = COALESCE\(revoked_at, NOW\(\)\)/);
     assert.match(repairSql, /ALTER COLUMN generation SET NOT NULL/);
     assert.match(repairSql, /idx_pilot_tokens_one_active/);
     assert.match(repairSql, /INSERT INTO pilot_boot_errors/);
+    const legacyBlock = repair.find((block) => block.includes('revoke-legacy'));
+    assert.ok(legacyBlock);
+    assert.match(legacyBlock, /COALESCE\(generation, 0\)/);
+    assert.match(legacyBlock, /revoked_at = COALESCE\(revoked_at, NOW\(\)\)/);
     for (const block of repair) assert.match(block, /EXCEPTION WHEN OTHERS/);
 
     async function watchBoot(report) {
@@ -1199,13 +1206,13 @@ describe('pilot estimate recovery', () => {
 
       await pool.query('DROP INDEX IF EXISTS idx_pilot_tokens_one_active');
       const older = await pool.query(
-        `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, token_hash, expires_at)
-         VALUES ($1, $2, 9, $3, NOW() + interval '14 days') RETURNING id`,
+        `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, token_hash, expires_at, derived)
+         VALUES ($1, $2, 9, $3, NOW() + interval '14 days', TRUE) RETURNING id`,
         [row.id, prospect.id, hash()]
       );
       const newer = await pool.query(
-        `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, token_hash, expires_at)
-         VALUES ($1, $2, 2, $3, NOW() + interval '14 days') RETURNING id`,
+        `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, token_hash, expires_at, derived)
+         VALUES ($1, $2, 2, $3, NOW() + interval '14 days', TRUE) RETURNING id`,
         [row.id, prospect.id, hash()]
       );
       assert.ok(Number(newer.rows[0].id) > Number(older.rows[0].id));
@@ -1242,6 +1249,225 @@ describe('pilot estimate recovery', () => {
       await pool.query('DROP FUNCTION IF EXISTS ff_test_block_pilot_token_update()');
       await applySchema();
       tokens._clearCacheForTests();
+    }
+  });
+
+  it('keeps a legacy token closed on a revoke-only failure and on the next boot', async () => {
+    async function watchBoot(report) {
+      const errors = [];
+      const logs = [];
+      const origError = console.error;
+      const origLog = console.log;
+      console.error = (...args) => {
+        errors.push(args.map((part) => String(part)).join(' '));
+      };
+      console.log = (...args) => {
+        logs.push(args.map((part) => String(part)).join(' '));
+      };
+      try {
+        const result = await concludeSchemaBoot(report);
+        return { result, errors, logs };
+      } finally {
+        console.error = origError;
+        console.log = origLog;
+      }
+    }
+
+    const row = await insertProposal(prospect.id, { slug: 'pilot-legacy-revoke' });
+    const legacy = 'c'.repeat(43);
+    await pool.query('DROP INDEX IF EXISTS idx_pilot_tokens_one_active');
+    await pool.query('ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS generation');
+    await pool.query('ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS derived');
+    const inserted = await pool.query(
+      `INSERT INTO pilot_tokens (proposal_id, prospect_id, token_hash, expires_at)
+       VALUES ($1, $2, $3, NOW() + interval '14 days') RETURNING id`,
+      [row.id, prospect.id, tokens.hashToken(legacy)]
+    );
+    const tokenId = inserted.rows[0].id;
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION ff_test_block_revoke_only() RETURNS trigger AS $fn$
+      BEGIN
+        IF NEW.revoked_at IS DISTINCT FROM OLD.revoked_at AND NEW.revoked_at IS NOT NULL THEN
+          RAISE EXCEPTION 'revoke blocked';
+        END IF;
+        RETURN NEW;
+      END
+      $fn$ LANGUAGE plpgsql;
+      CREATE TRIGGER ff_test_block_revoke_only
+        BEFORE UPDATE ON pilot_tokens
+        FOR EACH ROW EXECUTE FUNCTION ff_test_block_revoke_only();
+    `);
+    try {
+      setFlags({ master: true, link: true });
+      const first = await watchBoot(await applySchema());
+      assert.equal(first.result.ok, false);
+      assert.ok(first.errors.some((line) => line.includes('revoke blocked')));
+      assert.ok(first.errors.some((line) => line.includes('schema is not safe')));
+      assert.equal(first.logs.some((line) => line.includes('Schema up to date')), false);
+      assert.equal(tokens.pilotReady(), false);
+      const liveZero = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM pilot_tokens
+          WHERE id = $1 AND revoked_at IS NULL AND generation = 0`,
+        [tokenId]
+      );
+      assert.equal(liveZero.rows[0].n, 0);
+      const closedDemo = await request('GET', `/demo/estimate-recovery/${legacy}`, {
+        headers: { 'x-forwarded-for': '203.0.113.200' },
+      });
+      assertClosed(closedDemo);
+      tokens.openPilot();
+      assert.equal(await tokens.resolveToken(legacy), null);
+      const stillDemo = await request('GET', `/demo/estimate-recovery/${legacy}`, {
+        headers: { 'x-forwarded-for': '203.0.113.201' },
+      });
+      assertClosed(stillDemo);
+      tokens.closePilot();
+
+      await pool.query('DROP TRIGGER ff_test_block_revoke_only ON pilot_tokens');
+      await pool.query('DROP FUNCTION ff_test_block_revoke_only()');
+      const second = await watchBoot(await applySchema());
+      assert.equal(second.result.ok, true);
+      assert.equal(tokens.pilotReady(), true);
+      assert.ok(second.logs.some((line) => line.includes('Schema up to date')));
+      assert.equal(second.errors.some((line) => line.includes('schema is not safe')), false);
+      const stored = await pool.query(
+        `SELECT generation, derived, revoked_at IS NOT NULL AS revoked
+           FROM pilot_tokens WHERE id = $1`,
+        [tokenId]
+      );
+      assert.equal(Number(stored.rows[0].generation), 0);
+      assert.equal(stored.rows[0].derived, false);
+      assert.equal(stored.rows[0].revoked, true);
+      assert.equal(await tokens.resolveToken(legacy), null);
+      const openedDemo = await request('GET', `/demo/estimate-recovery/${legacy}`, {
+        headers: { 'x-forwarded-for': '203.0.113.202' },
+      });
+      assertClosed(openedDemo);
+
+      await pool.query(
+        `UPDATE pilot_tokens
+            SET revoked_at = NULL, derived = TRUE, generation = 1
+          WHERE id = $1`,
+        [tokenId]
+      );
+      assert.equal(await tokens.resolveToken(legacy), null);
+      const forged = await request('GET', `/demo/estimate-recovery/${legacy}`, {
+        headers: { 'x-forwarded-for': '203.0.113.203' },
+      });
+      assertClosed(forged);
+      const real = tokens.deriveToken(row.id, 1);
+      await pool.query(
+        `UPDATE pilot_tokens
+            SET token_hash = $2, generation = 1, derived = TRUE, revoked_at = NULL
+          WHERE id = $1`,
+        [tokenId, tokens.hashToken(real)]
+      );
+      const resolved = await tokens.resolveToken(real);
+      assert.equal(resolved && resolved.proposal_id, row.id);
+      const live = await request('GET', `/demo/estimate-recovery/${real}`, {
+        headers: { 'x-forwarded-for': '203.0.113.204' },
+      });
+      assert.equal(live.status, 200);
+    } finally {
+      await pool.query('DROP TRIGGER IF EXISTS ff_test_block_revoke_only ON pilot_tokens');
+      await pool.query('DROP FUNCTION IF EXISTS ff_test_block_revoke_only()');
+      await pool.query('DELETE FROM pilot_tokens WHERE proposal_id = $1', [row.id]);
+      await applySchema();
+      tokens._clearCacheForTests();
+    }
+  });
+
+  it('listens within the boot lock timeout and keeps the pilot closed', async () => {
+    const migrateSrc = fs.readFileSync(path.join(__dirname, '../src/db/migrate.js'), 'utf8');
+    assert.match(migrateSrc, /SET lock_timeout = '5s'/);
+    assert.match(migrateSrc, /SET statement_timeout = '15s'/);
+
+    setFlags({ master: true, link: true });
+    const row = await insertProposal(prospect.id, { slug: 'pilot-lock-boot' });
+    const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, {
+      headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.210' },
+    });
+    assert.equal(minted.status, 201);
+
+    const probe = http.createServer();
+    const port = await new Promise((resolve, reject) => {
+      probe.once('error', reject);
+      probe.listen(0, '127.0.0.1', () => resolve(probe.address().port));
+    });
+    await new Promise((resolve) => probe.close(resolve));
+
+    const holder = await pool.connect();
+    let child;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE pilot_tokens IN ACCESS EXCLUSIVE MODE');
+      const started = Date.now();
+      child = spawn(process.execPath, [path.join(__dirname, '../src/server.js')], {
+        env: {
+          ...process.env,
+          PORT: String(port),
+          NODE_ENV: 'test',
+          DISABLE_CRON: '1',
+          FF_PILOT_ESTIMATE_RECOVERY: 'true',
+          FF_PILOT_LINK_ON_ONEPAGER: 'true',
+          CRM_API_KEY: API_KEY,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let output = '';
+      child.stdout.on('data', (buf) => { output += buf.toString('utf8'); });
+      child.stderr.on('data', (buf) => { output += buf.toString('utf8'); });
+      const health = await new Promise((resolve, reject) => {
+        const deadline = Date.now() + 15000;
+        const attempt = () => {
+          const req = http.request({
+            method: 'GET', hostname: '127.0.0.1', port, path: '/health',
+          }, (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode));
+          });
+          req.on('error', () => {
+            if (Date.now() > deadline) {
+              reject(new Error(`server did not listen: ${JSON.stringify(output).slice(0, 2000)}`));
+            }
+            else setTimeout(attempt, 100);
+          });
+          req.end();
+        };
+        attempt();
+      });
+      const elapsed = Date.now() - started;
+      assert.equal(health, 200);
+      assert.ok(elapsed < 15000, `listen took ${elapsed}ms`);
+      assert.match(output, /schema is not safe/);
+      assert.equal(output.includes('Schema up to date'), false);
+      assert.equal(output.includes(API_KEY), false);
+      await holder.query('ROLLBACK');
+      const demo = await request('GET', minted.json.path, {
+        port,
+        headers: { 'x-forwarded-for': '203.0.113.211' },
+      });
+      assert.equal(demo.status, 404);
+      assert.deepEqual(demo.json, NOT_FOUND);
+      const page = await request('GET', '/p/pilot-lock-boot', {
+        port,
+        headers: { 'x-forwarded-for': '203.0.113.212' },
+      });
+      assert.equal(page.status, 200);
+      assert.equal(ctaHref(page.text), '');
+      const list = await request('GET', '/api/proposals?view=review', {
+        port,
+        headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.213' },
+      });
+      assert.equal(list.status, 200);
+      assert.ok(Array.isArray(list.json.proposals));
+    } finally {
+      if (child && child.exitCode == null) {
+        child.kill('SIGTERM');
+        await new Promise((resolve) => child.once('exit', resolve));
+      }
+      await holder.query('ROLLBACK').catch(() => {});
+      holder.release();
     }
   });
 });

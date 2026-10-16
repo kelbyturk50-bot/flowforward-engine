@@ -73,6 +73,19 @@ async function readPilotSchemaStatus() {
     failures.push(`active demo token check failed: ${err.message}`);
   }
 
+  try {
+    const legacy = await pool.query(
+      `SELECT COUNT(*)::int AS n
+         FROM pilot_tokens
+        WHERE revoked_at IS NULL
+          AND (derived IS NOT TRUE OR generation IS NULL)`
+    );
+    const n = Number(legacy.rows[0].n);
+    if (n > 0) failures.push(`${n} active demo tokens are not HMAC-derived`);
+  } catch (err) {
+    failures.push(`HMAC demo token check failed: ${err.message}`);
+  }
+
   return { ok: failures.length === 0, failures };
 }
 
@@ -87,6 +100,18 @@ function collectFailures(report, status) {
 }
 
 async function concludeSchemaBoot(report) {
+  // A lock or statement timeout already aborted the migration. That limit
+  // lived on the migration connection and is reset before the connection
+  // returns to the pool. Reading pilot_tokens on a fresh connection would
+  // wait on the same lock, and the process would never listen. The timeout
+  // is the repair failure; leave the pilot closed.
+  if (report && report.timedOut) {
+    const failures = collectFailures(report, { failures: [] });
+    const detail = failures.join('; ').slice(0, 2000);
+    tokens.closePilot();
+    console.error(`[pilot] schema is not safe — the estimate-recovery demo stays off. ${detail}`);
+    return { ok: false, failures };
+  }
   const status = await readPilotSchemaStatus();
   const failures = collectFailures(report, status);
   if (failures.length) {
