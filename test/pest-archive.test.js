@@ -35,13 +35,14 @@ const {
   unarchiveSql,
   dryRunQuery,
   archiveTarget,
+  confirmValue,
   beginGuardedWrite,
   runApply,
 } = require('../src/db/pest-archive');
 const { PEST_COMPANY_PATTERN, isPestCompanyName } = require('../src/scoring/industry');
 const { rescore } = require('../src/scoring/fit');
 const { pickLeads, draftProposal, _setClient } = require('../src/proposals/draft');
-const { sendDueFollowups, approveAndSend, _setTransport } = require('../src/proposals/send');
+const { sendDueFollowups, approveAndSend, inboxCandidates, _setTransport } = require('../src/proposals/send');
 const { runDiscovery, INDUSTRIES } = require('../src/bot/discover');
 const { _setSearch } = require('../src/bot/google-places');
 
@@ -100,7 +101,9 @@ function assertRefused(result) {
 function envWithoutDatabase(overrides) {
   const env = { ...process.env, ...overrides };
   delete env.NODE_OPTIONS;
-  delete env.PEST_ARCHIVE_CONFIRM;
+  if (!Object.prototype.hasOwnProperty.call(overrides, 'PEST_ARCHIVE_CONFIRM')) {
+    delete env.PEST_ARCHIVE_CONFIRM;
+  }
   for (const key of ['DATABASE_URL', 'PGHOST', 'PGHOSTADDR', 'PGDATABASE', 'PGSERVICE', 'PGPORT']) {
     if (!Object.prototype.hasOwnProperty.call(overrides, key)) delete env[key];
   }
@@ -958,6 +961,30 @@ describe('pest-name archive', { concurrency: false }, () => {
       NODE_ENV: 'test',
       DATABASE_URL: 'postgresql:///db?host=/tmp/.s.PGSQL.5432',
     }).local, true);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: ' ' }), null);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: '\n' }), null);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: '\t  ' }), null);
+    assert.equal(confirmValue({}), null);
+    assert.equal(confirmValue({ PEST_ARCHIVE_CONFIRM: ' flowforward_test ' }), 'flowforward_test');
+    for (const url of [' ', '\n', ' \n ', '\t']) {
+      const blank = archiveTarget({ NODE_ENV: 'test', DATABASE_URL: url });
+      assert.equal(blank.blocked, true);
+      assert.equal(blank.local, false);
+      assert.equal(blank.ambiguous, true);
+    }
+    assert.equal(archiveTarget({ NODE_ENV: 'test', DATABASE_URL: '' }).blocked, false);
+    assert.equal(archiveTarget({
+      NODE_ENV: 'PRODUCTION',
+      DATABASE_URL: 'postgres://u@127.0.0.1/flowforward_test',
+    }).blocked, true);
+    assert.equal(archiveTarget({
+      NODE_ENV: 'Production',
+      DATABASE_URL: 'postgres://u@127.0.0.1/flowforward_test',
+    }).production, true);
+    assert.equal(archiveTarget({
+      NODE_ENV: ' production ',
+      DATABASE_URL: 'postgres://u@127.0.0.1/flowforward_test',
+    }).blocked, true);
 
     const clean = { ...process.env };
     delete clean.PEST_ARCHIVE_CONFIRM;
@@ -968,6 +995,18 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.notEqual(prod.status, 0);
     assert.equal(prod.stdout, '');
     assert.equal(prod.stderr, 'pest-archive refused\n');
+    assert.equal((await stamp(row.id)).archived_at, null);
+
+    const foldedEnv = { ...clean, NODE_ENV: 'PRODUCTION' };
+    delete foldedEnv.NODE_OPTIONS;
+    delete foldedEnv.PEST_ARCHIVE_CONFIRM;
+    const folded = runScript('apply', [], foldedEnv, { timeout: 4000 });
+    assertRefused(folded);
+    const trailedEnv = { ...clean, NODE_ENV: 'production ' };
+    delete trailedEnv.NODE_OPTIONS;
+    delete trailedEnv.PEST_ARCHIVE_CONFIRM;
+    const trailed = runScript('apply', [], trailedEnv, { timeout: 4000 });
+    assertRefused(trailed);
     assert.equal((await stamp(row.id)).archived_at, null);
 
     const farEnv = {
@@ -1041,6 +1080,27 @@ describe('pest-name archive', { concurrency: false }, () => {
       assertRefused(fromFile);
       const fromFileDry = runScript('dry', [], envWithoutDatabase({}), { cwd: envDir, timeout: 4000 });
       assertRefused(fromFileDry);
+      const spaceConfirm = runScript('apply', [], envWithoutDatabase({
+        DATABASE_URL: 'postgres://u:secret@192.0.2.1:5432/prod',
+        PEST_ARCHIVE_CONFIRM: ' ',
+      }), { cwd: emptyDir, timeout: 4000 });
+      assertRefused(spaceConfirm);
+      assert.equal(`${spaceConfirm.stdout}${spaceConfirm.stderr}`.includes('secret'), false);
+      const newlineConfirm = runScript('undo', ['33333333-3333-4333-8333-333333333333'], envWithoutDatabase({
+        DATABASE_URL: 'postgres://u:secret@192.0.2.1:5432/prod',
+        PEST_ARCHIVE_CONFIRM: '\n',
+      }), { cwd: emptyDir, timeout: 4000 });
+      assertRefused(newlineConfirm);
+      const spaceUrl = runScript('apply', [], envWithoutDatabase({ DATABASE_URL: ' ' }), {
+        cwd: emptyDir,
+        timeout: 4000,
+      });
+      assertRefused(spaceUrl);
+      const newlineUrl = runScript('dry', [], envWithoutDatabase({ DATABASE_URL: '\n' }), {
+        cwd: emptyDir,
+        timeout: 4000,
+      });
+      assertRefused(newlineUrl);
       assert.equal((await stamp(row.id)).archive_run_id, runId);
     } finally {
       fs.rmSync(emptyDir, { recursive: true, force: true });
@@ -1066,21 +1126,137 @@ describe('pest-name archive', { concurrency: false }, () => {
     const locker = await pool.connect();
     const writer = await pool.connect();
     const started = Date.now();
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-archive-lock-'));
     try {
       await locker.query('BEGIN');
       await locker.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [first.id]);
       await assert.rejects(() => runApply(writer), (err) => err.code === '55P03');
+      assert.ok(Date.now() - started < 12000);
+      const cliEnv = { ...process.env };
+      delete cliEnv.PEST_ARCHIVE_CONFIRM;
+      const cliStarted = Date.now();
+      const cli = runScript('apply', [], cliEnv, { cwd: emptyDir, timeout: 12000 });
+      assert.equal(cli.status, 1, cli.stderr);
+      assert.equal(cli.stderr, 'pest-archive failed (55P03)\n');
+      assert.doesNotMatch(`${cli.stdout}${cli.stderr}`, /Lock Pest|Lock Exterminator|test\+lock|password|secret/i);
+      assert.ok(Date.now() - cliStarted < 12000);
     } finally {
       await locker.query('ROLLBACK').catch(() => {});
       locker.release();
       await writer.query('ROLLBACK').catch(() => {});
       writer.release();
+      fs.rmSync(emptyDir, { recursive: true, force: true });
     }
-    assert.ok(Date.now() - started < 12000);
     const after = await stamp(first.id);
     assert.equal(after.archived_at, null);
     assert.equal(after.archive_reason, null);
     assert.equal(new Date(after.updated_at).toISOString(), new Date(before.updated_at).toISOString());
     assert.equal((await stamp(second.id)).archived_at, null);
+  });
+
+  it('skips archived leads in focus proposal counts, the finisher, and inbox candidates', async () => {
+    await resetDb();
+    const active = await insertProspect({
+      google_place_id: 'test-place-focus-active',
+      company: 'TEST: Focus Heating',
+      industry: 'HVAC',
+      email: 'test+focus-active@example.com',
+      website: null,
+      stage: 'contacted',
+    });
+    const archived = await insertProspect({
+      google_place_id: 'test-place-focus-archived',
+      company: 'TEST: Focus Pest Control',
+      industry: 'HVAC',
+      email: 'test+focus-archived@example.com',
+      website: null,
+      stage: 'contacted',
+    });
+    await pool.query(
+      `UPDATE prospects
+          SET archived_at = NOW(), archive_reason = $2, next_action = 'Leave this', next_action_at = DATE '2026-10-01'
+        WHERE id = $1`,
+      [archived.id, PEST_ARCHIVE_REASON]
+    );
+
+    async function insertProposal(prospectId, slug, status, times = {}) {
+      const { rows } = await pool.query(
+        `INSERT INTO proposals (
+           prospect_id, version, status, slug, to_email, to_name, subject, body, followup1,
+           replied_at, sent_at, followup1_sent_at, followup2_sent_at
+         ) VALUES (
+           $1, 1, $2, $3, $4, 'Dana', 'A note', 'Hello from the draft.', 'Checking back.',
+           $5, $6, $7, $8
+         ) RETURNING id`,
+        [
+          prospectId,
+          status,
+          slug,
+          `test+${slug}@example.com`,
+          times.replied_at || null,
+          times.sent_at || null,
+          times.followup1_sent_at || null,
+          times.followup2_sent_at || null,
+        ]
+      );
+      return rows[0].id;
+    }
+
+    await insertProposal(active.id, 'focus-active-draft', 'draft');
+    await insertProposal(archived.id, 'focus-archived-draft', 'draft');
+    await insertProposal(active.id, 'focus-active-reply', 'replied', { replied_at: new Date() });
+    await insertProposal(archived.id, 'focus-archived-reply', 'replied', { replied_at: new Date() });
+    await insertProposal(active.id, 'focus-old-reply', 'replied', {
+      replied_at: new Date(Date.now() - 10 * 86400000),
+    });
+
+    const focusRes = await fetch(apiBase + `/api/focus?today=${TODAY}`);
+    const focusBody = await focusRes.json();
+    assert.equal(focusRes.status, 200);
+    assert.equal(focusBody.counts.proposals_to_review, 1);
+    assert.equal(focusBody.counts.proposal_replies_7d, 1);
+
+    const activeSent = await insertProposal(active.id, 'focus-active-sent', 'sent', { sent_at: new Date() });
+    await insertProposal(archived.id, 'focus-archived-sent', 'sent', { sent_at: new Date() });
+    const candidates = await inboxCandidates();
+    assert.deepEqual(candidates.map(row => row.id), [activeSent]);
+
+    const old = new Date(Date.now() - 20 * 86400000);
+    const follow1 = new Date(Date.now() - 16 * 86400000);
+    const follow2 = new Date(Date.now() - 15 * 86400000);
+    const activeDone = await insertProposal(active.id, 'focus-active-done', 'sent', {
+      sent_at: old,
+      followup1_sent_at: follow1,
+      followup2_sent_at: follow2,
+    });
+    const archivedDone = await insertProposal(archived.id, 'focus-archived-done', 'sent', {
+      sent_at: old,
+      followup1_sent_at: follow1,
+      followup2_sent_at: follow2,
+    });
+    _setTransport({
+      async sendMail() {
+        throw new Error('transport should not be called');
+      },
+    });
+    const follow = await sendDueFollowups();
+    assert.equal(follow.sent, 0);
+    assert.equal(follow.finished, 1);
+    const statuses = await pool.query(
+      `SELECT id, status, stop_reason FROM proposals WHERE id = ANY($1::int[])`,
+      [[activeDone, archivedDone]]
+    );
+    const byId = new Map(statuses.rows.map(row => [row.id, row]));
+    assert.equal(byId.get(activeDone).status, 'finished');
+    assert.equal(byId.get(archivedDone).status, 'sent');
+    assert.equal(byId.get(archivedDone).stop_reason, null);
+    const actions = await pool.query(
+      `SELECT id, next_action, next_action_at::text AS next_action_at FROM prospects WHERE id = ANY($1::int[])`,
+      [[active.id, archived.id]]
+    );
+    const actionById = new Map(actions.rows.map(row => [row.id, row]));
+    assert.equal(actionById.get(active.id).next_action, 'No reply to emails — try a call');
+    assert.equal(actionById.get(archived.id).next_action, 'Leave this');
+    assert.equal(actionById.get(archived.id).next_action_at, '2026-10-01');
   });
 });

@@ -101,8 +101,11 @@ function oneHost(value) {
 // PGDATABASE supplies the database name only when the URL has none.
 // A service name, more than one host, or a hostaddr that is not that same
 // host can point somewhere else. Those are ambiguous and fail closed.
+// A whitespace-only DATABASE_URL is truthy. pg-connection-string parses it
+// against postgres://base, so the dialed host is "base", not localhost.
+// That string is ambiguous and is refused before a connection.
 function archiveTarget(env) {
-  const production = env.NODE_ENV === 'production';
+  const production = envText(env, 'NODE_ENV').toLowerCase() === 'production';
   const closed = (ambiguous) => ({
     blocked: true,
     local: false,
@@ -110,11 +113,12 @@ function archiveTarget(env) {
     ambiguous,
     place: 'remote',
   });
-  const url = envText(env, 'DATABASE_URL');
+  const urlRaw = env.DATABASE_URL == null ? '' : String(env.DATABASE_URL);
+  if (urlRaw !== '' && urlRaw.trim() === '') return closed(true);
   let parsed = {};
-  if (url) {
+  if (urlRaw !== '') {
     try {
-      parsed = parseConnectionString(url);
+      parsed = parseConnectionString(urlRaw);
     } catch {
       return closed(true);
     }
@@ -151,7 +155,9 @@ function archiveTarget(env) {
 
 function confirmValue(env) {
   const confirm = env.PEST_ARCHIVE_CONFIRM;
-  return typeof confirm === 'string' && confirm.length > 0 ? confirm : null;
+  if (typeof confirm !== 'string') return null;
+  const trimmed = confirm.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function refused() {

@@ -243,12 +243,19 @@ async function sendDueFollowups() {
     }
   }
   // Sequences with no reply two weeks after the last follow-up are finished.
+  // Archived leads stay sent. This update does not write their status or
+  // next_action.
   const done = await pool.query(
-    `UPDATE proposals SET status = 'finished', stop_reason = 'No reply after the follow-ups'
-      WHERE status = 'sent' AND COALESCE(followup2_sent_at, followup1_sent_at, sent_at) < NOW() - INTERVAL '14 days'
-        AND (followup2_due_at IS NULL OR followup2_sent_at IS NOT NULL)
-        AND (followup1_due_at IS NULL OR followup1_sent_at IS NOT NULL)
-      RETURNING prospect_id`);
+    `UPDATE proposals pr
+        SET status = 'finished', stop_reason = 'No reply after the follow-ups'
+       FROM prospects p
+      WHERE pr.prospect_id = p.id
+        AND p.archived_at IS NULL
+        AND pr.status = 'sent'
+        AND COALESCE(pr.followup2_sent_at, pr.followup1_sent_at, pr.sent_at) < NOW() - INTERVAL '14 days'
+        AND (pr.followup2_due_at IS NULL OR pr.followup2_sent_at IS NOT NULL)
+        AND (pr.followup1_due_at IS NULL OR pr.followup1_sent_at IS NOT NULL)
+      RETURNING pr.prospect_id`);
   for (const r of done.rows) {
     await pool.query(`UPDATE prospects SET next_action = COALESCE(NULLIF(next_action, ''), 'No reply to emails — try a call'),
                              next_action_at = COALESCE(next_action_at, CURRENT_DATE) WHERE id = $1`, [r.prospect_id]);
@@ -349,11 +356,20 @@ async function fetchInbox(since) {
 }
 
 let checking = false;
+/** Sent proposals whose lead is still active. Archived leads are not replies to apply. */
+async function inboxCandidates() {
+  const { rows } = await pool.query(
+    `SELECT pr.*, p.stage, p.archived_at
+       FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+      WHERE pr.status = 'sent' AND pr.to_email IS NOT NULL
+        AND p.archived_at IS NULL`);
+  return rows;
+}
+
 /** Look through the inbox for replies, bookings, bounces and opt-outs. */
 async function checkInbox() {
   if (checking || !(await mailMode()) || (await mailMode()) === 'test') return { checked: 0 };
-  const { rows: active } = await pool.query(
-    `SELECT pr.*, p.stage FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'sent' AND pr.to_email IS NOT NULL`);
+  const active = await inboxCandidates();
   if (!active.length) return { checked: 0 };
   checking = true;
   const outcomes = []; let messages = [];
@@ -383,6 +399,6 @@ async function senderTick() {
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, checkInbox, senderTick, stopSequence, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, checkInbox, inboxCandidates, senderTick, stopSequence, classifyMessage, applyOutcome,
   renderMessage, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

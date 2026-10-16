@@ -13,13 +13,16 @@
 //
 // .env is loaded first. An already-set variable wins. The host is the one
 // node-postgres dials: a non-empty DATABASE_URL host, otherwise PGHOST,
-// otherwise localhost. PGHOSTADDR, a URL hostaddr, PGSERVICE, or more than
+// otherwise localhost. A whitespace-only DATABASE_URL is ambiguous: pg parses
+// it as host "base". PGHOSTADDR, a URL hostaddr, PGSERVICE, or more than
 // one host is ambiguous and is refused. Dry, apply, and undo refuse when
-// NODE_ENV is production or that host is not local, unless
-// PEST_ARCHIVE_CONFIRM equals the connected database name. They print the
-// database name and local or remote, never the host, user, password, or URL.
-// A blocked target with no confirm exits before the database client loads.
-// Apply and undo set lock_timeout to 5s and statement_timeout to 15s.
+// NODE_ENV trims to production in any case, or that host is not local, unless
+// PEST_ARCHIVE_CONFIRM trims to the connected database name. Empty or
+// whitespace confirm counts as unset. They print the database name and local
+// or remote, never the host, user, password, or URL. A blocked target with
+// no confirm exits before the database client loads. A database error prints
+// the SQLSTATE and does not print the error text. Apply and undo set
+// lock_timeout to 5s and statement_timeout to 15s.
 //
 // Uses DATABASE_URL. Tests point that at a disposable database. Do not point
 // this script at Railway from an agent. Boot does not run either statement:
@@ -38,6 +41,7 @@ const {
 } = require('../src/db/pest-archive');
 
 let pool;
+let mode;
 
 const USAGE = {
   dry: 'pest-archive dry-run failed\n',
@@ -45,12 +49,19 @@ const USAGE = {
   undo: 'pest-archive undo failed\n',
 };
 
+function failureText(mode, err) {
+  const line = USAGE[mode] || 'pest-archive failed\n';
+  const code = err && typeof err.code === 'string' ? err.code : '';
+  if (/^[0-9A-Z]{5}$/.test(code)) return line.replace(/\n$/, ` (${code})\n`);
+  return line;
+}
+
 function confirmSet(env) {
   return confirmValue(env) != null;
 }
 
 async function main() {
-  const mode = process.argv[2];
+  mode = process.argv[2];
   const argc = process.argv.length;
   if (mode === 'undo') {
     if (argc !== 4 || !isRunId(process.argv[3])) {
@@ -109,7 +120,7 @@ async function main() {
     process.stdout.write(`restored ${n}\n`);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
-    process.stderr.write(err.code === 'PEST_ARCHIVE_REFUSED' ? 'pest-archive refused\n' : USAGE[mode]);
+    process.stderr.write(err.code === 'PEST_ARCHIVE_REFUSED' ? 'pest-archive refused\n' : failureText(mode, err));
     process.exitCode = 1;
   } finally {
     client.release();
@@ -117,8 +128,8 @@ async function main() {
 }
 
 main()
-  .catch(() => {
-    process.stderr.write('pest-archive failed\n');
+  .catch((err) => {
+    process.stderr.write(failureText(mode, err));
     process.exitCode = 1;
   })
   .finally(() => {
