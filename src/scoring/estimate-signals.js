@@ -276,9 +276,11 @@ function isSentenceStart(text, at) {
 // Main's before-window check, unchanged. Used on the words the cut would
 // drop between the verb and the break, so a real negator there stays.
 function mainNegatesBefore(span) {
-  if (NEGATIVE_VERB.test(span)) return true;
-  if (NEGATIVE_NO_MORE.test(span)) return true;
-  if (NEGATIVE_BARE.test(span)) return true;
+  const clause = String(span || '');
+  const ended = /\s$/.test(clause) ? clause : `${clause} `;
+  if (NEGATIVE_VERB.test(ended)) return true;
+  if (NEGATIVE_NO_MORE.test(ended)) return true;
+  if (NEGATIVE_BARE.test(ended)) return true;
   return false;
 }
 
