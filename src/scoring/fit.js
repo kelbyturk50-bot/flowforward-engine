@@ -33,7 +33,8 @@
 // trade word. Air Conditioning counts. Heating Oil Delivery and Pool
 // Heating do not. A missing cache adds nothing. Plumbing, Plumber, and every
 // other trade are not boosted. A verb negation can sit well before the phrase.
-// A bare "no" or "without" has to sit next to it.
+// A bare "no" or "without" negates only with an optional any, a, an, or the
+// between it and the phrase.
 
 const pool = require('../db/client');
 const INDUSTRIES = require('../bot/industries');

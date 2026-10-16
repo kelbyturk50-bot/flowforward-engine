@@ -677,6 +677,22 @@ describe('F-003 estimate signals', () => {
     assert.equal(withoutAny.fit_score, plain.fit_score);
     assert.equal(signalPoints(withoutAny), 0);
 
+    const stillOn = [
+      ['no-hassle free estimates', 4, 'Free estimate'],
+      ['No hassle free estimates', 4, 'Free estimate'],
+      ['No pressure free estimates', 4, 'Free estimate'],
+      ['no hassle, free estimates', 4, 'Free estimate'],
+      ['No interest financing', 3, 'Financing'],
+      ['no-interest financing', 3, 'Financing'],
+      ['No risk financing', 3, 'Financing'],
+    ];
+    for (const [text, weight, label] of stillOn) {
+      const fit = computeFit({ ...peer, research: research(text) });
+      assert.equal(fit.fit_score - plain.fit_score, weight, text);
+      assert.equal(fit.fit_reasons.find(row => row.label === label).points, weight, text);
+      assert.equal(signalPoints(fit), weight, text);
+    }
+
     const afterSentence = computeFit({
       ...peer,
       research: research('No. We offer financing on replacements.'),

@@ -75,11 +75,11 @@ const TIER_CAP_FOR = {
 // A negated phrase does not count. Verb negations keep a wide window and may
 // cross a comma ("we do not offer financing", "we don't offer financing",
 // "not offering installation", "we do not offer, at this time, any kind of
-// financing", and "financing not available" after the phrase). A bare "no"
-// or "without" counts only next to the phrase: at most one word between, and
-// no comma or other clause mark ("no free estimates", "without financing").
-// A curly apostrophe counts (don’t, doesn’t). "not only", "no-cost" /
-// "no cost", and "no obligation" are not negations.
+// financing", and "financing not available" after the phrase). "not" followed
+// by "only" is not a verb negation. A bare "no" or "without" negates only
+// when the phrase comes next, or with just any, a, an, or the in between
+// ("no free estimates", "without any financing"). A curly apostrophe counts
+// (don’t, doesn’t). "no-hassle", "no interest", and "no-cost" are not negations.
 //
 // HVAC only (Scout, PR #51; Gauge on the industry gate). A stored industry
 // that is a non-HVAC trade scores 0 no matter what the company name or

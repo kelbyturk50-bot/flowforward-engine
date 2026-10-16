@@ -19,12 +19,11 @@ const JOB_AD_RE = /\b(?:comfort|sales)\s+(?:advisors?|consultants?)\b|\bcomfort\
 const SEARCH_ADS_RE = /\blocal\s+services\s+ads?\b|\bgoogle\s+ads\b|\bgoogle\s+local\s+services\b|\blsas?\b/i;
 const SEARCH_ADS_LABEL_RE = /google ads|\blocal services\b|\blsas?\b/i;
 // Apostrophes: straight, U+2019 (don’t), and U+2018. Verb negations keep a
-// wide window and may cross a comma. Bare "no" and "without" do not: at most
-// one word, and a hyphen is the only mark allowed in that gap, so "no-cost"
-// still matches unless the exception in isNegated returns first. "not only"
-// matches this verb pattern unless its exception returns first.
-const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|not|never)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
-const NEGATIVE_BARE = /\b(?:no|without)(?:[-\s]+[a-z0-9'\u2019\u2018]+){0,1}\s*$/i;
+// wide window and may cross a comma. "not only" is not one of them: the next
+// word after "not" is not "only". Bare "no" and "without" negate only when
+// the phrase follows immediately, or with just any/a/an/the in between.
+const NEGATIVE_VERB = /\b(?:do\s+not|does\s+not|did\s+not|is\s+not|are\s+not|was\s+not|were\s+not|will\s+not|cannot|don['\u2019\u2018]?t|doesn['\u2019\u2018]?t|didn['\u2019\u2018]?t|isn['\u2019\u2018]?t|aren['\u2019\u2018]?t|wasn['\u2019\u2018]?t|weren['\u2019\u2018]?t|won['\u2019\u2018]?t|can['\u2019\u2018]?t|not(?!\s+only\b)|never)\b(?:[\s,;-]+[a-z0-9'\u2019\u2018]+){0,8}\s*$/i;
+const NEGATIVE_BARE = /\b(?:no|without)(?:\s+(?:any|a|an|the))?\s+$/i;
 // A short window after the phrase: "not available", "unavailable", "none",
 // or a bare "no" / "no." The bare "no" does not match "no obligation".
 const NEGATIVE_AFTER = /^[\s,;:?!-]*(?:(?:are|is|was|were)\s+)?(?:\bnot\s+available\b|\bunavailable\b|\bnone\b|\bno(?=\s*[.!?]|[\s]*$))/i;
@@ -224,11 +223,6 @@ function clauseAfter(text, end) {
 
 function isNegated(text, index, length) {
   const before = clauseBefore(text, index);
-  // Early returns are load-bearing. The patterns below match these phrases.
-  if (/\bnot\s+only(?:\s+\S+){0,4}\s*$/i.test(before)) return false;
-  if (/\bno[-\s]+cost\s*$/i.test(before)) return false;
-  // "no obligation" is one word away, which the bare pattern would negate.
-  if (/\bno[-\s]+obligation\s*$/i.test(before)) return false;
   if (NEGATIVE_VERB.test(before)) return true;
   if (NEGATIVE_BARE.test(before)) return true;
   return NEGATIVE_AFTER.test(clauseAfter(text, index + length));
