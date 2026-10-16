@@ -4,6 +4,8 @@ How the Grok Bot team ships work on FlowForward. Coding agents follow `AGENTS.md
 
 Kelby owns the product. Who presses merge, and when, is Change flow step 8.
 
+Branded agent prototypes (selection, GTM, build order): [`PROTOTYPE_PLAY.md`](PROTOTYPE_PLAY.md). Prototype builds follow the normal branch → PR → gates flow, with Ochre reviewing UI and Warden reviewing the logo fetch and link/token auth.
+
 ## Roles
 
 | Person | Role | Does | Does not |
