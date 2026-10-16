@@ -690,6 +690,101 @@ describe('network guard', () => {
     }
   });
 
+  it('blocks undici.fetch through a Socks5ProxyAgent for https and http', async () => {
+    const { fetch: undiciFetch, Socks5ProxyAgent, ProxyAgent, Agent } = require('undici');
+    let received = Buffer.alloc(0);
+    const sockets = new Set();
+    const proxy = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+      socket.on('data', (buf) => { received = Buffer.concat([received, buf]); });
+      socket.on('end', () => socket.destroy());
+      socket.on('error', () => socket.destroy());
+    });
+    await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+    const port = proxy.address().port;
+    const proxyUrl = `socks5://127.0.0.1:${port}`;
+    try {
+      for (const target of ['https://192.0.2.1/', 'http://192.0.2.1/']) {
+        const fetched = await captureGuard(() => undiciFetch(target));
+        assertGuard(fetched, '192.0.2.1');
+        assert.match(guardError(fetched).message, /undici-fetch/);
+
+        const proxied = await captureGuard(() => undiciFetch(target, {
+          dispatcher: new Socks5ProxyAgent(proxyUrl),
+        }));
+        assertGuard(proxied);
+        assert.match(guardError(proxied).message, /socks/);
+        assert.match(guardError(proxied).stack, /guard\.js/);
+      }
+
+      assert.throws(
+        () => new ProxyAgent(proxyUrl),
+        (err) => {
+          assertGuard(err);
+          assert.match(err.message, /socks/);
+          return true;
+        }
+      );
+
+      const agent = new Agent();
+      try {
+        const dispatched = await captureGuard(() => agent.dispatch({
+          origin: 'https://192.0.2.1',
+          path: '/',
+          method: 'GET',
+        }, {
+          onRequestStart() {},
+          onHeaders() { return true; },
+          onData() { return true; },
+          onComplete() {},
+          onError() {},
+        }));
+        assertGuard(dispatched, '192.0.2.1');
+        assert.match(guardError(dispatched).message, /undici-proxy/);
+      } finally {
+        await agent.close();
+      }
+
+      const blocked = await captureGuard(() => {
+        const socket = net.connect(port, '127.0.0.1');
+        socket.on('error', () => {});
+        try {
+          // VER CMD RSV ATYP IPv4 192.0.2.1 port 443.
+          socket.write(Buffer.from([0x05, 0x01, 0x00, 0x01, 192, 0, 2, 1, 0x01, 0xbb]));
+        } catch (err) {
+          socket.destroy();
+          throw err;
+        }
+        return socket;
+      });
+      assertGuard(blocked, '192.0.2.1');
+      assert.match(guardError(blocked).message, /connect-tunnel/);
+
+      const allowed = net.connect(port, '127.0.0.1');
+      allowed.on('error', () => {});
+      assert.doesNotThrow(() => {
+        allowed.write(Buffer.from([0x05, 0x01, 0x00]));
+        allowed.write(Buffer.from([0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x00, 0x50]));
+      });
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`loopback SOCKS5 CONNECT was not delivered: ${received.toString('hex')}`)), 1000);
+        const iv = setInterval(() => {
+          if (received.includes(Buffer.from([0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x00, 0x50]))) {
+            clearTimeout(timer);
+            clearInterval(iv);
+            resolve();
+          }
+        }, 10);
+      });
+      allowed.destroy();
+      assert.equal(received.includes(Buffer.from([192, 0, 2, 1])), false);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => proxy.close(resolve));
+    }
+  });
+
   it('passes the preload to spawned children through NODE_OPTIONS', () => {
     const { spawnSync } = require('child_process');
     const path = require('path');

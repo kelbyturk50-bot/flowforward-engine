@@ -575,7 +575,43 @@ function chunkPrefix(chunk) {
   return '';
 }
 
+// SOCKS5 CONNECT is VER=0x05 CMD=0x01 RSV=0x00 ATYP DST.ADDR DST.PORT.
+// The greeting is only VER NMETHODS METHODS (05 01 00 with no address) and
+// must not be treated as a CONNECT. An incomplete address is not a request.
+function socks5ConnectHost(chunk) {
+  let buf = null;
+  if (Buffer.isBuffer(chunk)) buf = chunk;
+  else if (ArrayBuffer.isView(chunk)) buf = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  if (!buf || buf.length < 4) return '';
+  if (buf[0] !== 0x05 || buf[1] !== 0x01 || buf[2] !== 0x00) return '';
+  const atyp = buf[3];
+  if (atyp === 0x01) {
+    if (buf.length < 10) return '';
+    return `${buf[4]}.${buf[5]}.${buf[6]}.${buf[7]}`;
+  }
+  if (atyp === 0x03) {
+    const len = buf[4];
+    if (!len || buf.length < 5 + len + 2) return '';
+    return buf.subarray(5, 5 + len).toString('utf8');
+  }
+  if (atyp === 0x04) {
+    if (buf.length < 22) return '';
+    const addr = buf.subarray(4, 20);
+    const v4Mapped = addr.subarray(0, 10).every(b => b === 0) && addr[10] === 0xff && addr[11] === 0xff;
+    if (v4Mapped) return `${addr[12]}.${addr[13]}.${addr[14]}.${addr[15]}`;
+    if (addr.subarray(0, 15).every(b => b === 0) && addr[15] === 1) return '::1';
+    const parts = [];
+    for (let i = 0; i < 8; i++) parts.push(addr.readUInt16BE(i * 2).toString(16));
+    return parts.join(':');
+  }
+  return '';
+}
+
 function assertNoForeignTunnel(chunk) {
+  const socksHost = socks5ConnectHost(chunk);
+  if (socksHost && !isLocalName(socksHost)) {
+    throw new TestNetworkGuardError(normalizeHost(socksHost), 'connect-tunnel');
+  }
   const prefix = chunkPrefix(chunk);
   // GET http://192.0.2.1/ HTTP/1.1, including a leading CRLF and CONNECT https://...
   const absolute = /^\s*[A-Z]+\s+(https?:\/\/[^\s/]+)/i.exec(prefix);
@@ -627,10 +663,48 @@ function assertConnectPath(opts, via) {
   }
 }
 
+// socks://, socks4://, socks4a://, socks5://. Tests never need a proxy.
+function socksProxyLabel(value) {
+  if (value == null || value === '') return '';
+  const raw = typeof value === 'string' || (typeof URL !== 'undefined' && value instanceof URL)
+    ? value
+    : (value.uri || value.href || value.url || value.proxy || '');
+  if (raw == null || raw === '') return '';
+  try {
+    const url = typeof URL !== 'undefined' && raw instanceof URL ? raw : new URL(String(raw));
+    if (/^socks\d*a?:$/i.test(url.protocol)) return url.href;
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function throwIfSocksProxy(value) {
+  const label = socksProxyLabel(value);
+  if (label) throw new TestNetworkGuardError(label, 'socks');
+  return label;
+}
+
 function installUndiciProxyGuard() {
   let undici;
   try { undici = require('undici'); }
   catch { return; }
+
+  const originalFetch = undici.fetch;
+  if (typeof originalFetch === 'function' && !originalFetch.__ffGuarded) {
+    function guardedUndiciFetch(input, init) {
+      // Same loopback rule as global fetch. undici.fetch is a separate export
+      // (cheerio uses it) and is not the global fetch wrapper above.
+      try {
+        assertLoopbackTarget(input, 'undici-fetch');
+      } catch (err) {
+        return Promise.reject(err);
+      }
+      return originalFetch.call(this, input, init);
+    }
+    guardedUndiciFetch.__ffGuarded = true;
+    undici.fetch = guardedUndiciFetch;
+  }
 
   for (const name of ['request', 'stream', 'pipeline', 'connect', 'upgrade']) {
     const original = undici[name];
@@ -655,14 +729,15 @@ function installUndiciProxyGuard() {
     Dispatcher.prototype.connect = guardedDispatcherConnect;
   }
 
-  // ProxyAgent.dispatch does not call Dispatcher.prototype.dispatch.
-  // EnvHttpProxyAgent and Socks5ProxyAgent do, then open CONNECT to opts.origin.
-  const proxyClasses = [undici.ProxyAgent, undici.EnvHttpProxyAgent, undici.Socks5ProxyAgent];
+  // ProxyAgent defines its own dispatch and does not call Dispatcher.prototype.dispatch.
+  // Socks5ProxyAgent and EnvHttpProxyAgent do not either. They inherit
+  // DispatcherBase.prototype.dispatch, which calls [kDispatch]. The method on
+  // Dispatcher.prototype is the unimplemented base and is not the one they run.
+  const proxyClasses = [undici.ProxyAgent, undici.EnvHttpProxyAgent];
   for (const Ctor of proxyClasses) {
     if (!Ctor || !Ctor.prototype) continue;
     const original = Ctor.prototype.dispatch;
     if (typeof original !== 'function' || original.__ffGuarded) continue;
-    // Only wrap an own method. Inherited dispatch is wrapped once below.
     if (!Object.prototype.hasOwnProperty.call(Ctor.prototype, 'dispatch')) continue;
     function guardedDispatch(opts, handler) {
       if (opts && opts.origin) assertLoopbackTarget(opts.origin, 'undici-proxy');
@@ -672,17 +747,95 @@ function installUndiciProxyGuard() {
     Ctor.prototype.dispatch = guardedDispatch;
   }
 
-  const originalDispatch = Dispatcher && Dispatcher.prototype && Dispatcher.prototype.dispatch;
-  if (typeof originalDispatch === 'function' && !originalDispatch.__ffGuarded) {
-    function guardedDispatcher(opts, handler) {
-      const name = this && this.constructor && this.constructor.name;
-      if (name === 'EnvHttpProxyAgent' || name === 'Socks5ProxyAgent' || name === 'ProxyAgent') {
-        if (opts && opts.origin) assertLoopbackTarget(opts.origin, 'undici-proxy');
+  // Every dispatcher origin must be loopback, including agents that only
+  // implement [kDispatch] and inherit this method. Find DispatcherBase on a
+  // real Agent instance rather than assuming Dispatcher.prototype.dispatch.
+  const probe = new undici.Agent();
+  let baseProto = null;
+  try {
+    let proto = Object.getPrototypeOf(probe);
+    while (proto && proto !== Object.prototype) {
+      if (proto.constructor && proto.constructor.name === 'DispatcherBase'
+        && Object.prototype.hasOwnProperty.call(proto, 'dispatch')) {
+        baseProto = proto;
+        break;
       }
-      return originalDispatch.call(this, opts, handler);
+      proto = Object.getPrototypeOf(proto);
     }
-    guardedDispatcher.__ffGuarded = true;
-    Dispatcher.prototype.dispatch = guardedDispatcher;
+  } finally {
+    if (typeof probe.destroy === 'function') probe.destroy();
+  }
+  const originalBaseDispatch = baseProto && baseProto.dispatch;
+  if (typeof originalBaseDispatch === 'function' && !originalBaseDispatch.__ffGuarded) {
+    function guardedBaseDispatch(opts, handler) {
+      if (opts && opts.origin) assertLoopbackTarget(opts.origin, 'undici-proxy');
+      return originalBaseDispatch.call(this, opts, handler);
+    }
+    guardedBaseDispatch.__ffGuarded = true;
+    baseProto.dispatch = guardedBaseDispatch;
+  }
+
+  // Tests never need a SOCKS proxy. Construction throws, including a SOCKS
+  // URL handed to ProxyAgent or EnvHttpProxyAgent. The closed-over
+  // Socks5ProxyAgent inside undici still emits its experimental warning
+  // before it opens a tunnel; that warning throws too.
+  refuseSocksConstructors(undici);
+  const originalEmitWarning = process.emitWarning;
+  if (typeof originalEmitWarning === 'function' && !originalEmitWarning.__ffGuarded) {
+    function guardedEmitWarning(warning) {
+      const text = typeof warning === 'string' ? warning : (warning && warning.message) || '';
+      if (/SOCKS5 proxy support/i.test(text)) {
+        throw new TestNetworkGuardError('socks5', 'socks');
+      }
+      return originalEmitWarning.apply(this, arguments);
+    }
+    guardedEmitWarning.__ffGuarded = true;
+    process.emitWarning = guardedEmitWarning;
+  }
+}
+
+function refuseSocksConstructors(undici) {
+  if (undici.Socks5ProxyAgent && !undici.Socks5ProxyAgent.__ffGuarded) {
+    const Original = undici.Socks5ProxyAgent;
+    function GuardedSocks5ProxyAgent(...args) {
+      throw new TestNetworkGuardError(socksProxyLabel(args[0]) || 'socks5', 'socks');
+    }
+    GuardedSocks5ProxyAgent.__ffGuarded = true;
+    GuardedSocks5ProxyAgent.prototype = Original.prototype;
+    Object.setPrototypeOf(GuardedSocks5ProxyAgent, Original);
+    undici.Socks5ProxyAgent = GuardedSocks5ProxyAgent;
+  }
+
+  if (undici.ProxyAgent && !undici.ProxyAgent.__ffGuarded) {
+    const Original = undici.ProxyAgent;
+    function GuardedProxyAgent(...args) {
+      throwIfSocksProxy(args[0]);
+      return new Original(...args);
+    }
+    GuardedProxyAgent.__ffGuarded = true;
+    GuardedProxyAgent.prototype = Original.prototype;
+    Object.setPrototypeOf(GuardedProxyAgent, Original);
+    undici.ProxyAgent = GuardedProxyAgent;
+  }
+
+  if (undici.EnvHttpProxyAgent && !undici.EnvHttpProxyAgent.__ffGuarded) {
+    const Original = undici.EnvHttpProxyAgent;
+    function GuardedEnvHttpProxyAgent(...args) {
+      const opts = args[0] && typeof args[0] === 'object' ? args[0] : {};
+      throwIfSocksProxy(opts.httpProxy);
+      throwIfSocksProxy(opts.httpsProxy);
+      throwIfSocksProxy(process.env.http_proxy);
+      throwIfSocksProxy(process.env.HTTP_PROXY);
+      throwIfSocksProxy(process.env.https_proxy);
+      throwIfSocksProxy(process.env.HTTPS_PROXY);
+      throwIfSocksProxy(process.env.all_proxy);
+      throwIfSocksProxy(process.env.ALL_PROXY);
+      return new Original(...args);
+    }
+    GuardedEnvHttpProxyAgent.__ffGuarded = true;
+    GuardedEnvHttpProxyAgent.prototype = Original.prototype;
+    Object.setPrototypeOf(GuardedEnvHttpProxyAgent, Original);
+    undici.EnvHttpProxyAgent = GuardedEnvHttpProxyAgent;
   }
 }
 
