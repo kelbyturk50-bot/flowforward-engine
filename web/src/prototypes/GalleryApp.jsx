@@ -1,9 +1,11 @@
+import '@fontsource/barlow/latin-600.css';
 import { useEffect, useMemo, useState } from 'react';
 import { buildDemo } from '../demo/fixture.js';
 import { EstimateRecoveryFlow } from '../demo/EstimateRecovery';
 import { SampleTag } from '../components/PrototypeWatermark';
 import { presentBrand } from './brand';
 import { HOSTILE_BRAND, NAVY_BRAND, TEST_BRAND, YELLOW_BRAND } from './fixture-brand';
+import { BookkeepingPrototype, CallPrototype, SchedulingPrototype } from './agents';
 import PrototypeLayout from './PrototypeLayout';
 import { followGalleryLink, galleryHref, galleryRouteFromPath } from './route';
 
@@ -50,14 +52,23 @@ export default function GalleryApp({ token }) {
       {screen === 'estimate-follow-up' && (
         <EstimateFollowUp token={token} search={loc.search} brand={brand} />
       )}
+      {screen === 'scheduling' && <SchedulingPrototype />}
+      {screen === 'call' && <CallPrototype />}
+      {screen === 'bookkeeping' && <BookkeepingPrototype />}
       {screen === 'index' && <GalleryIndex token={token} search={loc.search} />}
       {screen === 'unknown' && <UnknownPrototype />}
     </PrototypeLayout>
   );
 }
 
+const AGENTS = [
+  ['estimate-follow-up', 'Estimate follow-up', 'Open estimate follow-up', 'Email previews for a stale estimate. They stop if the customer replies. No text or call goes out.'],
+  ['scheduling', 'Scheduling', 'Open scheduling', 'Sample visit slots for a fictional homeowner. Nothing is written to a calendar.'],
+  ['call', 'Call', 'Open call', 'A missed-call card and a draft text-back. Nothing is dialed.'],
+  ['bookkeeping', 'Bookkeeping', 'Open bookkeeping', 'Sample receipts from fictional vendors. Sync stays on this page.'],
+];
+
 function GalleryIndex({ token, search }) {
-  const href = galleryHref(token, 'estimate-follow-up', search);
   return (
     <main id="prototype-main" className="prototype-index">
       <p className="demo-kicker">Simulated prototypes</p>
@@ -65,15 +76,18 @@ function GalleryIndex({ token, search }) {
       <p className="muted demo-lead">
         These screens are simulated previews on fictional jobs. They are not a live system, nothing is sent, and the sample shop has not endorsed them.
       </p>
-      <article className="prototype-card">
-        <h2>Estimate follow-up <SampleTag /></h2>
-        <p>
-          A walkthrough of unsold-estimate recovery for this brand. No email, text, or call goes out.
-        </p>
-        <a className="prototype-open" href={href} onClick={(event) => followGalleryLink(event, href)}>
-          Open estimate follow-up
-        </a>
-      </article>
+      {AGENTS.map(([screen, title, label, body]) => {
+        const href = galleryHref(token, screen, search);
+        return (
+          <article className="prototype-card" key={screen}>
+            <h2>{title} <SampleTag /></h2>
+            <p>{body}</p>
+            <a className="prototype-open" href={href} onClick={(event) => followGalleryLink(event, href)}>
+              {label}
+            </a>
+          </article>
+        );
+      })}
     </main>
   );
 }

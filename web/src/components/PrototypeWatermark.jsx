@@ -6,14 +6,18 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 export const WATERMARK_TEXT = 'PROTOTYPE, not live. FlowForward can make this real in days.';
-export const ACTION_TOAST = 'Prototype, nothing was sent';
+export const ACTION_TOAST = 'In the live version this would send the email.';
+
+export function liveToast(action) {
+  return `In the live version this would ${action}.`;
+}
 export const FOOTER_LEAD = 'Concept by FlowForward, sample data, not affiliated with or endorsed by ';
 
 export const WATERMARK_BG = '#1E2A2F';
 export const WATERMARK_FG = '#F3F6F5';
 
 // Diagonal PROTOTYPE tile, slate at 5% opacity. Painted above brand fills.
-export const TILE_IMAGE = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='168' height='96'%3E%3Ctext x='6' y='58' fill='%231E2A2F' fill-opacity='0.05' font-family='sans-serif' font-size='15' font-weight='700' transform='rotate(-28 84 48)'%3EPROTOTYPE%3C/text%3E%3C/svg%3E\")";
+export const TILE_IMAGE = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='168' height='96'%3E%3Ctext x='6' y='58' fill='%231E2A2F' fill-opacity='0.05' font-family='sans-serif' font-size='15' font-weight='700' transform='rotate(-30 84 48)'%3EPROTOTYPE%3C/text%3E%3C/svg%3E\")";
 
 // Literal colors only. Brand CSS variables must not be able to restyle the ribbon.
 export const RIBBON_STYLE = {
@@ -32,8 +36,8 @@ export const RIBBON_STYLE = {
   mixBlendMode: 'normal',
   transform: 'none',
   margin: 0,
-  padding: '8px 12px',
-  paddingTop: 'calc(8px + env(safe-area-inset-top, 0px))',
+  padding: '6px 12px',
+  paddingTop: 'calc(6px + env(safe-area-inset-top, 0px))',
   minHeight: 'calc(32px + env(safe-area-inset-top, 0px))',
   width: '100%',
   maxWidth: 'none',
@@ -43,7 +47,7 @@ export const RIBBON_STYLE = {
   fontFamily: 'Barlow, system-ui, sans-serif',
   fontSize: '14px',
   fontWeight: 600,
-  lineHeight: 1.35,
+  lineHeight: 1.3,
 };
 
 const RIBBON_IMPORTANT = {
@@ -62,8 +66,8 @@ const RIBBON_IMPORTANT = {
   'mix-blend-mode': 'normal',
   transform: 'none',
   margin: '0',
-  padding: '8px 12px',
-  'padding-top': 'calc(8px + env(safe-area-inset-top, 0px))',
+  padding: '6px 12px',
+  'padding-top': 'calc(6px + env(safe-area-inset-top, 0px))',
   'min-height': 'calc(32px + env(safe-area-inset-top, 0px))',
   width: '100%',
   'max-width': 'none',
@@ -73,7 +77,7 @@ const RIBBON_IMPORTANT = {
   'font-family': 'Barlow, system-ui, sans-serif',
   'font-size': '14px',
   'font-weight': '600',
-  'line-height': '1.35',
+  'line-height': '1.3',
 };
 
 function lockStyle(node, declarations) {
@@ -94,8 +98,8 @@ export function usePrototypeChrome() {
   return useContext(PrototypeChromeContext);
 }
 
-export function SampleTag() {
-  return <span className="prototype-sample" aria-hidden="true">Sample</span>;
+export function SampleTag({ children = 'Sample' }) {
+  return <span className="prototype-sample" aria-hidden="true">{children}</span>;
 }
 
 export function SampleValue({ children }) {
@@ -176,7 +180,7 @@ function useLayoutEffectLock(declarations) {
   return ref;
 }
 
-export function PrototypeShell({ brandName, accent, swatch, children }) {
+export function PrototypeShell({ brandName, accent, onAccent, children }) {
   const [message, setMessage] = useState('');
 
   useEffect(() => {
@@ -198,16 +202,9 @@ export function PrototypeShell({ brandName, accent, swatch, children }) {
             <div
               className="prototype-screen"
               data-brand-accent={accent}
-              style={{ '--proto-accent': accent }}
+              data-on-accent={onAccent}
+              style={{ '--proto-accent': accent, '--proto-on-accent': onAccent }}
             >
-              {swatch ? (
-                <div
-                  className="prototype-brand-wash"
-                  data-brand-swatch={swatch}
-                  aria-hidden="true"
-                  style={{ backgroundColor: swatch }}
-                />
-              ) : null}
               <PrototypeTile />
               <div className="prototype-foreground">
                 {children}

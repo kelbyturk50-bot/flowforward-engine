@@ -11,8 +11,8 @@ export const TEST_BRAND = Object.freeze({
   }),
 });
 
-// Proof brands. Yellow fails text contrast, so accents fall back to juniper.
-// The raw swatch still paints so the watermark can be checked against it.
+// Proof brands. Yellow is too light for text, so the accent is darkened.
+// Navy already passes, so it stays unchanged.
 export const YELLOW_BRAND = Object.freeze({
   name: 'TEST: Pale Yellow Shop',
   logoUrl: BUNDLED_LOGO_ID,

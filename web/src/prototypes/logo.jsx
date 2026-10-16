@@ -11,7 +11,11 @@ export function TestWasatchMark() {
   );
 }
 
-export function BrandMark({ logoUrl }) {
-  if (logoUrl === BUNDLED_LOGO_ID) return <TestWasatchMark />;
-  return null;
+export function BrandMark({ logoUrl, plate = 'none' }) {
+  if (logoUrl !== BUNDLED_LOGO_ID) return null;
+  const mark = <TestWasatchMark />;
+  if (plate === 'slate' || plate === 'paper') {
+    return <span className={`prototype-logo-plate is-${plate}`}>{mark}</span>;
+  }
+  return mark;
 }

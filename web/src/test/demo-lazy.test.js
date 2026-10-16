@@ -57,6 +57,8 @@ describe('demo code split', () => {
         throw new Error(result.stderr || result.stdout || `vite build exited ${result.status}`);
       }
       const html = readFileSync(path.join(built, 'index.html'), 'utf8');
+      expect(html).not.toContain('fonts.googleapis.com');
+      expect(html).not.toContain('fonts.gstatic.com');
       const entrySrc = html.match(/src="([^"]+\.js)"/);
       expect(entrySrc).toBeTruthy();
       const entryName = entrySrc[1].split('/').pop();
@@ -82,6 +84,18 @@ describe('demo code split', () => {
       const watermark = files.find(file => file.text.includes('PROTOTYPE, not live'));
       expect(watermark, names.join(', ')).toBeTruthy();
       expect(watermark.name).not.toBe(entry.name);
+      const cssHref = html.match(/href="([^"]+\.css)"/);
+      expect(cssHref).toBeTruthy();
+      const entryCssName = cssHref[1].split('/').pop();
+      const entryCss = readFileSync(path.join(assetDir, entryCssName), 'utf8');
+      expect(entryCss).not.toContain('barlow-latin-600');
+      expect(entry.text).not.toContain('barlow-latin-600');
+      const fontCarrier = readdirSync(assetDir)
+        .filter(name => name !== entryCssName && name !== entryName)
+        .map(name => readFileSync(path.join(assetDir, name), 'utf8'))
+        .find(text => text.includes('barlow-latin-600'));
+      expect(fontCarrier).toBeTruthy();
+      expect(readdirSync(assetDir).some(name => name.endsWith('.woff2'))).toBe(true);
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }

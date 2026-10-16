@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ACTION_TOAST, SampleValue, usePrototypeNotify } from '../components/PrototypeWatermark';
+import { ACTION_TOAST, SampleValue, liveToast, usePrototypeChrome, usePrototypeNotify } from '../components/PrototypeWatermark';
 import { readCompanyOverride } from '../flags';
 import { getDemo } from './getDemo';
 
@@ -33,8 +33,12 @@ function downloadJson(filename, text) {
 }
 
 export function EstimateRecoveryFlow({ demo }) {
+  const chrome = usePrototypeChrome();
   const [step, setStep] = useState(1);
   const [approved, setApproved] = useState(false);
+  const steps = chrome
+    ? STEPS.map(item => (item.id === 4 ? { ...item, label: 'Summary' } : item))
+    : STEPS;
 
   return (
     <div className="demo-wrap" data-step={step}>
@@ -42,7 +46,7 @@ export function EstimateRecoveryFlow({ demo }) {
         Sample walkthrough for <SampleValue>{demo.company}</SampleValue>. The jobs and amounts are fictional. Nothing on this page is sent.
       </p>
       <ol className="demo-steps" aria-label="Demo progress">
-        {STEPS.map(item => (
+        {steps.map(item => (
           <li key={item.id} aria-current={item.id === step ? 'step' : undefined}>{item.id} {item.label}</li>
         ))}
       </ol>
@@ -151,6 +155,7 @@ function Landing({ demo, onSend }) {
 }
 
 function Timeline({ demo, onNext }) {
+  const chrome = usePrototypeChrome();
   const items = demo.timeline;
   const [count, setCount] = useState(() => (prefersReducedMotion() ? items.length : 1));
 
@@ -168,6 +173,7 @@ function Timeline({ demo, onNext }) {
       <h1 id="demo-step-title">Preview — nothing is sent</h1>
       <p className="muted demo-lead">
         Email previews branded for <SampleValue>{demo.company}</SampleValue>. The day 5 card is an owner task, not a message to the homeowner.
+        {chrome ? ' Stops on reply.' : ''}
       </p>
       <p role="status" className="demo-status">{done ? 'Preview finished. Nothing was sent.' : 'Playing the preview…'}</p>
       <ol className="demo-timeline" aria-label="Email previews">
@@ -205,7 +211,7 @@ function Reply({ demo, approved, onApprove, onNext }) {
         <p><SampleValue>{demo.reply.draft}</SampleValue></p>
       </article>
       {!approved && (
-        <button type="button" className="demo-btn" onClick={() => { notify?.(ACTION_TOAST); onApprove(); }}>
+        <button type="button" className="demo-btn" onClick={() => { notify?.(liveToast('send the reply')); onApprove(); }}>
           Approve reply
         </button>
       )}
@@ -223,9 +229,10 @@ function Reply({ demo, approved, onApprove, onNext }) {
 
 function Summary({ demo, onRestart }) {
   const notify = usePrototypeNotify();
+  const chrome = usePrototypeChrome();
   const onExport = () => {
     if (notify) {
-      notify(ACTION_TOAST);
+      notify(liveToast('keep the file on this device'));
       return;
     }
     import('./fixture.js').then(({ serializeDemo }) => {
@@ -235,9 +242,15 @@ function Summary({ demo, onRestart }) {
   return (
     <section aria-labelledby="demo-step-title">
       <p className="demo-kicker">Step 4 of 4 · <SampleValue>{demo.company}</SampleValue></p>
-      <h1 id="demo-step-title">Recovered: <SampleValue>{formatDollars(demo.recovered)}</SampleValue>. You own this workflow.</h1>
+      <h1 id="demo-step-title">
+        {chrome
+          ? 'Sample job. You own this workflow.'
+          : <>Recovered: <SampleValue>{formatDollars(demo.recovered)}</SampleValue>. You own this workflow.</>}
+      </h1>
       <p className="muted demo-lead">
-        That amount is the Better furnace option from the sample list. This page did not contact anyone, and the export stays on this device.
+        {chrome
+          ? 'These are sample prices. Nothing here is a recovered-revenue claim, and this page did not contact anyone.'
+          : 'That amount is the Better furnace option from the sample list. This page did not contact anyone, and the export stays on this device.'}
       </p>
       <ul className="demo-estimates">
         {demo.estimates.map(item => (

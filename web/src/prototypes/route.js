@@ -14,12 +14,14 @@ function decodePart(value) {
   catch { return value; }
 }
 
+const SCREENS = new Set(['index', 'estimate-follow-up', 'scheduling', 'call', 'bookkeeping']);
+
 export function galleryRouteFromPath(pathname) {
   const match = String(pathname ?? '').match(GALLERY);
   if (!match) return null;
   const token = decodePart(match[1]);
   const rawScreen = match[2] ? decodePart(match[2]) : 'index';
-  const screen = rawScreen === 'index' || rawScreen === 'estimate-follow-up' ? rawScreen : 'unknown';
+  const screen = SCREENS.has(rawScreen) ? rawScreen : 'unknown';
   return { token, screen };
 }
 
@@ -36,8 +38,8 @@ function encodeList(value) {
 }
 
 export function galleryHref(token = GALLERY_PREVIEW_TOKEN, screen = 'index', search = '') {
-  const path = screen === 'estimate-follow-up'
-    ? `/demo/gallery/${token}/estimate-follow-up`
+  const path = screen && screen !== 'index' && SCREENS.has(screen)
+    ? `/demo/gallery/${token}/${screen}`
     : `/demo/gallery/${token}`;
   const current = new URLSearchParams(String(search || '').replace(/^\?/, ''));
   const parts = [];

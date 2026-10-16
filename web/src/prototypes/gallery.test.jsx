@@ -4,8 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import PrototypeWatermark, { ACTION_TOAST, FOOTER_LEAD, WATERMARK_TEXT } from '../components/PrototypeWatermark';
+import PrototypeWatermark, { ACTION_TOAST, FOOTER_LEAD, WATERMARK_TEXT, liveToast } from '../components/PrototypeWatermark';
+import { presentBrand } from './brand';
 import GalleryGate from './GalleryGate';
+import PrototypeLayout from './PrototypeLayout';
 import { GALLERY_PREVIEW_TOKEN, galleryHref, galleryRouteFromPath, galleryTokenOk } from './route';
 
 const TOKEN = GALLERY_PREVIEW_TOKEN;
@@ -58,7 +60,7 @@ function expectRibbon(container) {
   expect(tile.style.zIndex).toBe('1');
   expect(tile.getAttribute('style')).toContain('0.05');
   expect(tile.getAttribute('style')).toContain('PROTOTYPE');
-  expect(container.querySelector('.prototype-brand-name .prototype-sample').textContent).toBe('Sample');
+  expect(container.querySelector('.prototype-brand-name .prototype-sample').textContent).toBe('Sample business');
   return ribbon;
 }
 
@@ -172,6 +174,7 @@ describe('prototype gallery', () => {
     expect(screen.getByRole('heading', { name: 'Preview — nothing is sent' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Thank you' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Close the loop' })).toBeInTheDocument();
+    expect(screen.getByText(/Stops on reply/)).toBeInTheDocument();
     const toast = screen.getByText(ACTION_TOAST);
     expect(toast).toBeInTheDocument();
     expect(container.querySelector('.prototype-scroll').contains(toast)).toBe(false);
@@ -187,14 +190,16 @@ describe('prototype gallery', () => {
     expect(container.querySelector('.demo-draft .prototype-sample')).not.toBeNull();
     await user.click(screen.getByRole('button', { name: 'Approve reply' }));
     expect(screen.getByText('Approved → schedule install')).toBeInTheDocument();
-    expect(screen.getByText(ACTION_TOAST)).toBeInTheDocument();
+    expect(screen.getByText(liveToast('send the reply'))).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'See the owner summary' }));
-    expect(screen.getByRole('heading', { name: 'Recovered: $14,800. You own this workflow.' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Sample job. You own this workflow.' })).toBeInTheDocument();
+    expect(screen.queryByText(/Recovered:/)).not.toBeInTheDocument();
+    expect(container.querySelector('.demo-steps').textContent).not.toMatch(/Recovered/);
     expectRibbon(container);
 
     await user.click(screen.getByRole('button', { name: 'Export sample data (JSON)' }));
-    expect(screen.getByText(ACTION_TOAST)).toBeInTheDocument();
+    expect(screen.getByText(liveToast('keep the file on this device'))).toBeInTheDocument();
     expect(downloads).toEqual([]);
     expect(createObjectURL).not.toHaveBeenCalled();
 
@@ -236,9 +241,12 @@ describe('prototype gallery', () => {
     expect(computed.display).not.toBe('none');
     expect(computed.visibility).not.toBe('hidden');
     expect(Number(computed.opacity)).toBe(1);
-    expect(branded.getAttribute('data-brand-accent')).toBe('#2F6B57');
+    expect(branded.getAttribute('data-brand-accent')).toBe('#6F6F6F');
+    expect(branded.getAttribute('data-on-accent')).toBe('#FFFFFF');
     expect(paint(mark.style.backgroundColor)).not.toBe(paint(branded.getAttribute('data-brand-accent')));
-    expect(mark.getAttribute('style')).not.toContain('2F6B57');
+    expect(mark.getAttribute('style')).not.toContain('6F6F6F');
+    expect(container.querySelector('.prototype-wordmark').textContent).toBe('TEST: <script>alert(1)</script>');
+    expect(container.querySelector('svg')).toBeNull();
 
     expect(calls.fetch).toBe(0);
     expect(calls.xhr).toBe(0);
@@ -270,6 +278,21 @@ describe('prototype gallery', () => {
         screen: 'unknown',
         heading: 'Prototype not in this build',
       },
+      {
+        path: `/demo/gallery/${TOKEN}/scheduling?flags=FF_PROTOTYPE_GALLERY&watermark=0`,
+        screen: 'scheduling',
+        heading: 'Book a visit',
+      },
+      {
+        path: `/demo/gallery/${TOKEN}/call?flags=FF_PROTOTYPE_GALLERY,FF_HIDE_WATERMARK&watermark=0`,
+        screen: 'call',
+        heading: 'Missed call',
+      },
+      {
+        path: `/demo/gallery/${TOKEN}/bookkeeping?flags=FF_PROTOTYPE_GALLERY&watermark=0`,
+        screen: 'bookkeeping',
+        heading: 'Receipts',
+      },
     ];
     for (const item of cases) {
       at(item.path);
@@ -295,8 +318,8 @@ describe('prototype gallery', () => {
       expect(await screen.findByRole('heading', { name: 'Prototype gallery' })).toBeInTheDocument();
       const yellowRibbon = expectRibbon(yellow.container);
       expect(paint(yellowRibbon.style.backgroundColor)).not.toMatch(/f5e050|245,224,80/);
-      expect(yellow.container.querySelector('[data-brand-swatch]').getAttribute('data-brand-swatch')).toBe('#F5E050');
-      expect(yellow.container.querySelector('.prototype-screen').getAttribute('data-brand-accent')).toBe('#2F6B57');
+      expect(yellow.container.querySelector('.prototype-screen').getAttribute('data-brand-accent')).toBe('#7D7000');
+      expect(yellow.container.querySelector('.prototype-screen').getAttribute('data-on-accent')).toBe('#FFFFFF');
       expect(yellow.container.querySelector('[data-prototype-tile]').style.getPropertyPriority('display')).toBe('important');
       yellow.unmount();
 
@@ -304,12 +327,34 @@ describe('prototype gallery', () => {
       const navy = render(<GalleryGate route={{ token: TOKEN, screen: 'estimate-follow-up' }} />);
       expect(await screen.findByRole('heading', { name: /open estimates/ })).toBeInTheDocument();
       expectRibbon(navy.container);
-      expect(navy.container.querySelector('[data-brand-swatch]').getAttribute('data-brand-swatch')).toBe('#14213D');
       expect(navy.container.querySelector('.prototype-screen').getAttribute('data-brand-accent')).toBe('#14213D');
+      expect(navy.container.querySelector('.prototype-screen').getAttribute('data-on-accent')).toBe('#FFFFFF');
       expectFooter(navy.container, 'TEST: Dark Navy Shop');
       navy.unmount();
     } finally {
       style.remove();
+    }
+  });
+
+  it('escapes markup in the business name and still shows the watermark', () => {
+    const payloads = [
+      'TEST: <style>.ribbon{display:none}</style>',
+      'TEST: </div><script>alert(1)</script>',
+      `TEST: ${'Very long shop name '.repeat(12)}`,
+    ];
+    for (const name of payloads) {
+      const brand = presentBrand({ name, colors: { accent: '#F5E050', primary: '#F5E050' } });
+      const { container, unmount } = render(
+        <PrototypeLayout brand={brand}><h1>Injection</h1></PrototypeLayout>,
+      );
+      expectRibbon(container);
+      expect(container.querySelector('style')).toBeNull();
+      expect(container.querySelector('script')).toBeNull();
+      expect(container.innerHTML).not.toContain('<style>.ribbon');
+      expect(container.innerHTML).not.toContain('<script>alert');
+      expect(container.querySelector('.prototype-wordmark').textContent).toBe(brand.name);
+      expect(brand.theme.accent).toBe('#7D7000');
+      unmount();
     }
   });
 
