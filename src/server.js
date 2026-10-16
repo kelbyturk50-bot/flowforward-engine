@@ -66,6 +66,9 @@ app.use('/api/runs',      require('./api/runs'));
 app.use('/api/proposals', require('./api/proposals'));
 app.use('/api/brands',    require('./api/brands'));
 app.use('/api/rubric',    require('./api/rubric'));
+// CSV intake for Pilot #1. 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly
+// "true". These routes do not send mail.
+app.use('/api/pilot/estimate-recovery', require('./api/pilot-estimates'));
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────
 const CRON_SCHEDULE = process.env.DISCOVERY_CRON || '0 6 * * *';
