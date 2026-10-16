@@ -63,6 +63,17 @@ Routines never merge. Merging is always a deliberate step by the owning engineer
 
 Nightly proposal drafting stays off (`PROPOSAL_AUTO_DRAFT` unset). Drafts are made on demand.
 
+## Pre-production Railway
+
+Kelby confirmed this on Oct 15, 2026. While FlowForward is pre-production, the current Railway environment is used as staging. There is no separate staging environment.
+
+1. Tagged test database writes are allowed in this environment when every test record is clearly marked as test, the records are cleaned up afterward, and the proof is posted on the PR.
+2. Still banned in this environment: sending emails, proposal sends, discovery runs, and contacting prospects.
+3. Never put secrets in chat, code, PRs, issues, or templates.
+4. A separate Railway staging environment is deferred until real production go-live.
+
+That allowance is only the tagged test writes in item 1. It does not change the standing bans on email, proposal sends, discovery, contacting prospects, Railway or Vercel setting changes, live Places, live Anthropic, or real sends. Local work still defaults to a disposable Postgres. The same rule is in `AGENTS.md`.
+
 ## Postmortem
 
 When something breaks in production or a change ships that should not have:
