@@ -1,23 +1,16 @@
 // GET/PUT /api/flags. Does not send mail.
 // requireFlagApiKey is mounted in server.js before the shared /api guard.
-// It trims CRM_API_KEY and applies only to these two methods. Other /api
-// routes keep requireApiKey. Env-only flags are refused by the PUT handler.
+// It uses crmApiKeyReady() and applies only to these two methods. Other
+// /api routes keep requireApiKey. Env-only flags are refused by the PUT handler.
 
 const express = require('express');
+const { crmApiKeyReady } = require('./key-ready');
 const { isKnown, isWritable } = require('../flags/registry');
 const { listFlags, setFlag } = require('../flags/resolve');
 
-const MIN_FLAG_API_KEY_LENGTH = 32;
-
-function flagApiKeyConfigured() {
-  const raw = process.env.CRM_API_KEY;
-  if (typeof raw !== 'string') return false;
-  return raw.trim().length >= MIN_FLAG_API_KEY_LENGTH;
-}
-
 function requireFlagApiKey(req, res, next) {
   if (req.method !== 'GET' && req.method !== 'PUT') return next();
-  if (flagApiKeyConfigured()) return next();
+  if (crmApiKeyReady()) return next();
   console.log('[flags] refused; api key not configured');
   return res.status(503).json({ error: 'api_key_not_configured' });
 }

@@ -1,7 +1,7 @@
-// Shared CRM_API_KEY strength check for pilot intake.
-// Trim, then drop every whitespace character. 32 spaces, or 31 characters
-// plus a space, are not ready. A missing value is not ready.
-// GET and PUT /api/flags use the trim-only guard in src/api/flags.js.
+// Shared CRM_API_KEY strength check for pilot intake and GET/PUT /api/flags.
+// Trim, then drop every whitespace character. 32 spaces, 31 characters plus
+// a space, or a longer value whose inner spaces leave fewer than 32
+// non-whitespace characters, are not ready. A missing value is not ready.
 
 const MIN_API_KEY_LENGTH = 32;
 

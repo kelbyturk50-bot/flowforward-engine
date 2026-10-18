@@ -745,13 +745,18 @@ describe('feature flags', { concurrency: 1 }, () => {
     }
   });
 
-  it('flags: real server.js GET and PUT return 503 api_key_not_configured for an unset, empty, spaces-only, or short key', { timeout: 120000 }, async () => {
+  it('flags: real server.js GET and PUT return 503 api_key_not_configured for an unset, empty, spaces-only, short, or inner-space key', { timeout: 120000 }, async () => {
+    const innerSpaces = `${'d'.repeat(8)}${' '.repeat(16)}${'d'.repeat(9)}`;
+    assert.equal(innerSpaces.length, 33);
+    assert.equal(innerSpaces.trim().length, 33);
+    assert.equal(innerSpaces.replace(/\s/g, '').length, 17);
     const cases = [
       { label: 'unset', key: undefined, fixturesWithout: 200 },
       { label: 'empty', key: '', fixturesWithout: 200 },
       { label: 'short', key: 'a'.repeat(31), fixturesWithout: 401, fixturesWith: 200 },
       { label: 'spaces', key: ' '.repeat(32), fixturesWithout: 401, fixturesWith: 401 },
       { label: 'padded', key: `${'b'.repeat(31)} `, fixturesWithout: 401 },
+      { label: 'inner-spaces', key: innerSpaces, fixturesWithout: 401, fixturesWith: 200 },
     ];
     for (const item of cases) {
       const app = await bootRealServer(item.key);

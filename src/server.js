@@ -57,10 +57,10 @@ app.use('/p', require('./proposals/onepager').router);
 app.use('/demo/estimate-recovery', pilotDemo.router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
-// GET and PUT /api/flags only. A CRM_API_KEY that is unset, empty,
-// spaces-only, or shorter than 32 characters after trim returns 503
-// from this guard. requireApiKey is unchanged and still covers every
-// other /api route.
+// GET and PUT /api/flags only. crmApiKeyReady() trims CRM_API_KEY and
+// drops every whitespace character. Unset, empty, spaces-only, or fewer
+// than 32 non-whitespace characters returns 503 from this guard.
+// requireApiKey is unchanged and still covers every other /api route.
 const flagsApi = require('./api/flags');
 app.use('/api/flags', flagsApi.requireFlagApiKey);
 app.use('/api', requireApiKey);
