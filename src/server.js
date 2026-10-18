@@ -57,6 +57,12 @@ app.use('/p', require('./proposals/onepager').router);
 app.use('/demo/estimate-recovery', pilotDemo.router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
+// GET and PUT /api/flags only. A CRM_API_KEY that is unset, empty,
+// spaces-only, or shorter than 32 characters after trim returns 503
+// from this guard. requireApiKey is unchanged and still covers every
+// other /api route.
+const flagsApi = require('./api/flags');
+app.use('/api/flags', flagsApi.requireFlagApiKey);
 app.use('/api', requireApiKey);
 app.use('/api/prospects', require('./api/prospects'));
 app.use('/api/projects',  projects);
@@ -66,7 +72,7 @@ app.use('/api/runs',      require('./api/runs'));
 app.use('/api/proposals', require('./api/proposals'));
 app.use('/api/brands',    require('./api/brands'));
 app.use('/api/rubric',    require('./api/rubric'));
-app.use('/api/flags',     require('./api/flags'));
+app.use('/api/flags',     flagsApi);
 // CSV intake for Pilot #1. 404 unless the master flag is effectively on
 // (database row true, and the env var is not a trimmed case-insensitive
 // "false", "off", "0", or "no"). These routes do not send mail.

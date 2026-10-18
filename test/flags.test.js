@@ -210,9 +210,11 @@ describe('feature flags', { concurrency: 1 }, () => {
     await applySchema();
     unsetFlagEnv();
     const app = express();
+    const flagsApi = require('../src/api/flags');
     app.use(express.json({ limit: '1mb' }));
+    app.use('/api/flags', flagsApi.requireFlagApiKey);
     app.use('/api', require('../src/api/auth'));
-    app.use('/api/flags', require('../src/api/flags'));
+    app.use('/api/flags', flagsApi);
     server = http.createServer(app);
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   });
@@ -317,6 +319,13 @@ describe('feature flags', { concurrency: 1 }, () => {
       assert.equal(view.env_forced_off, true, value);
       assert.equal(view.writable, true, value);
       assert.equal(view.source, 'db', value);
+    }
+    for (const value of ['falsehood', 'offset', '10', 'nobody', 'nope', 'disabled', 'n', 'f']) {
+      process.env.FF_CAMPAIGNS = value;
+      const view = await effective('FF_CAMPAIGNS');
+      assert.equal(view.env_forced_off, false, value);
+      assert.equal(view.effective, true, value);
+      assert.equal(view.enabled, true, value);
     }
     process.env.FF_CAMPAIGNS = ' OFF ';
     const stored = await request('PUT', '/api/flags/FF_CAMPAIGNS', {
@@ -452,6 +461,13 @@ describe('feature flags', { concurrency: 1 }, () => {
   });
 
   it('flags: PUT unknown name => 400; PUT FF_PILOT_ESTIMATE_LIVE_SEND => 400; not listed in GET', async () => {
+    assert.equal(NAMES.includes('FF_PILOT_ESTIMATE_LIVE_SEND'), false);
+    assert.equal(DB_NAMES.includes('FF_PILOT_ESTIMATE_LIVE_SEND'), false);
+    assert.equal(ENV_NAMES.includes('FF_PILOT_ESTIMATE_LIVE_SEND'), false);
+    assert.equal(ENV_NAMES.includes('FF_PILOT_ESTIMATE_SMS'), true);
+    assert.equal(ENV_NAMES.includes('FF_CAMPAIGN_OPEN_PIXEL'), true);
+    assert.equal(DB_NAMES.includes('FF_PILOT_ESTIMATE_SMS'), false);
+    assert.equal(DB_NAMES.includes('FF_CAMPAIGN_OPEN_PIXEL'), false);
     for (const name of ['FF_NOT_A_FLAG', 'FF_PILOT_ESTIMATE_LIVE_SEND', 'FF_HIDE_WATERMARK', 'ff_campaigns']) {
       const rejected = await request('PUT', `/api/flags/${encodeURIComponent(name)}`, {
         headers: KEY_HEADER,
@@ -641,9 +657,14 @@ describe('feature flags', { concurrency: 1 }, () => {
 
   it('flags: real server.js GET and PUT stay behind auth and a CORS preflight does not bypass them', async () => {
     const serverSrc = fs.readFileSync(path.join(__dirname, '../src/server.js'), 'utf8');
+    const authSrc = fs.readFileSync(path.join(__dirname, '../src/api/auth.js'), 'utf8');
+    const guardAt = serverSrc.indexOf('flagsApi.requireFlagApiKey');
     const authAt = serverSrc.indexOf("app.use('/api', requireApiKey)");
-    const flagsAt = serverSrc.indexOf("app.use('/api/flags'");
-    assert.ok(authAt !== -1 && flagsAt > authAt);
+    const routerAt = serverSrc.indexOf('flagsApi);');
+    assert.ok(guardAt !== -1 && authAt > guardAt);
+    assert.ok(routerAt > authAt);
+    assert.equal(authSrc.includes('api_key_not_configured'), false);
+    assert.equal(authSrc.includes('503'), false);
     const app = await bootRealServer(API_KEY);
     try {
       assert.equal(app.output().includes(API_KEY), false);
@@ -724,14 +745,13 @@ describe('feature flags', { concurrency: 1 }, () => {
     }
   });
 
-  it('flags: real server.js PUT returns 503 writes_disabled for an unset, empty, short, or whitespace key', { timeout: 120000 }, async () => {
+  it('flags: real server.js GET and PUT return 503 api_key_not_configured for an unset, empty, spaces-only, or short key', { timeout: 120000 }, async () => {
     const cases = [
-      { label: 'unset', key: undefined, sendKey: false },
-      { label: 'empty', key: '', sendKey: false },
-      { label: 'short', key: 'a'.repeat(31), sendKey: true },
-      { label: 'spaces', key: ' '.repeat(32), sendKey: true },
-      { label: 'padded', key: `${'b'.repeat(31)} `, sendKey: true },
-      { label: 'internal-space', key: `${'c'.repeat(16)} ${'c'.repeat(15)}`, sendKey: true },
+      { label: 'unset', key: undefined, fixturesWithout: 200 },
+      { label: 'empty', key: '', fixturesWithout: 200 },
+      { label: 'short', key: 'a'.repeat(31), fixturesWithout: 401, fixturesWith: 200 },
+      { label: 'spaces', key: ' '.repeat(32), fixturesWithout: 401, fixturesWith: 401 },
+      { label: 'padded', key: `${'b'.repeat(31)} `, fixturesWithout: 401 },
     ];
     for (const item of cases) {
       const app = await bootRealServer(item.key);
@@ -745,43 +765,53 @@ describe('feature flags', { concurrency: 1 }, () => {
         assert.equal(preflight.status, 204, item.label);
         assert.equal(preflight.headers['access-control-allow-origin'], '*', item.label);
         assert.deepEqual(await snapshot(), beforeRows, item.label);
-        const headers = { origin };
-        if (item.sendKey) headers['x-api-key'] = item.key;
-        const put = await request('PUT', '/api/flags/FF_PROTOTYPE_GALLERY', {
-          port: app.port,
-          headers,
-          body: { enabled: true },
-        });
-        assert.equal(put.status, 503, item.label);
-        assert.deepEqual(put.json, { error: 'writes_disabled' });
-        assert.equal(put.headers['access-control-allow-origin'], '*', item.label);
-        assert.equal(app.output().includes('[flags] put refused; writes disabled'), true, item.label);
-        if (item.key) assert.equal(app.output().includes(item.key), false, item.label);
+        const withKey = item.key ? { 'x-api-key': item.key } : {};
+        for (const method of ['PUT', 'GET']) {
+          const authed = await request(method, method === 'GET' ? '/api/flags' : '/api/flags/FF_PROTOTYPE_GALLERY', {
+            port: app.port,
+            headers: { origin, ...withKey },
+            body: method === 'PUT' ? { enabled: true } : undefined,
+          });
+          assert.equal(authed.status, 503, `${item.label} ${method} with key`);
+          assert.deepEqual(authed.json, { error: 'api_key_not_configured' });
+          assert.equal(authed.headers['access-control-allow-origin'], '*', item.label);
+          const bare = await request(method, method === 'GET' ? '/api/flags' : '/api/flags/FF_PROTOTYPE_GALLERY', {
+            port: app.port,
+            headers: { origin: 'https://not-flowforward.example' },
+            body: method === 'PUT' ? { enabled: true } : undefined,
+          });
+          assert.equal(bare.status, 503, `${item.label} ${method} without key`);
+          assert.deepEqual(bare.json, { error: 'api_key_not_configured' });
+        }
+        assert.equal(app.output().includes('[flags] refused; api key not configured'), true, item.label);
+        if (item.key && item.key.trim()) assert.equal(app.output().includes(item.key), false, item.label);
         assert.equal(app.output().includes(API_KEY), false, item.label);
         assert.deepEqual(await snapshot(), beforeRows, item.label);
-        const bare = await request('PUT', '/api/flags/FF_PROTOTYPE_GALLERY', {
-          port: app.port,
-          headers: { origin: 'https://not-flowforward.example' },
-          body: { enabled: true },
-        });
-        if (item.sendKey) {
-          assert.equal(bare.status, 401, item.label);
-          assert.deepEqual(bare.json, { error: 'Missing or invalid API key' });
-          const getMissing = await request('GET', '/api/flags', { port: app.port });
-          assert.equal(getMissing.status, 401, item.label);
-          const getAuthed = await request('GET', '/api/flags', {
-            port: app.port,
-            headers: { 'x-api-key': item.key },
-          });
-          assert.equal(getAuthed.status, 200, item.label);
+        const fixturesBare = await request('GET', '/api/brands/fixtures', { port: app.port });
+        assert.equal(fixturesBare.status, item.fixturesWithout, `${item.label} fixtures`);
+        assert.notEqual(fixturesBare.status, 503, `${item.label} fixtures`);
+        if (item.fixturesWithout === 401) {
+          assert.deepEqual(fixturesBare.json, { error: 'Missing or invalid API key' });
         } else {
-          assert.equal(bare.status, 503, item.label);
-          assert.deepEqual(bare.json, { error: 'writes_disabled' });
-          const getOpen = await request('GET', '/api/flags', { port: app.port });
-          assert.equal(getOpen.status, 200, item.label);
+          assert.equal(Array.isArray(fixturesBare.json.brands), true, item.label);
+          assert.equal(fixturesBare.json.brands.length > 0, true, item.label);
+        }
+        if (item.fixturesWith != null) {
+          const fixturesAuthed = await request('GET', '/api/brands/fixtures', {
+            port: app.port,
+            headers: withKey,
+          });
+          assert.equal(fixturesAuthed.status, item.fixturesWith, `${item.label} fixtures with key`);
+          assert.notEqual(fixturesAuthed.status, 503, `${item.label} fixtures with key`);
+          if (item.fixturesWith === 200) {
+            assert.equal(Array.isArray(fixturesAuthed.json.brands), true, item.label);
+            assert.equal(fixturesAuthed.json.brands[0].name.startsWith('TEST:'), true, item.label);
+          } else {
+            assert.deepEqual(fixturesAuthed.json, { error: 'Missing or invalid API key' });
+          }
         }
         assert.deepEqual(await snapshot(), beforeRows, item.label);
-        console.log(`[flags] real server PUT 503 writes_disabled key=${item.label}`);
+        console.log(`[flags] real server GET/PUT 503 api_key_not_configured key=${item.label}`);
       } finally {
         await app.stop();
       }

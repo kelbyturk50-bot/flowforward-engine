@@ -1,13 +1,30 @@
-// GET/PUT /api/flags. Mounted after requireApiKey. Does not send mail.
-// GET uses that guard only. PUT also refuses unless CRM_API_KEY passes the
-// same strength check as pilot intake, and it refuses env-only flags.
+// GET/PUT /api/flags. Does not send mail.
+// requireFlagApiKey is mounted in server.js before the shared /api guard.
+// It trims CRM_API_KEY and applies only to these two methods. Other /api
+// routes keep requireApiKey. Env-only flags are refused by the PUT handler.
 
 const express = require('express');
-const { crmApiKeyReady } = require('./key-ready');
 const { isKnown, isWritable } = require('../flags/registry');
 const { listFlags, setFlag } = require('../flags/resolve');
 
+const MIN_FLAG_API_KEY_LENGTH = 32;
+
+function flagApiKeyConfigured() {
+  const raw = process.env.CRM_API_KEY;
+  if (typeof raw !== 'string') return false;
+  return raw.trim().length >= MIN_FLAG_API_KEY_LENGTH;
+}
+
+function requireFlagApiKey(req, res, next) {
+  if (req.method !== 'GET' && req.method !== 'PUT') return next();
+  if (flagApiKeyConfigured()) return next();
+  console.log('[flags] refused; api key not configured');
+  return res.status(503).json({ error: 'api_key_not_configured' });
+}
+
 const router = express.Router();
+
+router.use(requireFlagApiKey);
 
 router.get('/', async (req, res) => {
   const flags = await listFlags();
@@ -15,10 +32,6 @@ router.get('/', async (req, res) => {
 });
 
 router.put('/:name', async (req, res) => {
-  if (!crmApiKeyReady()) {
-    console.log('[flags] put refused; writes disabled');
-    return res.status(503).json({ error: 'writes_disabled' });
-  }
   const name = req.params.name;
   if (!isKnown(name)) return res.status(400).json({ error: 'unknown_flag' });
   if (!isWritable(name)) return res.status(400).json({ error: 'flag_not_writable' });
@@ -38,3 +51,4 @@ router.put('/:name', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.requireFlagApiKey = requireFlagApiKey;

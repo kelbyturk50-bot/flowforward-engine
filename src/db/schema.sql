@@ -684,6 +684,8 @@ CREATE TABLE IF NOT EXISTS feature_flags (
   updated_by TEXT
 );
 
+-- Concurrent updates of one flag are last-write-wins. The API locks the
+-- row with SELECT … FOR UPDATE and inserts the audit row in that transaction.
 CREATE TABLE IF NOT EXISTS feature_flag_audit (
   id         SERIAL PRIMARY KEY,
   flag       TEXT,

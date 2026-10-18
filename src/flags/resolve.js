@@ -108,6 +108,9 @@ async function listFlags() {
   });
 }
 
+// Concurrent PUTs on one flag are last-write-wins. The row lock makes the
+// audit old_value the value this transaction replaced. The last COMMIT is
+// the stored value. A failed audit insert rolls the flag update back.
 async function setFlag(name, enabled) {
   if (!isWritable(name)) return null;
   const client = await pool.connect();
