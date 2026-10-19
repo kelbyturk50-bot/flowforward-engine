@@ -31,6 +31,8 @@ export function installApiDefaults() {
   api.proposalSummary.mockResolvedValue(summary);
   api.proposalJobs.mockResolvedValue({ jobs: [], unreviewed: 0 });
   api.proposal.mockResolvedValue(proposal);
+  api.inbox.mockResolvedValue({ items: [], counts: { needs: 0, fyi: 0, handled: 0, working: 0, waiting: 0 } });
+  api.markInboxSeen.mockResolvedValue({ ok: true });
   api.runs.mockResolvedValue([discoveryRun]);
   api.proposalRuns.mockResolvedValue([]);
   api.proposalSettings.mockResolvedValue({ style_notes: 'Keep the first email short.' });

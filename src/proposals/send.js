@@ -264,6 +264,8 @@ async function sendDueFollowups() {
 }
 
 // ─── Inbox watching ───────────────────────────────────────────────────────
+// Out-of-office and other automatic replies: never stop a sequence for these.
+const AUTO_SUBJECT = /^\s*(automatic reply|auto(matic)?[- ]?(reply|response)|out of (the )?office|ooo\b|away from (the )?office|on vacation)/i;
 const OPT_OUT = /\b(unsubscribe|remove me|take me off|stop (emailing|contacting)|no thanks|not interested|do not (email|contact)|don'?t (email|contact))\b/i;
 
 function domainOf(email) { return String(email || '').split('@')[1]?.toLowerCase() || ''; }
@@ -285,6 +287,7 @@ function classifyMessage(msg, p) {
 
   const dom = domainOf(to);
   const sameSender = from === to || (dom && !GENERIC_DOMAINS.includes(dom) && domainOf(from) === dom);
+  if ((sameSender || threaded) && (msg.auto || AUTO_SUBJECT.test(msg.subject || ''))) return { kind: 'auto' };
   if (sameSender || threaded) {
     const fresh = text.split(/\n\s*On .{5,200}wrote:|\n-{2,}\s*Original Message|\n>/)[0];
     return { kind: OPT_OUT.test(fresh) || /^\s*(stop|unsubscribe)\s*$/im.test(fresh) || /unsubscribe/i.test(msg.subject || '') ? 'opted_out' : 'replied',
@@ -294,7 +297,21 @@ function classifyMessage(msg, p) {
 }
 
 async function applyOutcome(p, outcome, msg) {
+  await applyOutcomeEffects(p, outcome, msg);
+  // Keep the whole message and open an inbox item (Claude reads it and drafts a reply).
+  try {
+    await require('./inbox').recordInbound(p, outcome.kind, { ...msg, auto: msg.auto || outcome.kind === 'auto' });
+  } catch (err) {
+    console.error('[inbox] could not record message:', err.message);
+  }
+}
+
+async function applyOutcomeEffects(p, outcome, msg) {
   const { kind, snippet } = outcome;
+  if (kind === 'auto') {
+    await logActivity(p.prospect_id, 'email', 'Got an automatic reply (out of office). Follow-ups keep running.');
+    return;
+  }
   if (kind === 'bounced') {
     await stopSequence(p.id, `Bounced: ${p.to_email} did not accept the message`, 'bounced');
     await pool.query(`UPDATE prospects SET email = NULL WHERE id = $1 AND email = $2`, [p.prospect_id, p.to_email]);
@@ -367,6 +384,49 @@ async function inboxCandidates() {
   return rows;
 }
 
+// Proposals already in a conversation (they replied before). New messages in
+// those threads go to the inbox too, without touching the proposal's status.
+async function conversationCandidates() {
+  const { rows } = await pool.query(
+    `SELECT pr.*, p.stage, p.archived_at, p.company, p.do_not_contact
+       FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+      WHERE pr.status = 'replied' AND pr.to_email IS NOT NULL AND p.archived_at IS NULL
+        AND COALESCE(pr.replied_at, pr.sent_at) > NOW() - INTERVAL '60 days'`);
+  return rows;
+}
+
+// A later message from someone already in a conversation.
+async function applyFollowOn(p, outcome, msg) {
+  const inbox = require('./inbox');
+  if (await inbox.alreadyRecorded(msg)) return false;
+  if (outcome.kind === 'opted_out') {
+    await pool.query(`UPDATE prospects SET do_not_contact = TRUE, stage = 'lost' WHERE id = $1`, [p.prospect_id]);
+    await logActivity(p.prospect_id, 'email', 'Asked not to be contacted. Marked do-not-contact.');
+  } else if (outcome.kind === 'replied' || outcome.kind === 'booked') {
+    await pool.query(`UPDATE prospects SET next_action = $2, next_action_at = CURRENT_DATE WHERE id = $1`,
+      [p.prospect_id, outcome.kind === 'booked' ? 'Prep for the consultation call' : 'Reply to their email']);
+    await logActivity(p.prospect_id, 'email', outcome.kind === 'booked' ? 'Booked a consultation on Calendly.'
+      : `Wrote back${outcome.snippet ? `: "${outcome.snippet}"` : ''}.`);
+  }
+  const item = await inbox.recordInbound(p, outcome.kind, { ...msg, auto: msg.auto || outcome.kind === 'auto' });
+  return !!item;
+}
+
+function collectFollowOns(rows, messages, taken) {
+  const out = [];
+  for (const msg of messages) {
+    if (taken.has(msg) || msg.from === SENDER.email.toLowerCase()) continue;
+    for (const p of rows) {
+      if (msg.date && p.sent_at && msg.date < new Date(p.sent_at)) continue;
+      const outcome = classifyMessage(msg, p);
+      if (!outcome || outcome.kind === 'bounced') continue;
+      out.push([p, outcome, msg]);
+      break;
+    }
+  }
+  return out;
+}
+
 function keepInboxOutcome(row, outcome) {
   if (!outcome) return false;
   if (!isArchivedLead(row)) return true;
@@ -390,30 +450,47 @@ function collectInboxOutcomes(rows, messages) {
 
 async function applyInboxMessages(messages) {
   const rows = await inboxCandidates();
+  const convo = await conversationCandidates();
   const outcomes = collectInboxOutcomes(rows, messages);
   for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
-  return { checked: messages.length, matched: outcomes.length };
+  const taken = new Set(outcomes.map(([, , m]) => m));
+  let followOns = 0;
+  for (const [p, o, msg] of collectFollowOns(convo, messages, taken)) if (await applyFollowOn(p, o, msg)) followOns++;
+  require('./inbox').kick();
+  return { checked: messages.length, matched: outcomes.length, follow_ons: followOns };
 }
 
 /** Look through the inbox for replies, bookings, bounces and opt-outs. */
 async function checkInbox() {
   if (checking || !(await mailMode()) || (await mailMode()) === 'test') return { checked: 0 };
   const active = await inboxCandidates();
-  if (!active.length) return { checked: 0 };
+  const convo = await conversationCandidates();
+  if (!active.length && !convo.length) return { checked: 0 };
   checking = true;
   let messages = [];
   let outcomes = [];
+  let followOns = [];
+  let sentHandled = 0;
   try {
-    const since = new Date(Math.min(...active.map(p => new Date(p.sent_at).getTime())) - 86400000);
+    const since = new Date(Math.min(...[...active, ...convo].map(p => new Date(p.sent_at).getTime())) - 86400000);
     messages = await fetchInbox(since);
     outcomes = collectInboxOutcomes(active, messages);
+    const taken = new Set(outcomes.map(([, , m]) => m));
+    followOns = collectFollowOns(convo, messages, taken);
+    if ((await mailMode()) === 'gmail_api') {
+      try { sentHandled = await require('./inbox').applySentMessages(await gmail.sentSince(since)); }
+      catch (err) { console.error('[inbox] sent check failed:', err.message); }
+    }
   } catch (err) {
     console.error('[inbox] ✗ check failed:', err.message);
   } finally {
     checking = false;
   }
   for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
-  return { checked: messages.length, matched: outcomes.length };
+  let recorded = 0;
+  for (const [p, o, msg] of followOns) if (await applyFollowOn(p, o, msg)) recorded++;
+  require('./inbox').kick();
+  return { checked: messages.length, matched: outcomes.length, follow_ons: recorded, replied_from_gmail: sentHandled };
 }
 
 async function senderTick() {
@@ -422,6 +499,6 @@ async function senderTick() {
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, checkInbox, inboxCandidates, applyInboxMessages, senderTick, stopSequence, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
   renderMessage, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

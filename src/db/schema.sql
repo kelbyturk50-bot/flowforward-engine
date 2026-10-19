@@ -678,3 +678,75 @@ CREATE TABLE IF NOT EXISTS pilot_estimate_suppressions (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_estimate_suppressions_customer_email
   ON pilot_estimate_suppressions (customer_id, email);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Inbox: replies to proposals, Claude's read of them, and drafted responses.
+-- Additive only. No boot UPDATEs.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Every message in a lead's conversation after the first email: their replies
+-- (direction 'in') and replies Kelby sends from the CRM or from Gmail ('out').
+-- The proposal's own first email and follow-ups stay on the proposals row.
+CREATE TABLE IF NOT EXISTS inbox_messages (
+  id                SERIAL PRIMARY KEY,
+  prospect_id       INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  proposal_id       INTEGER REFERENCES proposals(id) ON DELETE SET NULL,
+  direction         TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+  dedupe_key        TEXT NOT NULL UNIQUE,          -- Gmail id, else a hash of sender/date/subject/body
+  gmail_id          TEXT,
+  thread_id         TEXT,
+  header_message_id TEXT,                          -- RFC Message-ID, for In-Reply-To on our reply
+  from_addr         TEXT,
+  to_addr           TEXT,
+  subject           TEXT,
+  body              TEXT,
+  is_auto           BOOLEAN NOT NULL DEFAULT FALSE, -- auto-reply / out-of-office
+  received_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_inbox_messages_prospect ON inbox_messages(prospect_id, received_at);
+CREATE INDEX IF NOT EXISTS idx_inbox_messages_thread ON inbox_messages(thread_id);
+
+-- One row per inbound message that needs a look: Claude's summary, suggested
+-- next steps, and (when a reply makes sense) a drafted response to review.
+-- status: queued | triaging | rewriting | ready | fyi | failed | sent | handled | discarded
+CREATE TABLE IF NOT EXISTS inbox_items (
+  id             SERIAL PRIMARY KEY,
+  prospect_id    INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  proposal_id    INTEGER REFERENCES proposals(id) ON DELETE SET NULL,
+  message_id     INTEGER NOT NULL REFERENCES inbox_messages(id) ON DELETE CASCADE,
+  status         TEXT NOT NULL DEFAULT 'queued',
+  kind           TEXT,                              -- interested | question | not_now | booked | auto_reply | opt_out | not_interested | referral | bounce | other
+  label          TEXT,
+  summary        TEXT,
+  asks           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  timing         TEXT,
+  mood           TEXT,
+  prep           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  suggestions    JSONB NOT NULL DEFAULT '[]'::jsonb, -- [{action, label, stage?, date?, text?}]
+  applied        JSONB NOT NULL DEFAULT '{}'::jsonb, -- {"<index>": "<applied at>"}
+  notice         TEXT,
+  reply_to       TEXT,
+  reply_subject  TEXT,
+  reply_body     TEXT,
+  ai_original    TEXT,
+  instructions   TEXT,
+  model          TEXT,
+  cost_usd       NUMERIC(10,4) DEFAULT 0,
+  error          TEXT,
+  handled_note   TEXT,
+  reviewed_at    TIMESTAMPTZ,
+  triaged_at     TIMESTAMPTZ,
+  sent_at        TIMESTAMPTZ,
+  sent_message_id INTEGER REFERENCES inbox_messages(id) ON DELETE SET NULL,
+  created_at     TIMESTAMPTZ DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_items_message ON inbox_items(message_id);
+CREATE INDEX IF NOT EXISTS idx_inbox_items_status ON inbox_items(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_inbox_items_prospect ON inbox_items(prospect_id, created_at DESC);
+
+DROP TRIGGER IF EXISTS inbox_items_updated_at ON inbox_items;
+CREATE TRIGGER inbox_items_updated_at
+  BEFORE UPDATE ON inbox_items
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
