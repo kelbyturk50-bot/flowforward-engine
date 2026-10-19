@@ -90,11 +90,13 @@ router.get('/summary', async (req, res) => {
 // Background jobs (single-lead drafts and rewrites)
 router.get('/jobs', async (req, res) => {
   try {
-    const [list, unreviewed] = await Promise.all([
+    const [list, unreviewed, inboxCounts] = await Promise.all([
       jobs.list({ prospectId: req.query.prospect_id ? parseInt(req.query.prospect_id, 10) : null }),
       pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'draft' AND pr.reviewed_at IS NULL AND p.archived_at IS NULL`),
+      require('../proposals/inbox').counts(),
     ]);
-    res.json({ jobs: list, unreviewed: unreviewed.rows[0].n });
+    // inbox_waiting: replies with a draft (or a problem) to look at, plus unseen FYIs. inbox_working: being read by Claude.
+    res.json({ jobs: list, unreviewed: unreviewed.rows[0].n, inbox_waiting: inboxCounts.waiting, inbox_working: inboxCounts.working });
   }
   catch (err) { fail(res, err); }
 });

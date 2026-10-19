@@ -64,6 +64,7 @@ app.use('/api/tasks',     tasks);
 app.use('/api/focus',     require('./api/focus'));
 app.use('/api/runs',      require('./api/runs'));
 app.use('/api/proposals', require('./api/proposals'));
+app.use('/api/inbox',     require('./api/inbox'));
 app.use('/api/brands',    require('./api/brands'));
 app.use('/api/rubric',    require('./api/rubric'));
 // CSV intake for Pilot #1. 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly
@@ -124,6 +125,7 @@ async function boot() {
   if (mainOk) {
     try {
       await require('./proposals/jobs').recover();
+      await require('./proposals/inbox').recover();
       const n = await rescore();
       console.log(`[server] ✓ Fit scores refreshed for ${n} prospects`);
     } catch (err) {

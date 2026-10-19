@@ -5,11 +5,11 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { api, settings } from './api';
 import { toast } from './ui';
 
-const JobsContext = createContext({ jobs: [], unreviewed: 0, refresh: () => {}, activeFor: () => null, finishedFor: () => null, dismiss: () => {} });
+const JobsContext = createContext({ jobs: [], unreviewed: 0, inboxWaiting: 0, inboxWorking: 0, refresh: () => {}, activeFor: () => null, finishedFor: () => null, dismiss: () => {} });
 export const useJobs = () => useContext(JobsContext);
 
 export function JobsProvider({ bump, version, children }) {
-  const [state, setState] = useState({ jobs: [], unreviewed: 0 });
+  const [state, setState] = useState({ jobs: [], unreviewed: 0, inboxWaiting: 0, inboxWorking: 0 });
   const prev = useRef(null);
   const timer = useRef(null);
 
@@ -32,10 +32,10 @@ export function JobsProvider({ bump, version, children }) {
       }
     }
     prev.current = new Map(data.jobs.map(j => [j.id, j.status]));
-    setState({ jobs: data.jobs, unreviewed: data.unreviewed });
+    setState({ jobs: data.jobs || [], unreviewed: data.unreviewed || 0, inboxWaiting: data.inbox_waiting || 0, inboxWorking: data.inbox_working || 0 });
   }, [bump]);
 
-  const active = state.jobs.some(j => ['queued', 'running'].includes(j.status));
+  const active = state.jobs.some(j => ['queued', 'running'].includes(j.status)) || state.inboxWorking > 0;
   useEffect(() => { refresh(); }, [refresh, version]);
   useEffect(() => {
     clearInterval(timer.current);

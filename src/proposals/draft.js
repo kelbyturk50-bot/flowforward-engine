@@ -270,4 +270,7 @@ async function runProposalBatch({ trigger = 'nightly', count } = {}) {
   }
 }
 
-module.exports = { draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, isRunning: () => running };
+// The inbox reuses the same Anthropic client (and the same test mock).
+const getClient = () => claude();
+
+module.exports = { draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, getClient, isRunning: () => running };
