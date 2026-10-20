@@ -550,6 +550,32 @@ VALUES
   (1, 'bookkeeping', 'size_sweet', 5, 8, FALSE)
 ON CONFLICT (version, agent, signal) DO NOTHING;
 
+-- Branded prototype issued from a proposal draft when FF_PROTOTYPE_ON_DRAFT
+-- is exactly "true". Keyed to the prospect (the shop), not a proposal version.
+-- At most one active row per prospect. The raw token is not stored.
+-- Wordmark and hex colors only: this table has no image column.
+-- This block does not UPDATE existing rows.
+CREATE TABLE IF NOT EXISTS prototypes (
+  id               SERIAL PRIMARY KEY,
+  prospect_id      INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  agent_type       TEXT NOT NULL,
+  brand_name       TEXT NOT NULL,
+  color_primary    TEXT NOT NULL,
+  color_secondary  TEXT NOT NULL,
+  token_hash       BYTEA NOT NULL UNIQUE,
+  issued_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at       TIMESTAMPTZ NOT NULL,
+  revoked_at       TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT prototypes_color_primary_hex CHECK (color_primary ~ '^#[0-9a-fA-F]{6}$'),
+  CONSTRAINT prototypes_color_secondary_hex CHECK (color_secondary ~ '^#[0-9a-fA-F]{6}$'),
+  CONSTRAINT prototypes_expires_14d CHECK (expires_at = issued_at + INTERVAL '14 days')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prototypes_one_active
+  ON prototypes (prospect_id)
+  WHERE revoked_at IS NULL;
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Pilot #1 CSV intake (idempotent — applied on every boot).
 -- Shop row plus open estimates. No free-text notes column. No mailbox token.

@@ -10,6 +10,7 @@ const send    = require('../proposals/send');
 const jobs    = require('../proposals/jobs');
 const pilotFlags = require('../pilot/flags');
 const pilotTokens = require('../pilot/tokens');
+const { prototypeForProposal } = require('../prototypes/store');
 
 const LIST_COLS = `pr.id, pr.prospect_id, pr.version, pr.status, pr.slug, pr.to_email, pr.to_name, pr.subject,
   pr.cost_usd, pr.feedback_rating, pr.reviewed_at, pr.created_at, pr.updated_at, pr.sent_at, pr.followup1_due_at, pr.followup1_sent_at,
@@ -239,6 +240,7 @@ router.get('/:id', async (req, res) => {
       `SELECT id, version, status, created_at, cost_usd, instructions FROM proposals WHERE prospect_id = $1 ORDER BY version DESC`,
       [rows[0].prospect_id]);
     const p = rows[0];
+    const prototype = await prototypeForProposal(p.prospect_id);
     res.json({
       ...withUrl(p),
       versions: versions.rows,
@@ -247,6 +249,7 @@ router.get('/:id', async (req, res) => {
         followup1: p.followup1 ? send.renderMessage(p, 'followup1') : '',
         followup2: p.followup2 ? send.renderMessage(p, 'followup2') : '',
       },
+      prototype,
     });
   } catch (err) { fail(res, err); }
 });
