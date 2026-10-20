@@ -1,24 +1,61 @@
 // Opaque prototype links.
 //
-// The token is 32 bytes from crypto.randomBytes, unpadded base64url.
-// The database stores only the SHA-256 of that token. The raw token is
-// not derived from CRM_API_KEY, the prospect id, or issued_at, and it
-// cannot be rebuilt later. Creating a prototype does not read the API key.
+// Each row gets a random 32-byte nonce. The link token is the full
+// HMAC-SHA256 of `prototype:v1:<nonce>`, unpadded base64url (43 chars).
+// The HMAC key is HKDF-SHA256 over CRM_API_KEY with info `ff-prototype`,
+// the same pattern as the pilot demo tokens (src/pilot/tokens.js), so no new
+// env var is needed. The database stores the nonce and the SHA-256 of the
+// token, never the token itself. The CRM can show the link again after a
+// restart because the server recomputes it from the nonce.
+//
+// CRM_API_KEY must have at least 32 non-whitespace characters. Without it,
+// new prototypes are refused and existing links cannot be recomputed.
+// Rotating CRM_API_KEY changes every recomputed link: old links stop
+// matching their stored hash and return 404.
 
 const crypto = require('crypto');
+const { crmApiKeyReady } = require('../api/crm-key');
 
 const TOKEN_BYTES = 32;
+const NONCE_BYTES = 32;
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+const HKDF_INFO = 'ff-prototype';
+const LABEL = 'prototype:v1:';
 
 const DUMMY_HASH = crypto.randomBytes(32);
 
-function mintToken() {
-  const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
-  return { token, hash: hashToken(token) };
+let cachedKey = null;
+let cachedFrom = null;
+
+function keyReady() {
+  return crmApiKeyReady();
+}
+
+function hmacKey() {
+  if (!keyReady()) return null;
+  const secret = process.env.CRM_API_KEY;
+  if (cachedKey && cachedFrom === secret) return cachedKey;
+  cachedKey = Buffer.from(crypto.hkdfSync('sha256', Buffer.from(secret, 'utf8'), Buffer.alloc(0), Buffer.from(HKDF_INFO), 32));
+  cachedFrom = secret;
+  return cachedKey;
+}
+
+function tokenFor(nonce) {
+  const key = hmacKey();
+  if (!key || !Buffer.isBuffer(nonce) || nonce.length !== NONCE_BYTES) return null;
+  return crypto.createHmac('sha256', key).update(LABEL + nonce.toString('base64url')).digest('base64url');
 }
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(String(token), 'utf8').digest();
+}
+
+// Returns { nonce, token, hash } or null when CRM_API_KEY is not ready.
+function mintToken() {
+  const nonce = crypto.randomBytes(NONCE_BYTES);
+  const token = tokenFor(nonce);
+  if (!token) return null;
+  return { nonce, token, hash: hashToken(token) };
 }
 
 function hashesEqual(stored, computed) {
@@ -37,6 +74,9 @@ function tokenWellFormed(raw) {
 
 module.exports = {
   TOKEN_BYTES,
+  NONCE_BYTES,
+  keyReady,
+  tokenFor,
   mintToken,
   hashToken,
   hashesEqual,

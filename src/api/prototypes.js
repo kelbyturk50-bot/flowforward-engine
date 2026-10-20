@@ -1,4 +1,4 @@
-// Revoke a prototype. Writes stay closed unless CRM_API_KEY has at least
+// Create, restyle, and revoke prototypes from the CRM. Writes stay closed unless CRM_API_KEY has at least
 // 32 non-whitespace characters (crmApiKeyReady, the pilot CSV rule).
 // A short, blank, or missing key returns 503 and does not write, including
 // when the outer API guard is open. When the key is strong enough, this
@@ -7,7 +7,8 @@
 const crypto = require('crypto');
 const express = require('express');
 const { crmApiKeyReady } = require('./crm-key');
-const { revoke } = require('../prototypes/store');
+const store = require('../prototypes/store');
+const { revoke } = store;
 
 const router = express.Router();
 
@@ -54,6 +55,39 @@ function prototypeId(req) {
   const id = Number(raw);
   return Number.isInteger(id) && id > 0 ? id : null;
 }
+
+function fail(res, err) {
+  if (err && err.status) { stamp(res); return res.status(err.status).json({ error: err.userMessage || 'Request failed', code: err.code || null }); }
+  console.error('[prototype] write failed:', err && err.code);
+  stamp(res);
+  return res.status(500).json({ error: 'Something went wrong.' });
+}
+
+// { prospect_id, fresh? } -> the active prototype link (created if needed).
+// fresh: true revokes the current link and issues a new one.
+router.post('/', express.json(), async (req, res) => {
+  const pid = Number(req.body && req.body.prospect_id);
+  if (!Number.isInteger(pid) || pid <= 0) return res.status(400).json({ error: 'prospect_id required' });
+  try {
+    const row = await store.ensurePrototype(pid, { fresh: req.body.fresh === true });
+    stamp(res);
+    res.json({ prototype: store.linkFor(row) });
+  } catch (err) { fail(res, err); }
+});
+
+// { colors: {primary, secondary} } and/or { agent_type }
+router.patch('/:id', express.json(), async (req, res) => {
+  const id = prototypeId(req);
+  if (!id) return res.status(404).json({ error: 'not_found' });
+  try {
+    let row = null;
+    if (req.body && req.body.colors) row = await store.setColors(id, req.body.colors);
+    if (req.body && req.body.agent_type) row = await store.setAgent(id, req.body.agent_type);
+    if (!row) return res.status(400).json({ error: 'Nothing to change' });
+    stamp(res);
+    res.json({ prototype: store.linkFor(row) });
+  } catch (err) { fail(res, err); }
+});
 
 router.post('/:id/revoke', async (req, res) => {
   const id = prototypeId(req);

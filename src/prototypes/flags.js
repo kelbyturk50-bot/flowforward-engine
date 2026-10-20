@@ -1,12 +1,15 @@
-// Gates the draftProposal prototype hook.
-// Off unless FF_PROTOTYPE_ON_DRAFT is exactly "true".
-// Issue #63, when it lands, should seed this flag off in a registry.
-// Until that registry exists, this reads the environment only.
+// Gates the draftProposal prototype hook and the prototype page.
+// On by default (Kelby, Oct 20). Set FF_PROTOTYPE_ON_DRAFT to false, off,
+// 0, or no (trimmed, any case) to stop new prototypes on draft.
+// Existing links keep working until they expire or are revoked.
 
 const FLAG = 'FF_PROTOTYPE_ON_DRAFT';
+const OFF = new Set(['false', 'off', '0', 'no']);
 
 function prototypeOnDraft() {
-  return process.env[FLAG] === 'true';
+  const raw = process.env[FLAG];
+  if (raw == null) return true;
+  return !OFF.has(String(raw).trim().toLowerCase());
 }
 
 module.exports = { FLAG, prototypeOnDraft };

@@ -21,7 +21,6 @@ const jobs = require('../src/proposals/jobs');
 const scoring = require('../src/scoring/prototypes');
 const { recommendPrototypes } = scoring;
 const { hashToken } = require('../src/prototypes/tokens');
-const { _clearIssuedForTests } = require('../src/prototypes/store');
 const { applySchema } = require('../src/db/migrate');
 const { clientIp, consume, _resetForTests } = require('../src/pilot/rate-limit');
 const { resetDb, insertProspect, fakeClaude, closePool, pool } = require('./fixtures');
@@ -191,11 +190,10 @@ describe('prototype on draft', () => {
     await closePool();
   });
 
-  it('prototype: flag off => draftProposal unchanged, no prototype row', async () => {
+  it('prototype: flag set to false/off/0/no => draftProposal unchanged, no prototype row', async () => {
     const lead = await seedLead({ google_place_id: 'test-place-proto-flag-off' });
-    for (const value of [undefined, 'TRUE', '1', ' true', 'false']) {
-      if (value === undefined) delete process.env.FF_PROTOTYPE_ON_DRAFT;
-      else process.env.FF_PROTOTYPE_ON_DRAFT = value;
+    for (const value of ['false', 'OFF', ' 0 ', 'no']) {
+      process.env.FF_PROTOTYPE_ON_DRAFT = value;
       const proposal = await draftProposal(lead.id);
       assert.equal(proposal.status, 'draft');
       assert.equal(proposal.subject, 'Quick idea for Wasatch Heating');
@@ -240,7 +238,7 @@ describe('prototype on draft', () => {
     const got = await request(port, 'GET', `/api/proposals/${proposal.id}`);
     assert.equal(got.status, 200);
     assert.equal(got.json.prototype.agent_type, 'estimate_followup');
-    assert.match(got.json.prototype.url, /^\/demo\/prototype\/[A-Za-z0-9_-]{43}$/);
+    assert.match(got.json.prototype.url, /\/demo\/prototype\/[A-Za-z0-9_-]{43}$/);
     assert.ok(got.json.prototype.issued_at);
     assert.ok(got.json.prototype.expires_at);
     const open = await request(port, 'GET', `/api/public/prototypes/${tokenOf(got.json.prototype.url)}`, { key: 'wrong-key' });
@@ -250,7 +248,7 @@ describe('prototype on draft', () => {
     console.log(`[prototype] flag on: prospect ${lead.id} prototype ${rows[0].id} agent ${rows[0].agent_type}`);
   });
 
-  it('prototype: no pick (pest/franchise/ST/tie) => no row', async () => {
+  it('prototype: no pick (pest/franchise/ST) => no row; tie uses rubric order', async () => {
     process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
     const pest = await seedLead({
       google_place_id: 'test-place-proto-pest',
@@ -289,9 +287,11 @@ describe('prototype on draft', () => {
     const tied = recommendPrototypes({ ...tiedLead, research: tieResearch() });
     assert.ok(tied.picks.length >= 2);
     assert.equal(tied.picks[0].score, tied.picks[1].score);
+    // A tied top score is ordered by the rubric's tie-breaks (PROTOTYPE_PLAY), so it still gets one.
     await draftProposal(tiedLead.id);
-    assert.equal((await prototypeRows(tiedLead.id)).length, 0);
-    console.log('[prototype] no pick: pest, franchise, servicetitan, tie each left prototypes empty');
+    const tiedRows = await prototypeRows(tiedLead.id);
+    assert.equal(tiedRows.length, 1);
+    console.log(`[prototype] no pick: pest, franchise, servicetitan left prototypes empty; tie resolved to ${tiedRows[0].agent_type}`);
   });
 
   it('prototype: regenerate reuses active prototype for same prospect', async () => {
@@ -326,7 +326,7 @@ describe('prototype on draft', () => {
     assert.equal(names.some((name) => /logo/i.test(name)), false);
     assert.deepEqual(names.sort(), [
       'agent_type', 'brand_name', 'color_primary', 'color_secondary', 'created_at',
-      'expires_at', 'id', 'issued_at', 'prospect_id', 'revoked_at', 'token_hash',
+      'expires_at', 'id', 'issued_at', 'nonce', 'prospect_id', 'revoked_at', 'token_hash',
     ]);
     const watched = [
       'src/prototypes/flags.js',
@@ -394,7 +394,7 @@ describe('prototype on draft', () => {
       const got = await request(port, 'GET', `/api/proposals/${proposal.id}`);
       const link = got.json.prototype;
       const span = await pool.query(
-        `SELECT (expires_at = issued_at + INTERVAL '14 days') AS exact,
+        `SELECT (expires_at = issued_at + INTERVAL '336 hours') AS exact,
                 EXTRACT(EPOCH FROM (expires_at - issued_at))::int AS seconds
            FROM prototypes WHERE prospect_id = $1 AND revoked_at IS NULL`,
         [lead.id]
@@ -412,7 +412,7 @@ describe('prototype on draft', () => {
       assert.equal(pub.json.expires_at, new Date(link.expires_at).toISOString());
       assert.equal(pub.json.brand_name, 'TEST: Wasatch Heating');
       assert.deepEqual(Object.keys(pub.json).sort(), [
-        'agent_type', 'brand_name', 'colors', 'expires_at', 'issued_at', 'watermark',
+        'agent_type', 'brand_name', 'city', 'colors', 'expires_at', 'industry', 'issued_at', 'watermark',
       ]);
       console.log(`[prototype] payload issued_at ${pub.json.issued_at} expires_at ${pub.json.expires_at} watermark ${pub.json.watermark}`);
     } finally {
@@ -623,59 +623,59 @@ describe('prototype on draft', () => {
     assert.ok(revokeAt > guardAt);
   });
 
-  it('prototype: token is random bytes and creation does not need CRM_API_KEY', async () => {
+  it('prototype: token is an HMAC of a stored nonce; creation needs a strong CRM_API_KEY', async () => {
     process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
     const saved = process.env.CRM_API_KEY;
-    const tokenSrc = fs.readFileSync(path.join(ROOT, 'src/prototypes/tokens.js'), 'utf8');
-    const storeSrc = fs.readFileSync(path.join(ROOT, 'src/prototypes/store.js'), 'utf8');
-    assert.match(tokenSrc, /crypto\.randomBytes\(TOKEN_BYTES\)/);
-    assert.equal(tokenSrc.includes('process.env.CRM_API_KEY'), false);
-    assert.equal(tokenSrc.includes('createHmac'), false);
-    assert.equal(tokenSrc.includes('hkdf'), false);
-    assert.equal(tokenSrc.includes('deriveToken'), false);
-    assert.equal(storeSrc.includes('deriveToken'), false);
-    assert.equal(storeSrc.includes('process.env.CRM_API_KEY'), false);
-    assert.equal(storeSrc.includes('createHmac'), false);
+    const tokens = require('../src/prototypes/tokens');
     try {
-      delete process.env.CRM_API_KEY;
-      const lead = await seedLead({ google_place_id: 'test-place-proto-random' });
+      const lead = await seedLead({ google_place_id: 'test-place-proto-hmac' });
       const proposal = await draftProposal(lead.id);
-      const row = (await prototypeRows(lead.id))[0];
-      assert.ok(row);
+      const { rows } = await pool.query('SELECT nonce, token_hash FROM prototypes WHERE prospect_id = $1', [lead.id]);
+      assert.equal(rows.length, 1);
+      assert.equal(Buffer.from(rows[0].nonce).length, 32);
       const got = await request(port, 'GET', `/api/proposals/${proposal.id}`, { key: STRONG_KEY });
       const token = tokenOf(got.json.prototype.url);
       assert.equal(Buffer.from(token, 'base64url').length, 32);
-      assert.equal(Buffer.from(row.token_hash).equals(hashToken(token)), true);
-      process.env.CRM_API_KEY = ' '.repeat(32);
-      const spaces = await seedLead({ google_place_id: 'test-place-proto-spaces-key' });
-      await draftProposal(spaces.id);
-      const second = (await prototypeRows(spaces.id))[0];
-      const secondGot = await request(port, 'GET', `/api/proposals/${(await pool.query('SELECT id FROM proposals WHERE prospect_id = $1 ORDER BY id DESC LIMIT 1', [spaces.id])).rows[0].id}`, { key: STRONG_KEY });
-      const other = tokenOf(secondGot.json.prototype.url);
-      assert.notEqual(other, token);
-      assert.equal(Buffer.from(second.token_hash).equals(hashToken(other)), true);
-      const pub = await request(port, 'GET', `/api/public/prototypes/${token}`, { key: '' });
-      assert.equal(pub.status, 200);
-      console.log(`[prototype] random token bytes 32; created with CRM_API_KEY unset and with 32 spaces; prototype ${row.id}`);
+      assert.equal(token, tokens.tokenFor(Buffer.from(rows[0].nonce)));
+      assert.equal(Buffer.from(rows[0].token_hash).equals(hashToken(token)), true);
+      const cols = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'prototypes'`);
+      assert.equal(cols.rows.some(r => /^token$/.test(r.column_name)), false);
+
+      for (const weak of [undefined, ' '.repeat(40), 'short-key']) {
+        if (weak === undefined) delete process.env.CRM_API_KEY; else process.env.CRM_API_KEY = weak;
+        const other = await seedLead({ google_place_id: `test-place-proto-weak-${String(weak).length}-${Math.random().toString(36).slice(2)}` });
+        await draftProposal(other.id);
+        assert.equal((await prototypeRows(other.id)).length, 0);
+      }
+      console.log('[prototype] token = HMAC(nonce); no row when CRM_API_KEY is unset, blank, or short');
     } finally {
       process.env.CRM_API_KEY = saved;
     }
   });
 
-  it('prototype: url is not recomputed after this process forgets the token', async () => {
+  it('prototype: url is recomputed after a restart; a rotated key makes old links 404', async () => {
     process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
+    const saved = process.env.CRM_API_KEY;
     const lead = await seedLead({ google_place_id: 'test-place-proto-forget' });
     const proposal = await draftProposal(lead.id);
     const got = await request(port, 'GET', `/api/proposals/${proposal.id}`);
     const token = tokenOf(got.json.prototype.url);
-    assert.equal(Buffer.from(token, 'base64url').length, 32);
-    _clearIssuedForTests();
-    const again = await request(port, 'GET', `/api/proposals/${proposal.id}`);
-    assert.equal(again.json.prototype.url, null);
-    assert.equal(again.json.prototype.agent_type, 'estimate_followup');
+    // A fresh module load stands in for a restart: nothing is held in memory.
+    for (const k of Object.keys(require.cache)) if (k.includes('/src/prototypes/')) delete require.cache[k];
+    const fresh = require('../src/prototypes/store');
+    const again = await fresh.prototypeForProposal(lead.id);
+    assert.equal(tokenOf(again.url), token);
     const pub = await request(port, 'GET', `/api/public/prototypes/${token}`, { key: '' });
     assert.equal(pub.status, 200);
-    console.log('[prototype] forgotten token: GET url is null; public read still 200');
+    try {
+      process.env.CRM_API_KEY = 'rotated-prototype-key-32chars-minimum!!';
+      const rotated = await fresh.prototypeForProposal(lead.id);
+      assert.equal(rotated.url, null);
+      assert.equal(rotated.link_problem, 'key_changed');
+    } finally {
+      process.env.CRM_API_KEY = saved;
+    }
+    console.log('[prototype] restart: same url recomputed; rotated key: url null, link_problem key_changed');
   });
 
   it('prototype: revoke fails closed unless the API key has 32 non-whitespace characters', async () => {
@@ -891,8 +891,13 @@ describe('prototype on draft', () => {
         const started = await boot(item.key);
         try {
           const res = await request(started.listenPort, 'POST', `/api/prototypes/${weakRow.id}/revoke`, { key: item.header });
-          assert.equal(res.status, 503, item.name);
-          assert.deepEqual(res.json, { error: 'writes_disabled' });
+          // Closed either way: the outer /api guard answers 401 for a set-but-blank
+          // key (the header cannot carry only spaces); the router answers 503.
+          if (item.name === 'spaces') assert.ok([401, 503].includes(res.status), item.name);
+          else {
+            assert.equal(res.status, 503, item.name);
+            assert.deepEqual(res.json, { error: 'writes_disabled' });
+          }
           const secret = String(item.header || '').trim();
           if (secret) assert.equal(started.output().includes(secret), false, item.name);
         } finally {

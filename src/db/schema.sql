@@ -550,9 +550,11 @@ VALUES
   (1, 'bookkeeping', 'size_sweet', 5, 8, FALSE)
 ON CONFLICT (version, agent, signal) DO NOTHING;
 
--- Branded prototype issued from a proposal draft when FF_PROTOTYPE_ON_DRAFT
--- is exactly "true". Keyed to the prospect (the shop), not a proposal version.
--- At most one active row per prospect. The raw token is not stored.
+-- Branded prototype issued from a proposal draft (on unless
+-- FF_PROTOTYPE_ON_DRAFT is false) or from the CRM. Keyed to the prospect
+-- (the shop), not a proposal version. At most one active row per prospect.
+-- The raw token is not stored: the server recomputes it from nonce with an
+-- HMAC keyed by CRM_API_KEY (src/prototypes/tokens.js) and checks token_hash.
 -- Wordmark and hex colors only: this table has no image column.
 -- This block does not UPDATE existing rows.
 CREATE TABLE IF NOT EXISTS prototypes (
@@ -563,14 +565,17 @@ CREATE TABLE IF NOT EXISTS prototypes (
   color_primary    TEXT NOT NULL,
   color_secondary  TEXT NOT NULL,
   token_hash       BYTEA NOT NULL UNIQUE,
+  nonce            BYTEA,
   issued_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at       TIMESTAMPTZ NOT NULL,
   revoked_at       TIMESTAMPTZ,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT prototypes_color_primary_hex CHECK (color_primary ~ '^#[0-9a-fA-F]{6}$'),
   CONSTRAINT prototypes_color_secondary_hex CHECK (color_secondary ~ '^#[0-9a-fA-F]{6}$'),
-  CONSTRAINT prototypes_expires_14d CHECK (expires_at = issued_at + INTERVAL '14 days')
+  CONSTRAINT prototypes_expires_14d CHECK (expires_at = issued_at + INTERVAL '336 hours')
 );
+
+ALTER TABLE prototypes ADD COLUMN IF NOT EXISTS nonce BYTEA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_prototypes_one_active
   ON prototypes (prospect_id)

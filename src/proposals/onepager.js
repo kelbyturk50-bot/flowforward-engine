@@ -5,6 +5,7 @@ const express = require('express');
 const pool    = require('../db/client');
 const { SENDER } = require('./config');
 const { demoHrefForProposal } = require('../pilot/tokens');
+const { prototypeForProposal } = require('../prototypes/store');
 
 const router = express.Router();
 
@@ -24,6 +25,7 @@ const bareUrl = (u) => String(u || '').replace(/^https?:\/\//, '').replace(/\/$/
 function renderPage(p, lead, options = {}) {
   const o = p.onepager || {};
   const demoHref = options.demoHref || '';
+  const prototypeHref = options.prototypeHref || '';
   const first = SENDER.name.split(' ')[0];
   const mailto = `mailto:${SENDER.email}?subject=${encodeURIComponent(`Re: ideas for ${lead.company}`)}`;
   const obs = (o.observations || []).map(x => `<li><h3>${esc(x.title)}</h3><p>${esc(x.detail)}</p></li>`).join('');
@@ -85,6 +87,7 @@ ol.steps li::before{content:counter(s);font-family:"Barlow Semi Condensed",sans-
 .print-contact{display:none}
 .btn-main{background:#fff;color:var(--juniper)}.btn-alt{background:transparent;color:#fff;border:1.5px solid rgba(255,255,255,.6)}
 .btn:focus-visible{outline:3px solid var(--ochre);outline-offset:2px}
+.proto{border-left:5px solid var(--ochre)}.proto p{margin:0 0 16px}.proto .btn-main{background:var(--juniper);color:#fff}
 .pdf-bar{display:flex;justify-content:flex-end;padding:14px 0 6px}
 .btn-pdf{display:inline-flex;align-items:center;gap:8px;padding:9px 18px;border-radius:9px;font-weight:600;font-size:.9rem;background:var(--surface);color:var(--ink);border:1.5px solid var(--line);cursor:pointer;text-decoration:none;box-shadow:0 2px 8px rgba(30,42,47,.07);transition:box-shadow .15s}
 .btn-pdf:hover{box-shadow:0 4px 14px rgba(30,42,47,.13)}.btn-pdf svg{flex:none}
@@ -133,6 +136,9 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
   </section>
   ${obs ? `<section class="card"><h2>What I noticed</h2><ul class="obs">${obs}</ul></section>` : ''}
   ${opps ? `<section class="card"><h2>Where I think I can help</h2>${opps}</section>` : ''}
+  ${prototypeHref ? `<section class="card proto" data-prototype-link><h2>I built a prototype for ${esc(lead.company)}</h2>
+    <p>A clickable sample of what this could look like in your name and colors: a sample homepage plus the follow-up, text-back, and booking pieces behind it. It runs on sample data and nothing on it contacts anyone.</p>
+    <a class="btn btn-main" href="${esc(prototypeHref)}" target="_blank" rel="noopener">See your prototype</a></section>` : ''}
   <section class="card"><h2>How working together starts</h2>
     <ol class="steps">
       <li><span><strong>A free 15-minute call.</strong> You tell me where the day gets eaten up. No pitch deck.</span></li>
@@ -172,8 +178,13 @@ router.get('/:slug', async (req, res) => {
       pool.query(`UPDATE proposals SET views = views + 1, last_viewed_at = NOW() WHERE id = $1`, [p.id]).catch(() => {});
     }
     const demoHref = await demoHrefForProposal(req, p.id);
+    let prototypeHref = '';
+    try {
+      const proto = await prototypeForProposal(p.prospect_id);
+      if (proto && proto.url && !proto.expired) prototypeHref = proto.url;
+    } catch (err) { console.error('[prototype] one-pager link failed:', err && err.code); }
     res.set('Cache-Control', 'no-store').set('X-Robots-Tag', 'noindex, nofollow');
-    res.type('html').send(renderPage(p, { company: p.company, city: p.city }, { demoHref }));
+    res.type('html').send(renderPage(p, { company: p.company, city: p.city }, { demoHref, prototypeHref }));
   } catch (err) {
     res.status(500).type('text').send('Something went wrong.');
   }

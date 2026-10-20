@@ -960,3 +960,19 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ── Prototype card (proposal drawer) ───────────────────────────────────── */
+.proto-card { border: 1px solid var(--line); border-left: 4px solid var(--ochre); background: var(--surface); border-radius: var(--radius-s, 8px); padding: .9rem 1rem; margin: 0 0 1.2rem; display: grid; gap: .6rem; }
+.proto-card p { margin: 0; }
+.proto-card, .proto-card > * { min-width: 0; max-width: 100%; }
+.proto-head { display: flex; align-items: baseline; justify-content: space-between; gap: .8rem; flex-wrap: wrap; }
+.proto-head .col-title { margin: 0; }
+.proto-card .chip-warn { background: var(--ochre-wash); border-color: var(--ochre); cursor: default; font-size: .8rem; }
+.proto-link { align-items: center; }
+.proto-url { font-size: .78rem; color: var(--ink-2); min-width: 0; flex: 1 1 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proto-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .7rem; }
+.proto-grid label { display: grid; gap: .25rem; font-size: .85rem; font-weight: 600; min-width: 0; }
+.proto-color { display: flex; gap: .4rem; align-items: center; }
+.proto-color input[type="color"] { width: 44px; height: 38px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); flex: none; }
+.proto-color .input { min-width: 0; font-family: ui-monospace, monospace; font-size: .85rem; }
+@media (max-width: 720px) { .proto-grid { grid-template-columns: 1fr; } .proto-url { flex-basis: 100%; } }

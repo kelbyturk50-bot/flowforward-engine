@@ -4,6 +4,7 @@
 const pool = require('../db/client');
 const scoring = require('../scoring/prototypes');
 const { loadRubric } = require('../scoring/rubric-store');
+const { isPestCompanyName } = require('../scoring/industry');
 const { prototypeOnDraft } = require('./flags');
 const tokens = require('./tokens');
 
@@ -11,30 +12,37 @@ const PRIMARY_FALLBACK = '#2f6b57';
 const SECONDARY_FALLBACK = '#1e2a2f';
 const HEX = /^#[0-9a-fA-F]{6}$/;
 
-// Raw tokens from inserts in this process. The database keeps only the hash,
-// so a restart or another instance cannot rebuild the URL.
-const issued = new Map();
+// Agent click-throughs the prototype page can show. The rubric can rank
+// others (review requests, maintenance renewal, dispatch); those still get a
+// prototype, featuring the first built agent or estimate follow-up.
+const BUILT_AGENTS = Object.freeze(['estimate_followup', 'speed_to_lead', 'receptionist', 'scheduling']);
+const DEFAULT_AGENT = 'estimate_followup';
+// Rubric results a person can override from the CRM. Pest and franchise stay refused.
+const HARD_REFUSALS = new Set(['pest', 'franchise']);
+
+function httpError(status, message, code) {
+  const err = new Error(message);
+  err.status = status;
+  err.userMessage = message;
+  if (code) err.code = code;
+  return err;
+}
 
 function isServiceTitan(prospect) {
   return String(prospect && prospect.fsm_detected || '').trim().toLowerCase() === 'servicetitan';
 }
 
-// A shared top score is not an auto-pick. The rubric still orders those
-// agents; this hook waits until one score is strictly ahead.
+// The rubric already orders ties (estimate follow-up first, then cost tier,
+// own-it fit, tieRank), so the first pick wins.
 function resolvePick(result) {
   if (!result || result.disqualified) {
     return { agent: null, reason: (result && result.disqualified) || 'no_pick' };
   }
-  const picks = Array.isArray(result.picks) ? result.picks : [];
+  const picks = (Array.isArray(result.picks) ? result.picks : [])
+    .filter(p => p && typeof p.agent === 'string' && /^[a-z0-9_]+$/.test(p.agent));
   if (!picks.length) return { agent: null, reason: 'no_pick' };
-  if (picks.length >= 2 && Number(picks[0].score) === Number(picks[1].score)) {
-    return { agent: null, reason: 'tie' };
-  }
-  const agent = picks[0] && picks[0].agent;
-  if (typeof agent !== 'string' || !/^[a-z0-9_]+$/.test(agent)) {
-    return { agent: null, reason: 'no_pick' };
-  }
-  return { agent, reason: null };
+  const built = picks.find(p => BUILT_AGENTS.includes(p.agent));
+  return { agent: built ? built.agent : DEFAULT_AGENT, reason: null };
 }
 
 function serviceTitanBlocked(prospect, agent, rubric) {
@@ -74,7 +82,7 @@ function brandNameOf(prospect) {
 }
 
 const ROW_COLS = `id, prospect_id, agent_type, brand_name, color_primary, color_secondary,
-  token_hash, issued_at, expires_at, revoked_at, created_at`;
+  token_hash, nonce, issued_at, expires_at, revoked_at, created_at`;
 
 async function loadActive(prospectId) {
   const { rows } = await pool.query(
@@ -88,19 +96,34 @@ async function loadActive(prospectId) {
   return rows[0] || null;
 }
 
+// Recompute the link from the stored nonce. Null when the key is missing or
+// rotated (the recomputed token no longer matches the stored hash).
+function tokenOf(row) {
+  if (!row || row.revoked_at || !row.nonce) return null;
+  const token = tokens.tokenFor(Buffer.from(row.nonce));
+  if (!token) return null;
+  const stored = row.token_hash ? Buffer.from(row.token_hash) : null;
+  return tokens.hashesEqual(stored, tokens.hashToken(token)) ? token : null;
+}
+
+function publicBase() {
+  return String(process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+}
+
 function linkFor(row) {
   if (!row || row.revoked_at) return null;
-  const base = {
-    url: null,
+  const token = tokenOf(row);
+  const expired = new Date(row.expires_at).getTime() <= Date.now();
+  return {
+    id: row.id,
+    url: token ? `${publicBase()}${tokens.publicPath(token)}` : null,
     agent_type: row.agent_type,
+    colors: { primary: row.color_primary, secondary: row.color_secondary },
     issued_at: row.issued_at,
     expires_at: row.expires_at,
+    expired,
+    link_problem: token ? null : (tokens.keyReady() ? 'key_changed' : 'key_missing'),
   };
-  const token = issued.get(row.id);
-  if (!token) return base;
-  const stored = row.token_hash ? Buffer.from(row.token_hash) : null;
-  if (!tokens.hashesEqual(stored, tokens.hashToken(token))) return base;
-  return { ...base, url: tokens.publicPath(token), token };
 }
 
 async function insertRow(prospect, agent, colors) {
@@ -108,24 +131,20 @@ async function insertRow(prospect, agent, colors) {
   if (!name) throw new Error('prototype brand name missing');
   for (let attempt = 0; attempt < 3; attempt++) {
     const minted = tokens.mintToken();
-    if (Buffer.from(minted.token, 'base64url').length !== tokens.TOKEN_BYTES) {
-      throw new Error('prototype token was not 32 bytes');
-    }
+    if (!minted) throw httpError(503, 'Prototype links need CRM_API_KEY with at least 32 characters.', 'key_missing');
     try {
       const { rows } = await pool.query(
         `WITH stamp AS (SELECT NOW() AS issued_at)
          INSERT INTO prototypes (
            prospect_id, agent_type, brand_name, color_primary, color_secondary,
-           token_hash, issued_at, expires_at
+           token_hash, nonce, issued_at, expires_at
          )
-         SELECT $1, $2, $3, $4, $5, $6, issued_at, issued_at + INTERVAL '14 days'
+         SELECT $1, $2, $3, $4, $5, $6, $7, issued_at, issued_at + INTERVAL '336 hours'
            FROM stamp
          RETURNING ${ROW_COLS}`,
-        [prospect.id, agent, name, colors.primary, colors.secondary, minted.hash]
+        [prospect.id, agent, name, colors.primary, colors.secondary, minted.hash, minted.nonce]
       );
-      const row = rows[0];
-      issued.set(row.id, minted.token);
-      return row;
+      return rows[0];
     } catch (err) {
       if (err.code !== '23505') throw err;
       const active = await loadActive(prospect.id);
@@ -135,24 +154,30 @@ async function insertRow(prospect, agent, colors) {
   throw new Error('prototype insert conflict');
 }
 
+async function loadProspect(prospectId, research) {
+  const { rows } = await pool.query('SELECT * FROM prospects WHERE id = $1', [prospectId]);
+  const prospect = rows[0];
+  if (!prospect) return null;
+  if (research != null) prospect.research = research;
+  return prospect;
+}
+
+// Draft hook. Uses the rubric; no pick means no prototype.
 async function attachPrototype({ prospectId, research }) {
   if (!prototypeOnDraft()) return null;
   try {
-    const { rows } = await pool.query('SELECT * FROM prospects WHERE id = $1', [prospectId]);
-    const prospect = rows[0];
+    const prospect = await loadProspect(prospectId, research);
     if (!prospect) return null;
-    prospect.research = research == null ? prospect.research : research;
     const existing = await loadActive(prospect.id);
     if (existing) {
       console.log(`[prototype] prospect ${prospect.id} reused active prototype ${existing.id}`);
       return existing;
     }
+    if (prospect.archived_at || isPestCompanyName(prospect.company)) return null;
     const rubric = await loadRubric(pool);
     const pick = resolvePick(scoring.recommendPrototypes(prospect, rubric));
     if (!pick.agent || serviceTitanBlocked(prospect, pick.agent, rubric)) {
-      let reason = pick.reason;
-      if (!pick.agent && reason === 'below_min' && isServiceTitan(prospect)) reason = 'servicetitan';
-      if (pick.agent && serviceTitanBlocked(prospect, pick.agent, rubric)) reason = 'servicetitan';
+      const reason = pick.agent ? 'servicetitan' : pick.reason;
       console.log(`[prototype] prospect ${prospect.id} no pick (${reason})`);
       return null;
     }
@@ -166,44 +191,85 @@ async function attachPrototype({ prospectId, research }) {
   }
 }
 
+// From the CRM. Returns the active prototype, creating one when needed.
+// With fresh: true, revokes the active one first (a new link).
+// The rubric still picks the featured agent; a weak score falls back to
+// estimate follow-up because Kelby asked for it. Pest and franchise refuse.
+async function ensurePrototype(prospectId, { fresh = false } = {}) {
+  const prospect = await loadProspect(prospectId);
+  if (!prospect) throw httpError(404, 'Lead not found');
+  if (prospect.archived_at) throw httpError(409, 'This lead is archived.', 'archived');
+  if (isPestCompanyName(prospect.company)) throw httpError(409, 'Pest control is out of scope.', 'pest');
+  const existing = await loadActive(prospect.id);
+  if (existing && !fresh) return existing;
+  const rubric = await loadRubric(pool);
+  const result = scoring.recommendPrototypes(prospect, rubric);
+  if (result && HARD_REFUSALS.has(result.disqualified)) {
+    throw httpError(409, result.disqualified === 'pest' ? 'Pest control is out of scope.' : 'Franchises get no prototype (corporate systems).', result.disqualified);
+  }
+  let agent = resolvePick(result).agent || DEFAULT_AGENT;
+  if (serviceTitanBlocked(prospect, agent, rubric)) agent = DEFAULT_AGENT;
+  const colors = existing
+    ? { primary: existing.color_primary, secondary: existing.color_secondary }
+    : await colorsFor(prospect.id);
+  if (!tokens.keyReady()) throw httpError(503, 'Prototype links need CRM_API_KEY with at least 32 characters.', 'key_missing');
+  if (existing) await revoke(existing.id);
+  const row = await insertRow(prospect, agent, colors);
+  console.log(`[prototype] prospect ${prospect.id} agent ${row.agent_type} prototype ${row.id} (from CRM)`);
+  return row;
+}
+
+async function setColors(id, { primary, secondary }) {
+  const p = String(primary || '').trim();
+  const s = String(secondary || '').trim() || SECONDARY_FALLBACK;
+  if (!HEX.test(p) || !HEX.test(s)) throw httpError(400, 'Colors must be hex like #1F4E79.');
+  const { rows } = await pool.query(
+    `UPDATE prototypes SET color_primary = $2, color_secondary = $3
+      WHERE id = $1 AND revoked_at IS NULL RETURNING ${ROW_COLS}`,
+    [id, p.toLowerCase(), s.toLowerCase()]
+  );
+  if (!rows[0]) throw httpError(404, 'Prototype not found');
+  return rows[0];
+}
+
+async function setAgent(id, agent) {
+  if (!BUILT_AGENTS.includes(agent)) throw httpError(400, 'Unknown agent.');
+  const { rows } = await pool.query(
+    `UPDATE prototypes SET agent_type = $2 WHERE id = $1 AND revoked_at IS NULL RETURNING ${ROW_COLS}`, [id, agent]);
+  if (!rows[0]) throw httpError(404, 'Prototype not found');
+  return rows[0];
+}
+
 async function prototypeForProposal(prospectId) {
-  const row = await loadActive(prospectId);
-  if (!row) return null;
-  const link = linkFor(row);
-  if (!link) return null;
-  return {
-    url: link.url,
-    agent_type: link.agent_type,
-    issued_at: link.issued_at,
-    expires_at: link.expires_at,
-  };
+  return linkFor(await loadActive(prospectId));
 }
 
 // Unknown, malformed, and revoked are 404. Expired and still active is 410.
 // A row that is both revoked and expired is 404.
-async function readByToken(raw) {
+async function lookupToken(raw) {
   const wellFormed = tokens.tokenWellFormed(raw);
   const computed = wellFormed ? tokens.hashToken(raw) : tokens.DUMMY_HASH;
   const { rows } = await pool.query(
-    `SELECT ${ROW_COLS}, (NOW() >= expires_at) AS expired
-       FROM prototypes
-      WHERE token_hash = $1`,
+    `SELECT pt.id, pt.prospect_id, pt.agent_type, pt.brand_name, pt.color_primary, pt.color_secondary,
+            pt.token_hash, pt.issued_at, pt.expires_at, pt.revoked_at, (NOW() >= pt.expires_at) AS expired,
+            p.industry, p.city, p.archived_at
+       FROM prototypes pt JOIN prospects p ON p.id = pt.prospect_id
+      WHERE pt.token_hash = $1`,
     [computed]
   );
   const row = rows[0] || null;
   const stored = row && row.token_hash ? Buffer.from(row.token_hash) : null;
   const equal = tokens.hashesEqual(stored, computed);
-  if (!wellFormed || !row || !equal || row.revoked_at) {
-    return { status: 404, body: { error: 'not_found' } };
-  }
-  if (row.expired === true) {
-    return {
-      status: 410,
-      body: {
-        error: 'link_expired',
-        expires_at: new Date(row.expires_at).toISOString(),
-      },
-    };
+  if (!wellFormed || !row || !equal || row.revoked_at || row.archived_at) return { status: 404, row: null };
+  if (row.expired === true) return { status: 410, row };
+  return { status: 200, row };
+}
+
+async function readByToken(raw) {
+  const { status, row } = await lookupToken(raw);
+  if (status === 404) return { status, body: { error: 'not_found' } };
+  if (status === 410) {
+    return { status, body: { error: 'link_expired', expires_at: new Date(row.expires_at).toISOString() } };
   }
   return {
     status: 200,
@@ -211,6 +277,8 @@ async function readByToken(raw) {
       brand_name: row.brand_name,
       colors: { primary: row.color_primary, secondary: row.color_secondary },
       agent_type: row.agent_type,
+      industry: row.industry || null,
+      city: row.city || null,
       watermark: true,
       issued_at: new Date(row.issued_at).toISOString(),
       expires_at: new Date(row.expires_at).toISOString(),
@@ -226,22 +294,19 @@ async function revoke(id) {
       RETURNING id, revoked_at`,
     [id]
   );
-  if (rows[0]) issued.delete(id);
   return rows[0] || null;
 }
 
-function _clearIssuedForTests() {
-  if (process.env.NODE_ENV !== 'test') {
-    throw new Error('_clearIssuedForTests is only available when NODE_ENV=test');
-  }
-  issued.clear();
-}
-
 module.exports = {
+  BUILT_AGENTS,
   attachPrototype,
+  ensurePrototype,
+  setColors,
+  setAgent,
   prototypeForProposal,
+  linkFor,
+  lookupToken,
   readByToken,
   revoke,
   resolvePick,
-  _clearIssuedForTests,
 };

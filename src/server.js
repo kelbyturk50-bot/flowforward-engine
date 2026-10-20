@@ -58,9 +58,12 @@ app.use('/demo/estimate-recovery', pilotDemo.router);
 
 // Public prototype read (no API key — the token is the credential).
 // Mounted before the API-key guard. Rate limit uses the prototype bucket,
-// separate from the pilot demo. The page at /demo/prototype/<token> is a
-// later UI change; this route is the data read.
+// separate from the pilot demo.
 app.use('/api/public/prototypes', require('./prototypes/public').router);
+// The prototype page itself: sample homepage + agent click-throughs.
+// Server-rendered, watermarked, no API key (the token is the credential).
+app.use('/demo/prototype-assets', require('./prototypes/page').assets);
+app.use('/demo/prototype', require('./prototypes/page').router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
 app.use('/api', requireApiKey);
