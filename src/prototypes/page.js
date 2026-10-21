@@ -336,7 +336,7 @@ function css(t) {
 --ink:#1C2430;--ink-2:#475569;--ink-3:#64748B;--paper:#F4F6F9;--rule:#DCE1E8;
 --d:"Barlow Condensed","Arial Narrow",Arial,sans-serif;--b:"Source Sans 3",system-ui,-apple-system,"Segoe UI",sans-serif;
 --sh1:0 1px 2px rgba(16,24,40,.08);--sh2:0 8px 24px rgba(16,24,40,.18);color-scheme:light}
-*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:120px;overflow-x:hidden}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:230px;overflow-x:hidden}
 body{margin:0;background:#fff;color:var(--ink);font:400 18px/1.55 var(--b);-webkit-font-smoothing:antialiased}
 .wrap{max-width:1200px;margin:0 auto;padding:0 20px;position:relative}
 a{color:var(--brand)}
@@ -353,11 +353,12 @@ a{color:var(--brand)}
 .ffmenu-list{position:absolute;right:0;top:calc(100% + 6px);z-index:60;list-style:none;margin:0;padding:6px;background:#fff;border-radius:6px;box-shadow:var(--sh2);width:min(340px,calc(100vw - 32px))}
 .ffmenu-list button{display:block;width:100%;text-align:left;background:none;border:0;padding:10px;border-radius:4px;cursor:pointer;font:400 15px/1.35 var(--b);color:var(--ink)}
 .ffmenu-list button:hover,.ffmenu-list button:focus-visible{background:var(--paper)}
-.ffmenu-list b{font-weight:700}.ffmenu-list span:not(.rec){display:block;color:var(--ink-3);font-size:14px}.rec{font-size:12px;font-weight:700;color:#7A5A12;background:#F6EBD3;padding:0 6px;border-radius:3px}
+.ffmenu-list b{font-weight:700;color:var(--ink)}.ffmenu-list button{color:var(--ink)}.ffmenu-list span:not(.rec){display:block;color:var(--ink-3);font-size:14px}.rec{font-size:12px;font-weight:700;color:#7A5A12;background:#F6EBD3;padding:0 6px;border-radius:3px}
 /* utility + header */
 .util{background:var(--brand-dark);color:#fff;font-size:15px}.util-in{display:flex;justify-content:space-between;align-items:center;min-height:36px;gap:12px}
 .util a{color:#fff;font-weight:700;text-decoration:none}.util span{display:inline-flex;align-items:center;gap:6px}
-.hdr{position:sticky;top:32px;z-index:40;background:#fff;border-bottom:1px solid var(--rule)}
+.topbars{position:sticky;top:0;z-index:2147482800;box-shadow:0 2px 10px rgba(16,24,40,.12)}
+.hdr{background:#fff;border-bottom:1px solid var(--rule)}
 .hdr-in{display:flex;align-items:center;gap:22px;min-height:78px}.hdr-book{white-space:nowrap}
 .hdr-brand{text-decoration:none;color:var(--ink);margin-right:auto}
 .wm{display:inline-flex;align-items:center;gap:10px}.wm-glyph{display:grid;place-items:center;width:40px;height:40px;background:var(--brand);color:#fff;border-radius:4px}
@@ -493,7 +494,7 @@ input[readonly]{background:var(--paper);color:var(--ink-2)}
 @media (max-width:1180px){.hdr-nav{display:none}}@media (max-width:1100px){.tiles{grid-template-columns:repeat(3,1fr)}.sfoot-in{grid-template-columns:1fr 1fr}}
 @media (max-width:900px){.hero-in{grid-template-columns:1fr;gap:32px}.steps{grid-template-columns:1fr 1fr}.ffsec-in,.area{grid-template-columns:1fr}.trust-in{grid-template-columns:1fr 1fr}}
 @media (max-width:768px){
- body{font-size:17px;padding-bottom:60px}.wrap{padding:0 16px}html{scroll-padding-top:100px}
+ body{font-size:17px;padding-bottom:60px}.wrap{padding:0 16px}html{scroll-padding-top:170px}.util{display:none}.ffbar-in>span{display:none}.ffbar-in{justify-content:flex-end;min-height:40px}
  .util .util-right{display:none}.util-in{justify-content:center}
  .hdr{position:static}.hdr-in{min-height:62px;gap:10px}.hdr-phone,.hdr-book{display:none}
  .hdr-callbtn{display:grid;place-items:center;width:44px;height:44px;background:var(--brand);color:#fff;border-radius:4px}
@@ -606,10 +607,12 @@ function renderPrototype(row) {
 <link rel="preload" href="/demo/prototype-assets/barlow-condensed-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin>
 <style>${css(t)}</style>
 </head><body>
-${ribbon()}
 <div class="pt-tile" aria-hidden="true" data-prototype-tile="true"></div>
+<div class="topbars">
+${ribbon()}
 ${ffBar(biz, featured)}
 ${header(biz, trade, city)}
+</div>
 <main id="main">
 ${hero(biz, trade, city, t)}
 ${trustStrip()}
