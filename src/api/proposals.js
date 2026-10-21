@@ -243,6 +243,7 @@ router.get('/:id', async (req, res) => {
     const prototype = await prototypeForProposal(p.prospect_id);
     // Preview shows the prototype line exactly as it would go out now.
     p.prototype_url = prototype && prototype.url && !prototype.expired ? prototype.url : null;
+    const additions = { first: send.addedLines(p, 'first'), followup1: send.addedLines(p, 'followup1') };
     res.json({
       ...withUrl(p),
       versions: versions.rows,
@@ -252,6 +253,7 @@ router.get('/:id', async (req, res) => {
         followup2: p.followup2 ? send.renderMessage(p, 'followup2') : '',
       },
       prototype,
+      additions,
     });
   } catch (err) { fail(res, err); }
 });

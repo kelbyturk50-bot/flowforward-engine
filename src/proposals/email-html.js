@@ -26,7 +26,7 @@ function labelFor(url, p) {
   const base = cfg.PUBLIC_BASE_URL;
   if (url.startsWith(`${base}/p/`)) return 'See the one-pager';
   if (url.startsWith(`${base}/demo/prototype/`)) return 'Open the prototype';
-  if (SENDER.calendly && url.startsWith(SENDER.calendly)) return 'Grab 15 minutes on my calendar';
+  if (SENDER.calendly && url.startsWith(SENDER.calendly)) return 'Book a time';
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
 }
 
@@ -63,6 +63,7 @@ function signature() {
   const contact = [
     SENDER.phone ? esc(SENDER.phone) : '',
     `<a href="mailto:${esc(SENDER.email)}" style="color:#5B6B70;text-decoration:none">${esc(SENDER.email)}</a>`,
+    SENDER.calendly ? `<a href="${esc(SENDER.calendly)}" style="color:#2F6B57;font-weight:bold;text-decoration:none">Book a 15-minute call</a>` : '',
     site ? `<a href="${esc(site)}" style="color:#5B6B70;text-decoration:none">${esc(site.replace(/^https?:\/\//, ''))}</a>` : '',
   ].filter(Boolean).join(' &middot; ');
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:22px;border-top:1px solid #E3E8E6;padding-top:14px">

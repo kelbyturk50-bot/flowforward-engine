@@ -19,7 +19,7 @@ describe('prototype line in the email editors', () => {
   it('shows the line that will be added to the first email and follow-up 1', async () => {
     api.proposal.mockResolvedValue({ ...base, prototype: { id: 1, url, expired: false, colors: {}, agent_type: 'scheduling', expires_at: new Date(Date.now() + 864e5).toISOString() } });
     render(<ProposalDrawer {...props} />);
-    expect(await screen.findByText('Added right after the one-pager link when it sends:')).toBeInTheDocument();
+    expect(await screen.findByText('Added after the one-pager link when it sends:')).toBeInTheDocument();
     expect(screen.getByText('Added before your sign-off when it sends:')).toBeInTheDocument();
     expect(screen.getAllByText((t) => t.includes(url)).length).toBeGreaterThanOrEqual(2);
     expect(screen.getAllByText((t) => t.includes('for Peak Plumbing')).length).toBeGreaterThanOrEqual(2);
@@ -29,6 +29,17 @@ describe('prototype line in the email editors', () => {
     api.proposal.mockResolvedValue({ ...base, prototype: { id: 1, url: null, link_problem: 'key_missing', expired: false, colors: {}, agent_type: 'scheduling', expires_at: new Date().toISOString() } });
     render(<ProposalDrawer {...props} />);
     expect(await screen.findByText(/No prototype link will be added/)).toBeInTheDocument();
+  });
+});
+
+describe('booking line', () => {
+  it('shows every line the server will add, including the calendar link', async () => {
+    api.proposal.mockResolvedValue({ ...base, prototype: null, additions: {
+      first: [{ where: 'before your sign-off', text: "My calendar is here if that's easier: https://calendly.com/flowforward50" }],
+      followup1: [],
+    } });
+    render(<ProposalDrawer {...props} />);
+    expect(await screen.findByText(/My calendar is here if that's easier/)).toBeInTheDocument();
   });
 });
 
