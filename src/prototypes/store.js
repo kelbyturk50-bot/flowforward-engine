@@ -244,6 +244,22 @@ async function prototypeForProposal(prospectId) {
   return linkFor(await loadActive(prospectId));
 }
 
+// The link to put in an email, or null (none, expired, or not recomputable).
+async function liveLink(prospectId) {
+  const link = linkFor(await loadActive(prospectId));
+  return link && link.url && !link.expired ? link : null;
+}
+
+// Restart the 14 days when the link is first shared (the first email goes
+// out), so a draft that sat in review does not send a link that is about to
+// expire. Same token; only issued_at and expires_at move.
+async function restartClock(prospectId) {
+  const { rows } = await pool.query(
+    `UPDATE prototypes SET issued_at = NOW(), expires_at = NOW() + INTERVAL '336 hours'
+      WHERE prospect_id = $1 AND revoked_at IS NULL RETURNING ${ROW_COLS}`, [prospectId]);
+  return rows[0] || null;
+}
+
 // Unknown, malformed, and revoked are 404. Expired and still active is 410.
 // A row that is both revoked and expired is 404.
 async function lookupToken(raw) {
@@ -304,6 +320,8 @@ module.exports = {
   setColors,
   setAgent,
   prototypeForProposal,
+  liveLink,
+  restartClock,
   linkFor,
   lookupToken,
   readByToken,

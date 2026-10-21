@@ -241,6 +241,8 @@ router.get('/:id', async (req, res) => {
       [rows[0].prospect_id]);
     const p = rows[0];
     const prototype = await prototypeForProposal(p.prospect_id);
+    // Preview shows the prototype line exactly as it would go out now.
+    p.prototype_url = prototype && prototype.url && !prototype.expired ? prototype.url : null;
     res.json({
       ...withUrl(p),
       versions: versions.rows,

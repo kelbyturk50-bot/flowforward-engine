@@ -97,10 +97,21 @@ async function threadFor(prospectId, { upTo } = {}) {
   ]);
   const out = [];
   const s = send();
+  // Show the prototype line only on messages sent while that link was live,
+  // matching what went out.
+  let link = null;
+  try { link = await require('../prototypes/store').prototypeForProposal(prospectId); } catch { link = null; }
+  const company = props.rows.length
+    ? (await pool.query('SELECT company FROM prospects WHERE id = $1', [prospectId])).rows[0]?.company : '';
+  const render = (p, which, at) => {
+    const t = new Date(at).getTime();
+    const live = link && link.url && new Date(link.issued_at).getTime() <= t + 60000 && t < new Date(link.expires_at).getTime();
+    return s.renderMessage({ ...p, company, prototype_url: live ? link.url : null }, which);
+  };
   for (const p of props.rows) {
-    out.push({ who: 'You', direction: 'out', at: p.sent_at, subject: p.subject, body: s.renderMessage(p, 'first'), source: 'proposal' });
-    if (p.followup1_sent_at) out.push({ who: 'You', direction: 'out', at: p.followup1_sent_at, subject: `Re: ${p.subject}`, body: s.renderMessage(p, 'followup1'), source: 'followup' });
-    if (p.followup2_sent_at) out.push({ who: 'You', direction: 'out', at: p.followup2_sent_at, subject: `Re: ${p.subject}`, body: s.renderMessage(p, 'followup2'), source: 'followup' });
+    out.push({ who: 'You', direction: 'out', at: p.sent_at, subject: p.subject, body: render(p, 'first', p.sent_at), source: 'proposal' });
+    if (p.followup1_sent_at) out.push({ who: 'You', direction: 'out', at: p.followup1_sent_at, subject: `Re: ${p.subject}`, body: render(p, 'followup1', p.followup1_sent_at), source: 'followup' });
+    if (p.followup2_sent_at) out.push({ who: 'You', direction: 'out', at: p.followup2_sent_at, subject: `Re: ${p.subject}`, body: render(p, 'followup2', p.followup2_sent_at), source: 'followup' });
   }
   for (const m of msgs.rows) {
     if (upTo && m.id === upTo) break;
