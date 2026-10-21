@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, settings } from '../api';
 import { acceptedApiUrl, apiUrlIssue, shouldStoreApiUrl } from '../api-base.js';
 import { useAsync, ErrorNote, timeAgo, toast, money2 } from '../ui';
+import FeatureFlagsPanel from './FeatureFlags';
 
 export default function Settings({ authProblem, onSaved, version }) {
   const [baseline, setBaseline] = useState(() => settings.apiUrl);
@@ -79,6 +80,8 @@ export default function Settings({ authProblem, onSaved, version }) {
           <button className="btn" disabled={busy || !!urlError}>{busy ? 'Checking…' : 'Save and connect'}</button>
         </div>
       </form>
+
+      <FeatureFlagsPanel version={version} />
 
       {connected && (
         <section className="panel">

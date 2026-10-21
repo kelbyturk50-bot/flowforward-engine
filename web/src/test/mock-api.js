@@ -84,4 +84,6 @@ export const api = {
   gmailStatus: method(),
   gmailConnect: method(),
   gmailDisconnect: method(),
+  flags: method(),
+  setFlag: method(),
 };

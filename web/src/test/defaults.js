@@ -1,3 +1,4 @@
+import { flagRecords, savedFlag } from './flag-fixtures.js';
 import { api, settings } from './mock-api.js';
 import { contactedLead, discoveryRun, focus, foundLead, project, proposal, summary } from './fixtures.js';
 
@@ -41,6 +42,8 @@ export function installApiDefaults() {
     configured: false,
     redirect_uri: `${TEST_URL}/oauth/google/callback`,
   });
+  api.flags.mockResolvedValue(flagRecords());
+  api.setFlag.mockImplementation(async (name, enabled) => savedFlag(name, enabled));
   api.updateLead.mockResolvedValue(foundLead);
   api.updateTask.mockResolvedValue({});
   api.createLead.mockResolvedValue(foundLead);

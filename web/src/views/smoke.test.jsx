@@ -98,6 +98,10 @@ describe('CRM views', () => {
     expect(screen.getByText('completed')).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: 'Proposal bot' })).toBeInTheDocument();
     expect(screen.getByText(/sender@example\.test/)).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Feature flags' })).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'FF_CAMPAIGNS' })).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByRole('switch', { name: 'FF_CAMPAIGN_OPEN_PIXEL' })).toHaveAttribute('aria-checked', 'false');
+    expect(screen.queryByRole('switch', { name: 'FF_PILOT_ESTIMATE_LIVE_SEND' })).not.toBeInTheDocument();
   });
 
   it('opens the add-lead drawer', async () => {
