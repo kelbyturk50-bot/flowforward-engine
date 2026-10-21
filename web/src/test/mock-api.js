@@ -69,6 +69,7 @@ export const api = {
   createPrototype: method(),
   updatePrototype: method(),
   revokePrototype: method(),
+  matchPrototypeColors: method(),
   dismissJob: method(),
   markProposalSeen: method(),
   markSentProposal: method(),

@@ -20,6 +20,7 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
   const [primary, setPrimary] = useState(prototype?.colors?.primary || '#2f6b57');
   const [secondary, setSecondary] = useState(prototype?.colors?.secondary || '#1e2a2f');
   const [confirmOff, setConfirmOff] = useState(false);
+  const [swatches, setSwatches] = useState([]);
 
   const run = async (label, fn, msg) => {
     setBusy(label);
@@ -28,6 +29,7 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
       const next = r && 'prototype' in r ? r.prototype : null;
       setProto(next);
       if (next?.colors) { setPrimary(next.colors.primary); setSecondary(next.colors.secondary); }
+      if (r && Array.isArray(r.swatches)) setSwatches(r.swatches);
       if (msg) toast(msg);
       onChange?.();
     } catch (e) { toast(e.message); } finally { setBusy(''); }
@@ -94,7 +96,20 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
           </span>
         </label>
       </div>
-      <p className="muted small">Use the colors from their truck wrap or sign. Text colors are adjusted automatically so they stay readable. No logos.</p>
+      <div className="link-row proto-match">
+        <button className="btn btn-quiet" disabled={!!busy} onClick={() => run('match', () => api.matchPrototypeColors(proto.id), 'Colors matched to their website.')}>
+          {busy === 'match' ? 'Reading their site…' : 'Match their website colors'}
+        </button>
+        {swatches.length > 0 && (
+          <span className="proto-swatches" aria-label="Colors found on their site">
+            {swatches.map(s => (
+              <button key={s.hex} type="button" className="proto-swatch" style={{ background: s.hex }} title={`Use ${s.hex} as the main color`}
+                aria-label={`Use ${s.hex} as the main color`} onClick={() => setPrimary(s.hex)} />
+            ))}
+          </span>
+        )}
+      </div>
+      <p className="muted small">Colors come from their website automatically when it can be read. Tap a swatch or type a hex to change them. Text colors are adjusted so they stay readable. No logos.</p>
       <div className="link-row">
         {colorsDirty && (
           <button className="btn btn-quiet" disabled={!!busy || !colorsValid}
