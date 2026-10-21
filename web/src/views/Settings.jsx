@@ -81,7 +81,7 @@ export default function Settings({ authProblem, onSaved, version }) {
         </div>
       </form>
 
-      <FeatureFlagsPanel />
+      <FeatureFlagsPanel version={version} />
 
       {connected && (
         <section className="panel">

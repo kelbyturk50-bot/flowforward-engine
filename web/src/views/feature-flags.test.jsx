@@ -61,6 +61,16 @@ describe('feature flags panel', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('reloads the list when Settings saves (version changes) without a Retry', async () => {
+    api.flags.mockRejectedValueOnce(Object.assign(new Error('Missing or invalid API key'), { status: 401 }));
+    const view = render(<FeatureFlagsPanel version={0} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Every flag is off.');
+    api.flags.mockResolvedValue(records({ FF_CAMPAIGNS: { enabled: true } }));
+    view.rerender(<FeatureFlagsPanel version={1} />);
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'FF_CAMPAIGNS' })).toHaveAttribute('aria-checked', 'true'));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('fails closed when the payload is not a list', async () => {
     api.flags.mockResolvedValue({ flags: [] });
     render(<FeatureFlagsPanel />);

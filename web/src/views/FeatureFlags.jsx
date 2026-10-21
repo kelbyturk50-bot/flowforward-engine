@@ -27,7 +27,9 @@ function lastChangedText(flag) {
   return who || when;
 }
 
-export default function FeatureFlagsPanel() {
+// `version` changes when Settings saves (for example a new API key), so the
+// list reloads without a manual Retry.
+export default function FeatureFlagsPanel({ version = 0 }) {
   const snap = useSyncExternalStore(subscribeFeatureFlags, getFeatureFlagState, getFeatureFlagState);
   const [reloadToken, setReloadToken] = useState(0);
   const [phase, setPhase] = useState({});
@@ -35,11 +37,11 @@ export default function FeatureFlagsPanel() {
 
   useEffect(() => {
     refreshRemoteFlags().catch(() => {});
-  }, [reloadToken]);
+  }, [reloadToken, version]);
 
   useEffect(() => {
     setPhase({});
-  }, [reloadToken]);
+  }, [reloadToken, version]);
 
   const ready = snap.status === 'ready';
   const loading = snap.status === 'loading' || snap.status === 'idle';
