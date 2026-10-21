@@ -1143,3 +1143,5 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
 .proto-swatches { display: inline-flex; gap: .35rem; flex-wrap: wrap; }
 .proto-swatch { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; padding: 0; }
 .proto-swatch:focus-visible { outline: 3px solid var(--ochre); outline-offset: 2px; }
+.proto-addon { display: grid; gap: .25rem; margin-top: .4rem; border-left: 3px solid var(--ochre); padding: .4rem .6rem; background: var(--ochre-wash); border-radius: 4px; }
+.proto-addon pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .9rem; }
