@@ -6,8 +6,8 @@
 // does not send mail.
 
 const express = require('express');
+const { crmApiKeyReady } = require('./crm-key');
 const flags = require('../pilot/flags');
-const { crmApiKeyReady } = require('./key-ready');
 const { globalSendKilled } = require('../pilot/kill-switch');
 const { MAX_CSV_BYTES, parseIntake, startsWithFormula } = require('../pilot/estimate-intake');
 const store = require('../pilot/estimates');

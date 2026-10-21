@@ -189,6 +189,8 @@ async function inboxSince(since, max = 300) {
         date: m.internalDate ? new Date(Number(m.internalDate)) : null,
         inReplyTo: header(h, 'in-reply-to'),
         references: header(h, 'references').split(/\s+/).filter(Boolean),
+        messageIdHeader: header(h, 'message-id') || null,
+        auto: isAutoReply(h),
         text: bodyText(m.payload).slice(0, 20000),
       });
     } catch (err) { console.error(`[gmail] skip ${id}: ${err.message}`); }
@@ -196,4 +198,36 @@ async function inboxSince(since, max = 300) {
   return out;
 }
 
-module.exports = { status, authUrl, handleCallback, disconnect, sendMail, inboxSince, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText };
+// RFC 3834 Auto-Submitted plus the common vendor headers for vacation replies.
+function isAutoReply(headers) {
+  const auto = header(headers, 'auto-submitted').toLowerCase();
+  if (auto && auto !== 'no') return true;
+  if (header(headers, 'x-autoreply') || header(headers, 'x-autorespond') || header(headers, 'x-auto-response-suppress')) return true;
+  return /auto_reply|auto-reply/i.test(header(headers, 'precedence'));
+}
+
+/** Messages Kelby sent from Gmail since a date (to catch replies he sent outside the CRM). */
+async function sentSince(since, max = 100) {
+  const after = Math.floor(new Date(since).getTime() / 1000);
+  const page = await gmail('get', '/messages', { params: { q: `in:sent after:${after}`, maxResults: Math.min(max, 100) } });
+  const out = [];
+  for (const { id } of page.messages || []) {
+    try {
+      const m = await gmail('get', `/messages/${id}`, { params: { format: 'full' } });
+      const h = m.payload?.headers;
+      const toHeader = header(h, 'to');
+      out.push({
+        id: m.id, threadId: m.threadId,
+        from: (await getSetting('gmail_oauth'))?.email || SENDER.email,
+        to: (toHeader.match(/<([^>]+)>/)?.[1] || toHeader).trim().toLowerCase(),
+        subject: header(h, 'subject'),
+        date: m.internalDate ? new Date(Number(m.internalDate)) : null,
+        messageIdHeader: header(h, 'message-id') || null,
+        text: bodyText(m.payload).slice(0, 20000),
+      });
+    } catch (err) { console.error(`[gmail] skip sent ${id}: ${err.message}`); }
+  }
+  return out;
+}
+
+module.exports = { status, authUrl, handleCallback, disconnect, sendMail, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText };

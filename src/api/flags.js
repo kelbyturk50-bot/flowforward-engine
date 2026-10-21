@@ -4,7 +4,7 @@
 // /api routes keep requireApiKey. Env-only flags are refused by the PUT handler.
 
 const express = require('express');
-const { crmApiKeyReady } = require('./key-ready');
+const { crmApiKeyReady } = require('./crm-key');
 const { isKnown, isWritable } = require('../flags/registry');
 const { listFlags, setFlag } = require('../flags/resolve');
 

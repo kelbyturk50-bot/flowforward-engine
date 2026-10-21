@@ -22,7 +22,7 @@ const express = require('express');
 
 const { applySchema } = require('../src/db/migrate');
 const { closePool, pool } = require('./fixtures');
-const { DB_NAMES, ENV_NAMES, NAMES } = require('../src/flags/registry');
+const { DB_NAMES, DEFAULT_ON, ENV_NAMES, NAMES } = require('../src/flags/registry');
 const { ACTOR, effective } = require('../src/flags/resolve');
 const flags = require('../src/pilot/flags');
 const kill = require('../src/pilot/kill-switch');
@@ -88,9 +88,12 @@ async function resetRows() {
     `DELETE FROM feature_flags WHERE NOT (name = ANY($1::text[]))`,
     [DB_NAMES]
   );
+  // Back to the seed: FF_PROTOTYPE_ON_DRAFT on, every other DB flag off.
+  // Later test files share this database and expect the seeded values.
   await pool.query(
     `UPDATE feature_flags
-        SET enabled = false, updated_at = NULL, updated_by = NULL`
+        SET enabled = (name = ANY($1::text[])), updated_at = NULL, updated_by = NULL`,
+    [DEFAULT_ON]
   );
 }
 
@@ -229,7 +232,7 @@ describe('feature flags', { concurrency: 1 }, () => {
     await resetRows();
   });
 
-  it('flags: fresh database seed is off and the enabled default is false before any reset', async () => {
+  it('flags: fresh database seed is off except FF_PROTOTYPE_ON_DRAFT, and the enabled default is false before any reset', async () => {
     assert.equal(resetCalled, false);
     const column = await pool.query(
       `SELECT column_default, is_nullable, data_type
@@ -259,8 +262,9 @@ describe('feature flags', { concurrency: 1 }, () => {
         ORDER BY name`
     );
     assert.deepEqual(rows.map((row) => row.name), [...DB_NAMES].sort());
+    assert.deepEqual([...DEFAULT_ON], ['FF_PROTOTYPE_ON_DRAFT']);
     for (const row of rows) {
-      assert.equal(row.enabled, false, row.name);
+      assert.equal(row.enabled, DEFAULT_ON.includes(row.name), row.name);
       assert.equal(row.updated_at, null, row.name);
       assert.equal(row.updated_by, null, row.name);
     }
@@ -269,18 +273,19 @@ describe('feature flags', { concurrency: 1 }, () => {
     assert.equal(rows.some((row) => row.name === 'FF_PILOT_ESTIMATE_LIVE_SEND'), false);
     const audit = await pool.query('SELECT COUNT(*)::int AS n FROM feature_flag_audit');
     assert.equal(audit.rows[0].n, 0);
-    console.log(`[flags] fresh seed rows=${rows.length} enabled=false column_default=false`);
+    console.log(`[flags] fresh seed rows=${rows.length} enabled=${rows.filter((row) => row.enabled).map((row) => row.name).join(',')} column_default=false`);
   });
 
-  it('flags: fresh DB + unset env => all OFF', async () => {
+  it('flags: fresh DB + unset env => all OFF except FF_PROTOTYPE_ON_DRAFT', async () => {
     unsetFlagEnv();
     const listed = await request('GET', '/api/flags', { headers: KEY_HEADER });
     assert.equal(listed.status, 200);
     assert.equal(listed.json.flags.length, NAMES.length);
     assert.deepEqual(listed.json.flags.map((flag) => flag.name), [...NAMES]);
     for (const flag of listed.json.flags) {
-      assert.equal(flag.enabled, false, flag.name);
-      assert.equal(flag.effective, false, flag.name);
+      const seededOn = DEFAULT_ON.includes(flag.name);
+      assert.equal(flag.enabled, seededOn, flag.name);
+      assert.equal(flag.effective, seededOn, flag.name);
       assert.equal(flag.env_forced_off, false, flag.name);
       assert.equal(flag.updated_at, null, flag.name);
       assert.equal(flag.updated_by, null, flag.name);
@@ -301,6 +306,47 @@ describe('feature flags', { concurrency: 1 }, () => {
     assert.equal(await flags.masterOn(), false);
     assert.equal(await flags.linkOn(), false);
     assert.equal(await flags.smsOn(), false);
+  });
+
+  it('flags: FF_PROTOTYPE_ON_DRAFT is on by default, follows the row, and env false/off/0/no forces it off', async () => {
+    const { prototypeOnDraft } = require('../src/prototypes/flags');
+    unsetFlagEnv();
+    assert.equal(await prototypeOnDraft(), true);
+    for (const value of ['false', ' OFF ', '0', 'No']) {
+      process.env.FF_PROTOTYPE_ON_DRAFT = value;
+      assert.equal(await prototypeOnDraft(), false, value);
+    }
+    for (const value of ['true', '1', 'yes', '', '  ']) {
+      process.env.FF_PROTOTYPE_ON_DRAFT = value;
+      assert.equal(await prototypeOnDraft(), true, JSON.stringify(value));
+    }
+    unsetFlagEnv();
+    const off = await request('PUT', '/api/flags/FF_PROTOTYPE_ON_DRAFT', {
+      headers: KEY_HEADER,
+      body: { enabled: false },
+    });
+    assert.equal(off.status, 200);
+    assert.equal(off.json.flag.effective, false);
+    assert.equal(await prototypeOnDraft(), false);
+    process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
+    assert.equal(await prototypeOnDraft(), false, 'env never forces it on');
+    unsetFlagEnv();
+    const on = await request('PUT', '/api/flags/FF_PROTOTYPE_ON_DRAFT', {
+      headers: KEY_HEADER,
+      body: { enabled: true },
+    });
+    assert.equal(on.status, 200);
+    assert.equal(await prototypeOnDraft(), true);
+    try {
+      await pool.query(`DELETE FROM feature_flags WHERE name = 'FF_PROTOTYPE_ON_DRAFT'`);
+      assert.equal(await prototypeOnDraft(), false, 'a missing row is off');
+    } finally {
+      await pool.query(
+        `INSERT INTO feature_flags (name, enabled) VALUES ('FF_PROTOTYPE_ON_DRAFT', true)
+         ON CONFLICT (name) DO NOTHING`
+      );
+    }
+    console.log('[flags] FF_PROTOTYPE_ON_DRAFT default=on row-off=off env-off=off env-true-row-off=off missing-row=off');
   });
 
   it('flags: trimmed false, off, 0, and no force OFF when the row is true', async () => {
@@ -580,7 +626,7 @@ describe('feature flags', { concurrency: 1 }, () => {
     try {
       const failed = await request('PUT', '/api/flags/FF_PROTOTYPE_ON_DRAFT', {
         headers: KEY_HEADER,
-        body: { enabled: true },
+        body: { enabled: false },
       });
       assert.equal(failed.status, 500);
       assert.deepEqual(failed.json, { error: 'server_error' });
@@ -588,7 +634,7 @@ describe('feature flags', { concurrency: 1 }, () => {
       const unchanged = await pool.query(
         `SELECT enabled, updated_at, updated_by FROM feature_flags WHERE name = 'FF_PROTOTYPE_ON_DRAFT'`
       );
-      assert.equal(unchanged.rows[0].enabled, false);
+      assert.equal(unchanged.rows[0].enabled, true);
       assert.equal(unchanged.rows[0].updated_at, null);
       assert.equal(unchanged.rows[0].updated_by, null);
       const none = await pool.query('SELECT COUNT(*)::int AS n FROM feature_flag_audit');
@@ -600,12 +646,12 @@ describe('feature flags', { concurrency: 1 }, () => {
 
     const saved = await request('PUT', '/api/flags/FF_PROTOTYPE_ON_DRAFT', {
       headers: KEY_HEADER,
-      body: { enabled: true },
+      body: { enabled: false },
     });
     assert.equal(saved.status, 200);
     assert.equal(saved.json.flag.name, 'FF_PROTOTYPE_ON_DRAFT');
-    assert.equal(saved.json.flag.enabled, true);
-    assert.equal(saved.json.flag.effective, true);
+    assert.equal(saved.json.flag.enabled, false);
+    assert.equal(saved.json.flag.effective, false);
     assert.equal(saved.json.flag.env_forced_off, false);
     assert.equal(saved.json.flag.writable, true);
     assert.equal(saved.json.flag.source, 'db');
@@ -618,14 +664,14 @@ describe('feature flags', { concurrency: 1 }, () => {
     assert.equal(audit.rows.length, 1);
     assert.deepEqual(audit.rows[0], {
       flag: 'FF_PROTOTYPE_ON_DRAFT',
-      old_value: false,
-      new_value: true,
+      old_value: true,
+      new_value: false,
       actor: 'crm',
     });
     const row = await pool.query(
       `SELECT enabled FROM feature_flags WHERE name = 'FF_PROTOTYPE_ON_DRAFT'`
     );
-    assert.equal(row.rows[0].enabled, true);
+    assert.equal(row.rows[0].enabled, false);
     console.log(`[flags] audit ok actor=${audit.rows[0].actor} old=${audit.rows[0].old_value} new=${audit.rows[0].new_value}`);
   });
 
