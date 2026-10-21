@@ -53,6 +53,23 @@ describe('prototype brand colors', () => {
     assert.equal(wix.primary, '#c8102e');
   });
 
+  it('page theme: navy keeps navy with dark text on yellow; red brands get a charcoal hero; light colors are darkened', () => {
+    const { theme } = require('../src/prototypes/page');
+    const navy = theme('#0a3d7a', '#ffc20e');
+    assert.equal(navy.brand, '#0A3D7A');
+    assert.equal(navy.heroBg, '#0A3D7A');
+    assert.equal(navy.accent, '#FFC20E');
+    assert.equal(navy.onAccent, '#1C2430');
+    const red = theme('#c8102e', '#1e2a2f');
+    assert.equal(red.warm, true);
+    assert.equal(red.heroBg, '#1C2430');
+    assert.equal(red.accent, '#C8102E');
+    const lone = theme('#1565c0', null);
+    assert.equal(lone.accent, '#FFC845');
+    const pale = theme('#9ad0ff', null);
+    assert.notEqual(pale.brand, '#9AD0FF');
+  });
+
   it('reads the homepage and its theme stylesheet through safeFetch, skipping font CSS', async () => {
     calls.length = 0;
     const got = await detectBrandColors('ericsplumbing.example');
