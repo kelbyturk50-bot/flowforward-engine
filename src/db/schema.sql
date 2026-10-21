@@ -898,6 +898,10 @@ CREATE TABLE IF NOT EXISTS campaign_touches (
     revenue_cents IS NULL OR (
       type IN ('won', 'mvp_sold') AND revenue_cents >= 0
     )
+  ),
+  -- Prototype views and CTA clicks are recorded by the system, never by hand.
+  CONSTRAINT campaign_touches_manual_type_check CHECK (
+    NOT (source = 'manual' AND type IN ('prototype_viewed', 'prototype_cta_clicked'))
   )
 );
 

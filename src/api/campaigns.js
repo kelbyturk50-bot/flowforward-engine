@@ -1,26 +1,78 @@
-// Campaigns HTTP API. Slice 1 is one read route. Tracking only: this file
-// does not import the mail transport. Auth is the /api mount. The flag gate
-// is mounted before that so a closed flag matches an unknown route.
+// Campaigns HTTP API, slice 1: two read routes. Tracking only: this file
+// does not import the mail transport.
+//
+// Order, from the outside in (flagGate is mounted in server.js before the
+// shared /api API-key middleware):
+//   1. FF_CAMPAIGNS effectively off (flag service, src/campaigns/flags.js)
+//      -> the same 404 Express gives an unknown path, with or without a key.
+//   2. CRM_API_KEY not ready (crmApiKeyReady: fewer than 32 non-whitespace
+//      characters, or unset) -> 503 { error: 'api_key_not_configured' }.
+//      The routes never serve data while the shared middleware is open.
+//   3. requireApiKey -> 401 for a missing or wrong key.
 
 const express = require('express');
+const { crmApiKeyReady } = require('./crm-key');
 const { isFlagOn } = require('../campaigns/flags');
-const { parseMetricsQuery, headlineMetrics } = require('../campaigns/metrics');
+const {
+  parseMetricsQuery,
+  parseListQuery,
+  headlineMetrics,
+  campaignList,
+} = require('../campaigns/metrics');
 
 const router = express.Router();
 
-function flagGate(req, res, next) {
-  if (isFlagOn('FF_CAMPAIGNS')) return next();
+async function flagGate(req, res, next) {
+  let on = false;
+  try {
+    on = await isFlagOn('FF_CAMPAIGNS');
+  } catch (err) {
+    console.error(`[campaigns] flag read failed (${err && err.code ? err.code : 'error'})`);
+    on = false;
+  }
   // Leave the app router. The default final handler writes the same 404 an
   // unknown path gets, including when the API key is missing.
-  return next('router');
+  if (!on) return next('router');
+  if (!crmApiKeyReady()) {
+    console.log('[campaigns] refused; api key not configured');
+    res.set('Cache-Control', 'no-store');
+    return res.status(503).json({ error: 'api_key_not_configured' });
+  }
+  return next();
 }
+
+function badParam(err, res) {
+  if (err && err.status === 400) {
+    res.status(400).json({ error: 'invalid_param' });
+    return true;
+  }
+  return false;
+}
+
+router.get('/', async (req, res) => {
+  let params;
+  try {
+    params = parseListQuery(req.query);
+  } catch (err) {
+    if (badParam(err, res)) return;
+    throw err;
+  }
+  try {
+    const body = await campaignList(params);
+    console.log(`[campaigns] list campaigns=${body.campaigns.length} from=${body.range.from || '-'} to=${body.range.to || '-'}`);
+    res.json(body);
+  } catch (err) {
+    console.error(`[campaigns] list failed: ${err.code || 'error'}`);
+    res.status(500).json({ error: 'list_failed' });
+  }
+});
 
 router.get('/metrics', async (req, res) => {
   let params;
   try {
     params = parseMetricsQuery(req.query);
   } catch (err) {
-    if (err.status === 400) return res.status(400).json({ error: 'invalid_param' });
+    if (badParam(err, res)) return;
     throw err;
   }
   try {

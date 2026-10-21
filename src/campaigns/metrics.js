@@ -217,14 +217,18 @@ async function variantRows(db, params, touchedByVariant) {
   return rows;
 }
 
+// Archived leads (prospects.archived_at set, see #39/#66) are left out of
+// every count: their touches, their enrollments, and their events.
 async function headlineMetrics(params, db = pool) {
   const { rows } = await db.query(
-    `SELECT origin, source_id, lead_id, campaign_id, variant_id, type, channel,
-            occurred_at, source, machine_open
-       FROM v_campaign_effective_touches
-      WHERE ($1::int IS NULL OR campaign_id = $1)
-        AND ($2::timestamptz IS NULL OR occurred_at >= $2)
-        AND ($3::timestamptz IS NULL OR occurred_at <= $3)`,
+    `SELECT t.origin, t.source_id, t.lead_id, t.campaign_id, t.variant_id, t.type, t.channel,
+            t.occurred_at, t.source, t.machine_open
+       FROM v_campaign_effective_touches t
+       JOIN prospects p ON p.id = t.lead_id
+      WHERE p.archived_at IS NULL
+        AND ($1::int IS NULL OR t.campaign_id = $1)
+        AND ($2::timestamptz IS NULL OR t.occurred_at >= $2)
+        AND ($3::timestamptz IS NULL OR t.occurred_at <= $3)`,
     [params.campaignId, params.from, params.to]
   );
 
@@ -299,9 +303,109 @@ async function headlineMetrics(params, db = pool) {
   };
 }
 
+// ─── GET /api/campaigns (list) ────────────────────────────────────────────
+// Contract agreed on #67 (Oct 18). from/to are optional YYYY-MM-DD dates
+// (UTC, inclusive); omitted means lifetime. Every count is a number of
+// leads. Touched (>= 1 sent or call_logged in the range) is the denominator.
+// Converted is any won or mvp_sold for a touched lead, with no attribution
+// to a touch in slice 1. Only touches recorded against the campaign count.
+
+const LIST_KEYS = new Set(['from', 'to']);
+
+function parseDateOnly(value, bound) {
+  if (value == null || value === '') return { at: null, text: null };
+  if (typeof value !== 'string' || !DATE_ONLY.test(value)) throw invalidParam();
+  return { at: parseBound(value, bound), text: value };
+}
+
+function parseListQuery(query) {
+  const source = query || {};
+  for (const key of Object.keys(source)) {
+    if (!LIST_KEYS.has(key) || Array.isArray(source[key])) throw invalidParam();
+  }
+  const from = parseDateOnly(source.from, 'from');
+  const to = parseDateOnly(source.to, 'to');
+  if (from.at && to.at && from.at.getTime() > to.at.getTime()) throw invalidParam();
+  return { from: from.at, to: to.at, fromText: from.text, toText: to.text };
+}
+
+function listCounts(touches) {
+  const byLead = groupTouches(touches);
+  const touched = [];
+  for (const [leadId, rows] of byLead) {
+    if (rows.some(isBaseTouch)) touched.push(leadId);
+  }
+  const replied = (leadId) => hasReply(byLead, leadId);
+  const opened = (leadId, pred) => leadRows(byLead, leadId).some((touch) => touch.type === 'opened' && pred(touch));
+  const human = (touch) => touch.machine_open !== true;
+  const machine = (touch) => touch.machine_open === true;
+  const any = () => true;
+  const count = (pred) => touched.filter(pred).length;
+  return {
+    touched: touched.length,
+    responded: count(replied),
+    converted: count((leadId) => hasConversion(byLead, leadId, null)),
+    opened_no_response_human: count((leadId) => !replied(leadId) && opened(leadId, human)),
+    opened_no_response_incl_machine: count((leadId) => !replied(leadId) && opened(leadId, any)),
+    machine_opens: count((leadId) => !replied(leadId) && opened(leadId, machine)),
+    prototype_views: touches.filter((touch) => touch.type === 'prototype_viewed').length,
+  };
+}
+
+async function campaignList(params, db = pool) {
+  const { rows: campaigns } = await db.query(
+    `SELECT id, name, status, channel, segment, cost_cents,
+            to_char(start_date, 'YYYY-MM-DD') AS start_date,
+            to_char(end_date, 'YYYY-MM-DD') AS end_date
+       FROM campaigns
+      ORDER BY id`
+  );
+  const { rows: enrolledRows } = await db.query(
+    `SELECT cl.campaign_id, COUNT(*)::int AS n
+       FROM campaign_leads cl
+       JOIN prospects p ON p.id = cl.lead_id
+      WHERE p.archived_at IS NULL
+      GROUP BY cl.campaign_id`
+  );
+  const { rows: touches } = await db.query(
+    `SELECT t.lead_id, t.campaign_id, t.type, t.channel, t.machine_open
+       FROM v_campaign_effective_touches t
+       JOIN prospects p ON p.id = t.lead_id
+      WHERE p.archived_at IS NULL
+        AND t.campaign_id IS NOT NULL
+        AND ($1::timestamptz IS NULL OR t.occurred_at >= $1)
+        AND ($2::timestamptz IS NULL OR t.occurred_at <= $2)`,
+    [params.from, params.to]
+  );
+  const enrolled = new Map(enrolledRows.map((row) => [row.campaign_id, row.n]));
+  const touchesByCampaign = new Map();
+  for (const touch of touches) {
+    if (!touchesByCampaign.has(touch.campaign_id)) touchesByCampaign.set(touch.campaign_id, []);
+    touchesByCampaign.get(touch.campaign_id).push(touch);
+  }
+  return {
+    range: { from: params.fromText, to: params.toText },
+    attribution: { model: 'any' },
+    campaigns: campaigns.map((row) => ({
+      id: row.id,
+      name: row.name,
+      status: row.status,
+      channel: row.channel,
+      start_date: row.start_date,
+      end_date: row.end_date,
+      segment: row.segment,
+      enrolled: enrolled.get(row.id) || 0,
+      ...listCounts(touchesByCampaign.get(row.id) || []),
+      cost_cents: row.cost_cents,
+    })),
+  };
+}
+
 module.exports = {
   CHANNELS,
   OPEN_LABEL,
   parseMetricsQuery,
+  parseListQuery,
   headlineMetrics,
+  campaignList,
 };

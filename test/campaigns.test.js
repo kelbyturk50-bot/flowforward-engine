@@ -1,8 +1,9 @@
-process.env.CRM_API_KEY = 'test-campaigns-key-not-a-secret';
-process.env.FF_CAMPAIGNS = '';
+process.env.CRM_API_KEY = 'test-campaigns-key-not-a-secret-0001';
+delete process.env.FF_CAMPAIGNS;
 
 const { describe, it, before, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
@@ -12,7 +13,7 @@ const { applySchema } = require('../src/db/migrate');
 const { resetDb, closePool, pool, insertProspect } = require('./fixtures');
 const { attributeConversion } = require('../src/campaigns/attribution');
 
-const API_KEY = 'test-campaigns-key-not-a-secret';
+const API_KEY = 'test-campaigns-key-not-a-secret-0001';
 const OPEN_LABEL = 'Approximate, unreliable (Apple MPP)';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DAY0 = Date.parse('2026-09-24T16:00:00.000Z');
@@ -54,6 +55,86 @@ function request(method, reqPath, { headers = {}, body } = {}) {
 
 function authHeaders() {
   return { 'x-api-key': API_KEY };
+}
+
+// FF_CAMPAIGNS is a feature_flags row (#63). Env can only force it off.
+async function campaignsFlag(on) {
+  const res = await pool.query(
+    `UPDATE feature_flags SET enabled = $1 WHERE name = 'FF_CAMPAIGNS'`,
+    [on === true]
+  );
+  assert.equal(res.rowCount, 1);
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = http.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+async function stopChild(child) {
+  if (!child || child.exitCode != null) return;
+  child.kill('SIGTERM');
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (child.exitCode == null) child.kill('SIGKILL');
+      resolve();
+    }, 3000);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+function rawGet(port, reqPath, headers = {}) {
+  return new Promise((resolve) => {
+    const req = http.request({ method: 'GET', hostname: '127.0.0.1', port, path: reqPath, headers }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch { json = null; }
+        resolve({ status: res.statusCode, text, json, headers: res.headers });
+      });
+    });
+    req.on('error', () => resolve({ status: 0, text: '', json: null, headers: {} }));
+    req.end();
+  });
+}
+
+// Boots the real src/server.js (the production mount order) against this
+// test database. key === undefined leaves CRM_API_KEY unset.
+async function bootRealServer(key) {
+  const port = await freePort();
+  const env = { ...process.env, PORT: String(port), NODE_ENV: 'test', DISABLE_CRON: '1', CORS_ORIGINS: '' };
+  delete env.FF_CAMPAIGNS;
+  if (key === undefined) delete env.CRM_API_KEY;
+  else env.CRM_API_KEY = key;
+  const child = spawn(process.execPath, [path.join(__dirname, '../src/server.js')], {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  child.stdout.on('data', (buf) => { output += buf.toString('utf8'); });
+  child.stderr.on('data', (buf) => { output += buf.toString('utf8'); });
+  const deadline = Date.now() + 20000;
+  for (;;) {
+    const health = await rawGet(port, '/health');
+    if (health.status === 200) break;
+    if (Date.now() > deadline) {
+      await stopChild(child);
+      throw new Error('server did not listen');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return { port, output: () => output, stop: () => stopChild(child) };
 }
 
 function metricsPath(query) {
@@ -257,21 +338,29 @@ describe('campaigns', { concurrency: 1 }, () => {
     await closePool();
   });
 
-  afterEach(() => {
-    process.env.FF_CAMPAIGNS = '';
+  afterEach(async () => {
+    delete process.env.FF_CAMPAIGNS;
+    await campaignsFlag(false);
   });
 
   it('campaigns: FF_CAMPAIGNS off => all campaign routes 404', async () => {
     const unknown = await request('GET', '/api/not-a-real-route', { headers: authHeaders() });
     assert.equal(unknown.status, 404);
     const paths = ['/api/campaigns/metrics', '/api/campaigns', '/api/campaigns/nope'];
-    for (const value of ['', '1', 'TRUE', 'yes', 'true ']) {
-      process.env.FF_CAMPAIGNS = value;
+    // Row off: no env value turns it on. Row on: false/off/0/no force it off.
+    const cases = [
+      [false, undefined], [false, ''], [false, '1'], [false, 'TRUE'], [false, 'yes'], [false, 'true'],
+      [true, 'false'], [true, ' OFF '], [true, '0'], [true, 'No'],
+    ];
+    for (const [rowOn, value] of cases) {
+      await campaignsFlag(rowOn);
+      if (value === undefined) delete process.env.FF_CAMPAIGNS;
+      else process.env.FF_CAMPAIGNS = value;
       for (const reqPath of paths) {
         const withKey = await request('GET', reqPath, { headers: authHeaders() });
         const noKey = await request('GET', reqPath);
-        assert.equal(withKey.status, 404, `${value} ${reqPath}`);
-        assert.equal(noKey.status, 404, `no key ${value} ${reqPath}`);
+        assert.equal(withKey.status, 404, `${rowOn} ${value} ${reqPath}`);
+        assert.equal(noKey.status, 404, `no key ${rowOn} ${value} ${reqPath}`);
         assert.equal(withKey.json, null);
         assert.equal(normalize404(withKey.text), normalize404(unknown.text));
         assert.equal(normalize404(noKey.text), normalize404(unknown.text));
@@ -295,9 +384,12 @@ describe('campaigns', { concurrency: 1 }, () => {
       const methods = Object.keys(layer.route.methods).filter((method) => layer.route.methods[method]);
       routes.push({ path: layer.route.path, methods: methods.sort() });
     }
-    assert.deepEqual(routes, [{ path: '/metrics', methods: ['get'] }]);
+    assert.deepEqual(routes, [
+      { path: '/', methods: ['get'] },
+      { path: '/metrics', methods: ['get'] },
+    ]);
 
-    process.env.FF_CAMPAIGNS = 'true';
+    await campaignsFlag(true);
     for (const route of routes) {
       for (const method of route.methods) {
         const res = await request(method.toUpperCase(), `/api/campaigns${route.path}`);
@@ -308,7 +400,7 @@ describe('campaigns', { concurrency: 1 }, () => {
   });
 
   it('campaigns: fixture Responded 3/8, Converted 1/8, Opened-no-response 1/8', async () => {
-    process.env.FF_CAMPAIGNS = 'true';
+    await campaignsFlag(true);
     const res = await request('GET', metricsPath(`?campaign_id=${fixture.hvacId}`), { headers: authHeaders() });
     assert.equal(res.status, 200, res.text);
     const body = res.json;
@@ -345,7 +437,7 @@ describe('campaigns', { concurrency: 1 }, () => {
   });
 
   it('campaigns: include_machine_opens => Opened-no-response 2/8; Responded/Converted unchanged', async () => {
-    process.env.FF_CAMPAIGNS = 'true';
+    await campaignsFlag(true);
     const res = await request(
       'GET',
       metricsPath(`?campaign_id=${fixture.hvacId}&include_machine_opens=true`),
@@ -371,7 +463,7 @@ describe('campaigns', { concurrency: 1 }, () => {
   });
 
   it('campaigns: reply on different channel still counts as Responded', async () => {
-    process.env.FF_CAMPAIGNS = 'true';
+    await campaignsFlag(true);
     const campaignId = await insertCampaign({ name: 'TEST:Cross-Channel', channel: 'email', status: 'active' });
     const lead = await insertProspect({
       google_place_id: 'test-campaign-cross-channel',
@@ -403,7 +495,7 @@ describe('campaigns', { concurrency: 1 }, () => {
   });
 
   it('campaigns: mvp_sold counts as Converted', async () => {
-    process.env.FF_CAMPAIGNS = 'true';
+    await campaignsFlag(true);
     const { rows } = await pool.query(
       `SELECT type, revenue_cents FROM campaign_touches
         WHERE lead_id = $1 AND type IN ('won', 'mvp_sold')`,
@@ -416,7 +508,7 @@ describe('campaigns', { concurrency: 1 }, () => {
   });
 
   it('campaigns: TEST:Proto-Oct has 0 touched leads, 1 prototype view event', async () => {
-    process.env.FF_CAMPAIGNS = 'true';
+    await campaignsFlag(true);
     const res = await request('GET', metricsPath(`?campaign_id=${fixture.protoId}`), { headers: authHeaders() });
     assert.equal(res.status, 200, res.text);
     console.log('[campaigns] metrics proto', JSON.stringify(res.json));
@@ -614,7 +706,7 @@ describe('campaigns', { concurrency: 1 }, () => {
   });
 
   it('campaigns: from/to window limits the touched base', async () => {
-    process.env.FF_CAMPAIGNS = 'true';
+    await campaignsFlag(true);
     const inside = await request(
       'GET',
       metricsPath(`?campaign_id=${fixture.hvacId}&from=2026-09-24&to=2026-10-14`),
@@ -717,7 +809,7 @@ describe('campaigns', { concurrency: 1 }, () => {
     assert.match(checkRows[0].def, /estimate_recovered/);
     assert.doesNotMatch(checkRows[0].def, /prototype_viewed/);
 
-    process.env.FF_CAMPAIGNS = 'true';
+    await campaignsFlag(true);
     const beforeMetrics = await request('GET', metricsPath(''), { headers: authHeaders() });
     const lead = await insertProspect({
       google_place_id: 'test-campaign-backfill-real',
@@ -823,6 +915,288 @@ describe('campaigns', { concurrency: 1 }, () => {
         assert.equal(pattern.test(source), false, `${file} matched ${pattern}`);
       }
     }
+  });
+
+  it('campaigns: real server.js => flag off 404, unset or weak key 503, missing or wrong key 401, good key 200', async () => {
+    const paths = ['/api/campaigns', '/api/campaigns/metrics'];
+    await campaignsFlag(true);
+    const weakKeys = [
+      ['unset', undefined],
+      ['empty', ''],
+      ['spaces', ' '.repeat(40)],
+      ['short', 'short-key'],
+      ['31 chars', 'x'.repeat(31)],
+      ['inner spaces', `${'x'.repeat(16)}${' '.repeat(16)}y`],
+    ];
+    for (const [label, key] of weakKeys) {
+      const app = await bootRealServer(key);
+      try {
+        for (const reqPath of paths) {
+          for (const headers of [{}, key ? { 'x-api-key': key } : {}]) {
+            const res = await rawGet(app.port, reqPath, headers);
+            assert.equal(res.status, 503, `${label} ${reqPath}`);
+            assert.deepEqual(res.json, { error: 'api_key_not_configured' });
+          }
+        }
+        assert.equal(app.output().includes(API_KEY), false);
+      } finally {
+        await app.stop();
+      }
+    }
+
+    const app = await bootRealServer(API_KEY);
+    try {
+      for (const reqPath of paths) {
+        const missing = await rawGet(app.port, reqPath);
+        assert.equal(missing.status, 401, `missing ${reqPath}`);
+        assert.deepEqual(missing.json, { error: 'Missing or invalid API key' });
+        const wrong = await rawGet(app.port, reqPath, { 'x-api-key': `${API_KEY}x` });
+        assert.equal(wrong.status, 401, `wrong ${reqPath}`);
+        const good = await rawGet(app.port, reqPath, authHeaders());
+        assert.equal(good.status, 200, `good ${reqPath} ${good.text}`);
+        assert.equal(good.text.includes('test+hvac-oct'), false, 'no lead emails in campaign responses');
+      }
+      await campaignsFlag(false);
+      const unknown = await rawGet(app.port, '/api/not-a-real-route', authHeaders());
+      for (const reqPath of paths) {
+        for (const headers of [{}, authHeaders()]) {
+          const off = await rawGet(app.port, reqPath, headers);
+          assert.equal(off.status, 404, `off ${reqPath}`);
+          assert.equal(normalize404(off.text), normalize404(unknown.text));
+        }
+      }
+      assert.equal(app.output().includes(API_KEY), false);
+    } finally {
+      await app.stop();
+    }
+    console.log('[campaigns] real server: off=404 weak/unset key=503 missing/wrong key=401 good key=200');
+  });
+
+  it('campaigns: GET /api/campaigns lists each campaign with lead counts (#67 Oct 18 contract)', async () => {
+    await campaignsFlag(true);
+    const res = await request('GET', '/api/campaigns', { headers: authHeaders() });
+    assert.equal(res.status, 200, res.text);
+    console.log('[campaigns] list', JSON.stringify(res.json));
+    assert.deepEqual(res.json.range, { from: null, to: null });
+    assert.deepEqual(res.json.attribution, { model: 'any' });
+    const hvac = res.json.campaigns.find((row) => row.id === fixture.hvacId);
+    const proto = res.json.campaigns.find((row) => row.id === fixture.protoId);
+    assert.deepEqual(Object.keys(hvac).sort(), [
+      'channel', 'converted', 'cost_cents', 'end_date', 'enrolled', 'id', 'machine_opens', 'name',
+      'opened_no_response_human', 'opened_no_response_incl_machine', 'prototype_views', 'responded',
+      'segment', 'start_date', 'status', 'touched',
+    ]);
+    assert.deepEqual(hvac, {
+      id: fixture.hvacId,
+      name: 'TEST:HVAC-Oct',
+      status: 'active',
+      channel: 'email',
+      start_date: '2026-09-24',
+      end_date: null,
+      segment: 'hvac',
+      enrolled: 8,
+      touched: 8,
+      responded: 3,
+      converted: 1,
+      opened_no_response_human: 1,
+      opened_no_response_incl_machine: 2,
+      machine_opens: 1,
+      prototype_views: 0,
+      cost_cents: 6000,
+    });
+    assert.equal(proto.touched, 0);
+    assert.equal(proto.responded, 0);
+    assert.equal(proto.enrolled, 0);
+    assert.equal(proto.prototype_views, 1);
+
+    // Touch-dependent counts only use touches inside the range.
+    const sendDay = await request('GET', '/api/campaigns?from=2026-09-24&to=2026-09-24', { headers: authHeaders() });
+    assert.equal(sendDay.status, 200);
+    assert.deepEqual(sendDay.json.range, { from: '2026-09-24', to: '2026-09-24' });
+    const hvacSendDay = sendDay.json.campaigns.find((row) => row.id === fixture.hvacId);
+    assert.equal(hvacSendDay.touched, 8);
+    assert.equal(hvacSendDay.responded, 0);
+    assert.equal(hvacSendDay.converted, 0);
+    assert.equal(hvacSendDay.enrolled, 8);
+    const late = await request('GET', '/api/campaigns?from=2026-10-20', { headers: authHeaders() });
+    const hvacLate = late.json.campaigns.find((row) => row.id === fixture.hvacId);
+    assert.equal(hvacLate.touched, 0);
+    assert.equal(hvacLate.responded, 0);
+
+    for (const query of [
+      '?from=2026-02-30', '?from=2026-10-01T00:00:00Z', '?x=1', '?from=2026-10-02&to=2026-10-01',
+      '?from=2026-10-01&from=2026-10-02', '?campaign_id=1', '?to=yesterday',
+    ]) {
+      const bad = await request('GET', `/api/campaigns${query}`, { headers: authHeaders() });
+      assert.equal(bad.status, 400, query);
+      assert.deepEqual(bad.json, { error: 'invalid_param' });
+    }
+  });
+
+  it('campaigns: archived leads are left out of the list and the metrics', async () => {
+    await campaignsFlag(true);
+    const l4 = fixture.leads[3];
+    const l1 = fixture.leads[0];
+    await pool.query(
+      `UPDATE prospects SET archived_at = NOW(), archive_reason = 'TEST: campaigns archive'
+        WHERE id = ANY($1::int[])`,
+      [[l4.id, l1.id]]
+    );
+    try {
+      const metrics = await request('GET', metricsPath(`?campaign_id=${fixture.hvacId}`), { headers: authHeaders() });
+      assert.equal(metrics.json.touched, 6);
+      assert.deepEqual(metrics.json.responded, { count: 2, n: 6, rate: 2 / 6, directional: true });
+      assert.equal(metrics.json.converted.count, 0);
+      const list = await request('GET', '/api/campaigns', { headers: authHeaders() });
+      const hvac = list.json.campaigns.find((row) => row.id === fixture.hvacId);
+      assert.equal(hvac.enrolled, 6);
+      assert.equal(hvac.touched, 6);
+      assert.equal(hvac.responded, 2);
+      assert.equal(hvac.converted, 0);
+    } finally {
+      await pool.query(
+        `UPDATE prospects SET archived_at = NULL, archive_reason = NULL WHERE id = ANY($1::int[])`,
+        [[l4.id, l1.id]]
+      );
+    }
+    const restored = await request('GET', metricsPath(`?campaign_id=${fixture.hvacId}`), { headers: authHeaders() });
+    assert.equal(restored.json.touched, 8);
+  });
+
+  it('campaigns: an open alone is not a touch, call_logged alone is, and a replier is never opened-no-response', async () => {
+    await campaignsFlag(true);
+    const campaignId = await insertCampaign({ name: 'TEST:Edge-Leads', channel: 'email', status: 'active' });
+    const made = [];
+    const lead = async (key) => {
+      const row = await insertProspect({
+        google_place_id: `test-campaign-edge-${key}`,
+        company: `TEST: Edge ${key}`,
+        email: `test+edge-${key}@example.com`,
+        industry: 'HVAC',
+      });
+      made.push(row.id);
+      await enroll(row.id, campaignId, null);
+      return row;
+    };
+    try {
+      const openOnly = await lead('open-only');
+      await insertTouch({ leadId: openOnly.id, campaignId, type: 'opened', day: 1, machineOpen: false });
+      const callOnly = await lead('call-only');
+      await insertTouch({ leadId: callOnly.id, campaignId, type: 'call_logged', day: 1, channel: 'phone' });
+      const openReply = await lead('open-reply');
+      await insertTouch({ leadId: openReply.id, campaignId, type: 'sent', day: 0 });
+      await insertTouch({ leadId: openReply.id, campaignId, type: 'opened', day: 1, machineOpen: false });
+      await insertTouch({ leadId: openReply.id, campaignId, type: 'opened', day: 1, machineOpen: true });
+      await insertTouch({ leadId: openReply.id, campaignId, type: 'replied', day: 2 });
+
+      for (const include of ['false', 'true']) {
+        const res = await request(
+          'GET',
+          metricsPath(`?campaign_id=${campaignId}&include_machine_opens=${include}`),
+          { headers: authHeaders() }
+        );
+        assert.equal(res.json.touched, 2, include);
+        assert.equal(res.json.responded.count, 1, include);
+        assert.equal(res.json.opened_no_response.count, 0, include);
+      }
+      const list = await request('GET', '/api/campaigns', { headers: authHeaders() });
+      const row = list.json.campaigns.find((item) => item.id === campaignId);
+      assert.equal(row.enrolled, 3);
+      assert.equal(row.touched, 2);
+      assert.equal(row.responded, 1);
+      assert.equal(row.opened_no_response_human, 0);
+      assert.equal(row.opened_no_response_incl_machine, 0);
+      assert.equal(row.machine_opens, 0);
+    } finally {
+      await pool.query('DELETE FROM campaign_touches WHERE campaign_id = $1', [campaignId]);
+      await pool.query('DELETE FROM campaigns WHERE id = $1', [campaignId]);
+      await pool.query('DELETE FROM prospects WHERE id = ANY($1::int[])', [made]);
+    }
+  });
+
+  it('campaigns: directional is true below n=30 and false at n=30', async () => {
+    await campaignsFlag(true);
+    const campaignId = await insertCampaign({ name: 'TEST:Thirty', channel: 'email', status: 'active' });
+    const variantId = await insertVariant(campaignId, 'A');
+    const made = [];
+    try {
+      for (let n = 1; n <= 30; n += 1) {
+        const row = await insertProspect({
+          google_place_id: `test-campaign-thirty-${n}`,
+          company: `TEST: Thirty ${n}`,
+          email: `test+thirty-${n}@example.com`,
+          industry: 'HVAC',
+        });
+        made.push(row.id);
+        await insertTouch({ leadId: row.id, campaignId, variantId, type: 'sent', day: 0 });
+        if (n === 29 || n === 30) {
+          const res = await request('GET', metricsPath(`?campaign_id=${campaignId}`), { headers: authHeaders() });
+          assert.equal(res.json.touched, n);
+          const expected = n < 30;
+          assert.equal(res.json.responded.directional, expected, `n=${n}`);
+          assert.equal(res.json.converted.directional, expected, `n=${n}`);
+          assert.equal(res.json.opened_no_response.directional, expected, `n=${n}`);
+          assert.equal(res.json.by_variant[0].responded.directional, expected, `variant n=${n}`);
+        }
+      }
+    } finally {
+      await pool.query('DELETE FROM campaign_touches WHERE campaign_id = $1', [campaignId]);
+      await pool.query('DELETE FROM campaigns WHERE id = $1', [campaignId]);
+      await pool.query('DELETE FROM prospects WHERE id = ANY($1::int[])', [made]);
+    }
+  });
+
+  it('campaigns: at the same timestamp a touch with a campaign beats one without (tie rule 1)', async () => {
+    const first = await insertCampaign({ name: 'TEST:Tie-One-A', channel: 'email', status: 'active' });
+    const second = await insertCampaign({ name: 'TEST:Tie-One-B', channel: 'email', status: 'active' });
+    const lead = await insertProspect({
+      google_place_id: 'test-campaign-tie-one',
+      company: 'TEST: Tie One Heating',
+      email: 'test+tie-one@example.com',
+      industry: 'HVAC',
+    });
+    try {
+      // Enrolled in two active email campaigns, so a campaign-less touch
+      // falls back to nothing (unattributed) instead of to a campaign.
+      await enroll(lead.id, first, null);
+      await enroll(lead.id, second, null);
+      const when = atDay(10);
+      await insertTouch({ leadId: lead.id, campaignId: null, type: 'sent', occurredAt: when });
+      const withCampaign = await insertTouch({ leadId: lead.id, campaignId: first, type: 'sent', occurredAt: when });
+      const sold = await insertTouch({
+        leadId: lead.id, campaignId: null, type: 'won', occurredAt: atDay(12), revenueCents: 0,
+      });
+      for (const model of ['last', 'first']) {
+        const row = await attributeConversion({
+          leadId: lead.id, occurredAt: sold.occurred_at, origin: 'touch', sourceId: sold.id, model,
+        });
+        assert.equal(row.unattributed, false, model);
+        assert.equal(row.campaign_id, first, model);
+        assert.equal(String(row.source_id), String(withCampaign.id), model);
+      }
+    } finally {
+      await pool.query('DELETE FROM campaign_touches WHERE lead_id = $1', [lead.id]);
+      await pool.query('DELETE FROM campaign_leads WHERE lead_id = $1', [lead.id]);
+      await pool.query('DELETE FROM campaigns WHERE id = ANY($1::int[])', [[first, second]]);
+      await pool.query('DELETE FROM prospects WHERE id = $1', [lead.id]);
+    }
+  });
+
+  it('campaigns: manual source is refused for prototype views and CTA clicks', async () => {
+    const lead = fixture.leads[2];
+    for (const type of ['prototype_viewed', 'prototype_cta_clicked']) {
+      await assert.rejects(
+        insertTouch({ leadId: lead.id, campaignId: fixture.protoId, type, day: 3, channel: 'prototype_link', source: 'manual' }),
+        (err) => err.code === '23514' && /campaign_touches_manual_type_check/.test(err.message),
+        type
+      );
+      const ok = await insertTouch({
+        leadId: lead.id, campaignId: fixture.protoId, type, day: 3, channel: 'prototype_link', source: 'system',
+      });
+      await pool.query('DELETE FROM campaign_touches WHERE id = $1', [ok.id]);
+    }
+    const manualOpen = await insertTouch({ leadId: lead.id, campaignId: fixture.hvacId, type: 'opened', day: 1, source: 'manual' });
+    await pool.query('DELETE FROM campaign_touches WHERE id = $1', [manualOpen.id]);
   });
 
   it('campaigns: schema applied twice is idempotent', async () => {

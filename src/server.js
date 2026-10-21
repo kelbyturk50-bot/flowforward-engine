@@ -72,8 +72,9 @@ app.use('/demo/prototype', require('./prototypes/page').router);
 // requireApiKey is unchanged and still covers every other /api route.
 const flagsApi = require('./api/flags');
 app.use('/api/flags', flagsApi.requireFlagApiKey);
-// Campaigns flag gate is mounted before API-key auth. When FF_CAMPAIGNS is
-// not exactly "true", /api/campaigns is the same 404 as an unknown path.
+// Campaigns gate is mounted before API-key auth. FF_CAMPAIGNS effectively
+// off (flag service) -> the same 404 as an unknown path. On, but CRM_API_KEY
+// not ready (crmApiKeyReady) -> 503 api_key_not_configured. Then the key.
 const campaignsApi = require('./api/campaigns');
 app.use('/api/campaigns', campaignsApi.flagGate);
 app.use('/api', requireApiKey);
@@ -92,7 +93,7 @@ app.use('/api/flags',     flagsApi);
 // (database row true, and the env var is not a trimmed case-insensitive
 // "false", "off", "0", or "no"). These routes do not send mail.
 app.use('/api/pilot/estimate-recovery', require('./api/pilot-estimates'));
-// Tracking only. 404 unless FF_CAMPAIGNS is exactly "true". Does not send.
+// Tracking only. GET /api/campaigns and /api/campaigns/metrics. Does not send.
 app.use('/api/campaigns', campaignsApi.router);
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────
