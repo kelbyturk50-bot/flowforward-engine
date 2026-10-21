@@ -210,6 +210,27 @@ describe('prototype on draft', () => {
     console.log('[prototype] flag off: draft saved, prototypes=0, GET prototype=null');
   });
 
+  it('prototype: feature_flags row off (CRM toggle) => draft saved, no prototype row; env true does not override', async () => {
+    const lead = await seedLead({ google_place_id: 'test-place-proto-row-off' });
+    await pool.query(`UPDATE feature_flags SET enabled = false WHERE name = 'FF_PROTOTYPE_ON_DRAFT'`);
+    try {
+      for (const value of [undefined, 'true']) {
+        if (value === undefined) delete process.env.FF_PROTOTYPE_ON_DRAFT;
+        else process.env.FF_PROTOTYPE_ON_DRAFT = value;
+        const proposal = await draftProposal(lead.id);
+        assert.equal(proposal.status, 'draft');
+        assert.equal(await prototypeRows(lead.id).then((rows) => rows.length), 0);
+      }
+    } finally {
+      await pool.query(`UPDATE feature_flags SET enabled = true WHERE name = 'FF_PROTOTYPE_ON_DRAFT'`);
+    }
+    delete process.env.FF_PROTOTYPE_ON_DRAFT;
+    const proposal = await draftProposal(lead.id);
+    assert.equal(proposal.status, 'draft');
+    assert.equal(await prototypeRows(lead.id).then((rows) => rows.length), 1);
+    console.log('[prototype] row off: prototypes=0 (env unset and env true); row back on with env unset: prototypes=1');
+  });
+
   it('prototype: flag on + rubric pick => one row keyed to prospect_id', async () => {
     process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
     const lead = await seedLead({ google_place_id: 'test-place-proto-pick' });

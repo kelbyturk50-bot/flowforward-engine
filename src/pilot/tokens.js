@@ -278,7 +278,7 @@ async function revokeForProposal(proposalId) {
 }
 
 async function demoHrefForProposal(req, proposalId) {
-  if (!flags.masterOn() || !flags.linkOn() || !pilotReady()) return '';
+  if (!(await flags.masterOn()) || !(await flags.linkOn()) || !pilotReady()) return '';
   const id = Number(proposalId);
   if (!Number.isInteger(id) || id < 1) return '';
 

@@ -164,7 +164,7 @@ async function loadProspect(prospectId, research) {
 
 // Draft hook. Uses the rubric; no pick means no prototype.
 async function attachPrototype({ prospectId, research }) {
-  if (!prototypeOnDraft()) return null;
+  if (!(await prototypeOnDraft())) return null;
   try {
     const prospect = await loadProspect(prospectId, research);
     if (!prospect) return null;

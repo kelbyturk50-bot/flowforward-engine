@@ -53,7 +53,7 @@ ${back ? `<p><a href="${esc(back)}" style="color:#2F6B57;font-weight:600">Back t
 app.use('/p', require('./proposals/onepager').router);
 
 // Public pilot demo (no API key — the token is the credential).
-// 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly "true". No mint route.
+// 404 unless the master flag is effectively on. No mint route.
 app.use('/demo/estimate-recovery', pilotDemo.router);
 
 // Public prototype read (no API key — the token is the credential).
@@ -66,6 +66,12 @@ app.use('/demo/prototype-assets', require('./prototypes/page').assets);
 app.use('/demo/prototype', require('./prototypes/page').router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
+// GET and PUT /api/flags only. crmApiKeyReady() trims CRM_API_KEY and
+// drops every whitespace character. Unset, empty, spaces-only, or fewer
+// than 32 non-whitespace characters returns 503 from this guard.
+// requireApiKey is unchanged and still covers every other /api route.
+const flagsApi = require('./api/flags');
+app.use('/api/flags', flagsApi.requireFlagApiKey);
 app.use('/api', requireApiKey);
 app.use('/api/prospects', require('./api/prospects'));
 app.use('/api/projects',  projects);
@@ -77,8 +83,10 @@ app.use('/api/inbox',     require('./api/inbox'));
 app.use('/api/prototypes', require('./api/prototypes'));
 app.use('/api/brands',    require('./api/brands'));
 app.use('/api/rubric',    require('./api/rubric'));
-// CSV intake for Pilot #1. 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly
-// "true". These routes do not send mail.
+app.use('/api/flags',     flagsApi);
+// CSV intake for Pilot #1. 404 unless the master flag is effectively on
+// (database row true, and the env var is not a trimmed case-insensitive
+// "false", "off", "0", or "no"). These routes do not send mail.
 app.use('/api/pilot/estimate-recovery', require('./api/pilot-estimates'));
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────

@@ -44,13 +44,20 @@ function payloadTooLarge(err, req, res, next) {
   return sendJson(res, 413, { error: 'Payload too large' });
 }
 
-router.use((req, res, next) => {
+router.use(async (req, res, next) => {
   const hit = consume(clientIp(req), 'demo');
   if (hit.limited) {
     res.set('Retry-After', String(hit.retryAfter));
     return sendJson(res, 429, { error: 'Too many requests' });
   }
-  if (!flags.masterOn() || !pilotReady()) return notFound(res);
+  let on = false;
+  try {
+    on = await flags.masterOn();
+  } catch (err) {
+    console.error('[pilot] flag read failed');
+    on = false;
+  }
+  if (!on || !pilotReady()) return notFound(res);
   next();
 });
 

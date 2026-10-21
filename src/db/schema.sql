@@ -781,3 +781,37 @@ DROP TRIGGER IF EXISTS inbox_items_updated_at ON inbox_items;
 CREATE TRIGGER inbox_items_updated_at
   BEFORE UPDATE ON inbox_items
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- Server feature flags. Seeded off, except FF_PROTOTYPE_ON_DRAFT, which is
+-- seeded on (Kelby, Oct 20). A re-boot inserts missing names only.
+-- ON CONFLICT DO NOTHING does not update enabled, updated_at, or updated_by.
+-- FF_PILOT_ESTIMATE_SMS and FF_CAMPAIGN_OPEN_PIXEL are env-only (exactly
+-- "true") and are not seeded. A row left from an older boot is ignored.
+-- FF_PILOT_ESTIMATE_LIVE_SEND stays env-only and is not seeded.
+-- FF_HIDE_WATERMARK is test-only and is not seeded.
+CREATE TABLE IF NOT EXISTS feature_flags (
+  name       TEXT PRIMARY KEY,
+  enabled    BOOLEAN NOT NULL DEFAULT false,
+  updated_at TIMESTAMPTZ,
+  updated_by TEXT
+);
+
+-- Concurrent updates of one flag are last-write-wins. The API locks the
+-- row with SELECT … FOR UPDATE and inserts the audit row in that transaction.
+CREATE TABLE IF NOT EXISTS feature_flag_audit (
+  id         SERIAL PRIMARY KEY,
+  flag       TEXT,
+  old_value  BOOLEAN,
+  new_value  BOOLEAN,
+  actor      TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO feature_flags (name, enabled)
+VALUES
+  ('FF_PILOT_ESTIMATE_RECOVERY', false),
+  ('FF_PILOT_LINK_ON_ONEPAGER', false),
+  ('FF_PROTOTYPE_GALLERY', false),
+  ('FF_CAMPAIGNS', false),
+  ('FF_PROTOTYPE_ON_DRAFT', true)
+ON CONFLICT (name) DO NOTHING;

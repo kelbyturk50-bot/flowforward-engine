@@ -191,7 +191,7 @@ function pilotProposalId(req) {
 // POST /api/proposals/:id/demo-token — mint a demo token. API key required.
 // Not a public route. 404 when the master pilot flag is off or the proposal is missing.
 router.post('/:id/demo-token', async (req, res) => {
-  if (!pilotFlags.masterOn() || !pilotTokens.pilotReady()) return res.status(404).json({ error: 'Not found' });
+  if (!(await pilotFlags.masterOn()) || !pilotTokens.pilotReady()) return res.status(404).json({ error: 'Not found' });
   const id = pilotProposalId(req);
   if (!id) return res.status(404).json({ error: 'Not found' });
   try {
@@ -212,7 +212,7 @@ router.post('/:id/demo-token', async (req, res) => {
 
 // POST /api/proposals/:id/demo-token/revoke — revoke active demo tokens for this proposal.
 router.post('/:id/demo-token/revoke', async (req, res) => {
-  if (!pilotFlags.masterOn() || !pilotTokens.pilotReady()) return res.status(404).json({ error: 'Not found' });
+  if (!(await pilotFlags.masterOn()) || !pilotTokens.pilotReady()) return res.status(404).json({ error: 'Not found' });
   const id = pilotProposalId(req);
   if (!id) return res.status(404).json({ error: 'Not found' });
   try {
