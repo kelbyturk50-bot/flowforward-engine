@@ -118,22 +118,26 @@ describe('prototype page', () => {
     assert.ok(html.includes('data-prototype-tile="true"'));
     assert.ok(html.includes('Concept by FlowForward, sample data, not affiliated with or endorsed by'));
     assert.ok(html.includes('This preview link expires 14 days after it was shared'));
-    for (const id of ['site', 'estimate', 'lead', 'missed', 'booking']) assert.ok(html.includes(`data-panel="${id}"`), id);
+    // The automations run from real site controls: booking window, phone links
+    // (missed-call text-back), the estimate form (instant reply + follow-up).
+    for (const hook of ['<dialog class="dlg" id="book"', 'data-call', 'data-est-form', 'id="chat"', 'class="fu-line"', 'See the 4 automations', 'class="callbar"']) assert.ok(html.includes(hook), hook);
+    for (const slot of ['Your Google rating here', 'Your license # here', 'Your Google reviews appear here', 'Your seasonal offer here']) assert.ok(html.includes(slot), slot);
+    assert.equal(/★|rated \d|\d+ years|licensed (and|&amp;) insured|24\/7/i.test(html), false, 'no invented trust claims');
     for (const anchor of ['$0', 'typically $1.5–3.5K', 'typically $150–400/mo', 'typically $125–200/hr', 'Typical starting ranges; final scope after a call.']) {
       assert.ok(html.includes(anchor), anchor);
     }
-    assert.match(html, /<a class="pt-btn pt-talk" href="https:\/\/calendly\.com\//);
+    assert.match(html, /<a class="ff-talk" href="https:\/\/calendly\.com\//);
     // Yellow is darkened for contrast (prototype-system.md §2).
-    assert.ok(html.includes('--a:#7D7000'));
+    assert.ok(html.includes('--brand:#7D7000'));
     // Only Kelby's booking link and email leave the page; fonts are self-hosted.
     const urls = html.match(/https?:\/\/[^"'\s)<]+/g) || [];
     const outside = urls.filter(u => !/^https:\/\/calendly\.com\//.test(u) && !/^http:\/\/www\.w3\.org\/2000\/svg/.test(u));
     assert.deepEqual(outside, []);
     assert.equal(/<img|<iframe|fetch\(|XMLHttpRequest|sendBeacon|<form[^>]*action=/i.test(html), false);
     assert.equal(/logo/i.test(html), false);
-    const font = await call(port, 'GET', '/demo/prototype-assets/barlow-latin-600-normal.woff2', { key: '' });
+    const font = await call(port, 'GET', '/demo/prototype-assets/barlow-condensed-latin-700-normal.woff2', { key: '' });
     assert.equal(font.status, 200);
-    console.log(`[prototype-page] page ${html.length} bytes, 5 panels, watermark present with ?watermark=0, outside urls 0`);
+    console.log(`[prototype-page] page ${html.length} bytes, automation hooks present, watermark present with ?watermark=0, outside urls 0`);
   });
 
   it('escapes a hostile business name and the watermark stays', async () => {
