@@ -128,6 +128,14 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS do_not_contact BOOLEAN NOT NULL DEFAULT FALSE; -- opted out / bounced
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS researched_at  TIMESTAMPTZ;
+-- Archive flag. NULL archived_at means the lead is still in the working set.
+-- archive_run_id is the apply that set the flag. Undo restores that run only.
+-- Boot adds the columns and does not set them. The row update is an explicit
+-- script, not a statement in this file.
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS archived_at    TIMESTAMPTZ;
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS archive_reason TEXT;
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS archive_run_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_prospects_archived ON prospects(archived_at) WHERE archived_at IS NOT NULL;
 -- Field-service software cached by proposal research. NULL = unknown, so fit
 -- scoring applies no ServiceTitan penalty or tier cap. Only the value
 -- ServiceTitan is penalized (−15) and capped at tier B. computeFit / rescore
@@ -542,6 +550,37 @@ VALUES
   (1, 'bookkeeping', 'size_sweet', 5, 8, FALSE)
 ON CONFLICT (version, agent, signal) DO NOTHING;
 
+-- Branded prototype issued from a proposal draft (on unless
+-- FF_PROTOTYPE_ON_DRAFT is false) or from the CRM. Keyed to the prospect
+-- (the shop), not a proposal version. At most one active row per prospect.
+-- The raw token is not stored: the server recomputes it from nonce with an
+-- HMAC keyed by CRM_API_KEY (src/prototypes/tokens.js) and checks token_hash.
+-- Wordmark and hex colors only: this table has no image column.
+-- This block does not UPDATE existing rows.
+CREATE TABLE IF NOT EXISTS prototypes (
+  id               SERIAL PRIMARY KEY,
+  prospect_id      INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  agent_type       TEXT NOT NULL,
+  brand_name       TEXT NOT NULL,
+  color_primary    TEXT NOT NULL,
+  color_secondary  TEXT NOT NULL,
+  token_hash       BYTEA NOT NULL UNIQUE,
+  nonce            BYTEA,
+  issued_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at       TIMESTAMPTZ NOT NULL,
+  revoked_at       TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT prototypes_color_primary_hex CHECK (color_primary ~ '^#[0-9a-fA-F]{6}$'),
+  CONSTRAINT prototypes_color_secondary_hex CHECK (color_secondary ~ '^#[0-9a-fA-F]{6}$'),
+  CONSTRAINT prototypes_expires_14d CHECK (expires_at = issued_at + INTERVAL '336 hours')
+);
+
+ALTER TABLE prototypes ADD COLUMN IF NOT EXISTS nonce BYTEA;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prototypes_one_active
+  ON prototypes (prospect_id)
+  WHERE revoked_at IS NULL;
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Pilot #1 CSV intake (idempotent — applied on every boot).
 -- Shop row plus open estimates. No free-text notes column. No mailbox token.
@@ -672,6 +711,111 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_estimate_suppressions_customer_email
   ON pilot_estimate_suppressions (customer_id, email);
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- Inbox: replies to proposals, Claude's read of them, and drafted responses.
+-- Additive only. No boot UPDATEs.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Every message in a lead's conversation after the first email: their replies
+-- (direction 'in') and replies Kelby sends from the CRM or from Gmail ('out').
+-- The proposal's own first email and follow-ups stay on the proposals row.
+CREATE TABLE IF NOT EXISTS inbox_messages (
+  id                SERIAL PRIMARY KEY,
+  prospect_id       INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  proposal_id       INTEGER REFERENCES proposals(id) ON DELETE SET NULL,
+  direction         TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+  dedupe_key        TEXT NOT NULL UNIQUE,          -- Gmail id, else a hash of sender/date/subject/body
+  gmail_id          TEXT,
+  thread_id         TEXT,
+  header_message_id TEXT,                          -- RFC Message-ID, for In-Reply-To on our reply
+  from_addr         TEXT,
+  to_addr           TEXT,
+  subject           TEXT,
+  body              TEXT,
+  is_auto           BOOLEAN NOT NULL DEFAULT FALSE, -- auto-reply / out-of-office
+  received_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_inbox_messages_prospect ON inbox_messages(prospect_id, received_at);
+CREATE INDEX IF NOT EXISTS idx_inbox_messages_thread ON inbox_messages(thread_id);
+
+-- One row per inbound message that needs a look: Claude's summary, suggested
+-- next steps, and (when a reply makes sense) a drafted response to review.
+-- status: queued | triaging | rewriting | ready | fyi | failed | sent | handled | discarded
+CREATE TABLE IF NOT EXISTS inbox_items (
+  id             SERIAL PRIMARY KEY,
+  prospect_id    INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  proposal_id    INTEGER REFERENCES proposals(id) ON DELETE SET NULL,
+  message_id     INTEGER NOT NULL REFERENCES inbox_messages(id) ON DELETE CASCADE,
+  status         TEXT NOT NULL DEFAULT 'queued',
+  kind           TEXT,                              -- interested | question | not_now | booked | auto_reply | opt_out | not_interested | referral | bounce | other
+  label          TEXT,
+  summary        TEXT,
+  asks           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  timing         TEXT,
+  mood           TEXT,
+  prep           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  suggestions    JSONB NOT NULL DEFAULT '[]'::jsonb, -- [{action, label, stage?, date?, text?}]
+  applied        JSONB NOT NULL DEFAULT '{}'::jsonb, -- {"<index>": "<applied at>"}
+  notice         TEXT,
+  reply_to       TEXT,
+  reply_subject  TEXT,
+  reply_body     TEXT,
+  ai_original    TEXT,
+  instructions   TEXT,
+  model          TEXT,
+  cost_usd       NUMERIC(10,4) DEFAULT 0,
+  error          TEXT,
+  handled_note   TEXT,
+  reviewed_at    TIMESTAMPTZ,
+  triaged_at     TIMESTAMPTZ,
+  sent_at        TIMESTAMPTZ,
+  sent_message_id INTEGER REFERENCES inbox_messages(id) ON DELETE SET NULL,
+  created_at     TIMESTAMPTZ DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_items_message ON inbox_items(message_id);
+CREATE INDEX IF NOT EXISTS idx_inbox_items_status ON inbox_items(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_inbox_items_prospect ON inbox_items(prospect_id, created_at DESC);
+
+DROP TRIGGER IF EXISTS inbox_items_updated_at ON inbox_items;
+CREATE TRIGGER inbox_items_updated_at
+  BEFORE UPDATE ON inbox_items
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- Server feature flags. Seeded off, except FF_PROTOTYPE_ON_DRAFT, which is
+-- seeded on (Kelby, Oct 20). A re-boot inserts missing names only.
+-- ON CONFLICT DO NOTHING does not update enabled, updated_at, or updated_by.
+-- FF_PILOT_ESTIMATE_SMS and FF_CAMPAIGN_OPEN_PIXEL are env-only (exactly
+-- "true") and are not seeded. A row left from an older boot is ignored.
+-- FF_PILOT_ESTIMATE_LIVE_SEND stays env-only and is not seeded.
+-- FF_HIDE_WATERMARK is test-only and is not seeded.
+CREATE TABLE IF NOT EXISTS feature_flags (
+  name       TEXT PRIMARY KEY,
+  enabled    BOOLEAN NOT NULL DEFAULT false,
+  updated_at TIMESTAMPTZ,
+  updated_by TEXT
+);
+
+-- Concurrent updates of one flag are last-write-wins. The API locks the
+-- row with SELECT … FOR UPDATE and inserts the audit row in that transaction.
+CREATE TABLE IF NOT EXISTS feature_flag_audit (
+  id         SERIAL PRIMARY KEY,
+  flag       TEXT,
+  old_value  BOOLEAN,
+  new_value  BOOLEAN,
+  actor      TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO feature_flags (name, enabled)
+VALUES
+  ('FF_PILOT_ESTIMATE_RECOVERY', false),
+  ('FF_PILOT_LINK_ON_ONEPAGER', false),
+  ('FF_PROTOTYPE_GALLERY', false),
+  ('FF_CAMPAIGNS', false),
+  ('FF_PROTOTYPE_ON_DRAFT', true)
+ON CONFLICT (name) DO NOTHING;
+
 -- Campaigns slice 1 (F-006). Additive and idempotent. Applied on every boot.
 -- Tracking only: these statements do not INSERT, UPDATE, or DELETE existing
 -- rows, and they do not send mail. No pixel table and no /o route.

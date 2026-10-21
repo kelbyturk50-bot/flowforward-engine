@@ -24,7 +24,8 @@ test('min_value happy path is a parameterized est_value comparison', () => {
 test('min_value=0 is a real filter and still excludes NULL estimates', () => {
   const q = buildProspectListQuery({ min_value: '0' });
   assert.match(q.listSql, /est_value >= \$1/);
-  assert.doesNotMatch(q.listSql, /IS NULL/);
+  assert.doesNotMatch(q.listSql, /est_value IS NULL/);
+  assert.match(q.listSql, /archived_at IS NULL/);
   assert.deepEqual(q.params, [0]);
   assert.match(q.listSql, /ORDER BY fit_score DESC NULLS LAST/);
 });

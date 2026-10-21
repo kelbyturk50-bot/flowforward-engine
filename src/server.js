@@ -53,10 +53,25 @@ ${back ? `<p><a href="${esc(back)}" style="color:#2F6B57;font-weight:600">Back t
 app.use('/p', require('./proposals/onepager').router);
 
 // Public pilot demo (no API key — the token is the credential).
-// 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly "true". No mint route.
+// 404 unless the master flag is effectively on. No mint route.
 app.use('/demo/estimate-recovery', pilotDemo.router);
 
+// Public prototype read (no API key — the token is the credential).
+// Mounted before the API-key guard. Rate limit uses the prototype bucket,
+// separate from the pilot demo.
+app.use('/api/public/prototypes', require('./prototypes/public').router);
+// The prototype page itself: sample homepage + agent click-throughs.
+// Server-rendered, watermarked, no API key (the token is the credential).
+app.use('/demo/prototype-assets', require('./prototypes/page').assets);
+app.use('/demo/prototype', require('./prototypes/page').router);
+
 // ─── Routes ───────────────────────────────────────────────────────────────
+// GET and PUT /api/flags only. crmApiKeyReady() trims CRM_API_KEY and
+// drops every whitespace character. Unset, empty, spaces-only, or fewer
+// than 32 non-whitespace characters returns 503 from this guard.
+// requireApiKey is unchanged and still covers every other /api route.
+const flagsApi = require('./api/flags');
+app.use('/api/flags', flagsApi.requireFlagApiKey);
 // Campaigns flag gate is mounted before API-key auth. When FF_CAMPAIGNS is
 // not exactly "true", /api/campaigns is the same 404 as an unknown path.
 const campaignsApi = require('./api/campaigns');
@@ -68,10 +83,14 @@ app.use('/api/tasks',     tasks);
 app.use('/api/focus',     require('./api/focus'));
 app.use('/api/runs',      require('./api/runs'));
 app.use('/api/proposals', require('./api/proposals'));
+app.use('/api/inbox',     require('./api/inbox'));
+app.use('/api/prototypes', require('./api/prototypes'));
 app.use('/api/brands',    require('./api/brands'));
 app.use('/api/rubric',    require('./api/rubric'));
-// CSV intake for Pilot #1. 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly
-// "true". These routes do not send mail.
+app.use('/api/flags',     flagsApi);
+// CSV intake for Pilot #1. 404 unless the master flag is effectively on
+// (database row true, and the env var is not a trimmed case-insensitive
+// "false", "off", "0", or "no"). These routes do not send mail.
 app.use('/api/pilot/estimate-recovery', require('./api/pilot-estimates'));
 // Tracking only. 404 unless FF_CAMPAIGNS is exactly "true". Does not send.
 app.use('/api/campaigns', campaignsApi.router);
@@ -130,6 +149,7 @@ async function boot() {
   if (mainOk) {
     try {
       await require('./proposals/jobs').recover();
+      await require('./proposals/inbox').recover();
       const n = await rescore();
       console.log(`[server] ✓ Fit scores refreshed for ${n} prospects`);
     } catch (err) {

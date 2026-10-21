@@ -1,10 +1,12 @@
 // Pilot #1 CSV intake. API key is enforced by the /api mount.
-// Every route is 404 unless FF_PILOT_ESTIMATE_RECOVERY is exactly "true"
+// Every route is 404 unless FF_PILOT_ESTIMATE_RECOVERY is effectively on
+// (database row true, env not a trimmed case-insensitive "false", "off", "0", or "no")
 // AND CRM_API_KEY trims to at least 32 non-whitespace characters. A short,
 // blank, or missing key writes nothing, matching the pilot demo. This file
 // does not send mail.
 
 const express = require('express');
+const { crmApiKeyReady } = require('./crm-key');
 const flags = require('../pilot/flags');
 const { globalSendKilled } = require('../pilot/kill-switch');
 const { MAX_CSV_BYTES, parseIntake, startsWithFormula } = require('../pilot/estimate-intake');
@@ -17,14 +19,11 @@ const csvBody = express.text({
 });
 
 const NOT_FOUND = { error: 'Not found' };
-const MIN_API_KEY_LENGTH = 32;
 
 let missingKeyWarned = false;
 
 function pilotKeyReady() {
-  const secret = process.env.CRM_API_KEY;
-  const compact = typeof secret === 'string' ? secret.trim().replace(/\s/g, '') : '';
-  if (compact.length >= MIN_API_KEY_LENGTH) {
+  if (crmApiKeyReady()) {
     missingKeyWarned = false;
     return true;
   }
@@ -44,8 +43,15 @@ function closed(res) {
   return sendJson(res, 404, NOT_FOUND);
 }
 
-router.use((req, res, next) => {
-  if (!flags.masterOn() || !pilotKeyReady()) return closed(res);
+router.use(async (req, res, next) => {
+  let on = false;
+  try {
+    on = await flags.masterOn();
+  } catch (err) {
+    console.error('[pilot] flag read failed');
+    on = false;
+  }
+  if (!on || !pilotKeyReady()) return closed(res);
   return next();
 });
 

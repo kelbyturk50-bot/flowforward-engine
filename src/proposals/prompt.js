@@ -98,6 +98,7 @@ Owner to owner. Casual, plain-spoken, warm, curious. Sounds like a sharp local g
 - Plain text only. No bullet lists, no bold, no images, no attachments.
 - First email: 60–110 words. Open with one specific, true observation about THEIR business (from the research), not about ${SENDER.name.split(' ')[0]}. Then one or two sentences on what could be better and why it matters to them. Then the soft ask.
 - Exactly one link in the first email, written as the placeholder {{ONEPAGER_URL}} on its own line, introduced naturally (e.g. "I put a few specific ideas for <Company> on one page here:").
+- Don't write any other link or mention a prototype. When the shop has a clickable prototype, the system adds one short line with that link right after the one-pager link, and one before the sign-off in follow-up 1.
 - The ask: reply with any questions, or grab 15 minutes for a free consultation (the booking button is on the page). Low pressure.
 - Subject: 2–6 words, lowercase or sentence case, specific to them, no clickbait, no "Re:", no "quick question", no ALL CAPS, no exclamation marks, no "free", "guarantee", "$", "%", "act now", "limited time".
 - Greeting: "Hi <FirstName>," if you know the owner's first name with reasonable confidence, otherwise "Hi <Company> team,".

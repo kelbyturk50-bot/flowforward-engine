@@ -5,6 +5,7 @@ const router  = express.Router();
 const pool    = require('../db/client');
 const { CLOSED } = require('./prospects');
 const { appendATierPestHide } = require('../scoring/industry');
+const { notArchivedSql } = require('../db/pest-archive');
 
 router.get('/', async (req, res) => {
   const today = req.query.today || null; // YYYY-MM-DD in the viewer's timezone; defaults to server date
@@ -14,26 +15,30 @@ router.get('/', async (req, res) => {
     const d = today ? '$2::date' : 'CURRENT_DATE';
     const dOnly = today ? '$1::date' : 'CURRENT_DATE';
 
+    const active = notArchivedSql();
     const topParams = [];
     const topHide = appendATierPestHide(topParams);
     const countParams = [CLOSED];
     const countHide = appendATierPestHide(countParams);
     const [due, top, stale, work, counts] = await Promise.all([
-      // Follow-ups due today or overdue
+      // Follow-ups due today or overdue. Archived leads stay out of Today.
       pool.query(`SELECT * FROM prospects
                    WHERE stage <> ALL($1) AND next_action_at IS NOT NULL AND next_action_at <= ${d}
+                     AND ${active}
                    ORDER BY next_action_at, fit_score DESC NULLS LAST LIMIT 50`, withDate),
       // Best untouched leads to reach out to. Rows stored as A whose company
-      // name fails the company-name gate are omitted here. The SELECT does
-      // not update the row.
+      // name fails the company-name gate are omitted here. Archived leads are
+      // omitted too. The SELECT does not update the row.
       pool.query(`SELECT * FROM prospects
                    WHERE stage = 'found' AND fit_tier IN ('A','B') AND (phone IS NOT NULL OR website IS NOT NULL)
                      AND ${topHide}
+                     AND ${active}
                    ORDER BY fit_score DESC, review_count DESC NULLS LAST LIMIT 15`, topParams),
       // In conversation but gone quiet for 7+ days with no follow-up scheduled
       pool.query(`SELECT * FROM prospects
                    WHERE stage IN ('contacted','responded','qualified','proposal') AND next_action_at IS NULL
                      AND COALESCE(last_contacted_at, updated_at) < NOW() - INTERVAL '7 days'
+                     AND ${active}
                    ORDER BY fit_score DESC NULLS LAST LIMIT 20`),
       // Open project tasks overdue or due in the next 7 days
       pool.query(`SELECT t.*, pr.name AS project_name, pr.status AS project_status, pk.company AS client_company
@@ -43,14 +48,17 @@ router.get('/', async (req, res) => {
                      AND t.due_date <= ${dOnly} + 7
                    ORDER BY t.due_date, t.id LIMIT 30`, today ? [today] : []),
       pool.query(`SELECT
-                    (SELECT COUNT(*) FROM prospects WHERE stage <> ALL($1))::int AS open_leads,
-                    (SELECT COUNT(*) FROM prospects WHERE stage <> ALL($1) AND fit_tier = 'A' AND ${countHide})::int AS a_tier_open,
-                    (SELECT COUNT(*) FROM prospects WHERE stage IN ('qualified','proposal'))::int AS hot,
-                    (SELECT COALESCE(SUM(est_value),0) FROM prospects WHERE stage IN ('qualified','proposal'))::float AS pipeline_value,
+                    (SELECT COUNT(*) FROM prospects WHERE stage <> ALL($1) AND ${active})::int AS open_leads,
+                    (SELECT COUNT(*) FROM prospects WHERE stage <> ALL($1) AND fit_tier = 'A' AND ${countHide} AND ${active})::int AS a_tier_open,
+                    (SELECT COUNT(*) FROM prospects WHERE stage IN ('qualified','proposal') AND ${active})::int AS hot,
+                    (SELECT COALESCE(SUM(est_value),0) FROM prospects WHERE stage IN ('qualified','proposal') AND ${active})::float AS pipeline_value,
                     (SELECT COUNT(*) FROM projects WHERE status = 'active')::int AS active_projects,
-                    (SELECT COUNT(*) FROM prospects WHERE discovered_at > NOW() - INTERVAL '24 hours')::int AS new_24h,
-                    (SELECT COUNT(*) FROM proposals WHERE status = 'draft')::int AS proposals_to_review,
-                    (SELECT COUNT(*) FROM proposals WHERE status = 'replied' AND replied_at > NOW() - INTERVAL '7 days')::int AS proposal_replies_7d`, countParams),
+                    (SELECT COUNT(*) FROM prospects WHERE discovered_at > NOW() - INTERVAL '24 hours' AND ${active})::int AS new_24h,
+                    (SELECT COUNT(*) FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+                      WHERE pr.status = 'draft' AND ${notArchivedSql('p')})::int AS proposals_to_review,
+                    (SELECT COUNT(*) FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+                      WHERE pr.status = 'replied' AND pr.replied_at > NOW() - INTERVAL '7 days'
+                        AND ${notArchivedSql('p')})::int AS proposal_replies_7d`, countParams),
     ]);
 
     res.json({

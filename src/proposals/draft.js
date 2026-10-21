@@ -7,10 +7,12 @@ const Anthropic = require('@anthropic-ai/sdk');
 const pool      = require('../db/client');
 const cfg       = require('./config');
 const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
+const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 const { researchLead } = require('./research');
 const { fsmDetectedFromResearch } = require('./servicetitan');
 const { rescore } = require('../scoring/fit');
 const { systemPrompt, userPrompt, SUBMIT_TOOL } = require('./prompt');
+const { attachPrototype } = require('../prototypes/store');
 
 let client = null;
 function claude() {
@@ -146,6 +148,9 @@ async function draftProposal(prospectId, opts = {}) {
   if (isPestCompanyName(lead.company)) {
     throw Object.assign(new Error(`${PEST_NAME_REASON}.`), { status: 409 });
   }
+  if (isArchivedLead(lead)) {
+    throw Object.assign(new Error(`${ARCHIVED_LEAD_REASON}.`), { status: 409 });
+  }
 
   const prev = await pool.query(
     'SELECT id, version, research, status FROM proposals WHERE prospect_id = $1 ORDER BY version DESC LIMIT 1', [lead.id]);
@@ -200,6 +205,13 @@ async function draftProposal(prospectId, opts = {}) {
     await db.query('COMMIT');
     // Score from the cache just written. rescore does not fetch.
     await rescore([lead.id]);
+    // After the draft is committed. A prototype failure must not fail the draft.
+    // Flag off returns before any prototype write. No fetch, send, or job enqueue.
+    try {
+      await attachPrototype({ prospectId: lead.id, research });
+    } catch (err) {
+      console.error('[prototype] hook failed:', err && err.code);
+    }
     return ins.rows[0];
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
@@ -220,6 +232,7 @@ async function pickLeads(limit) {
   const { rows } = await pool.query(
     `SELECT p.* FROM prospects p
       WHERE p.fit_tier = ANY($1) AND p.stage = 'found' AND NOT p.do_not_contact
+        AND p.archived_at IS NULL
         AND ${gateSql}
         AND (p.website IS NOT NULL OR p.email IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM proposals pr WHERE pr.prospect_id = p.id)
@@ -265,4 +278,7 @@ async function runProposalBatch({ trigger = 'nightly', count } = {}) {
   }
 }
 
-module.exports = { draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, isRunning: () => running };
+// The inbox reuses the same Anthropic client (and the same test mock).
+const getClient = () => claude();
+
+module.exports = { draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, getClient, isRunning: () => running };

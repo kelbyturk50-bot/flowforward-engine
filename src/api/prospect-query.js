@@ -3,6 +3,7 @@
 // The stored fit_tier is not updated.
 const SORTS = require('./prospect-sorts');
 const { appendATierPestHide } = require('../scoring/industry');
+const { notArchivedSql } = require('../db/pest-archive');
 
 const CLOSED = ['won', 'lost', 'disqualified'];
 
@@ -50,7 +51,7 @@ function buildProspectListQuery(query = {}) {
   const limit = Math.min(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 200, 1000);
   const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0;
 
-  const where = [];
+  const where = [notArchivedSql()];
   const params = [];
   const add = (sql, val) => {
     params.push(val);

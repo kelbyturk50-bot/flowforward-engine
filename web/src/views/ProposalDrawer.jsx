@@ -3,6 +3,7 @@ import { api } from '../api';
 import { TryLiveDemoLink } from '../demo/DemoLinks';
 import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, relDate, timeAgo, toast, Stars } from '../ui';
 import { useJobs, elapsed } from '../jobs';
+import PrototypeCard from './PrototypeCard';
 
 export default function ProposalDrawer({ id, onClose, bump, openLead, openProposal }) {
   const [p, setP] = useState(null);
@@ -134,6 +135,10 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
       {busy && !['save', 'send', 'mark-sent'].includes(busy) && <p className="muted" role="status">Working…</p>}
 
       {p.status === 'sent' || p.sent_at ? <Sequence p={p} /> : null}
+
+      {!['discarded', 'superseded'].includes(p.status) && (
+        <PrototypeCard prospectId={p.prospect_id} prototype={p.prototype} onChange={bump} />
+      )}
 
       <div className="review-grid">
         {/* ── Left: what the bot found ── */}
