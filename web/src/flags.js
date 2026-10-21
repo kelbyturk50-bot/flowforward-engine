@@ -1,14 +1,18 @@
 // Pilot flags for the unsold-estimate recovery demo.
 //
 // Build-time defaults are off. There is no env var that turns them on.
+// The running CRM reads flag state from GET /api/flags. A failed or unreadable
+// response leaves every flag off.
 // A `?flags=a,b` override is honored only on a Vercel preview hostname, or on
-// localhost while `import.meta.env.DEV` is true. Every other origin, including
-// the production CRM hosts, keeps the defaults.
+// localhost while `import.meta.env.DEV` is true. On those hosts it replaces
+// the API values for this browser. Every other origin, including the
+// production CRM hosts, ignores the query and the saved override.
 //
 // Production hosts are rejected before the preview regex. That regex also
 // matches `flowforward-engine-git-main-turk11.vercel.app`, which is production.
 
 import { PRODUCTION_HOSTS } from './api-base.js';
+import { FEATURE_FLAG_NAMES, isCatalogFlag, isHiddenFlag } from './flags-contract.js';
 
 export const FF_PILOT_ESTIMATE_RECOVERY = 'FF_PILOT_ESTIMATE_RECOVERY';
 export const FF_PILOT_LINK_ON_ONEPAGER = 'FF_PILOT_LINK_ON_ONEPAGER';
@@ -108,8 +112,112 @@ export function readPilotFlags({
   return namedFlags(splitFlags(saved));
 }
 
+function namedFeatureFlags(names) {
+  const on = new Set(names.filter((name) => isCatalogFlag(name)));
+  const flags = {};
+  for (const name of FEATURE_FLAG_NAMES) flags[name] = on.has(name);
+  return flags;
+}
+
+// Preview-only override. Null means "no override": the API value stands.
+// A present `flags` query, including an empty one, replaces the API values
+// and is stored for later preview loads. An empty stored value does not.
+export function previewFlagsOverride({
+  location = window.location,
+  storage = window.sessionStorage,
+  env = import.meta.env,
+} = {}) {
+  if (!flagOverrideAllowed(location, env)) return null;
+
+  const params = new URLSearchParams(location?.search || '');
+  if (params.has('flags')) {
+    const names = splitFlags(params.get('flags'));
+    writeStored(storage, names.join(','));
+    return namedFeatureFlags(names);
+  }
+
+  const saved = readStored(storage);
+  if (!saved) return null;
+  return namedFeatureFlags(splitFlags(saved));
+}
+
+// API snapshot. Idle and error both read as off (fail closed).
+let remoteState = { status: 'idle', records: null, error: null };
+let remoteGeneration = 0;
+const remoteListeners = new Set();
+
+export function getFeatureFlagState() {
+  return remoteState;
+}
+
+export function subscribeFeatureFlags(listener) {
+  remoteListeners.add(listener);
+  return () => remoteListeners.delete(listener);
+}
+
+function emitFeatureFlags() {
+  for (const listener of remoteListeners) listener();
+}
+
+export function currentFlagGeneration() {
+  return remoteGeneration;
+}
+
+export function beginFlagLoad() {
+  remoteGeneration += 1;
+  remoteState = { status: 'loading', records: null, error: null };
+  emitFeatureFlags();
+  return remoteGeneration;
+}
+
+export function commitFlagLoad(ticket, records) {
+  if (ticket !== remoteGeneration) return false;
+  remoteState = { status: 'ready', records, error: null };
+  emitFeatureFlags();
+  return true;
+}
+
+export function failFlagLoad(ticket, error) {
+  if (ticket !== remoteGeneration) return false;
+  remoteState = { status: 'error', records: null, error };
+  emitFeatureFlags();
+  return true;
+}
+
+export function replaceRemoteFlag(record) {
+  if (!record || typeof record.name !== 'string' || isHiddenFlag(record.name)) return;
+  remoteGeneration += 1;
+  const current = Array.isArray(remoteState.records) ? remoteState.records : [];
+  const records = current.filter((row) => row?.name !== record.name);
+  records.push(record);
+  remoteState = { status: 'ready', records, error: null };
+  emitFeatureFlags();
+}
+
+export function resetRemoteFlags() {
+  remoteGeneration += 1;
+  remoteState = { status: 'idle', records: null, error: null };
+  emitFeatureFlags();
+}
+
+export function _setFeatureFlagsForTests(records) {
+  remoteGeneration += 1;
+  remoteState = { status: 'ready', records, error: null };
+  emitFeatureFlags();
+}
+
+function remoteFlagOn(name) {
+  if (remoteState.status !== 'ready' || !Array.isArray(remoteState.records)) return false;
+  const row = remoteState.records.find((item) => item && item.name === name);
+  if (!row || isHiddenFlag(name)) return false;
+  return row.enabled === true && row.env_forced_off !== true;
+}
+
 export function flagEnabled(name, options) {
-  return readPilotFlags(options)[name] === true;
+  if (typeof name !== 'string' || isHiddenFlag(name)) return false;
+  const override = previewFlagsOverride(options);
+  if (override) return override[name] === true;
+  return remoteFlagOn(name);
 }
 
 export function readCompanyOverride({

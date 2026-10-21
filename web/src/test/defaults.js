@@ -1,3 +1,4 @@
+import { flagRecords, savedFlag } from './flag-fixtures.js';
 import { api, settings } from './mock-api.js';
 import { contactedLead, discoveryRun, focus, foundLead, project, proposal, summary } from './fixtures.js';
 
@@ -31,6 +32,8 @@ export function installApiDefaults() {
   api.proposalSummary.mockResolvedValue(summary);
   api.proposalJobs.mockResolvedValue({ jobs: [], unreviewed: 0 });
   api.proposal.mockResolvedValue(proposal);
+  api.inbox.mockResolvedValue({ items: [], counts: { needs: 0, fyi: 0, handled: 0, working: 0, waiting: 0 } });
+  api.markInboxSeen.mockResolvedValue({ ok: true });
   api.runs.mockResolvedValue([discoveryRun]);
   api.proposalRuns.mockResolvedValue([]);
   api.proposalSettings.mockResolvedValue({ style_notes: 'Keep the first email short.' });
@@ -39,6 +42,8 @@ export function installApiDefaults() {
     configured: false,
     redirect_uri: `${TEST_URL}/oauth/google/callback`,
   });
+  api.flags.mockResolvedValue(flagRecords());
+  api.setFlag.mockImplementation(async (name, enabled) => savedFlag(name, enabled));
   api.updateLead.mockResolvedValue(foundLead);
   api.updateTask.mockResolvedValue({});
   api.createLead.mockResolvedValue(foundLead);

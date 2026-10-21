@@ -191,7 +191,7 @@ describe('campaigns flag gating', () => {
     const tabs = screen.getByRole('navigation', { name: 'Mobile' });
     expect(within(rail).queryByRole('link', { name: 'Campaigns' })).not.toBeInTheDocument();
     expect(within(rail).getAllByRole('link').map((link) => link.textContent.replace(/\d+$/, '').trim())).toEqual([
-      'Today', 'Leads', 'Proposals', 'Pipeline', 'Projects', 'Settings',
+      'Today', 'Leads', 'Proposals', 'Inbox', 'Pipeline', 'Projects', 'Settings',
     ]);
     expect(within(tabs).getAllByRole('link').map((link) => link.querySelector('span:not(.tab-badge)').textContent)).toEqual([
       'Today', 'Leads', 'Pipeline', 'Proposals', 'More',
@@ -210,7 +210,7 @@ describe('campaigns flag gating', () => {
     const rail = await screen.findByRole('navigation', { name: 'Main' });
     const tabs = screen.getByRole('navigation', { name: 'Mobile' });
     expect(within(rail).getAllByRole('link').map((link) => link.querySelector('span')?.textContent || link.textContent)).toEqual([
-      'Today', 'Leads', 'Pipeline', 'Campaigns', 'Proposals', 'Projects', 'Settings',
+      'Today', 'Leads', 'Pipeline', 'Campaigns', 'Proposals', 'Inbox', 'Projects', 'Settings',
     ]);
     expect(within(tabs).getAllByRole('link').map((link) => link.querySelector('span:not(.tab-badge)').textContent)).toEqual([
       'Today', 'Leads', 'Pipeline', 'Campaigns', 'More',
@@ -228,7 +228,7 @@ describe('campaigns flag gating', () => {
     await user.click(within(tabs).getByRole('link', { name: /^More/ }));
     expect(await screen.findByRole('heading', { name: 'More' })).toBeInTheDocument();
     const menu = screen.getAllByRole('link').filter((link) => link.className.includes('more-link'));
-    expect(menu.map((link) => link.querySelector('.lead-name').textContent)).toEqual(['Proposals', 'Projects']);
+    expect(menu.map((link) => link.querySelector('.lead-name').textContent)).toEqual(['Proposals', 'Inbox', 'Projects']);
     expect(menu[0]).toHaveAttribute('href', '#/proposals');
   });
 

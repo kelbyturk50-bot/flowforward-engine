@@ -1,6 +1,7 @@
 // Thin client for the FlowForward Engine API.
 // Base URL rules live in api-base.js.
 import { resolveApiBase, UNCONFIGURED_MESSAGE } from './api-base.js';
+import { FEATURE_FLAGS_API, parseFlagUpdate, parseFlagsPayload } from './flags-contract.js';
 
 function read(key, fallback = '') {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
@@ -113,6 +114,21 @@ export const api = {
   proposalJobs:      ()             => request('GET', '/api/proposals/jobs'),
   dismissJob:        (id)           => request('POST', `/api/proposals/jobs/${id}/dismiss`),
   markProposalSeen:  (id)           => request('POST', `/api/proposals/${id}/seen`),
+  // Inbox: replies to proposals, Claude's read, drafted responses
+  inbox:             (view)         => request('GET', `/api/inbox${qs({ view })}`),
+  inboxItem:         (id)           => request('GET', `/api/inbox/${id}`),
+  updateInboxItem:   (id, b)        => request('PATCH', `/api/inbox/${id}`, b),
+  sendInboxReply:    (id)           => request('POST', `/api/inbox/${id}/send`),
+  rewriteInboxReply: (id, instructions) => request('POST', `/api/inbox/${id}/rewrite`, { instructions }),
+  handleInboxItem:   (id, note)     => request('POST', `/api/inbox/${id}/handled`, { note }),
+  discardInboxDraft: (id)           => request('POST', `/api/inbox/${id}/discard`),
+  reopenInboxItem:   (id)           => request('POST', `/api/inbox/${id}/reopen`),
+  applyInboxSuggestion: (id, index) => request('POST', `/api/inbox/${id}/apply`, { index }),
+  markInboxSeen:     (id)           => request('POST', `/api/inbox/${id}/seen`),
+  // Branded prototypes (sample homepage + agent click-throughs) per lead
+  createPrototype:   (prospectId, fresh = false) => request('POST', '/api/prototypes', { prospect_id: prospectId, fresh }),
+  updatePrototype:   (id, b)        => request('PATCH', `/api/prototypes/${id}`, b),
+  revokePrototype:   (id)           => request('POST', `/api/prototypes/${id}/revoke`),
   markSentProposal:  (id, note)     => request('POST', `/api/proposals/${id}/mark-sent`, { note }),
   stopProposal:      (id, reason)   => request('POST', `/api/proposals/${id}/stop`, { reason }),
   repliedProposal:   (id, note)     => request('POST', `/api/proposals/${id}/replied`, { note }),
@@ -126,4 +142,7 @@ export const api = {
   gmailStatus:       ()             => request('GET', '/api/proposals/gmail/status'),
   gmailConnect:      (return_to)    => request('POST', '/api/proposals/gmail/connect', { return_to }),
   gmailDisconnect:   ()             => request('POST', '/api/proposals/gmail/disconnect'),
+  // Feature flags. Path and body live only in flags-contract.js.
+  flags:             ()             => request('GET', FEATURE_FLAGS_API.list).then(parseFlagsPayload),
+  setFlag:           (name, enabled) => request('PUT', FEATURE_FLAGS_API.update(name), FEATURE_FLAGS_API.body(enabled)).then(parseFlagUpdate),
 };

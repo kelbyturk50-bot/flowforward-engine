@@ -9,8 +9,10 @@ import Settings from './views/Settings';
 import LeadDrawer from './views/LeadDrawer';
 import ProjectDrawer from './views/ProjectDrawer';
 import More from './views/More';
+import Inbox from './views/Inbox';
 import { Toaster, isOverdue } from './ui';
 import { api, currentApiBase, settings } from './api';
+import { useLoadFeatureFlags } from './remote-flags';
 import ApiBanner from './ApiBanner';
 import { JobsProvider, useJobs } from './jobs';
 import { badgeCount } from './format';
@@ -49,6 +51,7 @@ export default function App() {
   const [proposalId, setProposalId] = useState(null);
   const [version, setVersion] = useState(0);
   const [authProblem, setAuthProblem] = useState(false);
+  useLoadFeatureFlags();
 
   useEffect(() => {
     const onHash = () => setRoute(readRoute());
@@ -66,6 +69,9 @@ export default function App() {
   const apiConfigured = currentApiBase().configured;
   const campaigns = flagEnabled(FF_CAMPAIGNS);
   const routes = railItems(campaigns);
+  // FF_CAMPAIGNS arrives from the API after the first render, so a deep link
+  // to #/campaigns is resolved again once the flag value is known.
+  useEffect(() => { setRoute(readRoute()); }, [campaigns]);
 
   return (
     <JobsProvider bump={bump} version={version}>
@@ -82,6 +88,7 @@ export default function App() {
             {r.id === 'settings' ? <GearIcon /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d={r.icon} /></svg>}
             <span>{r.label}</span>
             {r.id === 'proposals' && <ProposalsBadge />}
+            {r.id === 'inbox' && <InboxBadge />}
           </a>
         ))}
       </nav>
@@ -92,6 +99,7 @@ export default function App() {
         {route === 'today'    && <Today {...shared} />}
         {route === 'leads'    && <Leads {...shared} />}
         {route === 'proposals' && <Proposals {...shared} />}
+        {route === 'inbox'    && <Inbox {...shared} />}
         {route === 'pipeline' && <Pipeline {...shared} />}
         {route === 'campaigns' && (
           <Suspense fallback={<p className="muted">Loading campaigns…</p>}>
@@ -145,11 +153,11 @@ function useFocusCounts(version) {
 }
 
 function MobileTabs({ route, version, campaigns }) {
-  const { unreviewed } = useJobs();
+  const { unreviewed, inboxWaiting } = useJobs();
   const focus = useFocusCounts(version);
   const todayN = focus?.followups_due?.length || 0;
-  const moreN = (focus?.task_queue || []).filter(t => isOverdue(t.due_date)).length;
-  const badges = moreBadge({ campaignsOn: campaigns, proposalsN: unreviewed, overdueN: moreN });
+  const overdueN = (focus?.task_queue || []).filter(t => isOverdue(t.due_date)).length;
+  const badges = moreBadge({ campaignsOn: campaigns, proposalsN: unreviewed, overdueN, inboxN: inboxWaiting });
   const tabs = tabItems(campaigns);
   return (
     <nav className="tabbar" aria-label="Mobile">
@@ -188,6 +196,17 @@ function ProposalsBadge() {
     <span className="rail-badges">
       {working > 0 && <span className="rail-working" title={`${working} drafting in the background`} aria-label={`${working} drafting`} />}
       {unreviewed > 0 && <span className="rail-count" aria-label={`${unreviewed} new to review`}>{unreviewed}</span>}
+    </span>
+  );
+}
+
+function InboxBadge() {
+  const { inboxWaiting, inboxWorking } = useJobs();
+  if (!inboxWaiting && !inboxWorking) return null;
+  return (
+    <span className="rail-badges">
+      {inboxWorking > 0 && <span className="rail-working" title={`${inboxWorking} being read`} aria-label={`${inboxWorking} being read`} />}
+      {inboxWaiting > 0 && <span className="rail-count" aria-label={`${inboxWaiting} replies waiting`}>{inboxWaiting}</span>}
     </span>
   );
 }

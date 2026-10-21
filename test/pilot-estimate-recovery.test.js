@@ -444,6 +444,49 @@ describe('pilot estimate recovery', () => {
     assert.equal(revoked.text.includes('revoked'), false);
   });
 
+  it('returns the same 404 for an archived lead as for a missing token', async () => {
+    setFlags({ master: true });
+    const ip = { 'x-forwarded-for': '203.0.113.77' };
+    const minted = await request('POST', `/api/proposals/${proposal.id}/demo-token`, {
+      headers: { 'x-api-key': API_KEY, ...ip },
+    });
+    assert.equal(minted.status, 201);
+    const missing = await request('GET', `/demo/estimate-recovery/${'b'.repeat(22)}`, { headers: ip });
+    assertClosed(missing);
+    const before = await pool.query('SELECT COUNT(*)::int AS n FROM pilot_events');
+    try {
+      await pool.query(
+        `UPDATE prospects SET archived_at = NOW(), archive_reason = 'pest-name gate (#39)' WHERE id = $1`,
+        [prospect.id]
+      );
+      const archived = await request('GET', minted.json.path, { headers: ip });
+      assertClosed(archived);
+      assert.equal(archived.text, missing.text);
+      assert.equal(archived.headers['content-type'], missing.headers['content-type']);
+      assert.equal(archived.text.includes('Wasatch'), false);
+      assert.equal(archived.text.includes('archived'), false);
+      const posted = await request('POST', `${minted.json.path}/events`, {
+        headers: ip,
+        body: { type: 'demo_view' },
+      });
+      assertClosed(posted);
+      assert.equal(posted.text, missing.text);
+      const after = await pool.query('SELECT COUNT(*)::int AS n FROM pilot_events');
+      assert.equal(after.rows[0].n, before.rows[0].n);
+      const detail = await request('GET', `/api/proposals/${proposal.id}`, {
+        headers: { 'x-api-key': API_KEY, ...ip },
+      });
+      assert.equal(detail.status, 200);
+      assert.notEqual(detail.json.archived_at, null);
+      assert.equal(detail.json.archive_reason, 'pest-name gate (#39)');
+    } finally {
+      await pool.query(
+        `UPDATE prospects SET archived_at = NULL, archive_reason = NULL, archive_run_id = NULL WHERE id = $1`,
+        [prospect.id]
+      );
+    }
+  });
+
   it('rate limits each IP and keeps noindex on 429', async () => {
     setFlags({ master: true });
     process.env.PILOT_DEMO_RATE_MAX = '2';

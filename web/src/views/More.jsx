@@ -6,7 +6,7 @@ import { moreItems } from '../campaigns/nav';
 /** Low-frequency views. Settings lives on the header gear, not here. */
 export default function More() {
   const campaigns = flagEnabled(FF_CAMPAIGNS);
-  const { unreviewed } = useJobs();
+  const { unreviewed, inboxWaiting } = useJobs();
   const items = moreItems(campaigns);
   return (
     <div className="page">
@@ -18,8 +18,9 @@ export default function More() {
       </header>
       <ul className="more-menu">
         {items.map((item) => {
-          const count = item.id === 'proposals' ? unreviewed : 0;
+          const count = item.id === 'proposals' ? unreviewed : item.id === 'inbox' ? inboxWaiting : 0;
           const text = badgeCount(count);
+          const what = item.id === 'inbox' ? 'replies waiting' : 'proposals to review';
           return (
             <li key={item.id}>
               <a className="more-link" href={`#/${item.id}`}>
@@ -28,7 +29,7 @@ export default function More() {
                   <span className="lead-name">{item.label}</span>
                   <span className="muted">{item.hint}</span>
                 </span>
-                {text && <span className="rail-count" aria-label={`${count} proposals to review`}>{text}</span>}
+                {text && <span className="rail-count" aria-label={`${count} ${what}`}>{text}</span>}
               </a>
             </li>
           );

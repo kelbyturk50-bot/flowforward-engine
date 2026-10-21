@@ -180,7 +180,7 @@ describe('campaigns client', () => {
 describe('campaigns navigation helpers', () => {
   it('keeps the current rail and tabs when the flag is off', () => {
     expect(railItems(false).map((item) => item.label)).toEqual([
-      'Today', 'Leads', 'Proposals', 'Pipeline', 'Projects', 'Settings',
+      'Today', 'Leads', 'Proposals', 'Inbox', 'Pipeline', 'Projects', 'Settings',
     ]);
     expect(tabItems(false).map((item) => item.label)).toEqual([
       'Today', 'Leads', 'Pipeline', 'Proposals', 'More',
@@ -191,11 +191,14 @@ describe('campaigns navigation helpers', () => {
     expect(resolveRoute('#/campaigns', { campaigns: false, hasKey: true })).toBe('not-found');
     expect(moreBadge({ campaignsOn: false, proposalsN: 2, overdueN: 1 }).proposals.n).toBe(2);
     expect(moreBadge({ campaignsOn: false, proposalsN: 2, overdueN: 1 }).more.n).toBe(1);
+    expect(tabIsOn('more', 'inbox', false)).toBe(true);
+    expect(resolveRoute('#/inbox', { campaigns: false, hasKey: true })).toBe('inbox');
+    expect(moreBadge({ campaignsOn: false, proposalsN: 2, overdueN: 1, inboxN: 3 }).more).toEqual({ n: 4, label: '4 replies and overdue tasks' });
   });
 
   it('puts Campaigns between Pipeline and Proposals and rolls the proposals badge onto More', () => {
     expect(railItems(true).map((item) => item.label)).toEqual([
-      'Today', 'Leads', 'Pipeline', 'Campaigns', 'Proposals', 'Projects', 'Settings',
+      'Today', 'Leads', 'Pipeline', 'Campaigns', 'Proposals', 'Inbox', 'Projects', 'Settings',
     ]);
     expect(tabItems(true).map((item) => item.label)).toEqual([
       'Today', 'Leads', 'Pipeline', 'Campaigns', 'More',
@@ -208,5 +211,8 @@ describe('campaigns navigation helpers', () => {
     const badge = moreBadge({ campaignsOn: true, proposalsN: 14, overdueN: 4 });
     expect(badge.proposals).toBeNull();
     expect(badge.more).toEqual({ n: 18, label: '14 proposals to review, 4 overdue project tasks' });
+    expect(tabIsOn('more', 'inbox', true)).toBe(true);
+    expect(moreBadge({ campaignsOn: true, proposalsN: 1, overdueN: 2, inboxN: 3 }).more)
+      .toEqual({ n: 6, label: '1 proposals to review, 3 replies waiting, 2 overdue project tasks' });
   });
 });

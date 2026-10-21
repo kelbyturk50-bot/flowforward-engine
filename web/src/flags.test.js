@@ -8,9 +8,14 @@ import {
   FF_CAMPAIGNS,
   FLAG_STORAGE_KEY,
   PREVIEW_HOST_PATTERN,
+  _setFeatureFlagsForTests,
+  beginFlagLoad,
+  failFlagLoad,
+  flagEnabled,
   flagOverrideAllowed,
   readCompanyOverride,
   readPilotFlags,
+  resetRemoteFlags,
 } from './flags.js';
 
 const ALL_OFF = {
@@ -187,5 +192,81 @@ describe('pilot flags', () => {
     expect(flagsAt(dev, { env: { DEV: true } })[FF_PROTOTYPE_GALLERY]).toBe(true);
     expect(flagsAt(dev, { env: { DEV: false } })[FF_PROTOTYPE_GALLERY]).toBe(false);
     expect(flagsAt('http://127.0.0.1:5173/?flags=FF_PROTOTYPE_GALLERY', { env: { DEV: true } })[FF_PROTOTYPE_GALLERY]).toBe(false);
+  });
+});
+
+describe('feature flag source', () => {
+  const host = PRODUCTION_HOSTS[0];
+
+  function at(href, env = { DEV: false }, storage = mem()) {
+    return { location: loc(href), storage, env };
+  }
+
+  it('keeps ?flags= preview-only for campaign flags', () => {
+    resetRemoteFlags();
+    const storage = mem();
+    const preview = at(`https://${PREVIEW}/?flags=FF_CAMPAIGNS,FF_CAMPAIGN_OPEN_PIXEL`, { DEV: false }, storage);
+    expect(flagEnabled('FF_CAMPAIGNS', preview)).toBe(true);
+    expect(flagEnabled('FF_CAMPAIGN_OPEN_PIXEL', preview)).toBe(true);
+    expect(flagEnabled('FF_PILOT_ESTIMATE_RECOVERY', preview)).toBe(false);
+    expect(storage.getItem(FLAG_STORAGE_KEY)).toBe('FF_CAMPAIGNS,FF_CAMPAIGN_OPEN_PIXEL');
+
+    for (const hostname of PRODUCTION_HOSTS) {
+      const stored = mem({ [FLAG_STORAGE_KEY]: 'FF_CAMPAIGNS,FF_CAMPAIGN_OPEN_PIXEL' });
+      const prod = at(`https://${hostname}/?flags=FF_CAMPAIGNS,FF_CAMPAIGN_OPEN_PIXEL`, { DEV: true }, stored);
+      expect(flagEnabled('FF_CAMPAIGNS', prod)).toBe(false);
+      expect(flagEnabled('FF_CAMPAIGN_OPEN_PIXEL', prod)).toBe(false);
+      expect(stored.getItem(FLAG_STORAGE_KEY)).toBe('FF_CAMPAIGNS,FF_CAMPAIGN_OPEN_PIXEL');
+    }
+    expect(flagEnabled('FF_CAMPAIGNS', at(`http://${PREVIEW}/?flags=FF_CAMPAIGNS`))).toBe(false);
+    expect(flagEnabled('FF_CAMPAIGNS', at(`https://${PREVIEW}:444/?flags=FF_CAMPAIGNS`))).toBe(false);
+    expect(flagEnabled('FF_CAMPAIGNS', at('http://127.0.0.1:5173/?flags=FF_CAMPAIGNS', { DEV: true }))).toBe(false);
+    expect(flagEnabled('FF_CAMPAIGNS', at('http://localhost:5173/?flags=FF_CAMPAIGNS', { DEV: true }))).toBe(true);
+    expect(flagEnabled('FF_CAMPAIGNS', at('http://localhost:5173/?flags=FF_CAMPAIGNS', { DEV: false }))).toBe(false);
+  });
+
+  it('uses the API value when no preview override is active', () => {
+    _setFeatureFlagsForTests([
+      { name: 'FF_CAMPAIGNS', enabled: true, env_forced_off: false },
+      { name: 'FF_CAMPAIGN_OPEN_PIXEL', enabled: false },
+    ]);
+    const prod = at(`https://${host}/?flags=FF_CAMPAIGN_OPEN_PIXEL`, { DEV: true });
+    expect(flagEnabled('FF_CAMPAIGNS', prod)).toBe(true);
+    expect(flagEnabled('FF_CAMPAIGN_OPEN_PIXEL', prod)).toBe(false);
+    expect(flagEnabled('FF_PROTOTYPE_GALLERY', prod)).toBe(false);
+  });
+
+  it('lets a preview override replace API values', () => {
+    _setFeatureFlagsForTests([
+      { name: 'FF_CAMPAIGNS', enabled: true },
+      { name: 'FF_PILOT_ESTIMATE_RECOVERY', enabled: true },
+    ]);
+    const preview = at(`https://${PREVIEW}/?flags=FF_PROTOTYPE_GALLERY`, { DEV: false });
+    expect(flagEnabled('FF_PROTOTYPE_GALLERY', preview)).toBe(true);
+    expect(flagEnabled('FF_CAMPAIGNS', preview)).toBe(false);
+    expect(flagEnabled('FF_PILOT_ESTIMATE_RECOVERY', preview)).toBe(false);
+  });
+
+  it('fails closed when the load errors, and ignores hidden flags', () => {
+    _setFeatureFlagsForTests([
+      { name: 'FF_CAMPAIGNS', enabled: true },
+      { name: 'FF_HIDE_WATERMARK', enabled: true },
+      { name: 'FF_PILOT_ESTIMATE_LIVE_SEND', enabled: true },
+    ]);
+    const prod = at(`https://${host}/`, { DEV: true });
+    expect(flagEnabled('FF_CAMPAIGNS', prod)).toBe(true);
+    expect(flagEnabled('FF_HIDE_WATERMARK', at(`https://${PREVIEW}/?flags=FF_HIDE_WATERMARK`))).toBe(false);
+    expect(flagEnabled('FF_PILOT_ESTIMATE_LIVE_SEND', at(`https://${PREVIEW}/?flags=FF_PILOT_ESTIMATE_LIVE_SEND`))).toBe(false);
+    expect(flagEnabled('FF_HIDE_WATERMARK', prod)).toBe(false);
+    expect(flagEnabled('FF_PILOT_ESTIMATE_LIVE_SEND', prod)).toBe(false);
+
+    const ticket = beginFlagLoad();
+    expect(flagEnabled('FF_CAMPAIGNS', prod)).toBe(false);
+    failFlagLoad(ticket, new Error('Database unavailable'));
+    expect(flagEnabled('FF_CAMPAIGNS', prod)).toBe(false);
+    expect(flagEnabled('FF_CAMPAIGN_OPEN_PIXEL', prod)).toBe(false);
+
+    _setFeatureFlagsForTests([{ name: 'FF_CAMPAIGNS', enabled: true, env_forced_off: true }]);
+    expect(flagEnabled('FF_CAMPAIGNS', prod)).toBe(false);
   });
 });

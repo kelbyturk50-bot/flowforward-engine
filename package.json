@@ -8,6 +8,9 @@
     "dev": "nodemon src/server.js",
     "bot": "node src/bot/discover.js",
     "migrate": "node src/db/migrate.js",
+    "pest-archive:dry": "node scripts/pest-archive.js dry",
+    "pest-archive": "node scripts/pest-archive.js apply",
+    "pest-archive:undo": "node scripts/pest-archive.js undo",
     "test": "node test/run.js"
   },
   "engines": {

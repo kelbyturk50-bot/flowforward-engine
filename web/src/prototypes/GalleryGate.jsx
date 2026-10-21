@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect } from 'react';
 import NotFound from '../NotFound';
 import { FF_PROTOTYPE_GALLERY, flagEnabled } from '../flags';
+import { useLoadFeatureFlags } from '../remote-flags';
 import { galleryTokenOk } from './route';
 
 const GalleryApp = lazy(() => import('./GalleryApp.jsx'));
@@ -17,6 +18,7 @@ function useNoindex() {
 
 export default function GalleryGate({ route }) {
   useNoindex();
+  useLoadFeatureFlags();
   const open = flagEnabled(FF_PROTOTYPE_GALLERY) && galleryTokenOk(route?.token);
   if (!open) return <NotFound />;
   return (

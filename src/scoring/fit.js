@@ -255,12 +255,12 @@ function computeFit(p) {
 
 const RESCORE_COLUMNS = 'id, company, industry, website, phone, city, state, rating, review_count, fit_boost, fsm_detected, research';
 
-/** Recompute and persist fit for all prospects (or a list of ids).
- *  Pure over the selected columns. Does not fetch a homepage or any URL. */
+/** Recompute and persist fit for prospects that are not archived.
+ *  An archived row keeps the score it had. Does not fetch a homepage or any URL. */
 async function rescore(ids = null) {
   const { rows } = ids
-    ? await pool.query(`SELECT ${RESCORE_COLUMNS} FROM prospects WHERE id = ANY($1::int[])`, [ids])
-    : await pool.query(`SELECT ${RESCORE_COLUMNS} FROM prospects`);
+    ? await pool.query(`SELECT ${RESCORE_COLUMNS} FROM prospects WHERE archived_at IS NULL AND id = ANY($1::int[])`, [ids])
+    : await pool.query(`SELECT ${RESCORE_COLUMNS} FROM prospects WHERE archived_at IS NULL`);
   if (!rows.length) return 0;
 
   const idArr = [], scoreArr = [], tierArr = [], reasonArr = [];
@@ -273,6 +273,7 @@ async function rescore(ids = null) {
     `UPDATE prospects p SET fit_score = v.s, fit_tier = v.t, fit_reasons = v.r::jsonb
        FROM unnest($1::int[], $2::int[], $3::text[], $4::text[]) AS v(id, s, t, r)
       WHERE p.id = v.id
+        AND p.archived_at IS NULL
         AND (p.fit_score IS DISTINCT FROM v.s OR p.fit_tier IS DISTINCT FROM v.t OR p.fit_reasons IS DISTINCT FROM v.r::jsonb)`,
     [idArr, scoreArr, tierArr, reasonArr]
   );
