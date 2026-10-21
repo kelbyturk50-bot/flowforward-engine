@@ -179,8 +179,8 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
             <Field label="First name in greeting" value={p.to_name} disabled={!editable} onSave={v => save({ to_name: v })} />
           </div>
           <Field label="Subject" value={p.subject} disabled={!editable} onSave={v => save({ subject: v }, 'Saved.')} />
-          <EmailField label="First email" hint="Sends when you approve" value={p.body} subject={p.subject} first disabled={!editable} onSave={v => save({ body: v }, 'Saved.')} />
-          <EmailField label="Follow-up 1" hint={p.followup1_sent_at ? `Sent ${timeAgo(p.followup1_sent_at)}` : 'Day 3, as a reply in the same thread'} value={p.followup1} disabled={!editable} onSave={v => save({ followup1: v }, 'Saved.')} />
+          <EmailField label="First email" hint="Sends when you approve" value={p.body} subject={p.subject} first disabled={!editable} onSave={v => save({ body: v }, 'Saved.')} addon={editable ? <PrototypeAddon p={p} which="first" /> : null} />
+          <EmailField label="Follow-up 1" hint={p.followup1_sent_at ? `Sent ${timeAgo(p.followup1_sent_at)}` : 'Day 3, as a reply in the same thread'} value={p.followup1} disabled={!editable} onSave={v => save({ followup1: v }, 'Saved.')} addon={!p.followup1_sent_at && ['draft', 'sent'].includes(p.status) ? <PrototypeAddon p={p} which="followup1" /> : null} />
           <EmailField label="Follow-up 2 (last)" hint={p.followup2_sent_at ? `Sent ${timeAgo(p.followup2_sent_at)}` : 'Day 10'} value={p.followup2} disabled={!editable} onSave={v => save({ followup2: v }, 'Saved.')} />
           <details className="preview">
             <summary>{"Exactly what they'll receive"}</summary>
@@ -209,7 +209,38 @@ function Field({ label, value, onSave, type = 'text', disabled, rows }) {
   );
 }
 
-function EmailField({ label, hint, value, subject, first, disabled, onSave }) {
+// The prototype line the server adds when the email sends (send.js
+// withPrototype). Shown under the editor so it's clear it will be there.
+function prototypeLine(p, which) {
+  const proto = p.prototype;
+  const body = which === 'first' ? p.body : p.followup1;
+  if (!proto || !proto.url || proto.expired || /\{\{\s*PROTOTYPE_URL\s*\}\}/.test(body || '')) return null;
+  const shop = String(p.company || '').replace(/^test:\s*/i, '').trim() || 'your shop';
+  return which === 'first'
+    ? `I also built a quick clickable prototype of what this could look like for ${shop}, on sample data:\n${proto.url}`
+    : `If it's easier to see than read about, here's the clickable prototype I put together for ${shop}:\n${proto.url}`;
+}
+
+function PrototypeAddon({ p, which }) {
+  const line = prototypeLine(p, which);
+  if (line) {
+    return (
+      <div className="proto-addon">
+        <span className="muted small">{which === 'first' ? 'Added right after the one-pager link when it sends:' : 'Added before your sign-off when it sends:'}</span>
+        <pre>{line}</pre>
+      </div>
+    );
+  }
+  if (which === 'first' && p.prototype && !p.prototype.url && p.prototype.link_problem) {
+    return <p className="proto-addon muted small">No prototype link will be added: {p.prototype.link_problem === 'key_missing' ? 'the CRM API key on Railway is shorter than 32 characters.' : 'the CRM API key changed. Make a new link on the Prototype card.'}</p>;
+  }
+  if (which === 'first' && p.prototype?.expired) {
+    return <p className="proto-addon muted small">No prototype link will be added: it expired. Make a new link on the Prototype card.</p>;
+  }
+  return null;
+}
+
+function EmailField({ label, hint, value, subject, first, disabled, onSave, addon }) {
   const [v, setV] = useState(value ?? '');
   useEffect(() => setV(value ?? ''), [value]);
   const { words, issues } = emailChecks({ subject: first ? subject : '', body: v }, { firstEmail: first });
@@ -219,6 +250,7 @@ function EmailField({ label, hint, value, subject, first, disabled, onSave }) {
       <textarea className="input mono-ish" rows={first ? 15 : 7} value={v} disabled={disabled}
         onChange={e => setV(e.target.value)} onBlur={() => (value ?? '') !== v && onSave(v)} />
       {!disabled && issues.length > 0 && <ul className="checks">{issues.map(x => <li key={x}>{x}</li>)}</ul>}
+      {addon}
     </label>
   );
 }
