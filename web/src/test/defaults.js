@@ -1,4 +1,5 @@
 import { flagRecords, savedFlag } from './flag-fixtures.js';
+import { campaignsResponse } from './campaign-api.js';
 import { api, settings } from './mock-api.js';
 import { contactedLead, discoveryRun, focus, foundLead, project, proposal, summary } from './fixtures.js';
 
@@ -41,6 +42,10 @@ export function installApiDefaults() {
     connected: false,
     configured: false,
     redirect_uri: `${TEST_URL}/oauth/google/callback`,
+  });
+  api.get.mockImplementation(async (path) => {
+    if (String(path).startsWith('/api/campaigns')) return campaignsResponse();
+    throw Object.assign(new Error(`No mock for GET ${path}`), { status: 404 });
   });
   api.flags.mockResolvedValue(flagRecords());
   api.setFlag.mockImplementation(async (name, enabled) => savedFlag(name, enabled));

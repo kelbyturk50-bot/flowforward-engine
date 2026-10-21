@@ -1,8 +1,13 @@
+import { badgeCount } from '../format';
+import { FF_CAMPAIGNS, flagEnabled } from '../flags';
 import { useJobs } from '../jobs';
+import { moreItems } from '../campaigns/nav';
 
 /** Low-frequency views. Settings lives on the header gear, not here. */
 export default function More() {
-  const { inboxWaiting } = useJobs();
+  const campaigns = flagEnabled(FF_CAMPAIGNS);
+  const { unreviewed, inboxWaiting } = useJobs();
+  const items = moreItems(campaigns);
   return (
     <div className="page">
       <header className="page-head">
@@ -12,24 +17,23 @@ export default function More() {
         </div>
       </header>
       <ul className="more-menu">
-        <li>
-          <a className="more-link" href="#/inbox">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13h5l2 3h4l2-3h5M5.5 5h13L21 13v6H3v-6z" /></svg>
-            <span>
-              <span className="lead-name">Inbox{inboxWaiting ? <span className="tab-count more-count">{inboxWaiting}</span> : null}</span>
-              <span className="muted">Replies from leads, with drafted responses</span>
-            </span>
-          </a>
-        </li>
-        <li>
-          <a className="more-link" href="#/projects">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v12H4zM9 7V4h6v3" /></svg>
-            <span>
-              <span className="lead-name">Projects</span>
-              <span className="muted">Client builds and your own work</span>
-            </span>
-          </a>
-        </li>
+        {items.map((item) => {
+          const count = item.id === 'proposals' ? unreviewed : 0;
+          const text = badgeCount(count);
+          return (
+            <li key={item.id}>
+              <a className="more-link" href={`#/${item.id}`}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d={item.icon} /></svg>
+                <span>
+                  {/* Inbox keeps main's inline count so the flag-off page matches main. */}
+                  <span className="lead-name">{item.label}{item.id === 'inbox' && inboxWaiting ? <span className="tab-count more-count">{inboxWaiting}</span> : null}</span>
+                  <span className="muted">{item.hint}</span>
+                </span>
+                {text && <span className="rail-count" aria-label={`${count} proposals to review`}>{text}</span>}
+              </a>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

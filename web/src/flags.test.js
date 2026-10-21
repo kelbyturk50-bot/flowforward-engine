@@ -5,6 +5,7 @@ import {
   FF_PILOT_ESTIMATE_SMS,
   FF_PILOT_LINK_ON_ONEPAGER,
   FF_PROTOTYPE_GALLERY,
+  FF_CAMPAIGNS,
   FLAG_STORAGE_KEY,
   PREVIEW_HOST_PATTERN,
   _setFeatureFlagsForTests,
@@ -22,6 +23,7 @@ const ALL_OFF = {
   [FF_PILOT_LINK_ON_ONEPAGER]: false,
   [FF_PILOT_ESTIMATE_SMS]: false,
   [FF_PROTOTYPE_GALLERY]: false,
+  [FF_CAMPAIGNS]: false,
 };
 
 const PREVIEW = 'flowforward-engine-x-turk11.vercel.app';
@@ -107,6 +109,7 @@ describe('pilot flags', () => {
       [FF_PILOT_LINK_ON_ONEPAGER]: true,
       [FF_PILOT_ESTIMATE_SMS]: false,
       [FF_PROTOTYPE_GALLERY]: false,
+      [FF_CAMPAIGNS]: false,
     });
     expect(storage.getItem(FLAG_STORAGE_KEY)).toBe(`${FF_PILOT_ESTIMATE_RECOVERY},${FF_PILOT_LINK_ON_ONEPAGER}`);
     expect(flagsAt(`https://${PREVIEW}/demo/estimate-recovery/demo-example-heating-air`, { storage })).toEqual(on);
@@ -165,6 +168,20 @@ describe('pilot flags', () => {
     const gitMain = 'flowforward-engine-git-main-turk11.vercel.app';
     expect(PREVIEW_HOST_PATTERN.test(gitMain)).toBe(true);
     expect(flagsAt(`https://${gitMain}/?flags=${FF_PROTOTYPE_GALLERY}`, { env: { DEV: true } })[FF_PROTOTYPE_GALLERY]).toBe(false);
+  });
+
+  it('keeps FF_CAMPAIGNS off unless a preview host or dev localhost names it', () => {
+    expect(flagsAt(`https://${PREVIEW}/`)[FF_CAMPAIGNS]).toBe(false);
+    expect(flagsAt(`https://${PREVIEW}/?flags=${FF_CAMPAIGNS}`)[FF_CAMPAIGNS]).toBe(true);
+    expect(flagsAt(`http://${PREVIEW}/?flags=${FF_CAMPAIGNS}`)[FF_CAMPAIGNS]).toBe(false);
+    expect(flagsAt(`https://${PREVIEW}:444/?flags=${FF_CAMPAIGNS}`)[FF_CAMPAIGNS]).toBe(false);
+    const dev = 'http://localhost:5173/?flags=FF_CAMPAIGNS';
+    expect(flagsAt(dev, { env: { DEV: true } })[FF_CAMPAIGNS]).toBe(true);
+    expect(flagsAt(dev, { env: { DEV: false } })[FF_CAMPAIGNS]).toBe(false);
+    expect(flagsAt('http://127.0.0.1:5173/?flags=FF_CAMPAIGNS', { env: { DEV: true } })[FF_CAMPAIGNS]).toBe(false);
+    for (const hostname of PRODUCTION_HOSTS) {
+      expect(flagsAt(`https://${hostname}/?flags=${FF_CAMPAIGNS}`, { env: { DEV: true } })[FF_CAMPAIGNS]).toBe(false);
+    }
   });
 
   it('turns FF_PROTOTYPE_GALLERY on only for a preview host or dev localhost', () => {
