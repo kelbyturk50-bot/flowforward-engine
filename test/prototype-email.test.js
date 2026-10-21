@@ -56,6 +56,9 @@ describe('prototype link in emails', () => {
     assert.ok(text.includes(`I also built a quick clickable prototype of what this could look like for Sample Heating ${n}, on sample data:\n${link.url}`));
     assert.equal(text.includes('TEST:'), false);
     assert.equal(text.includes('{{'), false);
+    assert.match(link.url, /^https?:\/\//, 'absolute link');
+    assert.ok(sent[0].html.includes(`href="${link.url}"`), 'html part links the prototype');
+    assert.ok(sent[0].html.includes('/brand/flowforward-logo.png'), 'html signature has the logo');
     const after = await pool.query('SELECT issued_at, expires_at FROM prototypes WHERE id = $1', [row.id]);
     assert.ok(Date.now() - new Date(after.rows[0].issued_at).getTime() < 60000, 'clock restarted at send');
     assert.equal(new Date(after.rows[0].expires_at) - new Date(after.rows[0].issued_at), 336 * 3600 * 1000);

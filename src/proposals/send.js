@@ -121,6 +121,13 @@ function renderMessage(p, which) {
   return fillPlaceholders(withPrototype(text, p, which), p) + footer();
 }
 
+// The HTML part sent alongside the plain text: same words, short link text
+// instead of raw URLs, and a signature with the FlowForward logo.
+function renderMessageHtml(p, which) {
+  const text = which === 'first' ? p.body : which === 'followup1' ? p.followup1 : p.followup2;
+  return require('./email-html').renderHtml(fillPlaceholders(withPrototype(text, p, which), p), p);
+}
+
 // Sets p.prototype_url to the lead's live prototype link, if any. A lookup
 // failure never blocks an email; it just goes without the link.
 async function attachPrototypeUrl(p) {
@@ -214,6 +221,7 @@ async function approveAndSend(proposalId) {
       to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
       subject: p.subject.trim(),
       text: renderMessage(p, 'first'),
+      html: renderMessageHtml(p, 'first'),
       headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
     });
   } catch (err) {
@@ -298,6 +306,7 @@ async function sendDueFollowups() {
         to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
         subject: /^re:/i.test(p.subject) ? p.subject : `Re: ${p.subject}`,
         text: renderMessage(p, which),
+        html: renderMessageHtml(p, which),
         inReplyTo: p.message_id || undefined,
         references: p.message_id ? [p.message_id] : undefined,
         headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
@@ -568,5 +577,5 @@ async function senderTick() {
 
 module.exports = {
   approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
-  renderMessage, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
+  renderMessage, renderMessageHtml, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

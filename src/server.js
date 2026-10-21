@@ -63,6 +63,8 @@ app.use('/api/public/prototypes', require('./prototypes/public').router);
 // The prototype page itself: sample homepage + agent click-throughs.
 // Server-rendered, watermarked, no API key (the token is the credential).
 app.use('/demo/prototype-assets', require('./prototypes/page').assets);
+// FlowForward logo for the email signature (public, cached, no key).
+app.use('/brand', require('express').static(require('path').join(__dirname, 'brand', 'assets'), { index: false, fallthrough: false, maxAge: '30d' }));
 app.use('/demo/prototype', require('./prototypes/page').router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────

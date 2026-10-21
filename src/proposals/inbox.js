@@ -358,6 +358,7 @@ async function sendReply(id) {
       to: item.reply_to,
       subject: item.reply_subject || `Re: ${item.message_subject || ''}`,
       text: body,
+      html: require('./email-html').renderHtml(body, { company: item.company }, { footer: false }),
       inReplyTo: item.header_message_id || undefined,
       references: refs,
       threadId: item.thread_id || undefined,
