@@ -144,7 +144,9 @@ describe('campaigns list', () => {
 
   it('filters to nothing by status or date, then clears', async () => {
     const user = userEvent.setup();
-    render(<Campaigns />);
+    // Every fixture campaign starts in Sep 2026 or later, so "Last month"
+    // relative to Mar 15, 2026 matches none of them.
+    render(<Campaigns today={new Date(2026, 2, 15)} />);
     expect((await screen.findAllByText('TEST: HVAC-Oct')).length).toBeGreaterThan(0);
     await user.click(screen.getByRole('radio', { name: 'Paused' }));
     expect(screen.getByRole('heading', { name: 'No campaigns match these filters' })).toBeInTheDocument();
@@ -152,12 +154,63 @@ describe('campaigns list', () => {
     await user.click(screen.getByRole('button', { name: 'Clear filters' }));
     expect((await screen.findAllByText('TEST: HVAC-Oct')).length).toBeGreaterThan(0);
 
-    await user.click(screen.getByRole('button', { name: 'Sep 24 – Oct 16' }));
-    await user.click(screen.getByRole('option', { name: 'Jan 1 – Jan 31' }));
-    expect(screen.getByRole('heading', { name: 'No campaigns match these filters' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'All dates' }));
+    await user.click(screen.getByRole('option', { name: 'Last month' }));
+    expect(await screen.findByRole('heading', { name: 'No campaigns match these filters' })).toBeInTheDocument();
+    expect(api.get).toHaveBeenLastCalledWith('/api/campaigns?from=2026-02-01&to=2026-02-28');
     await user.click(screen.getByRole('button', { name: 'Clear filters' }));
-    expect(screen.getByRole('button', { name: 'Sep 24 – Oct 16' })).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.getAllByText('TEST: HVAC-Oct').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'All dates' })).toHaveAttribute('aria-expanded', 'false');
+    expect((await screen.findAllByText('TEST: HVAC-Oct')).length).toBeGreaterThan(0);
+    expect(api.get).toHaveBeenLastCalledWith('/api/campaigns');
+  });
+
+  it('reads GET /api/campaigns and shows server counts, including the machine-open switch', async () => {
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({
+      range: { from: null, to: null },
+      attribution: { model: 'any' },
+      campaigns: [{
+        id: 7,
+        name: 'Fall tune-up (real)',
+        status: 'active',
+        channel: 'email',
+        start_date: '2026-10-01',
+        end_date: null,
+        segment: 'hvac',
+        enrolled: 12,
+        touched: 10,
+        responded: 4,
+        converted: 1,
+        opened_no_response_human: 2,
+        opened_no_response_incl_machine: 3,
+        machine_opens: 1,
+        prototype_views: 0,
+        cost_cents: null,
+      }],
+    });
+    render(<Campaigns />);
+    const table = await screen.findByRole('table', { name: 'Campaigns' });
+    expect(api.get).toHaveBeenCalledWith('/api/campaigns');
+    expect(within(table).getByText('Fall tune-up (real)')).toBeInTheDocument();
+    expect(within(table).queryByText('Sample')).not.toBeInTheDocument();
+    expect(within(table).getByText('4 of 10 responded')).toBeInTheDocument();
+    expect(within(table).getByText('1 of 10 converted')).toBeInTheDocument();
+    expect(within(table).getByText('2 of 10 opened, no reply')).toBeInTheDocument();
+    expect(within(table).getByText('1 of 10 machine opens, no reply, excluded')).toBeInTheDocument();
+    await user.click(screen.getByRole('switch', { name: 'Include machine opens' }));
+    expect(within(table).getByText('3 of 10 opened, no reply')).toBeInTheDocument();
+    expect(within(table).getByText('4 of 10 responded')).toBeInTheDocument();
+    expect(screen.getByText(/Converted counts touched leads with a win or an MVP sale/)).toBeInTheDocument();
+    expect(screen.queryByText(/last-touch/)).not.toBeInTheDocument();
+  });
+
+  it('shows the error state with Retry when GET /api/campaigns fails', async () => {
+    const user = userEvent.setup();
+    api.get.mockRejectedValueOnce(Object.assign(new Error('api_key_not_configured'), { status: 503 }));
+    render(<Campaigns />);
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load campaigns.");
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect((await screen.findAllByText('TEST: HVAC-Oct')).length).toBeGreaterThan(0);
   });
 
   it('says Email only for a touched campaign that is not email', async () => {

@@ -6,6 +6,7 @@ import { PRODUCTION_HOSTS } from '../api-base.js';
 import { listCampaigns } from './client.js';
 import { HVAC_OCT, PROTO_OCT } from './fixture.js';
 import {
+  dateRanges,
   campaignInRange,
   footnote,
   formatCampaignDates,
@@ -131,16 +132,62 @@ describe('campaign headline math', () => {
 });
 
 describe('campaigns client', () => {
-  it('returns only TEST: rows and does not call the network', async () => {
-    const result = await listCampaigns({ location: loc('http://localhost:5173/'), env: { DEV: true } });
+  const apiRow = {
+    id: 3,
+    name: 'TEST: HVAC-Oct',
+    status: 'active',
+    channel: 'email',
+    start_date: '2026-09-24',
+    end_date: null,
+    segment: 'hvac',
+    enrolled: 8,
+    touched: 8,
+    responded: 3,
+    converted: 1,
+    opened_no_response_human: 1,
+    opened_no_response_incl_machine: 2,
+    machine_opens: 1,
+    prototype_views: 0,
+    cost_cents: 6000,
+  };
+
+  it('reads GET /api/campaigns with the range, maps rows, and never fetches directly', async () => {
+    const calls = [];
+    const get = async (path) => { calls.push(path); return { campaigns: [apiRow, null] }; };
+    const prod = loc(`https://${PRODUCTION_HOSTS[0]}/`);
+    const result = await listCampaigns({ location: prod, env: { DEV: false }, get });
+    expect(calls).toEqual(['/api/campaigns']);
     expect(result.endpoint).toBe('/api/campaigns');
-    expect(result.campaigns.map((row) => row.name)).toEqual([
-      'TEST: HVAC-Oct',
-      'TEST: Proto-Oct furnace-tune-up estimate follow-up demo link',
-      'TEST: Plumbing-Sep walk-ins',
-      'TEST: HVAC-Nov',
-    ]);
-    expect(result.campaigns.every((row) => row.name.startsWith('TEST:'))).toBe(true);
+    expect(result.campaigns).toEqual([{
+      id: 3,
+      name: 'TEST: HVAC-Oct',
+      channel: 'email',
+      segment: 'hvac',
+      status: 'active',
+      startDate: '2026-09-24',
+      endDate: null,
+      costCents: 6000,
+      counts: {
+        enrolled: 8,
+        touched: 8,
+        responded: 3,
+        converted: 1,
+        openedNoReplyHuman: 1,
+        openedNoReplyAll: 2,
+        machineOpens: 1,
+        prototypeViews: 0,
+      },
+    }]);
+    const metrics = headlineMetrics(result.campaigns[0], { includeMachineOpens: false });
+    expect(metrics).toMatchObject({ touched: 8, responded: 3, converted: 1, openedNoReply: 1, machineOpens: 1 });
+    expect(headlineMetrics(result.campaigns[0], { includeMachineOpens: true }).openedNoReply).toBe(2);
+
+    await listCampaigns({ location: prod, env: { DEV: false }, get, range: { from: '2026-10-01', to: '2026-10-20' } });
+    await listCampaigns({ location: prod, env: { DEV: false }, get, range: { from: '2026-10-01; DROP', to: null } });
+    expect(calls.slice(1)).toEqual(['/api/campaigns?from=2026-10-01&to=2026-10-20', '/api/campaigns']);
+
+    await expect(listCampaigns({ location: prod, env: { DEV: false }, get: async () => ({ campaigns: {} }) }))
+      .rejects.toThrow(/campaigns_unavailable/);
     const source = readFileSync(path.join(here, 'client.js'), 'utf8');
     expect(source).not.toMatch(/fetch\s*\(/);
     expect(source).not.toMatch(/axios|send\.js|gmail/);
@@ -148,32 +195,65 @@ describe('campaigns client', () => {
     expect(view).not.toMatch(/send\.js|gmail|fetch\s*\(/);
   });
 
-  it('honors preview empty, error, and loading only where flag overrides are allowed', async () => {
+  it('honors preview empty, error, loading, and fixture only where flag overrides are allowed', async () => {
+    const calls = [];
+    const get = async (path) => { calls.push(path); return { campaigns: [apiRow] }; };
     const empty = await listCampaigns({
       location: loc('http://localhost:5173/?campaigns=empty'),
       env: { DEV: true },
+      get,
     });
     expect(empty.campaigns).toEqual([]);
     await expect(listCampaigns({
       location: loc('http://localhost:5173/?campaigns=error'),
       env: { DEV: true },
+      get,
     })).rejects.toThrow(/campaigns_unavailable/);
 
     let settled = false;
     const pending = listCampaigns({
       location: loc('http://localhost:5173/?campaigns=loading'),
       env: { DEV: true },
+      get,
     });
     pending.then(() => { settled = true; }, () => { settled = true; });
     await new Promise((resolve) => { setTimeout(resolve, 20); });
     expect(settled).toBe(false);
 
-    const host = PRODUCTION_HOSTS[0];
-    const production = await listCampaigns({
-      location: loc(`https://${host}/?campaigns=empty`),
+    const fixture = await listCampaigns({
+      location: loc('http://localhost:5173/?campaigns=fixture'),
       env: { DEV: true },
+      get,
     });
-    expect(production.campaigns.length).toBe(4);
+    expect(fixture.campaigns.map((row) => row.name)).toEqual([
+      'TEST: HVAC-Oct',
+      'TEST: Proto-Oct furnace-tune-up estimate follow-up demo link',
+      'TEST: Plumbing-Sep walk-ins',
+      'TEST: HVAC-Nov',
+    ]);
+    expect(calls).toEqual([]);
+
+    const host = PRODUCTION_HOSTS[0];
+    for (const state of ['empty', 'error', 'loading', 'fixture']) {
+      const production = await listCampaigns({
+        location: loc(`https://${host}/?campaigns=${state}`),
+        env: { DEV: true },
+        get,
+      });
+      expect(production.campaigns.map((row) => row.id)).toEqual([3]);
+    }
+    expect(calls.length).toBe(4);
+  });
+
+  it('builds date ranges relative to today', () => {
+    expect(dateRanges(new Date(2026, 9, 20))).toEqual([
+      { id: 'lifetime', label: 'All dates', from: null, to: null },
+      { id: 'last30', label: 'Last 30 days', from: '2026-09-21', to: '2026-10-20' },
+      { id: 'month', label: 'This month', from: '2026-10-01', to: '2026-10-20' },
+      { id: 'lastMonth', label: 'Last month', from: '2026-09-01', to: '2026-09-30' },
+    ]);
+    expect(dateRanges(new Date(2027, 0, 5)).find((item) => item.id === 'lastMonth'))
+      .toMatchObject({ from: '2026-12-01', to: '2026-12-31' });
   });
 });
 
