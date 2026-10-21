@@ -938,7 +938,7 @@ describe('campaigns', { concurrency: 1 }, () => {
             assert.deepEqual(res.json, { error: 'api_key_not_configured' });
           }
         }
-        assert.equal(app.output().includes(API_KEY), false);
+        if (key && key.trim()) assert.equal(app.output().includes(key), false, `${label} key in logs`);
       } finally {
         await app.stop();
       }
