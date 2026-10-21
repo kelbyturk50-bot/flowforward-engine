@@ -89,6 +89,17 @@ router.patch('/:id', express.json(), async (req, res) => {
   } catch (err) { fail(res, err); }
 });
 
+// Read the shop's website now and apply its brand colors.
+router.post('/:id/match-site', async (req, res) => {
+  const id = prototypeId(req);
+  if (!id) return res.status(404).json({ error: 'not_found' });
+  try {
+    const { row, swatches, confident } = await store.matchSiteColors(id);
+    stamp(res);
+    res.json({ prototype: store.linkFor(row), swatches, confident });
+  } catch (err) { fail(res, err); }
+});
+
 router.post('/:id/revoke', async (req, res) => {
   const id = prototypeId(req);
   if (!id) return res.status(404).json({ error: 'not_found' });
