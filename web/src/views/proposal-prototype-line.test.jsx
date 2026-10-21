@@ -31,3 +31,23 @@ describe('prototype line in the email editors', () => {
     expect(await screen.findByText(/No prototype link will be added/)).toBeInTheDocument();
   });
 });
+
+describe('empty one-pager', () => {
+  it('offers to rebuild it and calls the API', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    api.proposal.mockResolvedValue({ ...base, status: 'sent', sent_at: '2026-10-20T00:00:00Z', onepager: { headline: 'A few ideas', intro: '', observations: [], opportunities: [] } });
+    api.rebuildOnepager.mockResolvedValue({ id: 9 });
+    render(<ProposalDrawer {...props} />);
+    const btn = await screen.findByRole('button', { name: 'Rebuild one-pager' });
+    expect(screen.getByText(/the email you already sent will show the full page/)).toBeInTheDocument();
+    await userEvent.click(btn);
+    expect(api.rebuildOnepager).toHaveBeenCalledWith(9);
+  });
+
+  it('stays hidden when the one-pager has content', async () => {
+    api.proposal.mockResolvedValue({ ...base, onepager: { headline: 'x', intro: 'y', observations: [{ title: 'a', detail: 'b' }], opportunities: [] } });
+    render(<ProposalDrawer {...props} />);
+    await screen.findByText('Follow-up 1');
+    expect(screen.queryByRole('button', { name: 'Rebuild one-pager' })).toBeNull();
+  });
+});

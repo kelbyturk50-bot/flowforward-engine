@@ -56,6 +56,7 @@ export const api = {
   updateProposal: method(),
   sendProposal: method(),
   regenerateProposal: method(),
+  rebuildOnepager: method(),
   proposalJobs: method(),
   inbox: method(),
   inboxItem: method(),

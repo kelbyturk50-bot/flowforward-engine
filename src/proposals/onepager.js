@@ -134,11 +134,11 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
     <div class="sig"><div class="avatar" aria-hidden="true">${esc(SENDER.name.split(' ').map(w => w[0]).join('').slice(0, 2))}</div>
       <div><strong>${esc(SENDER.name)}</strong><span>${esc(SENDER.title)}, ${esc(SENDER.company)} · ${esc(SENDER.hometown)}</span></div></div>
   </section>
-  ${obs ? `<section class="card"><h2>What I noticed</h2><ul class="obs">${obs}</ul></section>` : ''}
-  ${opps ? `<section class="card"><h2>Where I think I can help</h2>${opps}</section>` : ''}
   ${prototypeHref ? `<section class="card proto" data-prototype-link><h2>I built a prototype for ${esc(lead.company)}</h2>
     <p>A clickable sample of what this could look like in your name and colors: a sample homepage plus the follow-up, text-back, and booking pieces behind it. It runs on sample data and nothing on it contacts anyone.</p>
     <a class="btn btn-main" href="${esc(prototypeHref)}" target="_blank" rel="noopener">See your prototype</a></section>` : ''}
+  ${obs ? `<section class="card"><h2>What I noticed</h2><ul class="obs">${obs}</ul></section>` : ''}
+  ${opps ? `<section class="card"><h2>Where I think I can help</h2>${opps}</section>` : ''}
   <section class="card"><h2>How working together starts</h2>
     <ol class="steps">
       <li><span><strong>A free 15-minute call.</strong> You tell me where the day gets eaten up. No pitch deck.</span></li>

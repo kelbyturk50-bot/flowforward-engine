@@ -114,6 +114,7 @@ export const api = {
   updateProposal:    (id, b)        => request('PATCH', `/api/proposals/${id}`, b),
   sendProposal:      (id)           => request('POST', `/api/proposals/${id}/send`),
   regenerateProposal:(id, b)        => request('POST', `/api/proposals/${id}/regenerate`, b),
+  rebuildOnepager:   (id)           => request('POST', `/api/proposals/${id}/rebuild-onepager`),
   proposalJobs:      ()             => request('GET', '/api/proposals/jobs'),
   dismissJob:        (id)           => request('POST', `/api/proposals/jobs/${id}/dismiss`),
   markProposalSeen:  (id)           => request('POST', `/api/proposals/${id}/seen`),

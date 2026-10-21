@@ -5,7 +5,7 @@ const pool    = require('../db/client');
 const cfg     = require('../proposals/config');
 const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
-const { draftProposal, runProposalBatch, getSetting, isRunning } = require('../proposals/draft');
+const { draftProposal, runProposalBatch, getSetting, isRunning, rebuildOnepager } = require('../proposals/draft');
 const send    = require('../proposals/send');
 const jobs    = require('../proposals/jobs');
 const pilotFlags = require('../pilot/flags');
@@ -285,6 +285,15 @@ router.post('/:id/send', async (req, res) => {
 });
 
 // POST /api/proposals/:id/regenerate { instructions, fresh_research }
+// Rewrite just the one-pager (same link). Works on sent proposals too, so a
+// one-pager that came out empty can be fixed after the email went out.
+router.post('/:id/rebuild-onepager', async (req, res) => {
+  try {
+    const p = await rebuildOnepager(Number(req.params.id));
+    res.json({ id: p.id, onepager: p.onepager });
+  } catch (err) { fail(res, err); }
+});
+
 router.post('/:id/regenerate', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT prospect_id FROM proposals WHERE id = $1', [req.params.id]);

@@ -188,6 +188,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           </details>
 
           <h3 className="col-title">One-pager</h3>
+          <ThinOnepager p={p} reload={reload} bump={bump} />
           <OnePagerEditor p={p} editable={editable} save={save} />
 
           <Feedback p={p} save={save} />
@@ -252,6 +253,27 @@ function EmailField({ label, hint, value, subject, first, disabled, onSave, addo
       {!disabled && issues.length > 0 && <ul className="checks">{issues.map(x => <li key={x}>{x}</li>)}</ul>}
       {addon}
     </label>
+  );
+}
+
+// A one-pager with no observations or opportunities came back malformed
+// from the model. Offer to rewrite just the one-pager (same link, so a sent
+// email's link shows the full page).
+function ThinOnepager({ p, reload, bump }) {
+  const [busy, setBusy] = useState(false);
+  const o = p.onepager || {};
+  const thin = !(o.observations || []).length && !(o.opportunities || []).length;
+  if (!thin || ['discarded', 'superseded'].includes(p.status)) return null;
+  const go = async () => {
+    setBusy(true);
+    try { await api.rebuildOnepager(p.id); toast('One-pager rebuilt. Same link.'); bump(); await reload(p.id); }
+    catch (e) { toast(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="error-note" role="status">
+      <p>This one-pager came out empty (no &ldquo;What I noticed&rdquo; or &ldquo;Where I think I can help&rdquo;). Rebuild it with the same research. The link stays the same{p.sent_at ? ', so the email you already sent will show the full page' : ''}.</p>
+      <button className="btn" disabled={busy} onClick={go}>{busy ? 'Rebuilding… (about a minute)' : 'Rebuild one-pager'}</button>
+    </div>
   );
 }
 
