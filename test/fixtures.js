@@ -39,6 +39,10 @@ async function resetDb() {
       tasks,
       projects,
       discovery_runs,
+      campaign_touches,
+      campaign_leads,
+      campaign_variants,
+      campaigns,
       prospects,
       app_settings
     RESTART IDENTITY CASCADE
