@@ -66,9 +66,72 @@ function footer() {
   return `\n\n--\n${SENDER.company} · ${SENDER.address}\nNot interested? Reply "no thanks" and I won't reach out again.`;
 }
 
+// Prototype link. Callers set p.prototype_url to a live link (or leave it
+// unset). A {{PROTOTYPE_URL}} placeholder written in the copy is used as-is;
+// otherwise the first email gets a short line after the one-pager link and
+// follow-up 1 gets one before the sign-off. Follow-up 2 is left alone.
+// With no live link, lines holding the placeholder are dropped.
+const PROTO_RE = /\{\{\s*PROTOTYPE_URL\s*\}\}/;
+const shopName = (p) => String(p.company || '').replace(/^test:\s*/i, '').trim() || 'your shop';
+
+function protoLine(which, p) {
+  return which === 'first'
+    ? `I also built a quick clickable prototype of what this could look like for ${shopName(p)}, on sample data:\n${p.prototype_url}`
+    : `If it's easier to see than read about, here's the clickable prototype I put together for ${shopName(p)}:\n${p.prototype_url}`;
+}
+
+// Insert a paragraph before the sign-off (the last paragraph), or at the end.
+function beforeSignoff(text, para) {
+  const trimmed = text.replace(/\s+$/, '');
+  const parts = trimmed.split(/\n{2,}/);
+  if (parts.length < 2) {
+    // One block: a short last line with no sentence punctuation is the sign-off.
+    const lines = trimmed.split('\n');
+    const last = lines[lines.length - 1] || '';
+    if (lines.length > 1 && last.length <= 30 && !/[.?!:]$/.test(last)) {
+      return `${lines.slice(0, -1).join('\n')}\n\n${para}\n\n${last}`;
+    }
+    return `${trimmed}\n\n${para}`;
+  }
+  parts.splice(parts.length - 1, 0, para);
+  return parts.join('\n\n');
+}
+
+function withPrototype(text, p, which) {
+  const raw = String(text || '');
+  if (PROTO_RE.test(raw)) {
+    if (p.prototype_url) return raw.replace(new RegExp(PROTO_RE.source, 'g'), p.prototype_url);
+    return raw.split('\n').filter(line => !PROTO_RE.test(line)).join('\n').replace(/\n{3,}/g, '\n\n');
+  }
+  if (!p.prototype_url || !raw.trim() || which === 'followup2') return raw;
+  const line = protoLine(which, p);
+  if (which === 'first') {
+    const lines = raw.split('\n');
+    const at = lines.findIndex(l => /\{\{\s*ONEPAGER_URL\s*\}\}/.test(l));
+    if (at >= 0) {
+      lines.splice(at + 1, 0, '', line);
+      return lines.join('\n');
+    }
+  }
+  return beforeSignoff(raw, line);
+}
+
 function renderMessage(p, which) {
   const text = which === 'first' ? p.body : which === 'followup1' ? p.followup1 : p.followup2;
-  return fillPlaceholders(text, p) + footer();
+  return fillPlaceholders(withPrototype(text, p, which), p) + footer();
+}
+
+// Sets p.prototype_url to the lead's live prototype link, if any. A lookup
+// failure never blocks an email; it just goes without the link.
+async function attachPrototypeUrl(p) {
+  try {
+    const link = await require('../prototypes/store').liveLink(p.prospect_id);
+    p.prototype_url = link ? link.url : null;
+  } catch (err) {
+    console.error('[prototype] email link lookup failed:', err && err.code);
+    p.prototype_url = null;
+  }
+  return p;
 }
 
 // "Now" in the sending timezone → { hour, weekday (0=Sun), date 'YYYY-MM-DD' }
@@ -139,6 +202,10 @@ async function approveAndSend(proposalId) {
   // Claim the row first so a double-click can't send twice.
   const claim = await pool.query(`UPDATE proposals SET status = 'sending', approved_at = NOW() WHERE id = $1 AND status = 'draft' RETURNING id`, [p.id]);
   if (!claim.rows.length) throw Object.assign(new Error('Already sending.'), { status: 409 });
+
+  // The prototype link's 14 days start when it is first shared.
+  try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }
+  await attachPrototypeUrl(p);
 
   let info;
   try {
@@ -223,6 +290,7 @@ async function sendDueFollowups() {
     const claim = await pool.query(
       `UPDATE proposals SET ${which}_sent_at = NOW() WHERE id = $1 AND ${which}_sent_at IS NULL AND status = 'sent' RETURNING id`, [p.id]);
     if (!claim.rows.length) continue;
+    await attachPrototypeUrl(p);
     try {
       await (await mailer()).sendMail({
         threadId: p.thread_id || undefined,
@@ -499,6 +567,6 @@ async function senderTick() {
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
   renderMessage, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

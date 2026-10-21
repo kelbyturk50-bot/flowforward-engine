@@ -5,6 +5,7 @@
 // does not send mail.
 
 const express = require('express');
+const { crmApiKeyReady } = require('./crm-key');
 const flags = require('../pilot/flags');
 const { globalSendKilled } = require('../pilot/kill-switch');
 const { MAX_CSV_BYTES, parseIntake, startsWithFormula } = require('../pilot/estimate-intake');
@@ -17,14 +18,11 @@ const csvBody = express.text({
 });
 
 const NOT_FOUND = { error: 'Not found' };
-const MIN_API_KEY_LENGTH = 32;
 
 let missingKeyWarned = false;
 
 function pilotKeyReady() {
-  const secret = process.env.CRM_API_KEY;
-  const compact = typeof secret === 'string' ? secret.trim().replace(/\s/g, '') : '';
-  if (compact.length >= MIN_API_KEY_LENGTH) {
+  if (crmApiKeyReady()) {
     missingKeyWarned = false;
     return true;
   }

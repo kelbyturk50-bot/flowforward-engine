@@ -124,6 +124,10 @@ export const api = {
   reopenInboxItem:   (id)           => request('POST', `/api/inbox/${id}/reopen`),
   applyInboxSuggestion: (id, index) => request('POST', `/api/inbox/${id}/apply`, { index }),
   markInboxSeen:     (id)           => request('POST', `/api/inbox/${id}/seen`),
+  // Branded prototypes (sample homepage + agent click-throughs) per lead
+  createPrototype:   (prospectId, fresh = false) => request('POST', '/api/prototypes', { prospect_id: prospectId, fresh }),
+  updatePrototype:   (id, b)        => request('PATCH', `/api/prototypes/${id}`, b),
+  revokePrototype:   (id)           => request('POST', `/api/prototypes/${id}/revoke`),
   markSentProposal:  (id, note)     => request('POST', `/api/proposals/${id}/mark-sent`, { note }),
   stopProposal:      (id, reason)   => request('POST', `/api/proposals/${id}/stop`, { reason }),
   repliedProposal:   (id, note)     => request('POST', `/api/proposals/${id}/replied`, { note }),
