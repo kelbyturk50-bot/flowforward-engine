@@ -18,18 +18,18 @@ export default function More() {
       </header>
       <ul className="more-menu">
         {items.map((item) => {
-          const count = item.id === 'proposals' ? unreviewed : item.id === 'inbox' ? inboxWaiting : 0;
+          const count = item.id === 'proposals' ? unreviewed : 0;
           const text = badgeCount(count);
-          const what = item.id === 'inbox' ? 'replies waiting' : 'proposals to review';
           return (
             <li key={item.id}>
               <a className="more-link" href={`#/${item.id}`}>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d={item.icon} /></svg>
                 <span>
-                  <span className="lead-name">{item.label}</span>
+                  {/* Inbox keeps main's inline count so the flag-off page matches main. */}
+                  <span className="lead-name">{item.label}{item.id === 'inbox' && inboxWaiting ? <span className="tab-count more-count">{inboxWaiting}</span> : null}</span>
                   <span className="muted">{item.hint}</span>
                 </span>
-                {text && <span className="rail-count" aria-label={`${count} ${what}`}>{text}</span>}
+                {text && <span className="rail-count" aria-label={`${count} proposals to review`}>{text}</span>}
               </a>
             </li>
           );

@@ -136,7 +136,11 @@ export default function Campaigns({ load = listCampaigns, today = null }) {
 
       {list.error && (
         <div className="error-note camp-error" role="alert">
-          <p>Couldn&apos;t load campaigns. Check your connection.</p>
+          <p>
+            {list.error.status === 503
+              ? "Couldn't load campaigns. The server's API key isn't configured yet."
+              : <>Couldn&apos;t load campaigns. Check your connection.</>}
+          </p>
           <button type="button" className="btn btn-quiet camp-retry" onClick={list.reload}>Retry</button>
         </div>
       )}

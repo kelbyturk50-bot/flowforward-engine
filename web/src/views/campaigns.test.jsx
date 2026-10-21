@@ -208,7 +208,7 @@ describe('campaigns list', () => {
     const user = userEvent.setup();
     api.get.mockRejectedValueOnce(Object.assign(new Error('api_key_not_configured'), { status: 503 }));
     render(<Campaigns />);
-    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load campaigns.");
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load campaigns. The server's API key isn't configured yet.");
     await user.click(screen.getByRole('button', { name: 'Retry' }));
     expect((await screen.findAllByText('TEST: HVAC-Oct')).length).toBeGreaterThan(0);
   });
