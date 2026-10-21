@@ -1139,3 +1139,7 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
 .proto-color input[type="color"] { width: 44px; height: 38px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); flex: none; }
 .proto-color .input { min-width: 0; font-family: ui-monospace, monospace; font-size: .85rem; }
 @media (max-width: 720px) { .proto-grid { grid-template-columns: 1fr; } .proto-url { flex-basis: 100%; } }
+.proto-match { align-items: center; }
+.proto-swatches { display: inline-flex; gap: .35rem; flex-wrap: wrap; }
+.proto-swatch { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; padding: 0; }
+.proto-swatch:focus-visible { outline: 3px solid var(--ochre); outline-offset: 2px; }

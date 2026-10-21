@@ -5,6 +5,7 @@
 const axios   = require('axios');
 const cheerio = require('cheerio');
 const { safeFetch } = require('../net/safeFetch');
+const { detectBrandColors } = require('../prototypes/palette');
 const { MAX_SITE_PAGES, FETCH_REVIEWS } = require('./config');
 const { SOCIAL_HOSTS } = require('../scoring/config');
 const {
@@ -206,6 +207,10 @@ async function crawlSite(website) {
   site.socials = extractSocials(htmlAll);
   site.signals = detectSignals(htmlAll, site.pages.map(p => p.text).join(' '));
   site.has_contact_form = /<form[\s\S]{0,4000}?(type=["']?email|name=["']?(email|phone|message))/i.test(htmlAll);
+  // Brand colors for the prototype page: the homepage plus a few of its
+  // stylesheets, through the same safeFetch guard. Colors only.
+  const colors = await detectBrandColors(home.finalUrl, { html: home.html, finalUrl: home.finalUrl });
+  if (!colors.error) site.brand_colors = { primary: colors.primary, secondary: colors.secondary, confident: colors.confident, swatches: colors.swatches };
   return site;
 }
 

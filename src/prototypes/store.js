@@ -7,6 +7,7 @@ const { loadRubric } = require('../scoring/rubric-store');
 const { isPestCompanyName } = require('../scoring/industry');
 const { prototypeOnDraft } = require('./flags');
 const tokens = require('./tokens');
+const palette = require('./palette');
 
 const PRIMARY_FALLBACK = '#2f6b57';
 const SECONDARY_FALLBACK = '#1e2a2f';
@@ -60,20 +61,63 @@ function hexList(colors) {
   return out;
 }
 
-async function colorsFor(prospectId) {
+function siteColors(research) {
+  const c = research && research.site && research.site.brand_colors;
+  if (!c || !c.primary || !HEX.test(c.primary)) return null;
+  return { primary: c.primary.toLowerCase(), secondary: (c.secondary && HEX.test(c.secondary) ? c.secondary : SECONDARY_FALLBACK).toLowerCase() };
+}
+
+// Hand-entered TEST brand first, then the colors read from the shop's own
+// site during research, then (CRM only) a live read of the site, then the
+// FlowForward fallback.
+async function colorsFor(prospect, { live = false } = {}) {
   const { rows } = await pool.query(
     `SELECT colors
        FROM prospect_brands
       WHERE prospect_id = $1
       ORDER BY updated_at DESC, id DESC
       LIMIT 1`,
-    [prospectId]
+    [prospect.id]
   );
   const found = hexList(rows[0] && rows[0].colors);
-  return {
-    primary: found[0] || PRIMARY_FALLBACK,
-    secondary: found[1] || SECONDARY_FALLBACK,
-  };
+  if (found[0]) return { primary: found[0], secondary: found[1] || SECONDARY_FALLBACK };
+  const cached = siteColors(prospect.research);
+  if (cached) return cached;
+  if (live && prospect.website) {
+    const got = await palette.detectBrandColors(prospect.website);
+    if (!got.error && got.primary) {
+      await saveSiteColors(prospect.id, got);
+      return { primary: got.primary, secondary: got.secondary || SECONDARY_FALLBACK };
+    }
+  }
+  return { primary: PRIMARY_FALLBACK, secondary: SECONDARY_FALLBACK };
+}
+
+// Keep the detected palette on the lead's research cache so later
+// prototypes and rescoring don't fetch again.
+async function saveSiteColors(prospectId, got) {
+  const value = { primary: got.primary, secondary: got.secondary, confident: got.confident, swatches: got.swatches || [], detected_at: got.detected_at };
+  await pool.query(
+    `UPDATE prospects SET research = jsonb_set(
+        jsonb_set(COALESCE(research, '{}'::jsonb), '{site}', COALESCE(research->'site', '{}'::jsonb)),
+        '{site,brand_colors}', $2::jsonb)
+      WHERE id = $1`, [prospectId, JSON.stringify(value)]);
+}
+
+// CRM "Match their website": read the site now, apply the top two colors,
+// and return the swatches so Kelby can pick a different one.
+async function matchSiteColors(id) {
+  const { rows } = await pool.query(
+    `SELECT pt.id, pt.prospect_id, p.website FROM prototypes pt JOIN prospects p ON p.id = pt.prospect_id
+      WHERE pt.id = $1 AND pt.revoked_at IS NULL`, [id]);
+  if (!rows[0]) throw httpError(404, 'Prototype not found');
+  if (!rows[0].website) throw httpError(400, 'This lead has no website on file.', 'no_website');
+  const got = await palette.detectBrandColors(rows[0].website);
+  if (got.error) throw httpError(502, `Couldn't read their site: ${got.error}.`, 'fetch_failed');
+  if (!got.primary) throw httpError(422, 'No brand colors found on their site. Enter them by hand.', 'no_colors');
+  await saveSiteColors(rows[0].prospect_id, got);
+  const row = await setColors(id, { primary: got.primary, secondary: got.secondary || SECONDARY_FALLBACK });
+  return { row, swatches: got.swatches, confident: got.confident };
 }
 
 function brandNameOf(prospect) {
@@ -181,7 +225,7 @@ async function attachPrototype({ prospectId, research }) {
       console.log(`[prototype] prospect ${prospect.id} no pick (${reason})`);
       return null;
     }
-    const colors = await colorsFor(prospect.id);
+    const colors = await colorsFor(prospect);
     const row = await insertRow(prospect, pick.agent, colors);
     console.log(`[prototype] prospect ${prospect.id} agent ${row.agent_type} prototype ${row.id}`);
     return row;
@@ -211,7 +255,7 @@ async function ensurePrototype(prospectId, { fresh = false } = {}) {
   if (serviceTitanBlocked(prospect, agent, rubric)) agent = DEFAULT_AGENT;
   const colors = existing
     ? { primary: existing.color_primary, secondary: existing.color_secondary }
-    : await colorsFor(prospect.id);
+    : await colorsFor(prospect, { live: true });
   if (!tokens.keyReady()) throw httpError(503, 'Prototype links need CRM_API_KEY with at least 32 characters.', 'key_missing');
   if (existing) await revoke(existing.id);
   const row = await insertRow(prospect, agent, colors);
@@ -318,6 +362,7 @@ module.exports = {
   attachPrototype,
   ensurePrototype,
   setColors,
+  matchSiteColors,
   setAgent,
   prototypeForProposal,
   liveLink,
