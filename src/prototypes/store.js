@@ -151,7 +151,9 @@ function tokenOf(row) {
 }
 
 function publicBase() {
-  return String(process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+  // Same base the one-pager links use (falls back to the Railway URL when
+  // PUBLIC_BASE_URL is unset). Links in emails must be absolute.
+  return require('../proposals/config').PUBLIC_BASE_URL;
 }
 
 function linkFor(row) {
