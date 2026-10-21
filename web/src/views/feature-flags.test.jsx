@@ -5,22 +5,15 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { api } from '../api';
-import { FEATURE_FLAG_CATALOG } from '../flags-contract.js';
+import { flagRecords, savedFlag } from '../test/flag-fixtures.js';
 import { flagEnabled } from '../flags';
 import { installApiDefaults } from '../test/defaults.js';
 import FeatureFlagsPanel from './FeatureFlags';
 
 const css = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../styles.css'), 'utf8');
 
-function records(overrides = {}) {
-  return FEATURE_FLAG_CATALOG.map(({ name }) => ({
-    name,
-    enabled: false,
-    updated_at: null,
-    updated_by: null,
-    env_forced_off: false,
-    ...(overrides[name] || {}),
-  }));
+function records(overrides = {}, options) {
+  return flagRecords(overrides, options);
 }
 
 function flagRow(name) {
@@ -95,13 +88,7 @@ describe('feature flags panel', () => {
     expect(screen.getByRole('switch', { name: 'FF_CAMPAIGNS' })).toHaveTextContent('Saving…');
     expect(screen.getByRole('switch', { name: 'FF_CAMPAIGNS' })).toBeDisabled();
     expect(api.setFlag).toHaveBeenCalledWith('FF_CAMPAIGNS', true);
-    resolveSave({
-      name: 'FF_CAMPAIGNS',
-      enabled: true,
-      updated_at: new Date().toISOString(),
-      updated_by: 'Kelby',
-      env_forced_off: false,
-    });
+    resolveSave(savedFlag('FF_CAMPAIGNS', true, { updated_at: new Date().toISOString(), updated_by: 'Kelby' }));
     expect(await screen.findByRole('status')).toHaveTextContent('Saved.');
     expect(screen.getByRole('switch', { name: 'FF_CAMPAIGNS' })).toHaveAttribute('aria-checked', 'true');
     expect(flagRow('FF_CAMPAIGNS').getByText(/Last changed: Kelby/)).toBeInTheDocument();
@@ -120,42 +107,72 @@ describe('feature flags panel', () => {
     expect(alert).toHaveTextContent("Couldn't save FF_CAMPAIGNS. It stays off.");
     expect(screen.getByRole('switch', { name: 'FF_CAMPAIGNS' })).toHaveAttribute('aria-checked', 'false');
 
-    api.setFlag.mockResolvedValueOnce({
-      name: 'FF_CAMPAIGNS',
-      enabled: true,
-      updated_at: new Date().toISOString(),
-      updated_by: 'Kelby',
-      env_forced_off: false,
-    });
+    api.setFlag.mockResolvedValueOnce(savedFlag('FF_CAMPAIGNS', true, { updated_at: new Date().toISOString(), updated_by: 'Kelby' }));
     await user.click(within(alert).getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(screen.getByRole('switch', { name: 'FF_CAMPAIGNS' })).toHaveAttribute('aria-checked', 'true'));
     expect(screen.getByRole('status')).toHaveTextContent('Saved.');
   });
 
   it('shows an environment force as off and does not toggle it', async () => {
+    const user = userEvent.setup();
     api.flags.mockResolvedValue(records({
-      FF_PILOT_ESTIMATE_SMS: {
+      FF_PILOT_ESTIMATE_RECOVERY: {
         enabled: true,
         env_forced_off: true,
         updated_at: '2026-10-15T15:00:00.000Z',
-        updated_by: 'env',
+        updated_by: 'crm',
       },
     }));
     render(<FeatureFlagsPanel />);
-    const sw = await screen.findByRole('switch', { name: 'FF_PILOT_ESTIMATE_SMS' });
+    const sw = await screen.findByRole('switch', { name: 'FF_PILOT_ESTIMATE_RECOVERY' });
     await waitFor(() => expect(screen.getByRole('switch', { name: 'FF_CAMPAIGNS' })).toBeEnabled());
     expect(sw).toBeDisabled();
     expect(sw).toHaveAttribute('aria-checked', 'false');
-    expect(flagRow('FF_PILOT_ESTIMATE_SMS').getByText('Forced off by the environment.')).toBeInTheDocument();
+    expect(flagRow('FF_PILOT_ESTIMATE_RECOVERY').getByText('Forced off by the environment.')).toBeInTheDocument();
+    await user.click(sw);
+    expect(screen.queryByText(/Turn FF_PILOT_ESTIMATE_RECOVERY/)).not.toBeInTheDocument();
     expect(api.setFlag).not.toHaveBeenCalled();
+  });
+
+  it('shows env-only flags as read-only and never sends a PUT for them', async () => {
+    const user = userEvent.setup();
+    api.flags.mockResolvedValue(records({ FF_PILOT_ESTIMATE_SMS: { enabled: true } }));
+    render(<FeatureFlagsPanel />);
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'FF_CAMPAIGNS' })).toBeEnabled());
+    for (const name of ['FF_PILOT_ESTIMATE_SMS', 'FF_CAMPAIGN_OPEN_PIXEL']) {
+      const sw = screen.getByRole('switch', { name });
+      expect(sw).toBeDisabled();
+      expect(flagRow(name).getByText('Read-only. Set by the server environment.')).toBeInTheDocument();
+      await user.click(sw);
+      expect(screen.queryByText(new RegExp(`Turn ${name}`))).not.toBeInTheDocument();
+    }
+    expect(screen.getByRole('switch', { name: 'FF_PILOT_ESTIMATE_SMS' })).toHaveAttribute('aria-checked', 'true');
+    expect(flagRow('FF_CAMPAIGNS').queryByText(/Read-only/)).not.toBeInTheDocument();
+    expect(api.setFlag).not.toHaveBeenCalled();
+  });
+
+  it('lists the prototype-on-draft flag on by default and can turn it off', async () => {
+    const user = userEvent.setup();
+    api.flags.mockResolvedValue(records({}, { seeded: true }));
+    api.setFlag.mockResolvedValueOnce(savedFlag('FF_PROTOTYPE_ON_DRAFT', false));
+    render(<FeatureFlagsPanel />);
+    const sw = await screen.findByRole('switch', { name: 'FF_PROTOTYPE_ON_DRAFT' });
+    await waitFor(() => expect(sw).toBeEnabled());
+    expect(sw).toHaveAttribute('aria-checked', 'true');
+    expect(flagRow('FF_PROTOTYPE_ON_DRAFT').getByText('Branded prototype on new proposal drafts')).toBeInTheDocument();
+    await user.click(sw);
+    expect(screen.getByText('Turn FF_PROTOTYPE_ON_DRAFT off?')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(api.setFlag).toHaveBeenCalledWith('FF_PROTOTYPE_ON_DRAFT', false);
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'FF_PROTOTYPE_ON_DRAFT' })).toHaveAttribute('aria-checked', 'false'));
   });
 
   it('does not list live sending or the watermark, and ignores a preview query', async () => {
     window.history.pushState({}, '', '/?flags=FF_CAMPAIGNS,FF_PILOT_ESTIMATE_LIVE_SEND,FF_HIDE_WATERMARK');
     api.flags.mockResolvedValue([
       ...records(),
-      { name: 'FF_PILOT_ESTIMATE_LIVE_SEND', enabled: true, env_forced_off: false, updated_at: null, updated_by: null },
-      { name: 'FF_HIDE_WATERMARK', enabled: true, env_forced_off: false, updated_at: null, updated_by: null },
+      { name: 'FF_PILOT_ESTIMATE_LIVE_SEND', enabled: true, env_forced_off: false, updated_at: null, updated_by: null, writable: true, source: 'db' },
+      { name: 'FF_HIDE_WATERMARK', enabled: true, env_forced_off: false, updated_at: null, updated_by: null, writable: true, source: 'db' },
     ]);
     render(<FeatureFlagsPanel />);
     await waitFor(() => expect(screen.getByRole('switch', { name: 'FF_CAMPAIGNS' })).toBeEnabled());

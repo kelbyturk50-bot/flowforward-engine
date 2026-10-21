@@ -47,7 +47,7 @@ export default function FeatureFlagsPanel() {
   const saving = Object.values(phase).some((row) => row?.kind === 'saving');
 
   const ask = (flag) => {
-    if (!ready || flag.env_forced_off || saving) return;
+    if (!ready || flag.env_forced_off || !flag.writable || saving) return;
     setPhase({ [flag.name]: { kind: 'confirm', next: !flag.enabled } });
   };
 
@@ -79,7 +79,7 @@ export default function FeatureFlagsPanel() {
   return (
     <section className="panel flag-panel" aria-busy={loading ? 'true' : 'false'}>
       <h2>Feature flags</h2>
-      <p className="muted">These switches save to the server. A flag stays off until it is turned on. If the server environment forces a flag off, the switch stays off. Live sending is not listed here.</p>
+      <p className="muted">These switches save to the server and take effect right away. If the server environment forces a flag off, its switch is locked off. Flags marked read-only are set only by the server environment. Live sending is not listed here.</p>
       {preview && (
         <p className="flag-preview">This browser has a preview override. The switches show the saved values.</p>
       )}
@@ -93,7 +93,8 @@ export default function FeatureFlagsPanel() {
       <ul className="flag-list">
         {flags.map((flag) => {
           const row = phase[flag.name] || {};
-          const locked = !ready || flag.env_forced_off || saving || row.kind === 'saving';
+          const readOnly = ready && !flag.writable;
+          const locked = !ready || flag.env_forced_off || readOnly || saving || row.kind === 'saving';
           return (
             <li className="flag-row" key={flag.name} aria-label={flag.name}>
               <div className="flag-copy">
@@ -101,6 +102,9 @@ export default function FeatureFlagsPanel() {
                 <span className="flag-label">{flag.label}</span>
                 <span className="flag-meta">Last changed: {lastChangedText(flag)}</span>
                 {flag.env_forced_off && <p className="flag-env">Forced off by the environment.</p>}
+                {readOnly && !flag.env_forced_off && (
+                  <p className="flag-env">{flag.source === 'env' ? 'Read-only. Set by the server environment.' : 'Read-only. The server does not list this flag.'}</p>
+                )}
               </div>
               <div className="flag-actions">
                 <button

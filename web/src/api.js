@@ -1,7 +1,7 @@
 // Thin client for the FlowForward Engine API.
 // Base URL rules live in api-base.js.
 import { resolveApiBase, UNCONFIGURED_MESSAGE } from './api-base.js';
-import { FEATURE_FLAGS_API, parseFlagRecord, parseFlagsPayload } from './flags-contract.js';
+import { FEATURE_FLAGS_API, parseFlagUpdate, parseFlagsPayload } from './flags-contract.js';
 
 function read(key, fallback = '') {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
@@ -144,5 +144,5 @@ export const api = {
   gmailDisconnect:   ()             => request('POST', '/api/proposals/gmail/disconnect'),
   // Feature flags. Path and body live only in flags-contract.js.
   flags:             ()             => request('GET', FEATURE_FLAGS_API.list).then(parseFlagsPayload),
-  setFlag:           (name, enabled) => request('PUT', FEATURE_FLAGS_API.update(name), FEATURE_FLAGS_API.body(enabled)).then(parseFlagRecord),
+  setFlag:           (name, enabled) => request('PUT', FEATURE_FLAGS_API.update(name), FEATURE_FLAGS_API.body(enabled)).then(parseFlagUpdate),
 };

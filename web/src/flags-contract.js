@@ -1,11 +1,14 @@
-// Feature-flag HTTP shape for the CRM.
+// Feature-flag HTTP shape for the CRM. Server side: PR #70
+// (src/api/flags.js, src/flags/resolve.js).
 //
-// Issue #63 describes GET /api/flags and PUT /api/flags/:name, a
-// feature_flags row (name, enabled, updated_at, updated_by), and an env
-// kill switch the panel must show. It does not publish a JSON body.
-// No Canyon PR or doc adds one. This module is the only place that spells
-// the path and the body the client will send and accept. Change it here
-// when the contract lands.
+// GET  /api/flags        -> 200 { flags: Flag[] }
+// PUT  /api/flags/:name  { enabled: <boolean> } -> 200 { flag: Flag }
+// Flag = { name, enabled, effective, env_forced_off, updated_at, updated_by,
+//          writable, source: 'db' | 'env' }
+// `effective` is what is actually on. `enabled` is the stored row value.
+// `env_forced_off` means a server env var is forcing the flag off.
+// `writable: false` (source 'env') flags are set only by the server env.
+// This module is the only place that spells the path and the body.
 
 export const FEATURE_FLAGS_API = Object.freeze({
   list: '/api/flags',
@@ -17,8 +20,9 @@ export const FEATURE_FLAGS_API = Object.freeze({
   },
 });
 
-// Flags the Settings panel lists. Live sending stays env-only (issue #63)
-// and FF_HIDE_WATERMARK is not a flag. Neither is listed or toggleable.
+// Flags the Settings panel lists, in the server's registry order. Live
+// sending stays env-only (issue #63) and FF_HIDE_WATERMARK is not a flag.
+// Neither is listed or toggleable.
 export const FEATURE_FLAG_CATALOG = Object.freeze([
   Object.freeze({ name: 'FF_PILOT_ESTIMATE_RECOVERY', label: 'Unsold-estimate recovery demo' }),
   Object.freeze({ name: 'FF_PILOT_LINK_ON_ONEPAGER', label: 'Recovery link on the one-pager' }),
@@ -26,6 +30,7 @@ export const FEATURE_FLAG_CATALOG = Object.freeze([
   Object.freeze({ name: 'FF_PROTOTYPE_GALLERY', label: 'Prototype gallery' }),
   Object.freeze({ name: 'FF_CAMPAIGNS', label: 'Campaigns' }),
   Object.freeze({ name: 'FF_CAMPAIGN_OPEN_PIXEL', label: 'Campaign open pixel' }),
+  Object.freeze({ name: 'FF_PROTOTYPE_ON_DRAFT', label: 'Branded prototype on new proposal drafts' }),
 ]);
 
 export const FEATURE_FLAG_NAMES = Object.freeze(FEATURE_FLAG_CATALOG.map((flag) => flag.name));
@@ -55,22 +60,44 @@ function fail(message) {
   return error;
 }
 
+function stampText(value) {
+  return typeof value === 'string' && value ? value : null;
+}
+
+function actorText(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+// One Flag from the server. `enabled` here is what the CRM shows and uses:
+// the server's `effective` value (falling back to the stored `enabled` only
+// when `effective` is missing), and always off when env forces it off.
+// Only a JSON boolean true counts. `writable` must be exactly true.
 export function parseFlagRecord(data) {
   if (!data || typeof data !== 'object' || typeof data.name !== 'string' || data.name === '') {
     throw fail('Feature flag response was missing a name.');
   }
   const envForcedOff = data.env_forced_off === true;
+  const on = typeof data.effective === 'boolean' ? data.effective : data.enabled === true;
   return {
     name: data.name,
-    enabled: data.enabled === true && !envForcedOff,
-    updated_at: typeof data.updated_at === 'string' && data.updated_at ? data.updated_at : null,
-    updated_by: typeof data.updated_by === 'string' && data.updated_by.trim() ? data.updated_by.trim() : null,
+    enabled: on === true && !envForcedOff,
+    updated_at: stampText(data.updated_at),
+    updated_by: actorText(data.updated_by),
     env_forced_off: envForcedOff,
+    writable: data.writable === true,
+    source: data.source === 'env' ? 'env' : 'db',
   };
 }
 
-// GET /api/flags → { flags: Flag[] }. Anything else fails closed.
-// Flag = { name, enabled, updated_at, updated_by, env_forced_off }.
+// PUT /api/flags/:name -> { flag: Flag }. Anything else fails closed.
+export function parseFlagUpdate(data) {
+  if (!data || typeof data !== 'object' || !data.flag || typeof data.flag !== 'object') {
+    throw fail('Feature flag update response was missing the flag.');
+  }
+  return parseFlagRecord(data.flag);
+}
+
+// GET /api/flags -> { flags: Flag[] }. Anything else fails closed.
 export function parseFlagsPayload(data) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.flags)) {
     throw fail('Feature flags response was not a list.');
@@ -84,6 +111,7 @@ export function parseFlagsPayload(data) {
   return rows;
 }
 
+// A catalog flag the server did not return: off and not toggleable.
 function blankRow(name) {
   return {
     name,
@@ -92,11 +120,14 @@ function blankRow(name) {
     updated_at: null,
     updated_by: null,
     env_forced_off: false,
+    writable: false,
+    source: 'db',
   };
 }
 
-// Catalog order first, then any other DB flag the server returned.
-// Missing catalog flags stay off. Hidden flags are dropped.
+// Catalog order first, then any other flag the server returned.
+// Records are already parsed (parseFlagRecord). Missing catalog flags stay
+// off and locked. Hidden flags are dropped.
 export function panelFlagsFromRecords(records) {
   const byName = new Map();
   if (Array.isArray(records)) {
@@ -107,9 +138,11 @@ export function panelFlagsFromRecords(records) {
         name: row.name,
         label: flagLabel(row.name),
         enabled: row.enabled === true && !envForcedOff,
-        updated_at: typeof row.updated_at === 'string' && row.updated_at ? row.updated_at : null,
-        updated_by: typeof row.updated_by === 'string' && row.updated_by.trim() ? row.updated_by.trim() : null,
+        updated_at: stampText(row.updated_at),
+        updated_by: actorText(row.updated_by),
         env_forced_off: envForcedOff,
+        writable: row.writable === true,
+        source: row.source === 'env' ? 'env' : 'db',
       });
     }
   }

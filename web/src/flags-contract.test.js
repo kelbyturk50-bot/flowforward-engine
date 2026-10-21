@@ -8,6 +8,7 @@ import {
   closedPanelFlags,
   panelFlagsFromRecords,
   parseFlagRecord,
+  parseFlagUpdate,
   parseFlagsPayload,
 } from './flags-contract.js';
 
@@ -20,6 +21,8 @@ describe('feature flags contract', () => {
     expect(apiSrc).toContain('FEATURE_FLAGS_API.update');
     expect(apiSrc).toContain('FEATURE_FLAGS_API.body');
     expect(apiSrc).not.toMatch(/['"`]\/api\/flags/);
+    expect(apiSrc).toMatch(/flags:\s+\(\)\s+=>\s+request\('GET', FEATURE_FLAGS_API\.list\)\.then\(parseFlagsPayload\)/);
+    expect(apiSrc).toMatch(/setFlag:.*\.then\(parseFlagUpdate\),/);
     expect(FEATURE_FLAGS_API.list).toBe('/api/flags');
     expect(FEATURE_FLAGS_API.update('FF_CAMPAIGNS')).toBe('/api/flags/FF_CAMPAIGNS');
     expect(FEATURE_FLAGS_API.update('A B')).toBe('/api/flags/A%20B');
@@ -64,6 +67,8 @@ describe('feature flags contract', () => {
         updated_at: '2026-10-16T18:00:00.000Z',
         updated_by: 'Kelby',
         env_forced_off: false,
+        writable: false,
+        source: 'db',
       },
       {
         name: 'FF_CAMPAIGN_OPEN_PIXEL',
@@ -71,13 +76,62 @@ describe('feature flags contract', () => {
         updated_at: null,
         updated_by: 'env',
         env_forced_off: true,
+        writable: false,
+        source: 'db',
       },
     ]);
   });
 
+  it('parses the #70 server Flag: effective wins, env force wins, writable must be true', () => {
+    const server = (extra) => ({
+      name: 'FF_CAMPAIGNS',
+      enabled: false,
+      effective: false,
+      env_forced_off: false,
+      updated_at: null,
+      updated_by: null,
+      writable: true,
+      source: 'db',
+      ...extra,
+    });
+    expect(parseFlagRecord(server({ enabled: true, effective: true }))).toMatchObject({ enabled: true, writable: true, source: 'db' });
+    expect(parseFlagRecord(server({ enabled: true, effective: false, env_forced_off: true }))).toMatchObject({ enabled: false, env_forced_off: true });
+    expect(parseFlagRecord(server({ enabled: true, effective: true, env_forced_off: true })).enabled).toBe(false);
+    expect(parseFlagRecord(server({ enabled: true, effective: 'true' })).enabled).toBe(true);
+    expect(parseFlagRecord(server({ enabled: 'true', effective: 'true' })).enabled).toBe(false);
+    expect(parseFlagRecord(server({ writable: 'true' })).writable).toBe(false);
+    expect(parseFlagRecord(server({ name: 'FF_PILOT_ESTIMATE_SMS', writable: false, source: 'env', enabled: true, effective: true })))
+      .toMatchObject({ enabled: true, writable: false, source: 'env' });
+  });
+
+  it('reads PUT { flag } and fails closed on anything else', () => {
+    const flag = {
+      name: 'FF_CAMPAIGNS',
+      enabled: true,
+      effective: true,
+      env_forced_off: false,
+      updated_at: '2026-10-20T18:00:00.000Z',
+      updated_by: 'crm',
+      writable: true,
+      source: 'db',
+    };
+    expect(parseFlagUpdate({ flag })).toEqual({
+      name: 'FF_CAMPAIGNS',
+      enabled: true,
+      updated_at: '2026-10-20T18:00:00.000Z',
+      updated_by: 'crm',
+      env_forced_off: false,
+      writable: true,
+      source: 'db',
+    });
+    for (const payload of [flag, null, undefined, {}, { flag: null }, { flag: 'FF_CAMPAIGNS' }, []]) {
+      expect(() => parseFlagUpdate(payload)).toThrow(/missing the flag/);
+    }
+  });
+
   it('shows every catalog flag as off when the server omits it', () => {
     const rows = panelFlagsFromRecords([
-      { name: 'FF_PROTOTYPE_GALLERY', enabled: true },
+      { name: 'FF_PROTOTYPE_GALLERY', enabled: true, writable: true },
       { name: 'FF_PILOT_ESTIMATE_LIVE_SEND', enabled: true },
       { name: 'FF_EXTRA', enabled: true },
     ]);
@@ -88,5 +142,9 @@ describe('feature flags contract', () => {
     expect(byName.FF_EXTRA).toBe(true);
     expect(rows.some((flag) => flag.name === 'FF_PILOT_ESTIMATE_LIVE_SEND')).toBe(false);
     expect(panelFlagsFromRecords(null).every((flag) => flag.enabled === false)).toBe(true);
+    const locked = Object.fromEntries(rows.map((flag) => [flag.name, flag.writable]));
+    expect(locked.FF_PROTOTYPE_GALLERY).toBe(true);
+    expect(locked.FF_CAMPAIGNS).toBe(false);
+    expect(FEATURE_FLAG_NAMES).toContain('FF_PROTOTYPE_ON_DRAFT');
   });
 });
