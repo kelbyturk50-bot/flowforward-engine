@@ -4,11 +4,13 @@ const router  = express.Router();
 const pool    = require('../db/client');
 const cfg     = require('../proposals/config');
 const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
+const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 const { draftProposal, runProposalBatch, getSetting, isRunning } = require('../proposals/draft');
 const send    = require('../proposals/send');
 const jobs    = require('../proposals/jobs');
 const pilotFlags = require('../pilot/flags');
 const pilotTokens = require('../pilot/tokens');
+const { prototypeForProposal } = require('../prototypes/store');
 
 const LIST_COLS = `pr.id, pr.prospect_id, pr.version, pr.status, pr.slug, pr.to_email, pr.to_name, pr.subject,
   pr.cost_usd, pr.feedback_rating, pr.reviewed_at, pr.created_at, pr.updated_at, pr.sent_at, pr.followup1_due_at, pr.followup1_sent_at,
@@ -32,13 +34,13 @@ router.get('/', async (req, res) => {
   try {
     if (req.query.prospect_id) {
       const { rows } = await pool.query(`SELECT ${LIST_COLS} FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
-        WHERE pr.prospect_id = $1 ORDER BY pr.version DESC`, [req.query.prospect_id]);
+        WHERE pr.prospect_id = $1 AND p.archived_at IS NULL ORDER BY pr.version DESC`, [req.query.prospect_id]);
       return res.json({ proposals: rows.map(withUrl) });
     }
     const where = VIEWS[req.query.view] || VIEWS.review;
     const order = req.query.view === 'out' ? 'pr.sent_at DESC' : req.query.view === 'review' ? 'p.fit_score DESC NULLS LAST, pr.created_at DESC' : 'pr.updated_at DESC';
     const { rows } = await pool.query(`SELECT ${LIST_COLS} FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
-      WHERE ${where} ORDER BY ${order} LIMIT 200`);
+      WHERE ${where} AND p.archived_at IS NULL ORDER BY ${order} LIMIT 200`);
     res.json({ proposals: rows.map(withUrl) });
   } catch (err) { fail(res, err); }
 });
@@ -48,7 +50,7 @@ router.get('/summary', async (req, res) => {
   try {
     const counts = {};
     await Promise.all(Object.entries(VIEWS).map(async ([k, w]) => {
-      const { rows } = await pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr WHERE ${w}`);
+      const { rows } = await pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE ${w} AND p.archived_at IS NULL`);
       counts[k] = rows[0].n;
     }));
     const eligibleParams = [cfg.TIERS];
@@ -57,11 +59,12 @@ router.get('/summary', async (req, res) => {
       pool.query(`SELECT COALESCE(SUM(cost_usd), 0)::float AS month FROM proposals WHERE created_at >= date_trunc('month', NOW())`),
       send.sentToday(),
       pool.query(`SELECT COUNT(*)::int AS n FROM prospects p WHERE p.fit_tier = ANY($1) AND p.stage = 'found' AND NOT p.do_not_contact
+                    AND p.archived_at IS NULL
                     AND ${gateSql} AND (p.website IS NOT NULL OR p.email IS NOT NULL)
                     AND NOT EXISTS (SELECT 1 FROM proposals pr WHERE pr.prospect_id = p.id)`, eligibleParams),
     ]);
     const [unreviewed, activeJobs] = await Promise.all([
-      pool.query(`SELECT COUNT(*)::int AS n FROM proposals WHERE status = 'draft' AND reviewed_at IS NULL`),
+      pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'draft' AND pr.reviewed_at IS NULL AND p.archived_at IS NULL`),
       pool.query(`SELECT COUNT(*)::int AS n FROM proposal_jobs WHERE status IN ('queued', 'running')`),
     ]);
     counts.unreviewed = unreviewed.rows[0].n;
@@ -88,11 +91,13 @@ router.get('/summary', async (req, res) => {
 // Background jobs (single-lead drafts and rewrites)
 router.get('/jobs', async (req, res) => {
   try {
-    const [list, unreviewed] = await Promise.all([
+    const [list, unreviewed, inboxCounts] = await Promise.all([
       jobs.list({ prospectId: req.query.prospect_id ? parseInt(req.query.prospect_id, 10) : null }),
-      pool.query(`SELECT COUNT(*)::int AS n FROM proposals WHERE status = 'draft' AND reviewed_at IS NULL`),
+      pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'draft' AND pr.reviewed_at IS NULL AND p.archived_at IS NULL`),
+      require('../proposals/inbox').counts(),
     ]);
-    res.json({ jobs: list, unreviewed: unreviewed.rows[0].n });
+    // inbox_waiting: replies with a draft (or a problem) to look at, plus unseen FYIs. inbox_working: being read by Claude.
+    res.json({ jobs: list, unreviewed: unreviewed.rows[0].n, inbox_waiting: inboxCounts.waiting, inbox_working: inboxCounts.working });
   }
   catch (err) { fail(res, err); }
 });
@@ -101,11 +106,14 @@ router.post('/jobs/:jobId/dismiss', async (req, res) => {
 });
 
 async function startJob(res, { prospectId, kind, sourceProposalId, instructions, freshResearch }) {
-  const lead = await pool.query('SELECT id, do_not_contact, company FROM prospects WHERE id = $1', [prospectId]);
+  const lead = await pool.query('SELECT id, do_not_contact, company, archived_at FROM prospects WHERE id = $1', [prospectId]);
   if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
   // Refuse before a job row, a research fetch, or a model call.
   if (isPestCompanyName(lead.rows[0].company)) {
     return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+  }
+  if (isArchivedLead(lead.rows[0])) {
+    return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
   }
   if (!cfg.anthropicConfigured()) return res.status(400).json({ error: 'Add ANTHROPIC_API_KEY in Railway Variables first.' });
   if (lead.rows[0].do_not_contact) return res.status(409).json({ error: 'This lead asked not to be contacted.' });
@@ -225,13 +233,16 @@ router.get('/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT pr.*, p.company, p.industry, p.city, p.fit_score, p.fit_tier, p.stage, p.phone, p.website, p.email AS lead_email,
-              p.contact_name, p.do_not_contact, p.rating, p.review_count
+              p.contact_name, p.do_not_contact, p.rating, p.review_count, p.archived_at, p.archive_reason
          FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`, [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     const versions = await pool.query(
       `SELECT id, version, status, created_at, cost_usd, instructions FROM proposals WHERE prospect_id = $1 ORDER BY version DESC`,
       [rows[0].prospect_id]);
     const p = rows[0];
+    const prototype = await prototypeForProposal(p.prospect_id);
+    // Preview shows the prototype line exactly as it would go out now.
+    p.prototype_url = prototype && prototype.url && !prototype.expired ? prototype.url : null;
     res.json({
       ...withUrl(p),
       versions: versions.rows,
@@ -240,6 +251,7 @@ router.get('/:id', async (req, res) => {
         followup1: p.followup1 ? send.renderMessage(p, 'followup1') : '',
         followup2: p.followup2 ? send.renderMessage(p, 'followup2') : '',
       },
+      prototype,
     });
   } catch (err) { fail(res, err); }
 });
@@ -320,7 +332,7 @@ router.post('/:id/mark-sent', async (req, res) => {
   try {
     await db.query('BEGIN');
     const { rows } = await db.query(
-      `SELECT pr.*, p.company, p.stage
+      `SELECT pr.*, p.company, p.stage, p.archived_at
          FROM proposals pr
          JOIN prospects p ON p.id = pr.prospect_id
         WHERE pr.id = $1
@@ -334,6 +346,10 @@ router.post('/:id/mark-sent', async (req, res) => {
     if (isPestCompanyName(p.company)) {
       await db.query('ROLLBACK');
       return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+    }
+    if (isArchivedLead(p)) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
     }
     if (p.status !== 'draft') { await db.query('ROLLBACK'); return res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` }); }
 
@@ -433,7 +449,7 @@ router.post('/:id/restore', async (req, res) => {
   try {
     await db.query('BEGIN');
     const { rows } = await db.query(
-      `SELECT pr.*, p.company
+      `SELECT pr.*, p.company, p.archived_at
          FROM proposals pr
          JOIN prospects p ON p.id = pr.prospect_id
         WHERE pr.id = $1
@@ -446,6 +462,10 @@ router.post('/:id/restore', async (req, res) => {
     if (isPestCompanyName(p.company)) {
       await db.query('ROLLBACK');
       return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+    }
+    if (isArchivedLead(p)) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
     }
     if (!['discarded', 'superseded'].includes(p.status)) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Only discarded or older versions can be restored.' }); }
     const out = await db.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [p.prospect_id]);

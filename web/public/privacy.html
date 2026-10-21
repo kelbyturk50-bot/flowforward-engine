@@ -42,8 +42,9 @@ a:focus-visible{outline:3px solid var(--ochre);outline-offset:2px}
 <ul>
 <li><strong>Send email</strong> that Kelby has reviewed and approved, plus up to two follow-up replies in the same thread.</li>
 <li><strong>Read incoming messages in that inbox</strong> to detect replies, meeting bookings, delivery failures and unsubscribe requests for those emails, so follow-ups stop automatically.</li>
+<li><strong>Keep the conversation with people who reply</strong> so Kelby can see the whole thread in one place and respond. Replies to FlowForward emails are stored in full, and messages Kelby sends in those same threads are checked so the tools know he has already answered.</li>
 </ul>
-<p>Email content is not used for advertising, is not sold, and is not shared with anyone. Only short excerpts needed to log a reply (for example "they replied") are stored. FlowForward's use of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+<p>Email content is not used for advertising and is not sold. To help Kelby respond, a reply and the earlier messages in its thread are sent to Anthropic's Claude API, which summarizes what the person is asking and drafts a suggested response. Kelby reviews and edits every draft; nothing is sent automatically. Anthropic processes this data only to provide that service and does not use it to train its models. Email content is not shared with anyone else. Only replies and booking notices tied to a FlowForward email are stored; the rest of the inbox is not. FlowForward's use of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
 
 <h2>People who reply or book a call</h2>
 <p>If you reply to a FlowForward email or book a call, your name, email address, and the details you share are kept so FlowForward can respond and follow up with you.</p>

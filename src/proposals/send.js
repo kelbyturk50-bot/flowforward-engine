@@ -11,6 +11,7 @@ const nodemailer = require('nodemailer');
 const pool = require('../db/client');
 const cfg  = require('./config');
 const { appendCompanyPestExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
+const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 
 const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
@@ -65,9 +66,72 @@ function footer() {
   return `\n\n--\n${SENDER.company} · ${SENDER.address}\nNot interested? Reply "no thanks" and I won't reach out again.`;
 }
 
+// Prototype link. Callers set p.prototype_url to a live link (or leave it
+// unset). A {{PROTOTYPE_URL}} placeholder written in the copy is used as-is;
+// otherwise the first email gets a short line after the one-pager link and
+// follow-up 1 gets one before the sign-off. Follow-up 2 is left alone.
+// With no live link, lines holding the placeholder are dropped.
+const PROTO_RE = /\{\{\s*PROTOTYPE_URL\s*\}\}/;
+const shopName = (p) => String(p.company || '').replace(/^test:\s*/i, '').trim() || 'your shop';
+
+function protoLine(which, p) {
+  return which === 'first'
+    ? `I also built a quick clickable prototype of what this could look like for ${shopName(p)}, on sample data:\n${p.prototype_url}`
+    : `If it's easier to see than read about, here's the clickable prototype I put together for ${shopName(p)}:\n${p.prototype_url}`;
+}
+
+// Insert a paragraph before the sign-off (the last paragraph), or at the end.
+function beforeSignoff(text, para) {
+  const trimmed = text.replace(/\s+$/, '');
+  const parts = trimmed.split(/\n{2,}/);
+  if (parts.length < 2) {
+    // One block: a short last line with no sentence punctuation is the sign-off.
+    const lines = trimmed.split('\n');
+    const last = lines[lines.length - 1] || '';
+    if (lines.length > 1 && last.length <= 30 && !/[.?!:]$/.test(last)) {
+      return `${lines.slice(0, -1).join('\n')}\n\n${para}\n\n${last}`;
+    }
+    return `${trimmed}\n\n${para}`;
+  }
+  parts.splice(parts.length - 1, 0, para);
+  return parts.join('\n\n');
+}
+
+function withPrototype(text, p, which) {
+  const raw = String(text || '');
+  if (PROTO_RE.test(raw)) {
+    if (p.prototype_url) return raw.replace(new RegExp(PROTO_RE.source, 'g'), p.prototype_url);
+    return raw.split('\n').filter(line => !PROTO_RE.test(line)).join('\n').replace(/\n{3,}/g, '\n\n');
+  }
+  if (!p.prototype_url || !raw.trim() || which === 'followup2') return raw;
+  const line = protoLine(which, p);
+  if (which === 'first') {
+    const lines = raw.split('\n');
+    const at = lines.findIndex(l => /\{\{\s*ONEPAGER_URL\s*\}\}/.test(l));
+    if (at >= 0) {
+      lines.splice(at + 1, 0, '', line);
+      return lines.join('\n');
+    }
+  }
+  return beforeSignoff(raw, line);
+}
+
 function renderMessage(p, which) {
   const text = which === 'first' ? p.body : which === 'followup1' ? p.followup1 : p.followup2;
-  return fillPlaceholders(text, p) + footer();
+  return fillPlaceholders(withPrototype(text, p, which), p) + footer();
+}
+
+// Sets p.prototype_url to the lead's live prototype link, if any. A lookup
+// failure never blocks an email; it just goes without the link.
+async function attachPrototypeUrl(p) {
+  try {
+    const link = await require('../prototypes/store').liveLink(p.prospect_id);
+    p.prototype_url = link ? link.url : null;
+  } catch (err) {
+    console.error('[prototype] email link lookup failed:', err && err.code);
+    p.prototype_url = null;
+  }
+  return p;
 }
 
 // "Now" in the sending timezone → { hour, weekday (0=Sun), date 'YYYY-MM-DD' }
@@ -112,7 +176,7 @@ const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(x || '');
 /** Approve a draft and send the first email now. */
 async function approveAndSend(proposalId) {
   const { rows } = await pool.query(
-    `SELECT pr.*, p.company, p.stage, p.do_not_contact FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`,
+    `SELECT pr.*, p.company, p.stage, p.do_not_contact, p.archived_at FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`,
     [proposalId]);
   const p = rows[0];
   if (!p) throw Object.assign(new Error('Proposal not found'), { status: 404 });
@@ -120,6 +184,9 @@ async function approveAndSend(proposalId) {
   // UPDATE and before mailer() is called.
   if (isPestCompanyName(p.company)) {
     throw Object.assign(new Error(`${PEST_NAME_REASON}.`), { status: 409 });
+  }
+  if (isArchivedLead(p)) {
+    throw Object.assign(new Error(`${ARCHIVED_LEAD_REASON}.`), { status: 409 });
   }
 
   const problems = await sendReadiness();
@@ -135,6 +202,10 @@ async function approveAndSend(proposalId) {
   // Claim the row first so a double-click can't send twice.
   const claim = await pool.query(`UPDATE proposals SET status = 'sending', approved_at = NOW() WHERE id = $1 AND status = 'draft' RETURNING id`, [p.id]);
   if (!claim.rows.length) throw Object.assign(new Error('Already sending.'), { status: 409 });
+
+  // The prototype link's 14 days start when it is first shared.
+  try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }
+  await attachPrototypeUrl(p);
 
   let info;
   try {
@@ -189,11 +260,12 @@ async function sendDueFollowups() {
   const params = [];
   const nameSql = appendCompanyPestExclusion(params);
   const { rows } = await pool.query(
-    `SELECT pr.*, p.company, p.stage, p.do_not_contact FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+    `SELECT pr.*, p.company, p.stage, p.do_not_contact, p.archived_at FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
       WHERE pr.status = 'sent' AND (
             (pr.followup1_sent_at IS NULL AND pr.followup1_due_at <= NOW()) OR
             (pr.followup1_sent_at IS NOT NULL AND pr.followup2_sent_at IS NULL AND pr.followup2_due_at <= NOW()))
         AND ${nameSql}
+        AND p.archived_at IS NULL
       ORDER BY pr.sent_at LIMIT 25`,
     params);
   let sent = 0;
@@ -205,6 +277,10 @@ async function sendDueFollowups() {
       console.error('[send] skipped follow-up: company name matches pest control');
       continue;
     }
+    if (isArchivedLead(p)) {
+      console.error('[send] skipped follow-up: lead is archived');
+      continue;
+    }
     if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
       await stopSequence(p.id, p.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${p.stage}`);
       continue;
@@ -214,6 +290,7 @@ async function sendDueFollowups() {
     const claim = await pool.query(
       `UPDATE proposals SET ${which}_sent_at = NOW() WHERE id = $1 AND ${which}_sent_at IS NULL AND status = 'sent' RETURNING id`, [p.id]);
     if (!claim.rows.length) continue;
+    await attachPrototypeUrl(p);
     try {
       await (await mailer()).sendMail({
         threadId: p.thread_id || undefined,
@@ -234,12 +311,19 @@ async function sendDueFollowups() {
     }
   }
   // Sequences with no reply two weeks after the last follow-up are finished.
+  // Archived leads stay sent. This update does not write their status or
+  // next_action.
   const done = await pool.query(
-    `UPDATE proposals SET status = 'finished', stop_reason = 'No reply after the follow-ups'
-      WHERE status = 'sent' AND COALESCE(followup2_sent_at, followup1_sent_at, sent_at) < NOW() - INTERVAL '14 days'
-        AND (followup2_due_at IS NULL OR followup2_sent_at IS NOT NULL)
-        AND (followup1_due_at IS NULL OR followup1_sent_at IS NOT NULL)
-      RETURNING prospect_id`);
+    `UPDATE proposals pr
+        SET status = 'finished', stop_reason = 'No reply after the follow-ups'
+       FROM prospects p
+      WHERE pr.prospect_id = p.id
+        AND p.archived_at IS NULL
+        AND pr.status = 'sent'
+        AND COALESCE(pr.followup2_sent_at, pr.followup1_sent_at, pr.sent_at) < NOW() - INTERVAL '14 days'
+        AND (pr.followup2_due_at IS NULL OR pr.followup2_sent_at IS NOT NULL)
+        AND (pr.followup1_due_at IS NULL OR pr.followup1_sent_at IS NOT NULL)
+      RETURNING pr.prospect_id`);
   for (const r of done.rows) {
     await pool.query(`UPDATE prospects SET next_action = COALESCE(NULLIF(next_action, ''), 'No reply to emails — try a call'),
                              next_action_at = COALESCE(next_action_at, CURRENT_DATE) WHERE id = $1`, [r.prospect_id]);
@@ -248,6 +332,8 @@ async function sendDueFollowups() {
 }
 
 // ─── Inbox watching ───────────────────────────────────────────────────────
+// Out-of-office and other automatic replies: never stop a sequence for these.
+const AUTO_SUBJECT = /^\s*(automatic reply|auto(matic)?[- ]?(reply|response)|out of (the )?office|ooo\b|away from (the )?office|on vacation)/i;
 const OPT_OUT = /\b(unsubscribe|remove me|take me off|stop (emailing|contacting)|no thanks|not interested|do not (email|contact)|don'?t (email|contact))\b/i;
 
 function domainOf(email) { return String(email || '').split('@')[1]?.toLowerCase() || ''; }
@@ -269,6 +355,7 @@ function classifyMessage(msg, p) {
 
   const dom = domainOf(to);
   const sameSender = from === to || (dom && !GENERIC_DOMAINS.includes(dom) && domainOf(from) === dom);
+  if ((sameSender || threaded) && (msg.auto || AUTO_SUBJECT.test(msg.subject || ''))) return { kind: 'auto' };
   if (sameSender || threaded) {
     const fresh = text.split(/\n\s*On .{5,200}wrote:|\n-{2,}\s*Original Message|\n>/)[0];
     return { kind: OPT_OUT.test(fresh) || /^\s*(stop|unsubscribe)\s*$/im.test(fresh) || /unsubscribe/i.test(msg.subject || '') ? 'opted_out' : 'replied',
@@ -278,7 +365,21 @@ function classifyMessage(msg, p) {
 }
 
 async function applyOutcome(p, outcome, msg) {
+  await applyOutcomeEffects(p, outcome, msg);
+  // Keep the whole message and open an inbox item (Claude reads it and drafts a reply).
+  try {
+    await require('./inbox').recordInbound(p, outcome.kind, { ...msg, auto: msg.auto || outcome.kind === 'auto' });
+  } catch (err) {
+    console.error('[inbox] could not record message:', err.message);
+  }
+}
+
+async function applyOutcomeEffects(p, outcome, msg) {
   const { kind, snippet } = outcome;
+  if (kind === 'auto') {
+    await logActivity(p.prospect_id, 'email', 'Got an automatic reply (out of office). Follow-ups keep running.');
+    return;
+  }
   if (kind === 'bounced') {
     await stopSequence(p.id, `Bounced: ${p.to_email} did not accept the message`, 'bounced');
     await pool.query(`UPDATE prospects SET email = NULL WHERE id = $1 AND email = $2`, [p.prospect_id, p.to_email]);
@@ -340,24 +441,113 @@ async function fetchInbox(since) {
 }
 
 let checking = false;
+// Sent proposals, including archived leads. Opt-outs and bounces are still
+// recorded while a lead is archived. A reply or booking is not: that would
+// write status and next_action, which stay with the finisher and the send path.
+async function inboxCandidates() {
+  const { rows } = await pool.query(
+    `SELECT pr.*, p.stage, p.archived_at, p.company, p.do_not_contact
+       FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+      WHERE pr.status = 'sent' AND pr.to_email IS NOT NULL`);
+  return rows;
+}
+
+// Proposals already in a conversation (they replied before). New messages in
+// those threads go to the inbox too, without touching the proposal's status.
+async function conversationCandidates() {
+  const { rows } = await pool.query(
+    `SELECT pr.*, p.stage, p.archived_at, p.company, p.do_not_contact
+       FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+      WHERE pr.status = 'replied' AND pr.to_email IS NOT NULL AND p.archived_at IS NULL
+        AND COALESCE(pr.replied_at, pr.sent_at) > NOW() - INTERVAL '60 days'`);
+  return rows;
+}
+
+// A later message from someone already in a conversation.
+async function applyFollowOn(p, outcome, msg) {
+  const inbox = require('./inbox');
+  if (await inbox.alreadyRecorded(msg)) return false;
+  if (outcome.kind === 'opted_out') {
+    await pool.query(`UPDATE prospects SET do_not_contact = TRUE, stage = 'lost' WHERE id = $1`, [p.prospect_id]);
+    await logActivity(p.prospect_id, 'email', 'Asked not to be contacted. Marked do-not-contact.');
+  } else if (outcome.kind === 'replied' || outcome.kind === 'booked') {
+    await pool.query(`UPDATE prospects SET next_action = $2, next_action_at = CURRENT_DATE WHERE id = $1`,
+      [p.prospect_id, outcome.kind === 'booked' ? 'Prep for the consultation call' : 'Reply to their email']);
+    await logActivity(p.prospect_id, 'email', outcome.kind === 'booked' ? 'Booked a consultation on Calendly.'
+      : `Wrote back${outcome.snippet ? `: "${outcome.snippet}"` : ''}.`);
+  }
+  const item = await inbox.recordInbound(p, outcome.kind, { ...msg, auto: msg.auto || outcome.kind === 'auto' });
+  return !!item;
+}
+
+function collectFollowOns(rows, messages, taken) {
+  const out = [];
+  for (const msg of messages) {
+    if (taken.has(msg) || msg.from === SENDER.email.toLowerCase()) continue;
+    for (const p of rows) {
+      if (msg.date && p.sent_at && msg.date < new Date(p.sent_at)) continue;
+      const outcome = classifyMessage(msg, p);
+      if (!outcome || outcome.kind === 'bounced') continue;
+      out.push([p, outcome, msg]);
+      break;
+    }
+  }
+  return out;
+}
+
+function keepInboxOutcome(row, outcome) {
+  if (!outcome) return false;
+  if (!isArchivedLead(row)) return true;
+  return outcome.kind === 'opted_out' || outcome.kind === 'bounced';
+}
+
+function collectInboxOutcomes(rows, messages) {
+  const outcomes = [];
+  for (const msg of messages) {
+    if (msg.from === SENDER.email.toLowerCase()) continue;
+    for (const p of rows) {
+      if (p._done || (msg.date && p.sent_at && msg.date < new Date(p.sent_at))) continue;
+      const outcome = classifyMessage(msg, p);
+      if (!keepInboxOutcome(p, outcome)) continue;
+      p._done = true;
+      outcomes.push([p, outcome, msg]);
+    }
+  }
+  return outcomes;
+}
+
+async function applyInboxMessages(messages) {
+  const rows = await inboxCandidates();
+  const convo = await conversationCandidates();
+  const outcomes = collectInboxOutcomes(rows, messages);
+  for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
+  const taken = new Set(outcomes.map(([, , m]) => m));
+  let followOns = 0;
+  for (const [p, o, msg] of collectFollowOns(convo, messages, taken)) if (await applyFollowOn(p, o, msg)) followOns++;
+  require('./inbox').kick();
+  return { checked: messages.length, matched: outcomes.length, follow_ons: followOns };
+}
+
 /** Look through the inbox for replies, bookings, bounces and opt-outs. */
 async function checkInbox() {
   if (checking || !(await mailMode()) || (await mailMode()) === 'test') return { checked: 0 };
-  const { rows: active } = await pool.query(
-    `SELECT pr.*, p.stage FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'sent' AND pr.to_email IS NOT NULL`);
-  if (!active.length) return { checked: 0 };
+  const active = await inboxCandidates();
+  const convo = await conversationCandidates();
+  if (!active.length && !convo.length) return { checked: 0 };
   checking = true;
-  const outcomes = []; let messages = [];
+  let messages = [];
+  let outcomes = [];
+  let followOns = [];
+  let sentHandled = 0;
   try {
-    const since = new Date(Math.min(...active.map(p => new Date(p.sent_at).getTime())) - 86400000);
+    const since = new Date(Math.min(...[...active, ...convo].map(p => new Date(p.sent_at).getTime())) - 86400000);
     messages = await fetchInbox(since);
-    for (const msg of messages) {
-      if (msg.from === SENDER.email.toLowerCase()) continue;
-      for (const p of active) {
-        if (p._done || (msg.date && msg.date < new Date(p.sent_at))) continue;
-        const outcome = classifyMessage(msg, p);
-        if (outcome) { p._done = true; outcomes.push([p, outcome, msg]); }
-      }
+    outcomes = collectInboxOutcomes(active, messages);
+    const taken = new Set(outcomes.map(([, , m]) => m));
+    followOns = collectFollowOns(convo, messages, taken);
+    if ((await mailMode()) === 'gmail_api') {
+      try { sentHandled = await require('./inbox').applySentMessages(await gmail.sentSince(since)); }
+      catch (err) { console.error('[inbox] sent check failed:', err.message); }
     }
   } catch (err) {
     console.error('[inbox] ✗ check failed:', err.message);
@@ -365,7 +555,10 @@ async function checkInbox() {
     checking = false;
   }
   for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
-  return { checked: messages.length, matched: outcomes.length };
+  let recorded = 0;
+  for (const [p, o, msg] of followOns) if (await applyFollowOn(p, o, msg)) recorded++;
+  require('./inbox').kick();
+  return { checked: messages.length, matched: outcomes.length, follow_ons: recorded, replied_from_gmail: sentHandled };
 }
 
 async function senderTick() {
@@ -374,6 +567,6 @@ async function senderTick() {
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, checkInbox, senderTick, stopSequence, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
   renderMessage, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

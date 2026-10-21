@@ -9,6 +9,7 @@ import Settings from './views/Settings';
 import LeadDrawer from './views/LeadDrawer';
 import ProjectDrawer from './views/ProjectDrawer';
 import More from './views/More';
+import Inbox from './views/Inbox';
 import { Toaster, isOverdue } from './ui';
 import { api, currentApiBase, settings } from './api';
 import { useLoadFeatureFlags } from './remote-flags';
@@ -20,6 +21,7 @@ const ICONS = {
   today: 'M4 12h4l3-8 4 16 3-8h2',
   leads: 'M4 6h16M4 12h16M4 18h10',
   proposals: 'M4 6l8 6 8-6M4 6h16v12H4z',
+  inbox: 'M3 13h5l2 3h4l2-3h5M5.5 5h13L21 13v6H3v-6z',
   pipeline: 'M4 5v14M10 5v10M16 5v6M22 5v3',
   projects: 'M4 7h16v12H4zM9 7V4h6v3',
   more: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
@@ -38,6 +40,7 @@ const ROUTES = [
   { id: 'today',    label: 'Today',    icon: ICONS.today },
   { id: 'leads',    label: 'Leads',    icon: ICONS.leads },
   { id: 'proposals', label: 'Proposals', icon: ICONS.proposals },
+  { id: 'inbox',    label: 'Inbox',    icon: ICONS.inbox },
   { id: 'pipeline', label: 'Pipeline', icon: ICONS.pipeline },
   { id: 'projects', label: 'Projects', icon: ICONS.projects },
   { id: 'settings', label: 'Settings' },
@@ -59,7 +62,7 @@ const readRoute = () => {
   return settings.apiKey ? 'today' : 'settings';
 };
 
-const tabOn = (id, route) => id === 'more' ? route === 'more' || route === 'projects' : route === id;
+const tabOn = (id, route) => id === 'more' ? ['more', 'projects', 'inbox'].includes(route) : route === id;
 
 function BrandMark() {
   return (
@@ -109,6 +112,7 @@ export default function App() {
             {r.id === 'settings' ? <GearIcon /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d={r.icon} /></svg>}
             <span>{r.label}</span>
             {r.id === 'proposals' && <ProposalsBadge />}
+            {r.id === 'inbox' && <InboxBadge />}
           </a>
         ))}
       </nav>
@@ -119,6 +123,7 @@ export default function App() {
         {route === 'today'    && <Today {...shared} />}
         {route === 'leads'    && <Leads {...shared} />}
         {route === 'proposals' && <Proposals {...shared} />}
+        {route === 'inbox'    && <Inbox {...shared} />}
         {route === 'pipeline' && <Pipeline {...shared} />}
         {route === 'projects' && <Projects {...shared} />}
         {route === 'more'     && <More />}
@@ -160,12 +165,12 @@ function useFocusCounts(version) {
 }
 
 function MobileTabs({ route, version }) {
-  const { unreviewed } = useJobs();
+  const { unreviewed, inboxWaiting } = useJobs();
   const focus = useFocusCounts(version);
   const todayN = focus?.followups_due?.length || 0;
-  const moreN = (focus?.task_queue || []).filter(t => isOverdue(t.due_date)).length;
+  const moreN = (focus?.task_queue || []).filter(t => isOverdue(t.due_date)).length + (inboxWaiting || 0);
   const counts = { today: todayN, proposals: unreviewed, more: moreN };
-  const labels = { today: 'follow-ups due', proposals: 'proposals to review', more: 'overdue project tasks' };
+  const labels = { today: 'follow-ups due', proposals: 'proposals to review', more: inboxWaiting ? 'replies and overdue tasks' : 'overdue project tasks' };
   return (
     <nav className="tabbar" aria-label="Mobile">
       {TABS.map(t => {
@@ -196,6 +201,17 @@ function ProposalsBadge() {
     <span className="rail-badges">
       {working > 0 && <span className="rail-working" title={`${working} drafting in the background`} aria-label={`${working} drafting`} />}
       {unreviewed > 0 && <span className="rail-count" aria-label={`${unreviewed} new to review`}>{unreviewed}</span>}
+    </span>
+  );
+}
+
+function InboxBadge() {
+  const { inboxWaiting, inboxWorking } = useJobs();
+  if (!inboxWaiting && !inboxWorking) return null;
+  return (
+    <span className="rail-badges">
+      {inboxWorking > 0 && <span className="rail-working" title={`${inboxWorking} being read`} aria-label={`${inboxWorking} being read`} />}
+      {inboxWaiting > 0 && <span className="rail-count" aria-label={`${inboxWaiting} replies waiting`}>{inboxWaiting}</span>}
     </span>
   );
 }

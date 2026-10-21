@@ -23,6 +23,9 @@ const HVAC_LEAD = {
 async function resetDb() {
   await pool.query(`
     TRUNCATE TABLE
+      inbox_items,
+      inbox_messages,
+      prototypes,
       pilot_estimate_suppressions,
       pilot_open_estimates,
       pilot_customers,
