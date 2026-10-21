@@ -223,22 +223,27 @@ function prototypeLine(p, which) {
 }
 
 function PrototypeAddon({ p, which }) {
-  const line = prototypeLine(p, which);
-  if (line) {
-    return (
-      <div className="proto-addon">
-        <span className="muted small">{which === 'first' ? 'Added right after the one-pager link when it sends:' : 'Added before your sign-off when it sends:'}</span>
-        <pre>{line}</pre>
-      </div>
-    );
-  }
+  // Server-computed (send.js addedLines) when available; older API: prototype only.
+  const added = Array.isArray(p.additions?.[which])
+    ? p.additions[which]
+    : (prototypeLine(p, which) ? [{ where: which === 'first' ? 'after the one-pager link' : 'before your sign-off', text: prototypeLine(p, which) }] : []);
+  const notes = [];
   if (which === 'first' && p.prototype && !p.prototype.url && p.prototype.link_problem) {
-    return <p className="proto-addon muted small">No prototype link will be added: {p.prototype.link_problem === 'key_missing' ? 'the CRM API key on Railway is shorter than 32 characters.' : 'the CRM API key changed. Make a new link on the Prototype card.'}</p>;
+    notes.push(`No prototype link will be added: ${p.prototype.link_problem === 'key_missing' ? 'the CRM API key on Railway is shorter than 32 characters.' : 'the CRM API key changed. Make a new link on the Prototype card.'}`);
   }
-  if (which === 'first' && p.prototype?.expired) {
-    return <p className="proto-addon muted small">No prototype link will be added: it expired. Make a new link on the Prototype card.</p>;
-  }
-  return null;
+  if (which === 'first' && p.prototype?.expired) notes.push('No prototype link will be added: it expired. Make a new link on the Prototype card.');
+  if (!added.length && !notes.length) return null;
+  return (
+    <>
+      {added.map((a, i) => (
+        <div className="proto-addon" key={i}>
+          <span className="muted small">Added {a.where} when it sends:</span>
+          <pre>{a.text}</pre>
+        </div>
+      ))}
+      {notes.map(n => <p key={n} className="proto-addon muted small">{n}</p>)}
+    </>
+  );
 }
 
 function EmailField({ label, hint, value, subject, first, disabled, onSave, addon }) {

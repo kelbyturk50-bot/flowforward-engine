@@ -33,6 +33,20 @@ describe('email html', () => {
     assert.ok(text.includes(proto), 'plain text keeps the absolute URL');
   });
 
+  it('the first email gets a calendar link before the sign-off, once; follow-ups do not', () => {
+    const cal = cfg.SENDER.calendly;
+    const text = send.renderMessage(p, 'first');
+    assert.ok(text.includes(`My calendar is here if that's easier: ${cal}\n\nKelby`));
+    assert.equal(text.split(cal).length - 1, 1);
+    const html = send.renderMessageHtml(p, 'first');
+    assert.match(html, new RegExp(`easier: <a href="${cal}"[^>]*>Book a time &rarr;</a>`));
+    assert.ok(html.includes('>Book a 15-minute call</a>'), 'signature has the booking link');
+    const own = { ...p, body: 'Hi,\n\nBook here: {{CALENDLY_URL}}\n\nKelby' };
+    assert.equal(send.renderMessage(own, 'first').split(cal).length - 1, 1, 'no duplicate when the copy has it');
+    assert.equal(send.renderMessage(p, 'followup1').includes(cal), false);
+    assert.deepEqual(send.addedLines(p, 'first').map(a => a.where), ['after the one-pager link', 'before your sign-off']);
+  });
+
   it('escapes draft text and keeps unknown links as their host', () => {
     const html = renderHtml('Hi <b>there</b> & see https://example.com/x?a=1&b=2\n\nKelby', {});
     assert.ok(html.includes('Hi &lt;b&gt;there&lt;/b&gt; &amp; see'));

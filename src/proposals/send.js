@@ -116,16 +116,44 @@ function withPrototype(text, p, which) {
   return beforeSignoff(raw, line);
 }
 
-function renderMessage(p, which) {
+// Booking link (Kelby, Oct 20): the first email always ends with a direct
+// calendar link before the sign-off, unless the copy already has one.
+const BOOK_RE = /\{\{\s*CALENDLY_URL\s*\}\}/;
+const BOOK_LINE = "My calendar is here if that's easier: {{CALENDLY_URL}}";
+function withBooking(text, which) {
+  const raw = String(text || '');
+  if (which !== 'first' || !raw.trim() || !SENDER.calendly) return raw;
+  if (BOOK_RE.test(raw) || raw.includes(SENDER.calendly)) return raw;
+  return beforeSignoff(raw, BOOK_LINE);
+}
+
+function composed(p, which) {
   const text = which === 'first' ? p.body : which === 'followup1' ? p.followup1 : p.followup2;
-  return fillPlaceholders(withPrototype(text, p, which), p) + footer();
+  return fillPlaceholders(withBooking(withPrototype(text, p, which), which), p);
+}
+
+// The lines the system adds to the copy Kelby wrote, for the CRM preview.
+function addedLines(p, which) {
+  const text = which === 'first' ? p.body : which === 'followup1' ? p.followup1 : p.followup2;
+  if (!String(text || '').trim()) return [];
+  const out = [];
+  if (p.prototype_url && !PROTO_RE.test(text) && which !== 'followup2') {
+    out.push({ where: which === 'first' ? 'after the one-pager link' : 'before your sign-off', text: protoLine(which, p) });
+  }
+  if (withBooking(text, which) !== String(text)) {
+    out.push({ where: 'before your sign-off', text: fillPlaceholders(BOOK_LINE, p) });
+  }
+  return out;
+}
+
+function renderMessage(p, which) {
+  return composed(p, which) + footer();
 }
 
 // The HTML part sent alongside the plain text: same words, short link text
 // instead of raw URLs, and a signature with the FlowForward logo.
 function renderMessageHtml(p, which) {
-  const text = which === 'first' ? p.body : which === 'followup1' ? p.followup1 : p.followup2;
-  return require('./email-html').renderHtml(fillPlaceholders(withPrototype(text, p, which), p), p);
+  return require('./email-html').renderHtml(composed(p, which), p);
 }
 
 // Sets p.prototype_url to the lead's live prototype link, if any. A lookup
@@ -577,5 +605,5 @@ async function senderTick() {
 
 module.exports = {
   approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
-  renderMessage, renderMessageHtml, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
+  renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };
