@@ -58,6 +58,39 @@ async function learningContext() {
   return { styleNotes: typeof styleNotes === 'string' ? styleNotes : '', feedback: feedback.rows, examples: examples.rows };
 }
 
+// The model sometimes returns a nested object as a JSON string (e.g.
+// "onepager": "{\"headline\": ...}"). Parse those back into objects, so a
+// one-pager doesn't silently come out empty.
+function parseMaybe(v) {
+  if (typeof v !== 'string') return v;
+  const t = v.trim();
+  if (!/^[[{]/.test(t)) return v;
+  try { return JSON.parse(t); } catch { return v; }
+}
+
+function normalizeSubmission(input) {
+  const out = { ...(parseMaybe(input) || {}) };
+  for (const k of ['analysis', 'email', 'onepager']) out[k] = parseMaybe(out[k]);
+  const o = out.onepager;
+  if (o && typeof o === 'object') {
+    out.onepager = { ...o, observations: parseMaybe(o.observations), opportunities: parseMaybe(o.opportunities) };
+  }
+  return out;
+}
+
+// Why a submission's one-pager can't be used, or null when it's fine.
+function submissionProblem(input) {
+  const o = normalizeSubmission(input).onepager;
+  if (!o || typeof o !== 'object') return 'onepager missing or not an object';
+  const obs = Array.isArray(o.observations) ? o.observations.filter(x => x && (x.title || x.detail)) : [];
+  const opps = Array.isArray(o.opportunities) ? o.opportunities.filter(x => x && x.title) : [];
+  const missing = [];
+  if (!String(o.intro || '').trim()) missing.push('intro is empty');
+  if (!obs.length) missing.push('no observations');
+  if (!opps.length) missing.push('no opportunities');
+  return missing.length ? missing.join(', ') : null;
+}
+
 // Run Claude with web search + the submit tool until it submits.
 async function writeWithClaude({ lead, research, instructions }) {
   const ctx = await learningContext();
@@ -88,12 +121,19 @@ async function writeWithClaude({ lead, research, instructions }) {
 
     const cost = cfg.costOf(cfg.MODEL, usage);
     const submitted = (res.content || []).find(b => b.type === 'tool_use' && b.name === 'submit_proposal');
-    if (submitted && res.stop_reason !== 'max_tokens') return { output: submitted.input, usage, cost };
+    const problem = submitted && res.stop_reason !== 'max_tokens' ? submissionProblem(submitted.input) : null;
+    if (submitted && res.stop_reason !== 'max_tokens' && (!problem || turn >= 4)) {
+      if (problem) console.warn(`[proposals] submitted with a thin one-pager after retries: ${problem}`);
+      return { output: normalizeSubmission(submitted.input), usage, cost };
+    }
     if (cost > cfg.MAX_COST_PER_LEAD) throw new Error(`Stopped: cost passed the $${cfg.MAX_COST_PER_LEAD} per-lead cap.`);
 
     messages.push({ role: 'assistant', content: res.content });
     if (res.stop_reason === 'pause_turn') continue;           // long search turn; resume as-is
-    if (submitted) {                                          // truncated submit: ask again
+    if (submitted && problem) {                               // malformed or empty one-pager: ask again
+      messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: submitted.id, is_error: true,
+        content: `The one-pager is incomplete (${problem}). Call submit_proposal again with every field as a real JSON object or array (not a string): onepager.intro, 2–4 observations, and 2–3 opportunities.` }] });
+    } else if (submitted) {                                   // truncated submit: ask again
       messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: submitted.id, is_error: true,
         content: 'Your submission was cut off. Submit again, keeping each field concise.' }] });
     } else {
@@ -281,4 +321,33 @@ async function runProposalBatch({ trigger = 'nightly', count } = {}) {
 // The inbox reuses the same Anthropic client (and the same test mock).
 const getClient = () => claude();
 
-module.exports = { draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, getClient, isRunning: () => running };
+// Rewrite only the one-pager of an existing proposal (any status but
+// discarded/superseded), keeping its slug, so a link already sent shows the
+// full page. Uses the stored research; no new crawl. Email copy is untouched.
+async function rebuildOnepager(proposalId) {
+  const { rows: prs } = await pool.query('SELECT id, prospect_id, version, status, research, instructions FROM proposals WHERE id = $1', [proposalId]);
+  const pr = prs[0];
+  if (!pr) throw Object.assign(new Error('Proposal not found'), { status: 404 });
+  if (['discarded', 'superseded'].includes(pr.status)) throw Object.assign(new Error('Restore this version before rebuilding its one-pager.'), { status: 409 });
+  const { rows: leads } = await pool.query('SELECT * FROM prospects WHERE id = $1', [pr.prospect_id]);
+  const lead = leads[0];
+  if (!lead) throw Object.assign(new Error('Lead not found'), { status: 404 });
+  if (isPestCompanyName(lead.company)) throw Object.assign(new Error(`${PEST_NAME_REASON}.`), { status: 409 });
+  if (isArchivedLead(lead)) throw Object.assign(new Error(`${ARCHIVED_LEAD_REASON}.`), { status: 409 });
+  const research = pr.research || await researchLead(lead);
+  const row = { ...pr, prospect_id: lead.id };
+  const { output, usage, cost } = await writeWithClaude({ lead, research, instructions: row.instructions });
+  const { onepager } = cleanOutput(output, research, lead);
+  if (!onepager.observations.length && !onepager.opportunities.length) {
+    throw Object.assign(new Error('Claude returned an empty one-pager again. Try once more.'), { status: 502 });
+  }
+  const { rows: upd } = await pool.query(
+    `UPDATE proposals SET onepager = $2, cost_usd = COALESCE(cost_usd, 0) + $3 WHERE id = $1 RETURNING *`,
+    [proposalId, onepager, cost.toFixed(4)]);
+  await pool.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'note', $2)`,
+    [row.prospect_id, `One-pager rebuilt for proposal v${row.version} ($${cost.toFixed(2)}).`]);
+  void usage;
+  return upd[0];
+}
+
+module.exports = { rebuildOnepager, normalizeSubmission, submissionProblem, draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, getClient, isRunning: () => running };
