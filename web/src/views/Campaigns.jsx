@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import RateCell, { OpenInfo } from '../campaigns/RateCell';
 import { listCampaigns } from '../campaigns/client';
-import { DATE_RANGES, STATUS_FILTERS } from '../campaigns/fixture';
+import { STATUS_FILTERS } from '../campaigns/fixture';
 import {
   campaignInRange,
   campaignMatchesStatus,
   channelLabel,
+  dateRanges,
   footnote,
   formatCampaignDates,
   headlineMetrics,
-  onlyTestCampaigns,
   sortCampaigns,
   statusLabel,
   untouchedMessage,
@@ -26,18 +26,21 @@ function writeMachineOpens(on) {
   try { localStorage.setItem(OPENS_KEY, on ? '1' : '0'); } catch { /* private mode */ }
 }
 
-export default function Campaigns({ load = listCampaigns }) {
-  const list = useAsync(() => load(), [load]);
+// `today` is injectable for tests; the date-range chip is relative to it.
+// The selected range goes to the API, so every count is for that range.
+export default function Campaigns({ load = listCampaigns, today = null }) {
+  const ranges = useMemo(() => dateRanges(today || new Date()), [today]);
   const [status, setStatus] = useState('all');
   const [rangeId, setRangeId] = useState('lifetime');
   const [dateOpen, setDateOpen] = useState(false);
   const [includeMachineOpens, setIncludeMachineOpens] = useState(readMachineOpens);
+  const range = ranges.find((item) => item.id === rangeId) || ranges[0];
+  const list = useAsync(() => load({ range: { from: range.from, to: range.to } }), [load, range.from, range.to]);
 
   useEffect(() => { writeMachineOpens(includeMachineOpens); }, [includeMachineOpens]);
 
-  const range = DATE_RANGES.find((item) => item.id === rangeId) || DATE_RANGES[0];
   const campaigns = useMemo(() => {
-    const rows = onlyTestCampaigns(list.data?.campaigns || []);
+    const rows = list.data?.campaigns || [];
     return sortCampaigns(rows.filter((row) => campaignMatchesStatus(row, status) && campaignInRange(row, range)));
   }, [list.data, status, range]);
 
@@ -89,7 +92,7 @@ export default function Campaigns({ load = listCampaigns }) {
             </button>
             {dateOpen && (
               <div className="camp-date-menu" role="listbox" aria-label="Date range">
-                {DATE_RANGES.map((item) => (
+                {ranges.map((item) => (
                   <button
                     key={item.id}
                     type="button"

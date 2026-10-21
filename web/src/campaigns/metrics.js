@@ -54,7 +54,21 @@ export function formatCampaignDates(start, end) {
   return `${formatCampaignDate(start)} – ${end ? formatCampaignDate(end) : 'not set'}`;
 }
 
+// A campaign from GET /api/campaigns carries server counts (see client.js).
+// The TEST: fixture and unit tests carry leads with touches and are counted here.
 export function headlineMetrics(campaign, { includeMachineOpens = false } = {}) {
+  const counts = campaign?.counts;
+  if (counts) {
+    return {
+      enrolled: counts.enrolled,
+      touched: counts.touched,
+      responded: counts.responded,
+      converted: counts.converted,
+      openedNoReply: includeMachineOpens ? counts.openedNoReplyAll : counts.openedNoReplyHuman,
+      machineOpens: counts.machineOpens,
+      prototypeViews: counts.prototypeViews,
+    };
+  }
   const leads = campaign?.leads || [];
   const touched = leads.filter(isTouchedLead);
   const replied = (lead) => (lead.touches || []).some((touch) => touch.type === 'replied');
@@ -124,5 +138,22 @@ export function footnote({ includeMachineOpens = false } = {}) {
   const opens = includeMachineOpens
     ? 'Opens: including machine opens.'
     : 'Opens: likely-human only (machine opens excluded).';
-  return `Touched = leads with at least one Sent or Call logged touch in the range. ${opens} Opens are display-only and never used in attribution or conversion. Converted uses last-touch attribution, 90-day window.`;
+  return `Touched = leads with at least one Sent or Call logged touch in the range. ${opens} Opens are display-only and never used in attribution or conversion. Converted counts touched leads with a win or an MVP sale.`;
+}
+
+function isoDay(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+/** Date-range chip options, relative to today (local dates). Lifetime is the default. */
+export function dateRanges(today = new Date()) {
+  const y = today.getFullYear();
+  const m = today.getMonth();
+  const last30 = new Date(y, m, today.getDate() - 29);
+  return [
+    { id: 'lifetime', label: 'All dates', from: null, to: null },
+    { id: 'last30', label: 'Last 30 days', from: isoDay(last30), to: isoDay(today) },
+    { id: 'month', label: 'This month', from: isoDay(new Date(y, m, 1)), to: isoDay(today) },
+    { id: 'lastMonth', label: 'Last month', from: isoDay(new Date(y, m - 1, 1)), to: isoDay(new Date(y, m, 0)) },
+  ];
 }

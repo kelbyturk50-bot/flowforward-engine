@@ -27,6 +27,7 @@ export const localToday = () => {
 const method = () => vi.fn(async () => ({}));
 
 export const api = {
+  get: method(),
   health: method(),
   focus: method(),
   prospects: method(),

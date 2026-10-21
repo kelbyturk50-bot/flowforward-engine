@@ -82,6 +82,9 @@ export const localToday = () => {
 };
 
 export const api = {
+  // Generic read for lazy-loaded views that keep their own path (for example
+  // the Campaigns chunk), so the path string stays out of the entry bundle.
+  get:           (path)      => request('GET', path),
   health:        ()          => request('GET', '/health'),
   focus:         ()          => request('GET', `/api/focus${qs({ today: localToday() })}`),
   prospects:     (f = {})    => request('GET', `/api/prospects${qs(f)}`),

@@ -101,13 +101,6 @@ export const FIXTURE_CAMPAIGNS = Object.freeze([
   HVAC_NOV,
 ]);
 
-export const DATE_RANGES = Object.freeze([
-  { id: 'lifetime', label: 'Sep 24 – Oct 16', from: null, to: null },
-  { id: 'sep', label: 'Sep 1 – Sep 30', from: '2026-09-01', to: '2026-09-30' },
-  { id: 'oct', label: 'Oct 1 – Oct 16', from: '2026-10-01', to: '2026-10-16' },
-  { id: 'jan', label: 'Jan 1 – Jan 31', from: '2026-01-01', to: '2026-01-31' },
-]);
-
 export const STATUS_FILTERS = Object.freeze([
   { id: 'all', label: 'All' },
   { id: 'active', label: 'Active' },
