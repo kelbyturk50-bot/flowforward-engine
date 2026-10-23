@@ -9,8 +9,26 @@ const { listFacts, writeFact } = require('../chatdemo/facts-store');
 const { readSpend } = require('../chatdemo/spend');
 
 const router = express.Router();
+const INVALID_BODY = Buffer.from('{"error":"invalid_body"}');
 
 router.use(requireApiKey);
+
+function invalidJson(err, req, res, next) {
+  if (res.headersSent) return next(err);
+  const url = req.originalUrl || '';
+  const chat = url.startsWith('/api/chat')
+    || url.startsWith('/api/public/chat')
+    || url.startsWith('/api/public/prototypes/');
+  const parseError = err && (
+    err.type === 'entity.parse.failed'
+    || (err instanceof SyntaxError && (err.status === 400 || err.statusCode === 400))
+  );
+  if (!chat || !parseError) return next(err);
+  res.status(400);
+  res.set('Content-Type', 'application/json; charset=utf-8');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.end(INVALID_BODY);
+}
 
 function sendError(res, error) {
   if (error === 'test_only') return res.status(422).json({ error: 'test_only' });
@@ -70,3 +88,4 @@ router.get('/spend', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.invalidJson = invalidJson;

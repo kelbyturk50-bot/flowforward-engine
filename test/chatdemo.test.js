@@ -43,17 +43,32 @@ describe('live chat pure checks', () => {
     assert.equal(/nodeEnv:\s*['"]/.test(src), false);
   });
 
-  it('readCeiling fails closed and accepts a trimmed positive amount', () => {
-    const { readCeiling } = require('../src/chatdemo/ceiling');
-    const off = [undefined, null, '', '   ', 'abc', '5abc', '1e', '$5', '5,00', '0', '-1', 'NaN', 'Infinity', '0.0000001'];
+  it('readCeiling accepts only a plain decimal at or under 100000 dollars', () => {
+    const { readCeiling, MAX_CEILING_USD, DECIMAL } = require('../src/chatdemo/ceiling');
+    assert.equal(DECIMAL.source, '^\\d+(\\.\\d{1,2})?$');
+    assert.equal(MAX_CEILING_USD, 100000);
+    const off = [
+      undefined, null, '', ' ', '   ', '\t', ' 5 ', '5 ', ' 5', '5\n',
+      'abc', '5abc', '1e', '1e9', ' 1e9 ', '0x10', '0b11', '.5', '.50',
+      '$5', '5,00', '+5', '0', '0.00', '0.0', '-1', '-0.01', 'NaN', 'Infinity',
+      '0.0000001', '0.000001', '0.043', '100000.01', '100001', '100000.001',
+    ];
     for (const value of off) {
       const env = {};
       if (value !== undefined) env.CHAT_DEMO_DAILY_CEILING_USD = value;
       assert.equal(readCeiling(env), null, JSON.stringify(value));
     }
     assert.equal(readCeiling({}), null);
-    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: ' 5 ' }), 5_000_000);
-    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: '0.043' }), 43000);
+    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: 5 }), null);
+    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: true }), null);
+    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: '5' }), 5_000_000);
+    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: '5.5' }), 5_500_000);
+    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: '5.50' }), 5_500_000);
+    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: '0.01' }), 10_000);
+    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: '0.05' }), 50_000);
+    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: '2' }), 2_000_000);
+    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: '100000' }), 100_000_000_000);
+    assert.equal(readCeiling({ CHAT_DEMO_DAILY_CEILING_USD: '100000.00' }), 100_000_000_000);
   });
 
   it('each live-gate condition fails alone and all-true passes in production', async () => {
@@ -379,6 +394,7 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     const origins = process.env.CORS_ORIGINS.split(',').map((part) => part.trim()).filter(Boolean);
     app.use(cors({ origin: origins }));
     app.use(express.json({ limit: '1mb' }));
+    app.use(require('../src/api/chat').invalidJson);
     mountPublicFlags(app);
     const flagsApi = require('../src/api/flags');
     app.use('/api/flags', flagsApi.requireFlagApiKey);
@@ -640,8 +656,8 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     assert.equal(reserves, 0);
 
     _setEngineForTests(createChatEngine({ liveGate: async () => true }));
-    process.env.CHAT_DEMO_DAILY_CEILING_USD = '0.000001';
-    assert.equal(readCeiling(process.env), 1);
+    process.env.CHAT_DEMO_DAILY_CEILING_USD = '0.01';
+    assert.equal(readCeiling(process.env), 10_000);
     const tokenless = await request('POST', '/api/public/chat/demos/wasatch-heating/message', {
       body: { sessionId: opened.json.sessionId, text: 'hello third' },
     });
@@ -658,6 +674,17 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     assert.equal(creates, 0);
     const held = await pool.query(`SELECT COUNT(*)::int AS n FROM chat_demo_reservations`);
     assert.equal(held.rows[0].n, 0);
+
+    const rejectedSession = await openPrototypeChat();
+    for (const rejected of ['1e9', '0x10', '0b11', '.5', '-1', '', ' ', '100001']) {
+      process.env.CHAT_DEMO_DAILY_CEILING_USD = rejected;
+      assert.equal(readCeiling(process.env), null, JSON.stringify(rejected));
+      const stayed = await rejectedSession.message('ceiling rejected');
+      assert.equal(stayed.status, 200, JSON.stringify(rejected));
+      assert.equal(stayed.json.source, 'fixture', JSON.stringify(rejected));
+      assert.equal(stayed.json.paused, false, JSON.stringify(rejected));
+      assert.equal(creates, 0, JSON.stringify(rejected));
+    }
   });
 
   async function defaultGateStillOff() {
@@ -716,15 +743,14 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
 
   it('a blocked regenerate does not make a second model call', async () => {
     await setFlags(true);
-    const amount = reservationUsd();
-    process.env.CHAT_DEMO_DAILY_CEILING_USD = (amount / 1e6).toFixed(6);
-    assert.equal(readCeiling(process.env), amount);
+    process.env.CHAT_DEMO_DAILY_CEILING_USD = '0.05';
+    assert.equal(readCeiling(process.env), 50_000);
     let creates = 0;
     _setClient({
       messages: {
         create: async () => {
           creates += 1;
-          return { content: [{ type: 'text', text: '$49' }], usage: { input_tokens: 10, output_tokens: 8 } };
+          return { content: [{ type: 'text', text: '$49' }], usage: { input_tokens: 10, output_tokens: 800 } };
         },
       },
     });
@@ -1398,6 +1424,248 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     });
     assert.equal(blocked.status, 429);
     assert.equal(blocked.json.error, 'demo_limit');
+  });
+
+  it('the live path stays off when FF_LIVE_CHAT_DEMO is false even if every other gate is on', async () => {
+    const proto = await makeProto();
+    const expired = await makeProto({ expired: true });
+    let calls = 0;
+    _setEngineForTests(createChatEngine({
+      liveGate: async () => true,
+      liveResponder: async () => {
+        calls += 1;
+        return { text: 'live', tools: [], costMicros: 0, usage: {} };
+      },
+      fixtureResponder: () => {
+        calls += 1;
+        return { text: 'fixture', tools: [], source: 'fixture' };
+      },
+    }));
+    process.env.CHAT_DEMO_DAILY_CEILING_USD = '5';
+    process.env.FF_LIVE_CHAT_MODEL = 'true';
+    process.env.ANTHROPIC_API_KEY = 'test-not-a-real-key';
+    const routes = [
+      ['GET', '/api/public/chat/demos'],
+      ['POST', '/api/public/chat/demos/wasatch-heating/session'],
+      ['POST', '/api/public/chat/demos/wasatch-heating/message'],
+      ['POST', '/api/public/chat/demos/wasatch-heating/cta'],
+      ['POST', `/api/public/prototypes/${proto.token}/chat/session`],
+      ['POST', `/api/public/prototypes/${proto.token}/chat/message`],
+      ['POST', `/api/public/prototypes/${proto.token}/chat/cta`],
+      ['POST', `/api/public/prototypes/${expired.token}/chat/session`],
+    ];
+    async function expectHidden(label) {
+      for (const [method, reqPath] of routes) {
+        const res = await request(method, reqPath, {
+          body: method === 'POST' ? { sessionId: 'x', text: 'hi', chipId: 'chip_hours' } : undefined,
+        });
+        assert.equal(res.status, 404, `${label} ${reqPath}`);
+        assert.equal(res.text, NOT_FOUND, `${label} ${reqPath}`);
+      }
+      assert.equal(calls, 0, label);
+    }
+    try {
+      await pool.query(
+        `UPDATE feature_flags
+            SET enabled = (name = 'FF_PROTOTYPE_GALLERY'), updated_at = NULL, updated_by = NULL
+          WHERE name IN ('FF_PROTOTYPE_GALLERY', 'FF_LIVE_CHAT_DEMO')`
+      );
+      await expectHidden('demo off');
+      await pool.query(
+        `UPDATE feature_flags
+            SET enabled = (name = 'FF_LIVE_CHAT_DEMO'), updated_at = NULL, updated_by = NULL
+          WHERE name IN ('FF_PROTOTYPE_GALLERY', 'FF_LIVE_CHAT_DEMO')`
+      );
+      await expectHidden('gallery off');
+    } finally {
+      delete process.env.FF_LIVE_CHAT_DEMO;
+      delete process.env.FF_PROTOTYPE_GALLERY;
+    }
+  });
+
+  it('a cap check raced past Express is 429, and any other 23514 is 500 with no bump', async () => {
+    await setFlags(true);
+    let calls = 0;
+    const counters = require('../src/chatdemo/counters');
+    const responders = {
+      liveGate: async () => true,
+      fixtureResponder: () => {
+        calls += 1;
+        return { text: 'no', tools: [], source: 'fixture' };
+      },
+      liveResponder: async () => {
+        calls += 1;
+        return { text: 'no', tools: [], costMicros: 0, usage: {} };
+      },
+    };
+    await pool.query(
+      `INSERT INTO chat_demo_links (link_key, message_count, session_count)
+       VALUES ('demo:wasatch-heating', 0, 10)`
+    );
+    _setEngineForTests(createChatEngine({
+      ...responders,
+      counters: {
+        ...counters,
+        prepareMint: async () => ({ ok: true, keys: ['race-mint'] }),
+      },
+    }));
+    const minted = await request('POST', '/api/public/chat/demos/wasatch-heating/session', { body: {} });
+    assert.equal(minted.status, 429);
+    assert.equal(minted.json.error, 'demo_limit');
+    assert.equal(calls, 0);
+    const link = await pool.query(
+      `SELECT session_count FROM chat_demo_links WHERE link_key = 'demo:wasatch-heating'`
+    );
+    assert.equal(link.rows[0].session_count, 10);
+    const demoSessions = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM chat_demo_sessions WHERE link_key = 'demo:wasatch-heating'`
+    );
+    assert.equal(demoSessions.rows[0].n, 0);
+    const mintHits = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM chat_demo_events WHERE event_type = 'cap_hit'`
+    );
+    assert.equal(mintHits.rows[0].n, 1);
+
+    _setEngineForTests(createChatEngine({ liveGate: async () => false }));
+    const opened = await openPrototypeChat();
+    await pool.query(
+      `UPDATE chat_demo_sessions SET message_count = 20 WHERE link_key = $1`,
+      [`prototype:${opened.proto.row.id}`]
+    );
+    _setEngineForTests(createChatEngine({
+      ...responders,
+      counters: {
+        ...counters,
+        prepareMessage: async () => ({ ok: true, keys: ['race-msg'] }),
+      },
+    }));
+    const messaged = await opened.message('one more');
+    assert.equal(messaged.status, 429);
+    assert.equal(messaged.json.error, 'demo_limit');
+    assert.equal(calls, 0);
+    const sessionCount = await pool.query(
+      `SELECT message_count FROM chat_demo_sessions WHERE link_key = $1`,
+      [`prototype:${opened.proto.row.id}`]
+    );
+    assert.equal(sessionCount.rows[0].message_count, 20);
+    const messageHits = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM chat_demo_events WHERE event_type = 'cap_hit'`
+    );
+    assert.equal(messageHits.rows[0].n, 2);
+
+    const ip = '198.51.100.88';
+    for (const constraint of ['chat_demo_sessions_tag_check', 'not_a_cap_check']) {
+      _setEngineForTests(createChatEngine({
+        ...responders,
+        counters: {
+          ...counters,
+          runMint: async () => {
+            const err = new Error('check');
+            err.code = '23514';
+            err.constraint = constraint;
+            throw err;
+          },
+        },
+      }));
+      const ipBefore = await pool.query(`SELECT COALESCE(SUM(mint_count), 0)::int AS n FROM chat_demo_ip_hours`);
+      const globalBefore = await pool.query(`SELECT COALESCE(SUM(session_count), 0)::int AS n FROM chat_demo_global_days`);
+      const hitsBefore = await pool.query(`SELECT COUNT(*)::int AS n FROM chat_demo_events WHERE event_type = 'cap_hit'`);
+      const sessionsBefore = await pool.query(`SELECT COUNT(*)::int AS n FROM chat_demo_sessions`);
+      const failed = await request('POST', '/api/public/chat/demos/canyon-plumbing/session', {
+        body: {},
+        headers: { 'x-forwarded-for': ip },
+      });
+      assert.equal(failed.status, 500, constraint);
+      assert.equal(failed.json.error, 'server_error', constraint);
+      assert.equal(failed.text.includes('demo_limit'), false, constraint);
+      assert.equal(calls, 0, constraint);
+      const ipAfter = await pool.query(`SELECT COALESCE(SUM(mint_count), 0)::int AS n FROM chat_demo_ip_hours`);
+      const globalAfter = await pool.query(`SELECT COALESCE(SUM(session_count), 0)::int AS n FROM chat_demo_global_days`);
+      const hitsAfter = await pool.query(`SELECT COUNT(*)::int AS n FROM chat_demo_events WHERE event_type = 'cap_hit'`);
+      const sessionsAfter = await pool.query(`SELECT COUNT(*)::int AS n FROM chat_demo_sessions`);
+      assert.equal(ipAfter.rows[0].n, ipBefore.rows[0].n, constraint);
+      assert.equal(globalAfter.rows[0].n, globalBefore.rows[0].n, constraint);
+      assert.equal(hitsAfter.rows[0].n, hitsBefore.rows[0].n, constraint);
+      assert.equal(sessionsAfter.rows[0].n, sessionsBefore.rows[0].n, constraint);
+    }
+
+    _setEngineForTests(createChatEngine({ liveGate: async () => false }));
+    let openedOk = 0;
+    for (let i = 0; i < 5; i += 1) {
+      const res = await request('POST', '/api/public/chat/demos/canyon-plumbing/session', {
+        body: {},
+        headers: { 'x-forwarded-for': ip },
+      });
+      if (res.status === 201) openedOk += 1;
+    }
+    assert.equal(openedOk, 5);
+    const blocked = await request('POST', '/api/public/chat/demos/canyon-plumbing/session', {
+      body: {},
+      headers: { 'x-forwarded-for': ip },
+    });
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.json.error, 'demo_limit');
+  });
+
+  it('env force-off is false on GET /api/public/flags', async () => {
+    await setFlags(true);
+    try {
+      process.env.FF_LIVE_CHAT_DEMO = 'off';
+      const demoOff = await request('GET', '/api/public/flags');
+      assert.equal(demoOff.status, 200);
+      assert.equal(demoOff.json.FF_LIVE_CHAT_DEMO, false);
+      assert.equal(demoOff.json.FF_PROTOTYPE_GALLERY, true);
+      assert.deepEqual(Object.keys(demoOff.json), ['FF_PROTOTYPE_GALLERY', 'FF_LIVE_CHAT_DEMO']);
+      assert.equal(demoOff.text.includes('writable'), false);
+      const hidden = await request('GET', '/api/public/chat/demos');
+      assert.equal(hidden.status, 404);
+      assert.equal(hidden.text, NOT_FOUND);
+      delete process.env.FF_LIVE_CHAT_DEMO;
+
+      process.env.FF_PROTOTYPE_GALLERY = 'false';
+      const galleryOff = await request('GET', '/api/public/flags');
+      assert.equal(galleryOff.status, 200);
+      assert.equal(galleryOff.json.FF_PROTOTYPE_GALLERY, false);
+      assert.equal(galleryOff.json.FF_LIVE_CHAT_DEMO, true);
+      assert.deepEqual(Object.keys(galleryOff.json), ['FF_PROTOTYPE_GALLERY', 'FF_LIVE_CHAT_DEMO']);
+      delete process.env.FF_PROTOTYPE_GALLERY;
+
+      await setFlags(false);
+      process.env.FF_LIVE_CHAT_DEMO = 'true';
+      process.env.FF_PROTOTYPE_GALLERY = 'true';
+      const notForcedOn = await request('GET', '/api/public/flags');
+      assert.equal(notForcedOn.text, '{"FF_PROTOTYPE_GALLERY":false,"FF_LIVE_CHAT_DEMO":false}');
+    } finally {
+      delete process.env.FF_LIVE_CHAT_DEMO;
+      delete process.env.FF_PROTOTYPE_GALLERY;
+    }
+  });
+
+  it('malformed JSON on chat routes is 400 invalid_body and not an HTML error page', async () => {
+    await setFlags(true);
+    const proto = await makeProto();
+    const raw = Buffer.from('{"prospect_id":');
+    const routes = [
+      ['/api/chat/facts', false],
+      ['/api/chat/facts', true],
+      ['/api/public/chat/demos/wasatch-heating/session', false],
+      ['/api/public/chat/demos/wasatch-heating/message', false],
+      ['/api/public/chat/demos/wasatch-heating/cta', false],
+      [`/api/public/prototypes/${proto.token}/chat/session`, false],
+      [`/api/public/prototypes/${proto.token}/chat/message`, false],
+      [`/api/public/prototypes/${proto.token}/chat/cta`, false],
+    ];
+    for (const [reqPath, key] of routes) {
+      const res = await request('POST', reqPath, { raw, key });
+      assert.equal(res.status, 400, reqPath);
+      assert.equal(res.text, '{"error":"invalid_body"}', reqPath);
+      assert.match(String(res.headers['content-type']), /^application\/json/, reqPath);
+      assert.equal(res.text.includes('<html'), false, reqPath);
+      assert.equal(res.text.includes('SyntaxError'), false, reqPath);
+      assert.equal(res.text.includes('at JSON'), false, reqPath);
+      assert.equal(res.text.includes('banner'), false, reqPath);
+      assert.equal(res.text.includes(WATERMARK_TEXT), false, reqPath);
+    }
   });
 
   it('FF_LIVE_CHAT_DEMO seed stays false', async () => {

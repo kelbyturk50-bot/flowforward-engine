@@ -29,6 +29,9 @@ const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).f
 app.use(cors(origins.length ? { origin: origins } : undefined));
 const pilotDemo = require('./pilot/demo');
 app.use(express.json({ limit: '1mb' }));
+// A malformed JSON body on the chat routes is a JSON 400. The handler does
+// not send the parser's HTML page or the stack.
+app.use(require('./api/chat').invalidJson);
 // A body over the JSON limit fails here, before the demo router. Stamp the
 // public demo 413 with the same noindex / no-store headers as a demo 404.
 app.use(pilotDemo.payloadTooLarge);

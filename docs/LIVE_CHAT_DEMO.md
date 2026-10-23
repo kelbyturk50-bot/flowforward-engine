@@ -24,10 +24,7 @@ There are two responders behind one seam (§7):
 - [ ] Fixture responder, plus a live model responder behind the `Responder` seam.
 - [ ] Server-side proof events with no free-text PII.
 
-- [ ] **PENDING KELBY: business-name persona.** In prod the assistant would speak **as the business**, using a real business's name in a live AI persona for real prospects. This is a new surface beyond the scripted page (Warden, review 5623321489). Kelby's explicit yes or no is recorded here:
-  - **Decision:** _PENDING KELBY_ (date, yes/no, any conditions).
-  - Until Kelby answers, `FF_LIVE_CHAT_DEMO` stays **OFF in prod**. Pre-prod and tests may run it for `TEST:` prospects only (§3).
-  - If Kelby says no, the persona falls back to a neutral "an AI receptionist demo for <Business>" voice. That needs a spec revision before any prod enable.
+- [x] **Business-name persona (Kelby, Oct 23, 2026): yes.** The assistant speaks as the business and uses the real business name. The demo businesses use the approved real names and brand colors. No logos. Every demo payload carries "Sample concept built by FlowForward for <Business>. Not affiliated with or operated by <Business>. No real bookings are made." `FF_LIVE_CHAT_DEMO` stays seeded off until Kelby turns that flag on.
 
 **Out of scope** (each needs its own spec)
 - Voice receptionist (browser talk button, Retell/ElevenLabs/Vapi).
@@ -302,7 +299,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   - It's read on every reservation from the env var **`CHAT_DEMO_DAILY_CEILING_USD`**, a dollar value Kelby sets in the Railway env, and parsed to integer `ceiling_micros`.
   - The reader is `readCeiling(env = process.env)` in `src/chatdemo/ceiling.js`. It's a pure function, so tests pass a plain env object.
   - **Kelby sets the value.** No default ships, and no PR, test, routine, migration, seed or agent sets it. Nothing changes Railway env vars.
-  - Unset, empty, non-numeric, non-finite (`NaN`, `Infinity`), zero or negative means the live path stays off (`readCeiling` returns null). Only a finite value greater than 0 enables it.
+  - The raw string must match `/^\d+(\.\d{1,2})?$/` (digits, optional dot, at most two decimal places). Spaces, a leading dot, a sign, an exponent (`1e9`), hex (`0x10`), binary (`0b11`), empty, and anything `Number()` would otherwise accept are rejected. The amount must be greater than 0 and at most **100000** dollars (one hundred thousand per America/Denver day). A rejected value leaves the live path off (`readCeiling` returns null).
   - **Nothing in the database holds the ceiling.** It isn't stored in `app_settings` or any other table, it isn't seeded, and no `app_settings` key exists for it.
   - **No write path.** No route, including the flags and settings APIs, writes the ceiling.
   - The CRM may show the **effective value read-only**, from `readCeiling()`, with no edit control.
@@ -478,7 +475,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   - **Validator and tools:** the prompt-injection fixtures give 0 escapes; a free-text tool arg or an unknown tool is dropped and gives the canned line.
   - **Session:** `sessionId` is 43 base64url chars, and only its SHA-256 is stored; using it under another token gives 404; it expires at 30 min.
   - **Logging:** the captured logs contain no IP, `ip_hash`, `sessionId`, user text, model output or Anthropic error text.
-  - **Flag and ceiling:** `PUT /api/flags/FF_LIVE_CHAT_MODEL` gives 400 `flag_not_writable`; the env value `"TRUE"` or `"1"` means off; no route writes the ceiling, and `app_settings` is never read or written for it; `CHAT_DEMO_DAILY_CEILING_USD` unset, `""`, `"abc"`, `0`, `-1`, `NaN` and `Infinity` mean off.
+  - **Flag and ceiling:** `PUT /api/flags/FF_LIVE_CHAT_MODEL` gives 400 `flag_not_writable`; the env value `"TRUE"` or `"1"` means off; no route writes the ceiling, and `app_settings` is never read or written for it; `CHAT_DEMO_DAILY_CEILING_USD` unset, `""`, whitespace, `" 5 "`, `"abc"`, `0`, `0.00`, `-1`, `.5`, `1e9`, `0x10`, `0b11`, `NaN`, `Infinity`, and any amount over `100000` mean off. A value matching `/^\d+(\.\d{1,2})?$/` from `0.01` through `100000` is on.
   - **Model:** an unpriced `MODEL` fails gate (h) and gives fixtures.
   - **Body and CORS:** a 2,049-byte body gives 413 from the router's own handler, with 0 counter increments, 0 DB queries and 0 responder calls (spies), no ACAO, a body byte-equal to `{"error":"payload_too_large"}`, the four chat headers, and no payload marker in the captured logs; `express.json({ limit: '2kb' })` is the first middleware on the chat router; under a pinned CORS setup (allow-list unset, or including the test origin), a preflight and a POST to the chat routes get no ACAO and no `Access-Control-Allow-Methods`, while a control request to a normal `/api` route does get ACAO.
   - **Trust proxy:** `app.get('trust proxy') === 1`, because `clientIp`'s trust-all branch would fall back to the left-most XFF.
@@ -529,7 +526,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 | S3 LiveResponder (PROPOSAL_MODEL, `costOf`, fail-closed `reservationUsd`, the reserve/settle/release seam, settle-vs-sweep race handling) | **Canyon** | S1 merged (caps and ceiling first) |
 | Review: public token routes, caps, ip_hash (daily in-memory key), IP bucketing, purge, session ids, logging, privacy page, body limit/CORS, capture_lead PII, robots/headers, `schema.sql` | **Warden** (required on S1 and S3) | — |
 | QA on preview plus test DB, against §12 | **Gauge** | each slice |
-| Prod enable: `FF_LIVE_CHAT_DEMO` (DB), Kelby sets `FF_LIVE_CHAT_MODEL` (Railway env, exactly `"true"`) and `CHAT_DEMO_DAILY_CEILING_USD` (Railway env; no DB row, no API) | **Kelby** | S1–S3 merged **and** Kelby's answer to the §2 persona question (**PENDING KELBY**). `FF_LIVE_CHAT_DEMO` stays OFF in prod until then. |
+| Prod enable: `FF_LIVE_CHAT_DEMO` (DB), Kelby sets `FF_LIVE_CHAT_MODEL` (Railway env, exactly `"true"`) and `CHAT_DEMO_DAILY_CEILING_USD` (Railway env; no DB row, no API) | **Kelby** | S1–S3 merged. Kelby approved the business-name persona on Oct 23, 2026 (§2). `FF_LIVE_CHAT_DEMO` stays seeded off until Kelby turns it on. |
 
 - The chat attaches to the existing prototype page as a "Try it live" panel next to the call-agent and speed-to-lead screens. In v1 it doesn't remove any scripted screen. Swapping out scripted screens is a later Scout call based on §11 data.
 - Every change follows branch → PR → gates (PLAYBOOK). Nothing changes Railway or Vercel settings or env vars.

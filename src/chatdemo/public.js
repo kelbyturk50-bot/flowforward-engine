@@ -14,6 +14,7 @@ const pool = require('../db/client');
 
 const NOT_FOUND = Buffer.from('{"error":"not_found"}');
 const TOO_LARGE = Buffer.from('{"error":"payload_too_large"}');
+const INVALID_BODY = Buffer.from('{"error":"invalid_body"}');
 
 let engineOverride = null;
 let defaultEngine = null;
@@ -297,13 +298,12 @@ function createRouter(kind) {
     if (err && (err.type === 'entity.too.large' || err.status === 413 || err.statusCode === 413)) {
       return send413(res);
     }
-    if (err && (err.type === 'entity.parse.failed' || err.status === 400 || err.statusCode === 400)) {
+    if (err && (err.type === 'entity.parse.failed' || (err instanceof SyntaxError && (err.status === 400 || err.statusCode === 400)))) {
       stamp(res);
-      return res.status(400).json({
-        error: 'invalid_body',
-        watermark: WATERMARK_TEXT,
-        banner: banner('this business'),
-      });
+      res.status(400);
+      res.set('Content-Type', 'application/json; charset=utf-8');
+      res.end(INVALID_BODY);
+      return;
     }
     logErr('cap_store_unavailable', err);
     stamp(res);
