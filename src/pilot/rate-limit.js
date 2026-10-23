@@ -63,7 +63,24 @@ function clientIp(req) {
   return cleanIp(chosen) || socketIp || 'unknown';
 }
 
-function consume(ip, bucket = 'demo') {
+function consumeFixed(ip, bucket, options) {
+  const max = options.max;
+  const bucketKey = String(options.bucketKey || '');
+  const readClock = typeof options.clock === 'function' ? options.clock : Date.now;
+  const now = readClock();
+  const key = `${bucket}\n${ip || 'unknown'}\n${bucketKey}`;
+  let entry = buckets.get(key);
+  if (!entry || entry.bucketKey !== bucketKey) {
+    entry = { count: 0, bucketKey };
+    buckets.set(key, entry);
+  }
+  entry.count += 1;
+  if (entry.count > max) return { limited: true, retryAfter: 1 };
+  return { limited: false, retryAfter: 0 };
+}
+
+function consume(ip, bucket = 'demo', options) {
+  if (options && options.fixed === true) return consumeFixed(ip, bucket, options);
   const { max, windowMs } = limits();
   const now = Date.now();
   const key = `${bucket}\n${ip || 'unknown'}`;

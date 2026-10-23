@@ -7,6 +7,7 @@ process.env.FF_PILOT_LINK_ON_ONEPAGER = '';
 process.env.FF_PILOT_ESTIMATE_SMS = '';
 process.env.FF_PROTOTYPE_GALLERY = '';
 process.env.FF_LIVE_CHAT_DEMO = '';
+process.env.FF_LIVE_CHAT_MODEL = '';
 process.env.FF_CAMPAIGNS = '';
 process.env.FF_CAMPAIGN_OPEN_PIXEL = '';
 process.env.FF_PROTOTYPE_ON_DRAFT = '';
@@ -560,7 +561,7 @@ describe('feature flags', { concurrency: 1 }, () => {
   it('flags: SMS and open pixel are env-only and PUT returns flag_not_writable', async () => {
     await pool.query(
       `INSERT INTO feature_flags (name, enabled)
-       VALUES ('FF_PILOT_ESTIMATE_SMS', true), ('FF_CAMPAIGN_OPEN_PIXEL', true)`
+       VALUES ('FF_PILOT_ESTIMATE_SMS', true), ('FF_CAMPAIGN_OPEN_PIXEL', true), ('FF_LIVE_CHAT_MODEL', true)`
     );
     try {
       for (const name of ENV_NAMES) {

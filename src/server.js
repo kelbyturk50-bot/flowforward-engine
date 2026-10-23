@@ -18,6 +18,11 @@ const app = express();
 // ignores a left-most value the caller can spoof. See src/pilot/rate-limit.js.
 app.set('trust proxy', 1);
 
+// Live chat POSTs are mounted before cors() and the global JSON parser so a
+// body over 2 KB never inherits ACAO or the 1 MB parser. See src/chatdemo/mount.js.
+const chatMount = require('./chatdemo/mount');
+chatMount.mountBeforeCors(app);
+
 // CORS — restrict to your frontend(s) with CORS_ORIGINS="https://your-app.vercel.app,http://localhost:5173".
 // Unset = allow any origin (the API key still guards access).
 const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -60,6 +65,9 @@ app.use('/demo/estimate-recovery', pilotDemo.router);
 // Mounted before the API-key guard. Rate limit uses the prototype bucket,
 // separate from the pilot demo.
 app.use('/api/public/prototypes', require('./prototypes/public').router);
+// Public flag booleans for the CRM. After cors(), before the API-key guard.
+// Body is only FF_PROTOTYPE_GALLERY and FF_LIVE_CHAT_DEMO.
+chatMount.mountPublicFlags(app);
 // The prototype page itself: sample homepage + agent click-throughs.
 // Server-rendered, watermarked, no API key (the token is the credential).
 app.use('/demo/prototype-assets', require('./prototypes/page').assets);
@@ -99,6 +107,8 @@ app.use('/api/flags',     flagsApi);
 app.use('/api/pilot/estimate-recovery', require('./api/pilot-estimates'));
 // Tracking only. GET /api/campaigns and /api/campaigns/metrics. Does not send.
 app.use('/api/campaigns', campaignsApi.router);
+// Facts sheet and spend read. requireApiKey is also applied inside the router.
+app.use('/api/chat', require('./api/chat'));
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────
 const CRON_SCHEDULE = process.env.DISCOVERY_CRON || '0 6 * * *';
@@ -159,6 +169,11 @@ async function boot() {
       console.log(`[server] ✓ Fit scores refreshed for ${n} prospects`);
     } catch (err) {
       console.error('[server] ✗ Startup migration/rescore failed:', err.message);
+    }
+    try {
+      chatMount.startMaintenance();
+    } catch (err) {
+      console.error('[chatdemo] maintenance_failed', err && err.code ? err.code : 'error');
     }
   }
   app.listen(PORT, () => {
