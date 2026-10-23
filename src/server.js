@@ -151,10 +151,11 @@ const PORT = process.env.PORT || 3000;
 
 async function boot() {
   // schema.sql throws on failure, the same as before the pilot. That catch
-  // logs the startup line and skips rescore. The brand-check step, the
-  // estimate-check step, and the pilot step return reports instead of
-  // throwing, so those failures do not take this path. A brand-check or
-  // estimate-check failure is a warning. The server still boots.
+  // skips rescore. A lock or statement timeout is logged as the SQLSTATE
+  // only (55P03 or 57014), with no query text. Brand, estimate, and pilot
+  // steps do not run after that throw. Those steps return reports instead
+  // of throwing, so their own failures do not take this path. A brand-check
+  // or estimate-check failure is a warning. The listen call below still runs.
   let mainOk = false;
   try {
     const report = await applySchema();
@@ -162,7 +163,8 @@ async function boot() {
     await concludeSchemaBoot(report);
   } catch (err) {
     pilotTokens.closePilot();
-    console.error('[server] ✗ Startup migration/rescore failed:', err.message);
+    if (err && (err.code === '55P03' || err.code === '57014')) console.error(err.code);
+    else console.error('[server] ✗ Startup migration/rescore failed:', err.message);
   }
   if (mainOk) {
     try {
