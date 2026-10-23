@@ -315,6 +315,9 @@ describe('live chat pure checks', () => {
       '',
       'https://flowforward-engine-abc123def-turk11.vercel.app\n',
       'https://flowforward-engine-six.vercel.app\n',
+      'https://flowforward-engine-six.vercel.app.evil.com',
+      'https://flowforward-engine-six.vercel.app:443',
+      'https://flowforward-engine-six.vercel.app/',
     ];
     for (const origin of denied) assert.equal(originAllowed(origin), false, origin);
     assert.equal(originAllowed(undefined), false);
@@ -1147,6 +1150,12 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
       ['text/plain; charset=utf-8', 'hello'],
       ['application/x-www-form-urlencoded', 'sessionId=abc'],
       ['multipart/form-data; boundary=----ff', '------ff\r\n'],
+      ['application/json; foo=bar', '{}'],
+      ['application/json; charset=utf-8; foo=bar', '{}'],
+      ['application/json; charset=utf-8; charset=utf-8', '{}'],
+      ['application/json; charset=', '{}'],
+      ['application/jsonx', '{}'],
+      ['application/json-patch+json', '{}'],
     ];
     try {
       for (const reqPath of paths) {
@@ -1164,6 +1173,12 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
           assert.equal(res.headers['x-content-type-options'], 'nosniff', reqPath);
           assert.match(String(res.headers['content-type']), /^application\/json/, reqPath);
         }
+      }
+      for (const reqPath of paths) {
+        // No Content-Type at all is also a simple CORS POST.
+        const res = await request('POST', reqPath, { origin: 'https://flowforward-engine-six.vercel.app' });
+        assert.equal(res.status, 415, `no content-type ${reqPath}`);
+        assert.equal(res.text, '{"error":"unsupported_media_type"}', reqPath);
       }
       assert.equal(hits.prepare, 0);
       assert.equal(hits.bump, 0);
