@@ -181,6 +181,12 @@ camps2=[("TEST: HVAC-Oct","Email","active","Sep 24 – Oct 31",8,8,3,1,1,2),
        ("TEST: Proto-Oct furnace-tune-up estimate follow-up demo link","Prototype link","active","Oct 3 – Nov 15",1,0,0,0,0,0),
        ("TEST: Plumbing-Sep walk-ins","In person","ended","Sep 2 – Sep 30",0,0,0,0,0,0),
        ("TEST: HVAC-Nov","Email","draft","Nov 3 – not set",0,0,0,0,0,0)]
+# List sort (campaigns.md §2): Active first, then newest start date; same rule inside the non-active group.
+_MON={m:i for i,m in enumerate(["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"],1)}
+def _start(c):
+    mon,day=c[3].split(" – ")[0].split()
+    return (_MON[mon],int(day))
+camps2=sorted(camps2,key=lambda c:(c[2]!="active",tuple(-x for x in _start(c))))
 NT=lambda c: 'No sent or call-logged touches yet. 1 prototype view is tracked but isn\'t a touch for these rates.' if c[4] else 'No touches logged'
 def hcells(c,d,email=True):
     return [(c[0],"responded"),(c[1],"converted"),(c[2] if email else None,"opened, no reply"),(c[3],"booked")]

@@ -6,6 +6,8 @@ import { presentBrand } from './brand';
 import { HOSTILE_BRAND, NAVY_BRAND, TEST_BRAND, YELLOW_BRAND } from './fixture-brand';
 import { BookkeepingPrototype, CallPrototype, SchedulingPrototype } from './agents';
 import PrototypeLayout from './PrototypeLayout';
+import { FF_LIVE_CHAT_DEMO, flagEnabled } from '../flags';
+import { liveChatHref } from '../live-chat/route';
 import { followGalleryLink, galleryHref, galleryRouteFromPath } from './route';
 
 const FIXTURES = {
@@ -87,6 +89,13 @@ function GalleryIndex({ token, search }) {
           </article>
         );
       })}
+      {flagEnabled(FF_LIVE_CHAT_DEMO) && (
+        <article className="prototype-card">
+          <h2>Live chat <SampleTag /></h2>
+          <p>A text-back on sample replies. Nothing is sent.</p>
+          <a className="prototype-open" href={liveChatHref(search)}>Try it live</a>
+        </article>
+      )}
     </main>
   );
 }

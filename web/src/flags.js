@@ -3,13 +3,17 @@
 // Build-time defaults are off. There is no env var that turns them on.
 // The running CRM reads flag state from GET /api/flags. A failed or unreadable
 // response leaves every flag off.
-// A `?flags=a,b` override is honored only on a Vercel preview hostname, or on
-// localhost while `import.meta.env.DEV` is true. On those hosts it replaces
-// the API values for this browser. Every other origin, including the
-// production CRM hosts, ignores the query and the saved override.
+// A `?flags=a,b` override is honored only when this build is a dev server
+// (`import.meta.env.DEV`) or it was built with `VERCEL_ENV === 'preview'`
+// (`__FF_VERCEL_ENV__`, inlined by Vite from the build environment). The host
+// is a second condition: localhost while DEV, or https with an empty port on
+// a preview hostname. On those pages it replaces the API values for this
+// browser. A production build (`VERCEL_ENV` of `production`, or unset) ignores
+// the query and the saved override on every host.
 //
 // Production hosts are rejected before the preview regex. That regex also
-// matches `flowforward-engine-git-main-turk11.vercel.app`, which is production.
+// matches `flowforward-engine-git-main-turk11.vercel.app` and unique production
+// deploy hosts such as `flowforward-engine-<hash>-turk11.vercel.app`.
 
 import { PRODUCTION_HOSTS } from './api-base.js';
 import { FEATURE_FLAG_NAMES, isCatalogFlag, isHiddenFlag } from './flags-contract.js';
@@ -18,6 +22,7 @@ export const FF_PILOT_ESTIMATE_RECOVERY = 'FF_PILOT_ESTIMATE_RECOVERY';
 export const FF_PILOT_LINK_ON_ONEPAGER = 'FF_PILOT_LINK_ON_ONEPAGER';
 export const FF_PILOT_ESTIMATE_SMS = 'FF_PILOT_ESTIMATE_SMS';
 export const FF_PROTOTYPE_GALLERY = 'FF_PROTOTYPE_GALLERY';
+export const FF_LIVE_CHAT_DEMO = 'FF_LIVE_CHAT_DEMO';
 export const FF_CAMPAIGNS = 'FF_CAMPAIGNS';
 
 export const PILOT_FLAG_NAMES = Object.freeze([
@@ -25,6 +30,7 @@ export const PILOT_FLAG_NAMES = Object.freeze([
   FF_PILOT_LINK_ON_ONEPAGER,
   FF_PILOT_ESTIMATE_SMS,
   FF_PROTOTYPE_GALLERY,
+  FF_LIVE_CHAT_DEMO,
   FF_CAMPAIGNS,
 ]);
 
@@ -33,6 +39,7 @@ const DEFAULTS = Object.freeze({
   [FF_PILOT_LINK_ON_ONEPAGER]: false,
   [FF_PILOT_ESTIMATE_SMS]: false,
   [FF_PROTOTYPE_GALLERY]: false,
+  [FF_LIVE_CHAT_DEMO]: false,
   [FF_CAMPAIGNS]: false,
 });
 
@@ -58,12 +65,25 @@ function hostFields(loc) {
   };
 }
 
+function vercelEnvFrom(env) {
+  if (env && Object.prototype.hasOwnProperty.call(env, 'VERCEL_ENV')) {
+    return env.VERCEL_ENV == null ? '' : String(env.VERCEL_ENV);
+  }
+  return typeof __FF_VERCEL_ENV__ === 'string' ? __FF_VERCEL_ENV__ : '';
+}
+
+function overrideBuildAllowed(env) {
+  return env?.DEV === true || vercelEnvFrom(env) === 'preview';
+}
+
 export function flagOverrideAllowed(loc, env = import.meta.env) {
   const { protocol, port, hostname } = hostFields(loc);
 
   for (const host of PRODUCTION_HOSTS) {
     if (host === hostname) return false;
   }
+
+  if (!overrideBuildAllowed(env)) return false;
 
   if (env?.DEV && hostname === 'localhost') return true;
 
@@ -119,24 +139,35 @@ function namedFeatureFlags(names) {
   return flags;
 }
 
+let testRuntime = null;
+
+// Tests only. LiveChatGate calls previewFlagsOverride() with no arguments, so
+// a production-build hostname cannot be passed in. Explicit options still win.
+export function _setFlagRuntimeForTests(next = null) {
+  testRuntime = next;
+}
+
 // Preview-only override. Null means "no override": the API value stands.
 // A present `flags` query, including an empty one, replaces the API values
 // and is stored for later preview loads. An empty stored value does not.
 export function previewFlagsOverride({
-  location = window.location,
-  storage = window.sessionStorage,
-  env = import.meta.env,
+  location,
+  storage,
+  env,
 } = {}) {
-  if (!flagOverrideAllowed(location, env)) return null;
+  const resolvedLocation = location ?? testRuntime?.location ?? window.location;
+  const resolvedStorage = storage ?? window.sessionStorage;
+  const resolvedEnv = env ?? testRuntime?.env ?? import.meta.env;
+  if (!flagOverrideAllowed(resolvedLocation, resolvedEnv)) return null;
 
-  const params = new URLSearchParams(location?.search || '');
+  const params = new URLSearchParams(resolvedLocation?.search || '');
   if (params.has('flags')) {
     const names = splitFlags(params.get('flags'));
-    writeStored(storage, names.join(','));
+    writeStored(resolvedStorage, names.join(','));
     return namedFeatureFlags(names);
   }
 
-  const saved = readStored(storage);
+  const saved = readStored(resolvedStorage);
   if (!saved) return null;
   return namedFeatureFlags(splitFlags(saved));
 }
