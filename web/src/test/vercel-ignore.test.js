@@ -209,22 +209,18 @@ describe('web/vercel.json ignoreCommand', () => {
     const config = JSON.parse(readFileSync(path.join(webRoot, 'vercel.json'), 'utf8'));
     expect(config.ignoreCommand).toBe(IGNORE_COMMAND);
     expect(existsSync(path.join(webRoot, 'scripts/vercel-ignore.mjs'))).toBe(true);
+    const demoHeaders = [
+      { key: 'X-Robots-Tag', value: 'noindex, nofollow' },
+      { key: 'Referrer-Policy', value: 'no-referrer' },
+      { key: 'Cache-Control', value: 'no-store' },
+      { key: 'X-Content-Type-Options', value: 'nosniff' },
+    ];
+    const csp = [{ key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'none'" }];
     expect(config.headers).toEqual([
-      {
-        source: '/demo/:path*',
-        headers: [
-          { key: 'X-Robots-Tag', value: 'noindex, nofollow' },
-          { key: 'Referrer-Policy', value: 'no-referrer' },
-          { key: 'Cache-Control', value: 'no-store' },
-          { key: 'X-Content-Type-Options', value: 'nosniff' },
-        ],
-      },
-      {
-        source: '/demo/live-chat',
-        headers: [
-          { key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'none'" },
-        ],
-      },
+      { source: '/demo/:path*', headers: demoHeaders },
+      { source: '/demo/:path*/', headers: demoHeaders },
+      { source: '/demo/live-chat', headers: csp },
+      { source: '/demo/live-chat/', headers: csp },
     ]);
     expect(config.rewrites).toEqual([
       { source: '/about', destination: '/about.html' },

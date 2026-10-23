@@ -34,7 +34,9 @@ function threadScrollTarget(node, typing) {
   if (typing) return node.querySelector('.live-chat-typing');
   const turn = node.querySelector('.live-chat-turn:last-child');
   if (!turn) return null;
-  return turn.querySelector('.live-chat-bubble') || turn;
+  return turn.querySelector('.live-chat-failed')
+    || turn.querySelector('.live-chat-bubble')
+    || turn;
 }
 
 function leadChanged(before, after) {
@@ -144,7 +146,7 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
     const node = threadRef.current;
     const target = threadScrollTarget(node, typing);
     if (!node || !target) return;
-    const top = node.scrollTop + (target.getBoundingClientRect().top - node.getBoundingClientRect().top);
+    const top = Math.max(0, node.scrollTop + (target.getBoundingClientRect().bottom - node.getBoundingClientRect().bottom));
     const behavior = prefersReducedMotion() ? 'auto' : 'smooth';
     if (typeof node.scrollTo === 'function') node.scrollTo({ top, behavior });
     else node.scrollTop = top;
@@ -233,30 +235,29 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
             aria-expanded={bannerOpen}
             onClick={() => setBannerOpen((open) => !open)}
           >
-            {BANNER_SUMMARY}
+            {bannerOpen ? 'Sample by FlowForward · not affiliated · no real bookings · Hide' : BANNER_SUMMARY}
           </button>
           <p className={bannerOpen ? 'live-chat-banner-copy' : 'live-chat-banner-copy live-chat-sr'}>{banner}</p>
         </div>
-        {afterHours ? <p className="live-chat-after" role="status">{afterHours}</p> : null}
-        <button
-          type="button"
-          className="live-chat-owner-toggle"
-          aria-expanded={ownerOpen}
-          aria-controls="live-chat-owner"
-          onClick={() => {
-            setOwnerOpen((open) => !open);
-            setOwnerUpdates(0);
-          }}
-        >
-          <span>{ownerOpen ? 'Hide owner panel' : 'View owner panel'}</span>
-          {ownerUpdates > 0 && !ownerOpen ? (
-            <span className="live-chat-badge">{ownerUpdates} update{ownerUpdates === 1 ? '' : 's'}</span>
-          ) : null}
-        </button>
         <div className="live-chat-stage">
           <section className="live-chat-phone" aria-label="Text-back">
             <header className="live-chat-phone-head">
               <span className="live-chat-ai">{AI_DEMO_LABEL}</span>
+              <button
+                type="button"
+                className="live-chat-owner-toggle"
+                aria-expanded={ownerOpen}
+                aria-controls="live-chat-owner"
+                onClick={() => {
+                  setOwnerOpen((open) => !open);
+                  setOwnerUpdates(0);
+                }}
+              >
+                <span>{ownerOpen ? 'Hide owner panel' : 'View owner panel'}</span>
+                {ownerUpdates > 0 && !ownerOpen ? (
+                  <span className="live-chat-badge">{ownerUpdates} update{ownerUpdates === 1 ? '' : 's'}</span>
+                ) : null}
+              </button>
             </header>
             <div
               ref={threadRef}
@@ -266,6 +267,7 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
               aria-relevant="additions"
               aria-label="Messages"
             >
+              {afterHours ? <p className="live-chat-after" role="status">{afterHours}</p> : null}
               <p className="live-chat-bubble is-in" data-disclosure="true">{disclosure}</p>
               {turns.map((turn) => (
                 <div key={turn.id} className="live-chat-turn">
@@ -316,11 +318,16 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
                 ) : null}
               </div>
               <div className="live-chat-compose">
-                <label className="live-chat-label" htmlFor="live-chat-input">Text the business</label>
+                <div className="live-chat-compose-head">
+                  <label className="live-chat-label" htmlFor="live-chat-input">Text the business</label>
+                  <p id="live-chat-count" className="live-chat-count">
+                    {count} / {MAX_MESSAGE_CHARS}
+                  </p>
+                </div>
                 <textarea
                   id="live-chat-input"
                   className="live-chat-input"
-                  rows={2}
+                  rows={1}
                   value={draft}
                   aria-describedby="live-chat-count"
                   onChange={(event) => setDraft(capMessage(event.target.value))}
@@ -331,9 +338,6 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
                     }
                   }}
                 />
-                <p id="live-chat-count" className="live-chat-count">
-                  {count} / {MAX_MESSAGE_CHARS}
-                </p>
                 <p className="live-chat-limit" role="status" aria-live="polite">
                   {nearLimit ? limitText : ''}
                 </p>

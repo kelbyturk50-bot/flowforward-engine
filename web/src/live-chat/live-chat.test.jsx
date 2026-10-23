@@ -190,7 +190,10 @@ describe('live chat demo', () => {
     const demo = render(<LiveChatGate />);
     expect(await screen.findByText(DISCLOSURE)).toBeInTheDocument();
     expect(screen.getByText(BANNER)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: BANNER_SUMMARY })).toBeInTheDocument();
+    const bannerButton = screen.getByRole('button', { name: BANNER_SUMMARY });
+    expect(bannerButton).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(bannerButton);
+    expect(screen.getByRole('button', { name: 'Sample by FlowForward · not affiliated · no real bookings · Hide' })).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByText(AFTER_HOURS)).toBeInTheDocument();
     expect(screen.getByText('AI demo')).toBeInTheDocument();
     expect(screen.getByRole('note', { name: WATERMARK_TEXT })).toBeInTheDocument();
@@ -203,11 +206,12 @@ describe('live chat demo', () => {
 
     const search = `?flags=${BOTH}`;
     at(`/demo/gallery/${GALLERY_PREVIEW_TOKEN}${search}`);
-    render(<GalleryGate route={{ token: GALLERY_PREVIEW_TOKEN, screen: 'index' }} />);
+    const gallery = render(<GalleryGate route={{ token: GALLERY_PREVIEW_TOKEN, screen: 'index' }} />);
     const entry = await screen.findByRole('link', { name: 'Try it live' });
     expect(entry).toHaveAttribute('href', liveChatHref(search));
     expect(fetchMock).not.toHaveBeenCalled();
     expect(refreshSpy).not.toHaveBeenCalled();
+    gallery.unmount();
   });
 
   it('renders fixture replies, tool cards, and the owner panel without calling fetch', async () => {
@@ -383,11 +387,20 @@ describe('live chat demo', () => {
     const phoneRules = css.match(/\.live-chat-phone \{[^}]*\}/g) || [];
     expect(phoneRules.length).toBeGreaterThan(0);
     for (const rule of phoneRules) expect(rule).not.toMatch(/100dvh\s*-\s*\d+px/);
+    expect(phoneRules[0]).toContain('display: flex');
+    expect(phoneRules[0]).toContain('flex-direction: column');
+    expect(phoneRules[0]).toContain('height: calc(100vh - 8.75rem)');
+    expect(phoneRules[0]).toContain('height: calc(100dvh - 8.75rem)');
+    expect(phoneRules[0]).toContain('min-height: calc(200px + 13.75rem)');
+    expect(phoneRules[0]).toContain('overflow: hidden');
     const threadRule = css.slice(css.indexOf('.live-chat-thread {'), css.indexOf('.live-chat-dock'));
+    expect(threadRule).toContain('flex: 1 1 auto');
     expect(threadRule).toContain('min-height: 200px');
-    expect(threadRule).toContain('height: 42vh');
-    expect(threadRule).toContain('height: 42dvh');
-    expect(css).toMatch(/\.live-chat-chip-row \{[^}]*flex-wrap:\s*wrap/);
+    expect(threadRule).toContain('overflow-y: auto');
+    expect(threadRule).not.toContain('42dvh');
+    expect(css).toMatch(/\.live-chat-chip-row \{[^}]*flex-wrap:\s*nowrap/);
+    expect(css).toMatch(/\.live-chat-chip-row \{[^}]*overflow-x:\s*auto/);
+    expect(css).toContain('mask-image: linear-gradient(to right');
     expect(BANNER_SUMMARY).toBe('Sample by FlowForward · not affiliated · no real bookings · Details');
   });
 
@@ -441,24 +454,33 @@ describe('live chat demo', () => {
     const calls = [];
     thread.scrollTo = (options) => { calls.push(options); };
     const original = Element.prototype.getBoundingClientRect;
-    const box = (top) => ({
-      x: 0, y: top, top, left: 0, bottom: top + 24, right: 120, width: 120, height: 24, toJSON() {},
+    const rectFor = (top, height) => ({
+      x: 0, y: top, top, left: 0, bottom: top + height, right: 120, width: 120, height, toJSON() {},
     });
     const rects = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function mockRect() {
-      if (this.classList?.contains('live-chat-typing')) return box(640);
-      if (this.classList?.contains('live-chat-tool')) return box(900);
-      if (this.classList?.contains('live-chat-thread')) return box(0);
-      if (this.classList?.contains('live-chat-bubble') && this.closest('.live-chat-turn')) return box(480);
+      if (this.classList?.contains('live-chat-typing')) return rectFor(640, 24);
+      if (this.classList?.contains('live-chat-tool')) return rectFor(900, 80);
+      if (this.classList?.contains('live-chat-failed')) return rectFor(700, 48);
+      if (this.classList?.contains('live-chat-thread')) return rectFor(0, 200);
+      if (this.classList?.contains('live-chat-bubble') && this.closest('.live-chat-turn')) return rectFor(480, 40);
       return original.call(this);
     });
 
     try {
       await user.click(screen.getByRole('button', { name: 'My water heater is leaking all over the garage' }));
       expect(await screen.findByText('Typing…')).toBeInTheDocument();
-      expect(calls.some((call) => call.top === 640 && call.behavior === 'smooth')).toBe(true);
+      expect(calls.some((call) => call.top === 464 && call.behavior === 'smooth')).toBe(true);
       expect(await screen.findByText(/marked this sample lead as an emergency/)).toBeInTheDocument();
-      expect(calls.at(-1)).toMatchObject({ top: 480, behavior: 'smooth' });
+      expect(calls.at(-1)).toMatchObject({ top: 320, behavior: 'smooth' });
       expect(calls.some((call) => call.top === 900)).toBe(false);
+
+      calls.length = 0;
+      await user.type(screen.getByLabelText('Text the business'), 'are you a bot?');
+      await user.click(screen.getByRole('button', { name: 'Send' }));
+      expect(await screen.findByText('Typing…')).toBeInTheDocument();
+      expect(calls.some((call) => call.top === 464 && call.behavior === 'smooth')).toBe(true);
+      expect(await screen.findByText(IDENTITY_REPLY)).toBeInTheDocument();
+      expect(calls.at(-1)).toMatchObject({ top: 320, behavior: 'smooth' });
 
       window.matchMedia = vi.fn().mockImplementation((query) => ({
         matches: String(query).includes('prefers-reduced-motion'),

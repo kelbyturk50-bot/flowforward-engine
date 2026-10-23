@@ -716,22 +716,39 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 
 /* ── Live chat demo (F-007). Fixtures only. ────────────── */
 .prototype-column:has(.live-chat) .prototype-brandbar { display: none; }
-.prototype-root:has(.live-chat) .prototype-screen { padding: 8px 10px 16px; }
+.prototype-root:has(.live-chat) .prototype-screen {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px 8px;
+}
+.prototype-root:has(.live-chat) .prototype-foreground,
+.prototype-root:has(.live-chat) .prototype-frame,
+.prototype-root:has(.live-chat) .prototype-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
 .live-chat {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   min-height: 0;
 }
 .live-chat-title {
-  margin: 0 0 8px;
-  font-size: 1.25rem;
-  line-height: 1.25;
+  flex: none;
+  margin: 0 0 4px;
+  font-size: 1.15rem;
+  line-height: 1.2;
   overflow-wrap: anywhere;
 }
 .live-chat-banner {
   position: static;
-  margin: 0 0 8px;
+  flex: none;
+  margin: 0 0 4px;
   background: #F7EBCF;
   color: #1E2A2F;
   border: 1px solid #8A6A1F;
@@ -744,7 +761,8 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   align-items: center;
   width: 100%;
   min-height: 44px;
-  padding: 10px 12px;
+  padding: 6px 12px;
+  line-height: 1.25;
   border: 0;
   background: transparent;
   color: #1E2A2F;
@@ -766,29 +784,50 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   border: 0;
 }
 .live-chat-after {
-  margin: 0 0 12px; padding: 8px 12px;
+  margin: 0; padding: 6px 10px;
   background: var(--surface); color: var(--ink);
   border: 1px solid var(--line); border-radius: 10px;
   font-size: .92rem;
 }
-.live-chat-stage { position: relative; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.live-chat-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+}
 .live-chat-phone {
   position: relative;
   display: flex;
   flex-direction: column;
+  flex: none;
+  box-sizing: border-box;
   min-width: 0;
-  height: auto;
-  max-height: none;
-  overflow: visible;
+  /* Title and banner sit above the frame. vh is the fallback when dvh is unsupported. */
+  height: calc(100vh - 8.75rem);
+  height: calc(100dvh - 8.75rem);
+  /* Thread floor is 200px. The rest is the head, one chip row, the text box, Send, and padding. */
+  min-height: calc(200px + 13.75rem);
+  overflow: hidden;
   background: var(--surface);
   color: var(--ink);
   border: 1px solid var(--line);
   border-radius: 24px;
-  padding: 12px;
+  padding: 4px 8px 6px;
 }
 .live-chat-phone-head {
+  flex: none;
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  min-height: 44px; margin-bottom: 10px;
+  min-height: 44px; margin-bottom: 0;
+}
+.live-chat-phone-head .live-chat-owner-toggle {
+  width: auto;
+  flex: 0 1 auto;
+  margin: 0;
+  min-height: 44px;
+  padding: 6px 10px;
 }
 .live-chat-wordmark { max-width: 70%; }
 .live-chat-ai {
@@ -804,11 +843,9 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   min-width: 0;
   flex: 1 1 auto;
   min-height: 200px;
-  height: 42vh;
-  height: 42dvh;
-  overflow: auto;
+  overflow-y: auto;
 }
-.live-chat-dock { flex: none; display: flex; flex-direction: column; gap: 8px; margin-top: 8px; background: var(--surface); }
+.live-chat-dock { flex: none; display: flex; flex-direction: column; gap: 4px; margin-top: 0; background: var(--surface); }
 .live-chat-typing {
   margin: 0;
   color: var(--ink-2);
@@ -838,7 +875,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   color: var(--proto-on-accent, var(--juniper-ink));
   border-radius: 16px 16px 4px 16px;
 }
-.live-chat-chips { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; }
+.live-chat-chips { position: relative; display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; min-width: 0; }
 .live-chat-chip-row, .live-chat-slots {
   list-style: none;
   display: flex;
@@ -846,7 +883,16 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   margin: 0;
   padding: 0;
 }
-.live-chat-chip-row { flex-direction: row; flex-wrap: wrap; overflow: visible; }
+.live-chat-chip-row {
+  flex-direction: row;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  max-width: 100%;
+  scrollbar-width: none;
+  mask-image: linear-gradient(to right, #000 calc(100% - 1.75rem), transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 1.75rem), transparent);
+}
+.live-chat-chip-row::-webkit-scrollbar { display: none; }
 .live-chat-slots { flex-direction: column; }
 .live-chat-expand {
   display: flex;
@@ -864,14 +910,15 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .live-chat-chip, .live-chat-action {
   background: var(--paper); color: var(--ink); border: 1px solid var(--line);
 }
-.live-chat-chip { width: auto; flex: 1 1 auto; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.live-chat-chip { width: auto; flex: 0 0 auto; max-width: none; white-space: nowrap; }
 .live-chat-chip:focus-visible, .live-chat-action:focus-visible, .live-chat-send:focus-visible {
   outline: 2px solid var(--ink); outline-offset: 2px;
 }
-.live-chat-compose { display: flex; flex-direction: column; gap: 8px; }
-.live-chat-label { font-size: .85rem; font-weight: 600; }
+.live-chat-compose { display: flex; flex-direction: column; gap: 4px; }
+.live-chat-compose-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-height: 0; }
+.live-chat-label { font-size: .75rem; line-height: 1.2; font-weight: 600; }
 .live-chat-input {
-  width: 100%; min-height: 44px; padding: 10px 12px; resize: vertical;
+  width: 100%; min-height: 44px; max-height: 44px; padding: 10px 12px; resize: none;
   border: 2px solid #3E4C4F; border-radius: 10px; background: #FFFFFF;
   color: #1E2A2F; font: inherit; font-size: 1rem;
 }
@@ -902,7 +949,8 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   gap: 8px;
   width: 100%;
   min-height: 44px;
-  margin: 0 0 8px;
+  flex: none;
+  margin: 0 0 6px;
   padding: 10px 12px;
   border-radius: 10px;
   border: 2px solid #3E4C4F;
@@ -940,10 +988,12 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 }
 .live-chat-owner .prototype-card { margin: 0; }
 @media (min-width: 1280px) {
-  .prototype-root:has(.live-chat) .prototype-screen { max-width: 1112px; padding: 12px 16px 24px; }
+  .prototype-root:has(.live-chat) .prototype-screen { max-width: 1112px; padding: 8px 16px 12px; }
   .live-chat-owner-toggle { display: none; }
-  .live-chat-phone { height: auto; max-height: none; }
-  .live-chat-thread { min-height: 200px; height: 48vh; height: 48dvh; }
+  .live-chat-phone {
+    height: calc(100vh - 7.25rem);
+    height: calc(100dvh - 7.25rem);
+  }
   .live-chat-stage {
     display: grid;
     grid-template-columns: minmax(0, 1.2fr) minmax(240px, .8fr);
