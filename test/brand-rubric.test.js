@@ -969,7 +969,12 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
   it('commits schema.sql and boots when a 51c459d brand row breaks the tighter checks', async () => {
     const schema = fs.readFileSync(path.join(ROOT, 'src/db/schema.sql'), 'utf8');
     const repair = fs.readFileSync(path.join(ROOT, 'src/db/brand-constraints.sql'), 'utf8');
-    assert.equal(/DROP\s+CONSTRAINT/i.test(schema), false);
+    const schemaWithoutTagUpgrade = schema.replace(
+      /-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/,
+      ''
+    );
+    assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
+    assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutTagUpgrade), false);
     assert.equal(/DROP\s+CONSTRAINT/i.test(repair), false);
     assert.match(repair, /NOT VALID/);
     assert.match(repair, /VALIDATE CONSTRAINT prospect_brands_name_strict/);

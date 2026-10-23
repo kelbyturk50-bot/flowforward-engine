@@ -13,9 +13,12 @@
 //   - colors on buttons, headers, nav, links, and CTA-ish selectors
 // Neutrals (whites, grays, near-black) are ignored. Similar shades merge.
 
-const { safeFetch } = require('../net/safeFetch');
+const net = require('../net/safeFetch');
 
 const MAX_SHEETS = 4;
+// One budget for the homepage and every stylesheet. Each safeFetch call
+// receives only the time still left, so five fetches cannot stack to ~50s.
+const TOTAL_BUDGET_MS = 12000;
 const SHEET_BYTES = 1_500_000;
 const UA = 'Mozilla/5.0 (compatible; FlowForwardBot/1.0; +https://flowforward-engine-six.vercel.app/about)';
 
@@ -153,9 +156,34 @@ function extractPalette(html, cssTexts = []) {
 }
 
 // ── fetch ───────────────────────────────────────────────────────────────────
-async function getText(url, accept, maxBytes) {
-  const res = await safeFetch(url, {
-    timeoutMs: 10000, maxBytes, maxRedirects: 5,
+function isHtml(type) {
+  const value = String(type || '').toLowerCase();
+  return value.includes('text/html') || value.includes('application/xhtml+xml');
+}
+
+// http and https only. A missing scheme is treated as https. Any other
+// scheme is refused here, before safeFetch resolves a name.
+function normalizeSiteUrl(raw) {
+  const url = String(raw || '').trim();
+  if (!url || url.startsWith('//')) return null;
+  const scheme = url.match(/^([a-z][a-z0-9+.-]*):/i);
+  if (scheme) {
+    const name = scheme[1].toLowerCase();
+    if (name !== 'http' && name !== 'https') return null;
+    return url;
+  }
+  return `https://${url}`;
+}
+
+async function getText(url, accept, maxBytes, timeoutMs, timeouts) {
+  if (timeouts) timeouts.push(timeoutMs);
+  if (!(timeoutMs > 0)) {
+    const err = new Error('budget');
+    err.code = 'EFETCH';
+    throw err;
+  }
+  const res = await net.safeFetch(url, {
+    timeoutMs, maxBytes, maxRedirects: 5,
     headers: { 'User-Agent': UA, Accept: accept, 'Accept-Language': 'en-US,en;q=0.9' },
   });
   if (res.status >= 400) throw new Error(`status ${res.status}`);
@@ -177,20 +205,28 @@ function stylesheetUrls(html, baseUrl) {
 
 // Fetch the homepage (or reuse html already fetched) and up to MAX_SHEETS
 // stylesheets, then score colors. Never throws; returns { error } instead.
-async function detectBrandColors(website, { html: knownHtml, finalUrl: knownUrl } = {}) {
+async function detectBrandColors(website, opts = {}) {
+  const knownHtml = opts.html;
+  const knownUrl = opts.finalUrl;
+  const readNow = typeof opts.now === 'function' ? opts.now : Date.now;
+  const timeouts = Array.isArray(opts.timeouts) ? opts.timeouts : null;
+  const deadline = readNow() + TOTAL_BUDGET_MS;
+  const remaining = () => deadline - readNow();
   try {
     let html = knownHtml; let base = knownUrl;
     if (!html) {
-      let url = String(website || '').trim();
-      if (!url) return { error: 'no website' };
-      if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
-      const home = await getText(url, 'text/html,application/xhtml+xml', 3_000_000);
+      const url = normalizeSiteUrl(website);
+      if (!url) return { error: 'could not read the site (EFETCH)' };
+      const home = await getText(url, 'text/html,application/xhtml+xml', 3_000_000, remaining(), timeouts);
+      if (!isHtml(home.type)) return { error: 'could not read the site (EFETCH)' };
       html = home.text; base = home.finalUrl;
     }
     const sheets = [];
     for (const href of stylesheetUrls(html, base)) {
+      const left = remaining();
+      if (!(left > 0)) break;
       try {
-        const css = await getText(href, 'text/css,*/*;q=0.1', SHEET_BYTES);
+        const css = await getText(href, 'text/css,*/*;q=0.1', SHEET_BYTES, left, timeouts);
         if (!css.type || /css|text\/plain/.test(css.type)) sheets.push(css.text);
       } catch { /* skip a sheet that fails */ }
     }
@@ -200,4 +236,12 @@ async function detectBrandColors(website, { html: knownHtml, finalUrl: knownUrl 
   }
 }
 
-module.exports = { extractPalette, detectBrandColors, stylesheetUrls, parseColor, isNeutral };
+module.exports = {
+  TOTAL_BUDGET_MS,
+  extractPalette,
+  detectBrandColors,
+  stylesheetUrls,
+  parseColor,
+  isNeutral,
+  normalizeSiteUrl,
+};

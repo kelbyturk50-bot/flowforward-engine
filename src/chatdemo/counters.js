@@ -8,6 +8,18 @@ const { logErr } = require('./log');
 const { pool, withChatTx } = require('./tx');
 
 const cache = new Map();
+// The map is a hint. Postgres CHECKs stay authoritative. Evict the oldest
+// key once the map is past this size so it cannot grow without a bound.
+const CACHE_MAX = 1024;
+
+function touch(key, value) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > CACHE_MAX) {
+    const oldest = cache.keys().next().value;
+    cache.delete(oldest);
+  }
+}
 
 function utcStamp(date, unit) {
   const d = new Date(date.getTime());
@@ -30,13 +42,15 @@ async function allow(key, max, read) {
       err.code = 'seed';
       throw err;
     }
-    cache.set(key, n);
+    touch(key, n);
+  } else {
+    touch(key, cache.get(key));
   }
   return cache.get(key) < max;
 }
 
 function bump(key) {
-  cache.set(key, (cache.get(key) || 0) + 1);
+  touch(key, (cache.get(key) || 0) + 1);
 }
 
 async function purge(at) {
@@ -52,6 +66,11 @@ async function purge(at) {
     );
     await pool.query(
       `DELETE FROM chat_demo_ip_days
+        WHERE day < (($1::timestamptz - interval '48 hours') AT TIME ZONE 'America/Denver')::date`,
+      [when]
+    );
+    await pool.query(
+      `DELETE FROM chat_demo_ip_day_keys
         WHERE day < (($1::timestamptz - interval '48 hours') AT TIME ZONE 'America/Denver')::date`,
       [when]
     );
@@ -236,7 +255,23 @@ function _resetExpressCacheForTests() {
   cache.clear();
 }
 
+function _seedExpressCacheForTests(key, value) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('test only');
+  touch(key, value);
+}
+
+function _expressCacheSizeForTests() {
+  if (process.env.NODE_ENV !== 'test') throw new Error('test only');
+  return cache.size;
+}
+
+function _expressCacheHasForTests(key) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('test only');
+  return cache.has(key);
+}
+
 module.exports = {
+  CACHE_MAX,
   purge,
   prepareMint,
   prepareMessage,
@@ -246,4 +281,7 @@ module.exports = {
   loadSession,
   rememberBumps,
   _resetExpressCacheForTests,
+  _seedExpressCacheForTests,
+  _expressCacheSizeForTests,
+  _expressCacheHasForTests,
 };

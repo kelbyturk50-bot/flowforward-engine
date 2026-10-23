@@ -374,7 +374,7 @@ describe('prototype on draft', () => {
     console.log('[prototype] schema, source, and payloads have no logo field');
   });
 
-  it('prototype: expiry boundary — 14d minus 1s => 200; at 14d => 410 link_expired with expires_at', async () => {
+  it('prototype: expiry boundary — 60s early => 200; at expiry and 60s late => 410 link_expired', async () => {
     process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
     const lead = await seedLead({ google_place_id: 'test-place-proto-expiry' });
     const proposal = await draftProposal(lead.id);
@@ -397,7 +397,7 @@ describe('prototype on draft', () => {
 
     // Millisecond clocks: SQL NOW() carries microseconds, so a same-millisecond
     // read can land before that instant. Anchor both sides to a JS date.
-    const early = await shift(new Date(Date.now() + 1000));
+    const early = await shift(new Date(Date.now() + 60 * 1000));
     const earlyRes = await request(port, 'GET', `/api/public/prototypes/${early.token}`, { key: '' });
     assert.equal(earlyRes.status, 200);
     assert.equal(earlyRes.json.expires_at, early.expires_at);
@@ -406,9 +406,117 @@ describe('prototype on draft', () => {
     const due = await shift(new Date());
     const dueRes = await request(port, 'GET', `/api/public/prototypes/${due.token}`, { key: '' });
     assert.equal(dueRes.status, 410);
-    assert.deepEqual(dueRes.json, { error: 'link_expired', expires_at: due.expires_at });
+    assert.deepEqual(dueRes.json, { error: 'link_expired' });
+    assert.equal(Object.hasOwn(dueRes.json, 'expires_at'), false);
     assert.equal(dueRes.headers['x-content-type-options'], 'nosniff');
-    console.log(`[prototype] expiry 14d-1s => ${earlyRes.status}; at 14d => ${dueRes.status} ${dueRes.json.error} ${dueRes.json.expires_at}`);
+
+    const late = await shift(new Date(Date.now() - 60 * 1000));
+    const lateRes = await request(port, 'GET', `/api/public/prototypes/${late.token}`, { key: '' });
+    assert.equal(lateRes.status, 410);
+    assert.deepEqual(lateRes.json, { error: 'link_expired' });
+    for (const [res, expiresAt] of [[dueRes, due.expires_at], [lateRes, late.expires_at]]) {
+      const at = new Date(expiresAt);
+      const forms = [at.toISOString(), at.toUTCString(), String(at.getTime()), String(Math.floor(at.getTime() / 1000))];
+      for (const [name, value] of Object.entries(res.headers)) {
+        assert.equal(/expir/i.test(name), false, `410 header ${name}`);
+        if (name === 'date') continue;
+        for (const form of forms) assert.equal(String(value).includes(form), false, `410 header ${name} carries the expiry`);
+      }
+    }
+    console.log(`[prototype] expiry 60s early => ${earlyRes.status}; at expiry and 60s late => ${dueRes.status} ${lateRes.status} ${dueRes.json.error}`);
+  });
+
+  it('tokensEqual compares one opaque token, and an unknown token still runs one HMAC', async () => {
+    const tokens = require('../src/prototypes/tokens');
+    const store = require('../src/prototypes/store');
+    const a = 'A'.repeat(43);
+    // The link token is one opaque value. It is not an id, a nonce, and a mac.
+    assert.equal(a.includes('.'), false);
+    assert.equal(tokens.tokensEqual(a, a), true);
+    assert.equal(tokens.tokensEqual(a, 'B'.repeat(43)), false);
+    assert.equal(tokens.tokensEqual(a, a.slice(0, 42)), false);
+    assert.equal(tokens.tokensEqual(a, `${a}x`), false);
+    assert.equal(tokens.tokensEqual(a, null), false);
+    assert.equal(tokens.tokensEqual(null, null), false);
+    assert.equal(tokens.tokensEqual('', ''), false);
+    assert.equal(tokens.tokensEqual(1, 1), false);
+    let calls = 0;
+    const orig = tokens.tokenFor;
+    tokens.tokenFor = (nonce) => {
+      calls += 1;
+      return orig(nonce);
+    };
+    try {
+      const miss = await store.lookupToken('C'.repeat(43), new Date());
+      assert.equal(miss.status, 404);
+      assert.equal(calls, 1);
+    } finally {
+      tokens.tokenFor = orig;
+    }
+    console.log('[prototype] tokensEqual is length-safe; a well-formed miss still runs one HMAC');
+  });
+
+  it('a prototype link minted before the #101 check (nonce row, same key) is 200', async () => {
+    const tokens = require('../src/prototypes/tokens');
+    const lead = await seedLead({
+      google_place_id: 'test-place-proto-pre-101',
+      company: 'TEST: Pre 101 Heating',
+    });
+    const minted = tokens.mintToken();
+    // Pre-#101 rows stored the nonce and the SHA-256 of the HMAC token.
+    // The token is one opaque 43-character value, not id + nonce + mac.
+    assert.equal(minted.token.length, 43);
+    assert.equal(minted.token.includes('.'), false);
+    await pool.query(
+      `INSERT INTO prototypes (
+         prospect_id, agent_type, brand_name, color_primary, color_secondary,
+         token_hash, nonce, issued_at, expires_at
+       )
+       VALUES ($1, 'estimate_followup', 'TEST: Pre 101 Heating', '#112233', '#445566', $2, $3, NOW(), NOW() + INTERVAL '336 hours')`,
+      [lead.id, minted.hash, minted.nonce]
+    );
+    const json = await request(port, 'GET', `/api/public/prototypes/${minted.token}`, { key: '' });
+    assert.equal(json.status, 200);
+    assert.equal(json.json.brand_name, 'TEST: Pre 101 Heating');
+    const page = await request(port, 'GET', `/demo/prototype/${minted.token}`, { key: '' });
+    assert.equal(page.status, 200);
+    assert.match(page.json.raw, /Pre 101 Heating/);
+    console.log('[prototype] pre-#101 nonce row with the same key is 200 on GET and the page');
+  });
+
+  it('prototype create rejects a hostile or over-long business name', async () => {
+    const { brandNameOk, publicBrandName, MAX_LEN } = require('../src/prototypes/brand-name');
+    const { DEMOS } = require('../src/chatdemo/demos');
+    assert.equal(brandNameOk('Affiliated. Real bookings confirmed'), true);
+    assert.equal(publicBrandName('Affiliated. Real bookings confirmed'), 'Affiliated. Real bookings confirmed');
+    assert.equal(brandNameOk('A'.repeat(MAX_LEN + 1)), false);
+    assert.equal(brandNameOk('ACME <Heating>'), false);
+    assert.equal(brandNameOk('Bad\u0000Name'), false);
+    assert.equal(brandNameOk('Bad\u202EName'), false);
+    assert.equal(publicBrandName('ACME <Heating>'), 'this business');
+    for (const demo of DEMOS) assert.equal(brandNameOk(demo.business_name), true, demo.slug);
+
+    const hostile = await seedLead({
+      google_place_id: 'test-place-proto-name-bad',
+      company: 'TEST: <Heating>',
+    });
+    const denied = await request(port, 'POST', '/api/prototypes', { body: { prospect_id: hostile.id } });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.json.code, 'invalid_brand_name');
+    const none = await pool.query('SELECT COUNT(*)::int AS n FROM prototypes WHERE prospect_id = $1', [hostile.id]);
+    assert.equal(none.rows[0].n, 0);
+    await assert.rejects(
+      () => pool.query(
+        `INSERT INTO prototypes (
+           prospect_id, agent_type, brand_name, color_primary, color_secondary,
+           token_hash, nonce, issued_at, expires_at
+         )
+         VALUES ($1, 'estimate_followup', $2, '#112233', '#445566', $3, $4, NOW(), NOW() + INTERVAL '336 hours')`,
+        [hostile.id, `TEST: ${'A'.repeat(MAX_LEN)}`, Buffer.alloc(32, 1), Buffer.alloc(32, 2)]
+      ),
+      (err) => err.code === '23514'
+    );
+    console.log('[prototype] hostile and over-long brand names are refused');
   });
 
   it('prototype: restartClock leaves an expired link at 410', async () => {
@@ -599,6 +707,13 @@ describe('prototype on draft', () => {
       const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
       assert.equal(banned.test(text), false, file);
     }
+    const storeSrc = fs.readFileSync(path.join(ROOT, 'src/prototypes/store.js'), 'utf8');
+    const beforeMatch = storeSrc.split('async function matchSiteColors')[0];
+    assert.equal(beforeMatch.includes('detectBrandColors'), false);
+    assert.equal(storeSrc.includes('palette.detectBrandColors'), true);
+    const agents = fs.readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8');
+    assert.match(agents, /only prototype route that re-reads the site/);
+    assert.match(agents, /fresh research also crawls/);
     let claudeCalls = 0;
     _setClient({
       messages: {

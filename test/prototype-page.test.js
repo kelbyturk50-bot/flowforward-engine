@@ -171,15 +171,28 @@ describe('prototype page', () => {
   });
 
   it('escapes a hostile business name and the watermark stays', async () => {
-    const p = await lead({ company: 'TEST: <style>.pt-ribbon{display:none}</style></div><script>alert(1)</script>' });
+    const hostile = 'TEST: <style>.pt-ribbon{display:none}</style></div><script>alert(1)</script>';
+    const p = await lead({ company: hostile });
     const made = await call(port, 'POST', '/api/prototypes', { body: { prospect_id: p.id } });
-    const page = await call(port, 'GET', pathOf(made.json.prototype.url), { key: '' });
-    assert.equal(page.status, 200);
-    assert.equal(page.text.includes('<style>.pt-ribbon{display:none}</style>'), false);
-    assert.equal(page.text.includes('<script>alert(1)</script>'), false);
-    assert.ok(page.text.includes('&lt;style&gt;.pt-ribbon{display:none}&lt;/style&gt;'));
-    assert.ok(page.text.includes(WATERMARK_TEXT));
-    console.log('[prototype-page] hostile name escaped; ribbon intact');
+    assert.equal(made.status, 400);
+    assert.equal(made.json.code, 'invalid_brand_name');
+    const none = await pool.query('SELECT COUNT(*)::int AS n FROM prototypes WHERE prospect_id = $1', [p.id]);
+    assert.equal(none.rows[0].n, 0);
+    const { renderPrototype } = require('../src/prototypes/page');
+    const html = renderPrototype({
+      brand_name: hostile,
+      industry: 'HVAC',
+      city: 'Provo',
+      color_primary: '#112233',
+      color_secondary: '#445566',
+      agent_type: 'estimate_followup',
+      expires_at: new Date('2026-11-06T00:00:00Z'),
+    });
+    assert.equal(html.includes('<style>.pt-ribbon{display:none}</style>'), false);
+    assert.equal(html.includes('<script>alert(1)</script>'), false);
+    assert.ok(html.includes('&lt;style&gt;.pt-ribbon{display:none}&lt;/style&gt;'));
+    assert.ok(html.includes(WATERMARK_TEXT));
+    console.log('[prototype-page] hostile name refused on create; renderer still escapes');
   });
 
   it('CRM: manual create falls back to estimate follow-up, refuses pest and franchise, and fresh revokes the old link', async () => {
@@ -221,6 +234,28 @@ describe('prototype page', () => {
     const gone = await call(port, 'GET', path, { key: '' });
     assert.equal(gone.status, 410);
     assert.ok(gone.text.includes('This preview link has expired'));
+    assert.ok(gone.text.includes('This link is no longer active.'));
+    assert.ok(gone.text.includes('Ask Kelby for a fresh one.'));
+    assert.equal(/expired on/i.test(gone.text), false);
+    assert.equal(/\d{4}-\d{2}-\d{2}/.test(gone.text), false, '410 HTML has an ISO date');
+    assert.equal(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(gone.text), false, '410 HTML has a numeric date');
+    assert.equal(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b/.test(gone.text), false, '410 HTML has a month name');
+    // No expiry date in any other form either: body, title, meta, data
+    // attributes, or response headers.
+    const exp = new Date((await pool.query('SELECT expires_at FROM prototypes WHERE id = $1', [made.json.prototype.id])).rows[0].expires_at);
+    const ms = String(exp.getTime());
+    const secs = String(Math.floor(exp.getTime() / 1000));
+    const utcDay = exp.toUTCString().slice(0, 16);
+    const SHORT_MONTH = /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\.?\s+\d|\d\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\b/;
+    const hasExpiry = (v) => v.includes(exp.toISOString().slice(0, 10)) || v.includes(utcDay)
+      || v.includes(ms) || v.includes(secs) || SHORT_MONTH.test(v);
+    assert.equal(hasExpiry(gone.text), false, '410 HTML has the expiry date');
+    assert.equal(/expires/i.test(gone.text), false, '410 HTML has an expires attribute');
+    for (const [name, value] of Object.entries(gone.headers)) {
+      if (name === 'date') continue;
+      assert.equal(/expir/i.test(name), false, `410 header ${name}`);
+      assert.equal(hasExpiry(String(value)), false, `410 header ${name} has the expiry date`);
+    }
     assert.ok(gone.text.includes(WATERMARK_TEXT));
     assertNoFlowForwardPrices(gone.text, 'expired page');
     assert.equal(DOLLAR_DIGIT.test(gone.text), false, '410 page dollar digit');

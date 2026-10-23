@@ -630,10 +630,10 @@ ${dialogs(biz, trade, days)}
 </body></html>`;
 }
 
-function renderGone(status, row) {
+function renderGone(status) {
   const title = status === 410 ? 'This preview link has expired' : 'This page isn\'t available';
   const body = status === 410
-    ? `Prototype links last 14 days${row && row.expires_at ? `; this one expired on ${esc(longDate(row.expires_at))}` : ''}. Ask ${esc(SENDER.name.split(' ')[0])} for a fresh one.`
+    ? `Prototype links last 14 days. This link is no longer active. Ask ${esc(SENDER.name.split(' ')[0])} for a fresh one.`
     : 'The link may be mistyped or turned off.';
   const t = theme('#2F6B57', '#C9952F');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"><title>${title}</title>
@@ -662,7 +662,7 @@ router.get('/:token', async (req, res) => {
   }
   try {
     const { status, row } = await lookupToken(req.params.token);
-    if (status !== 200) return res.status(status).type('html').send(renderGone(status, row));
+    if (status !== 200) return res.status(status).type('html').send(renderGone(status));
     res.type('html').send(renderPrototype(row));
   } catch (err) {
     console.error('[prototype] page failed:', err && err.code);
@@ -670,9 +670,37 @@ router.get('/:token', async (req, res) => {
   }
 });
 
-const assets = express.static(path.join(__dirname, 'assets'), {
-  index: false, fallthrough: false, maxAge: '30d', immutable: true,
+function closePage(req, res) {
+  stamp(res);
+  if (req.method !== 'GET') {
+    res.set('Allow', 'GET');
+    return res.status(405).type('html').send(renderGone(404));
+  }
+  return res.status(404).type('html').send(renderGone(404));
+}
+
+// Last on the page router. Unmatched paths never reach cors().
+router.use(closePage);
+
+const assets = express.Router();
+assets.use(express.static(path.join(__dirname, 'assets'), {
+  index: false,
+  // Missing files and non-GET methods call next() so the handler below
+  // answers them. Nothing under this mount calls next() out of the router.
+  fallthrough: true,
+  maxAge: '30d',
+  immutable: true,
   setHeaders: (res) => res.set('X-Content-Type-Options', 'nosniff'),
+}));
+assets.use((req, res) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Robots-Tag', 'noindex, nofollow');
+  res.set('Cache-Control', 'no-store');
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.set('Allow', 'GET, HEAD');
+    return res.status(405).type('text/plain').send('Method not allowed');
+  }
+  return res.status(404).type('text/plain').send('Not found');
 });
 
 module.exports = { router, assets, renderPrototype, renderGone, theme, WATERMARK_TEXT };

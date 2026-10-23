@@ -578,6 +578,22 @@ CREATE TABLE IF NOT EXISTS prototypes (
 
 ALTER TABLE prototypes ADD COLUMN IF NOT EXISTS nonce BYTEA;
 
+-- CREATE TABLE IF NOT EXISTS does not add a check to a table that already
+-- exists. NOT VALID skips the scan of current rows. Validation runs after
+-- commit in brand-constraints.sql. This block does not UPDATE rows.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'prototypes_brand_name_chars'
+  ) THEN
+    ALTER TABLE prototypes
+      ADD CONSTRAINT prototypes_brand_name_chars CHECK (
+        char_length(brand_name) BETWEEN 1 AND 120
+        AND brand_name !~ U&'[[:cntrl:]<>\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
+      ) NOT VALID;
+  END IF;
+END $$;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_prototypes_one_active
   ON prototypes (prospect_id)
   WHERE revoked_at IS NULL;
@@ -1281,6 +1297,19 @@ CREATE TABLE IF NOT EXISTS chat_demo_sessions (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_demo_sessions_hash ON chat_demo_sessions (session_hash);
 
+-- BEGIN chat_demo_sessions_tag_check upgrade
+-- CREATE TABLE IF NOT EXISTS keeps an older TEST-only check. Drop and re-add
+-- so a database that booted an earlier head allows demo-prototype as well.
+ALTER TABLE chat_demo_sessions DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check;
+ALTER TABLE chat_demo_sessions ADD CONSTRAINT chat_demo_sessions_tag_check CHECK (
+  char_length(test_tag) <= 80
+  AND (
+    test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+    OR test_tag ~ '^demo-[a-z0-9]+(-[a-z0-9]+)*$'
+  )
+);
+-- END chat_demo_sessions_tag_check upgrade
+
 CREATE TABLE IF NOT EXISTS chat_demo_turns (
   id                  UUID PRIMARY KEY,
   session_id          UUID NOT NULL REFERENCES chat_demo_sessions(id) ON DELETE CASCADE,
@@ -1336,6 +1365,14 @@ CREATE TABLE IF NOT EXISTS chat_demo_ip_days (
   mint_count  INTEGER NOT NULL,
   PRIMARY KEY (ip_hash, day),
   CONSTRAINT chat_demo_ip_days_mint_count_cap CHECK (mint_count >= 0 AND mint_count <= 20)
+);
+
+-- One HMAC key per America/Denver day, shared by every process that uses
+-- this database. Not derived from CRM_API_KEY. No seed and no UPDATE.
+CREATE TABLE IF NOT EXISTS chat_demo_ip_day_keys (
+  day        DATE PRIMARY KEY,
+  key_bytes  BYTEA NOT NULL,
+  CONSTRAINT chat_demo_ip_day_keys_len CHECK (octet_length(key_bytes) = 32)
 );
 
 CREATE TABLE IF NOT EXISTS chat_demo_rate_minutes (

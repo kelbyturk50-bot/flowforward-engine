@@ -59,4 +59,14 @@ router.use((err, req, res, next) => {
   return res.status(400).json({ error: 'invalid_body' });
 });
 
+// Last. An unmatched path or method ends here, so it never reaches cors().
+router.use((req, res) => {
+  stamp(res);
+  if (req.method !== 'GET') {
+    res.set('Allow', 'GET');
+    return res.status(405).json({ error: 'method_not_allowed' });
+  }
+  return res.status(404).json({ error: 'not_found' });
+});
+
 module.exports = { router };

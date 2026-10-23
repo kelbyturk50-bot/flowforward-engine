@@ -11,7 +11,6 @@ import {
   LOAD_ERROR,
   PAUSE_LOCKED_MESSAGE,
 } from './contract.js';
-import { formatDenverDateTime } from './dates.js';
 import { chipsFor } from './fixture.js';
 import { publicJson } from './public-client.js';
 
@@ -65,7 +64,7 @@ function chatPath(kind, { slug, token }, action) {
 function interpretSession(result, extra) {
   const data = result?.data || {};
   if (result?.status === 404) return { status: 'closed' };
-  if (result?.status === 410) return { status: 'expired', expiresAt: data.expires_at };
+  if (result?.status === 410) return { status: 'expired' };
   if (result?.status === 201 && typeof data.sessionId === 'string' && data.sessionId) {
     return { status: 'ready', data, locked: false, notice: null, ...extra };
   }
@@ -107,8 +106,7 @@ async function openPrototype(token) {
   return interpretSession(session, { kind: 'prototype', slug: '', token, demo: { chips } });
 }
 
-function ExpiredDemo({ expiresAt }) {
-  const when = formatDenverDateTime(expiresAt);
+function ExpiredDemo() {
   return (
     <div className="prototype-root">
       <PrototypeWatermark />
@@ -116,7 +114,7 @@ function ExpiredDemo({ expiresAt }) {
         <div className="not-found-card">
           <h1>{EXPIRED_TITLE}</h1>
           <p>{LINK_LIFETIME}</p>
-          <p>{when ? `This one expired on ${when}.` : 'This link is no longer active.'}</p>
+          <p>This link is no longer active.</p>
           <p>{LINK_NEXT_STEP}</p>
         </div>
       </main>
@@ -156,7 +154,7 @@ export default function LiveChatConnected({ kind = 'sample', token = '' }) {
     return <main className="demo"><p className="demo-loading">Loading sample data…</p></main>;
   }
   if (view.status === 'closed') return <LiveChatNotFound />;
-  if (view.status === 'expired') return <ExpiredDemo expiresAt={view.expiresAt} />;
+  if (view.status === 'expired') return <ExpiredDemo />;
   if (view.status === 'error') {
     return <BootError onRetry={() => setAttempt((value) => value + 1)} />;
   }
@@ -190,7 +188,7 @@ export default function LiveChatConnected({ kind = 'sample', token = '' }) {
         notice: view.notice,
         send,
         onCta,
-        onExpired: (data) => setView({ status: 'expired', expiresAt: data?.expires_at }),
+        onExpired: () => setView({ status: 'expired' }),
         onNotFound: () => setView({ status: 'closed' }),
       }}
     />

@@ -921,7 +921,12 @@ describe('pilot csv estimate intake', () => {
     const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
     const repairSql = fs.readFileSync(path.join(__dirname, '../src/db/estimate-constraints.sql'), 'utf8');
     const migrate = fs.readFileSync(path.join(__dirname, '../src/db/migrate.js'), 'utf8');
-    assert.equal(/DROP\s+CONSTRAINT/i.test(schema), false);
+    const schemaWithoutTagUpgrade = schema.replace(
+      /-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/,
+      ''
+    );
+    assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
+    assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutTagUpgrade), false);
     assert.equal(/VALIDATE CONSTRAINT/.test(schema), false);
     assert.match(
       schema,

@@ -205,7 +205,13 @@ function createChatEngine(opts = {}) {
   async function openSession(ctx) {
     const at = clock();
     const business = ctx.business;
-    const hashed = ipHash(bucketIp(ctx.ip), at);
+    let hashed;
+    try {
+      hashed = await ipHash(bucketIp(ctx.ip), at);
+    } catch (err) {
+      logErr('cap_store_unavailable', err);
+      return failPaused(business);
+    }
     try {
       await countersApi.purge(at);
     } catch (err) {
@@ -364,7 +370,13 @@ function createChatEngine(opts = {}) {
       return { status: 413, body: envelope(business, { error: 'message_too_long' }) };
     }
     const zone = business.time_zone || FLOWFORWARD_ZONE;
-    const hashed = ipHash(bucketIp(ctx.ip), at);
+    let hashed;
+    try {
+      hashed = await ipHash(bucketIp(ctx.ip), at);
+    } catch (err) {
+      logErr('cap_store_unavailable', err);
+      return failPaused(business);
+    }
     let prepared;
     try {
       prepared = await countersApi.prepareMessage({

@@ -33,6 +33,7 @@ async function resetDb() {
       chat_demo_global_days,
       chat_demo_ip_hours,
       chat_demo_ip_days,
+      chat_demo_ip_day_keys,
       chat_demo_rate_minutes,
       chat_demo_spend_days,
       prototype_facts,
