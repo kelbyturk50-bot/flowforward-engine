@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { BookkeepingPrototype } from './agents';
 import { presentBrand } from './brand';
@@ -15,6 +15,18 @@ function textOutsideSampleValues(container) {
 }
 
 describe('CtaPanel', () => {
+  beforeEach(() => {
+    window.matchMedia = vi.fn().mockImplementation((query) => ({
+      matches: false,
+      media: query,
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+      dispatchEvent() { return false; },
+    }));
+  });
+
   it('does not show service prices', () => {
     render(<CtaPanel />);
     const panel = screen.getByRole('complementary', { name: "How we'd make this real" });
