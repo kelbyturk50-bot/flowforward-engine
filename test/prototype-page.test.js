@@ -234,6 +234,12 @@ describe('prototype page', () => {
     const gone = await call(port, 'GET', path, { key: '' });
     assert.equal(gone.status, 410);
     assert.ok(gone.text.includes('This preview link has expired'));
+    assert.ok(gone.text.includes('This link is no longer active.'));
+    assert.ok(gone.text.includes('Ask Kelby for a fresh one.'));
+    assert.equal(/expired on/i.test(gone.text), false);
+    assert.equal(/\d{4}-\d{2}-\d{2}/.test(gone.text), false, '410 HTML has an ISO date');
+    assert.equal(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(gone.text), false, '410 HTML has a numeric date');
+    assert.equal(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b/.test(gone.text), false, '410 HTML has a month name');
     assert.ok(gone.text.includes(WATERMARK_TEXT));
     assertNoFlowForwardPrices(gone.text, 'expired page');
     assert.equal(DOLLAR_DIGIT.test(gone.text), false, '410 page dollar digit');

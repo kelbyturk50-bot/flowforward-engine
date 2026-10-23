@@ -401,7 +401,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   | Any required flag off (§9) | **404** | the same body, byte-identical to unknown |
   | Revoked token, or archived prospect | **404** | the same body, byte-identical to unknown |
   | Revoked **and** expired | **404** | the same body, byte-identical to unknown (revoked wins) |
-  | Expired (not revoked) | **410** | the page renders `renderGone(410, row)`; the chat API returns 410 with a JSON body of exactly `{ error, expires_at }` and nothing else |
+  | Expired (not revoked) | **410** | the page renders `renderGone(410)` with "This link is no longer active." and no expiry date; the chat API returns 410 with a JSON body of exactly `{ "error": "link_expired" }` and nothing else |
 
   - The 404 body, headers and timing path are identical in all four 404 cases. It reveals nothing about whether the token exists, was revoked, or the feature is off, and a test asserts byte equality across them.
   - Every cap hit returns 429 (§8.2).

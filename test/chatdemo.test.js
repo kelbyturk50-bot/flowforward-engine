@@ -18,6 +18,20 @@ const NOT_FOUND = '{"error":"not_found"}';
 const TOO_LARGE = '{"error":"payload_too_large"}';
 const API_KEY = process.env.CRM_API_KEY;
 
+// A 410 carries only { error: 'link_expired' }. The expiry must not ride
+// along under another key or in a response header.
+function assertExpiredOnly(res, expiresAt) {
+  assert.equal(res.status, 410);
+  assert.deepEqual(res.json, { error: 'link_expired' });
+  const at = new Date(expiresAt);
+  const forms = [at.toISOString(), at.toUTCString(), String(at.getTime()), String(Math.floor(at.getTime() / 1000))];
+  for (const [name, value] of Object.entries(res.headers)) {
+    assert.equal(/expir/i.test(name), false, `410 header ${name}`);
+    if (name === 'date') continue;
+    for (const form of forms) assert.equal(String(value).includes(form), false, `410 header ${name} carries the expiry`);
+  }
+}
+
 describe('live chat pure checks', () => {
   it('wiring passes process.env.NODE_ENV and the default gate is off in test', async () => {
     const gatePath = require.resolve('../src/chatdemo/gate');
@@ -268,6 +282,9 @@ describe('live chat pure checks', () => {
     const pageAt = server.indexOf("app.use('/demo/prototype',");
     assert.ok(assetsAt > flagsAt && assetsAt < corsAt);
     assert.ok(pageAt > assetsAt && pageAt < corsAt);
+    const chatAuthAt = server.indexOf("app.use('/api/chat', requireApiKey)");
+    const parserAt = server.indexOf("app.use(express.json({ limit: '1mb' }))");
+    assert.ok(corsAt < chatAuthAt && chatAuthAt < parserAt, '/api/chat auth sits after cors and before the JSON parser');
     assert.equal(server.includes('publicPrototypeSurface'), false);
     assert.match(server, /app\.set\('trust proxy',\s*1\)/);
     const { demoRouter } = require('../src/chatdemo/public');
@@ -1812,6 +1829,12 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     });
     assert.equal(msg.status, 410);
     assert.equal(msg.json.error, 'link_expired');
+    assertExpiredOnly(gone, expires);
+    assertExpiredOnly(msg, expires);
+    const cta = await request('POST', `/api/public/prototypes/${proto.token}/chat/cta`, {
+      body: { sessionId: open.json.sessionId },
+    });
+    assertExpiredOnly(cta, expires);
   });
 
   it('tokenless demos stay on the fixture path when every live gate is on', async () => {

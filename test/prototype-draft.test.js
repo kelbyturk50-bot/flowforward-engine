@@ -414,6 +414,15 @@ describe('prototype on draft', () => {
     const lateRes = await request(port, 'GET', `/api/public/prototypes/${late.token}`, { key: '' });
     assert.equal(lateRes.status, 410);
     assert.deepEqual(lateRes.json, { error: 'link_expired' });
+    for (const [res, expiresAt] of [[dueRes, due.expires_at], [lateRes, late.expires_at]]) {
+      const at = new Date(expiresAt);
+      const forms = [at.toISOString(), at.toUTCString(), String(at.getTime()), String(Math.floor(at.getTime() / 1000))];
+      for (const [name, value] of Object.entries(res.headers)) {
+        assert.equal(/expir/i.test(name), false, `410 header ${name}`);
+        if (name === 'date') continue;
+        for (const form of forms) assert.equal(String(value).includes(form), false, `410 header ${name} carries the expiry`);
+      }
+    }
     console.log(`[prototype] expiry 60s early => ${earlyRes.status}; at expiry and 60s late => ${dueRes.status} ${lateRes.status} ${dueRes.json.error}`);
   });
 

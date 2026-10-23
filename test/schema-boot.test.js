@@ -191,21 +191,30 @@ describe('schema boot lock', () => {
   it('gives up on the advisory lock inside the test lock_timeout', async () => {
     _setMainSchemaTimeouts({ lockTimeout: '200', statementTimeout: '60000' });
     const holder = await pool.connect();
+    const origExit = process.exit;
+    const origError = console.error;
+    const logged = [];
+    let exitCode = null;
+    console.error = (...args) => { logged.push(args.map(String).join(' ')); };
+    process.exit = (code) => {
+      exitCode = code;
+      throw new Error('process.exit');
+    };
     try {
       await holder.query('BEGIN');
       await holder.query('SELECT pg_advisory_xact_lock($1::bigint)', [MAIN_SCHEMA_ADVISORY_LOCK]);
       const started = Date.now();
-      await assert.rejects(applyMainSchema(), (err) => {
-        assert.equal(err.code, '55P03');
-        assert.equal(err.message, '55P03');
-        return true;
-      });
+      await assert.rejects(applyMainSchema(), (err) => err && err.message === 'process.exit');
       const elapsed = Date.now() - started;
-      assert.ok(elapsed < 2000, `advisory wait took ${elapsed}ms`);
-      assert.ok(elapsed >= 100, `advisory wait returned in ${elapsed}ms`);
+      assert.equal(exitCode, 1);
+      assert.deepEqual(logged, ['55P03']);
+      assert.ok(elapsed < 4000, `advisory wait took ${elapsed}ms`);
+      assert.ok(elapsed >= 500, `advisory wait returned in ${elapsed}ms`);
       await holder.query('SELECT 1');
       console.log(`[schema-boot] advisory lock wait gave up in ${elapsed}ms with 55P03`);
     } finally {
+      process.exit = origExit;
+      console.error = origError;
       await holder.query('ROLLBACK').catch(() => {});
       holder.release();
       _setMainSchemaTimeouts(null);
@@ -508,7 +517,7 @@ describe('schema boot lock', () => {
     }
   });
 
-  it('logs only 55P03 when the advisory lock wait hits lock_timeout, and still listens', async () => {
+  it('logs only 55P03 and exits non-zero when the advisory lock fails three times', async () => {
     const port = await freePort();
     const holder = await pool.connect();
     let child;
@@ -531,27 +540,25 @@ describe('schema boot lock', () => {
       });
       child.stdout.on('data', (buf) => { output += buf.toString('utf8'); });
       child.stderr.on('data', (buf) => { output += buf.toString('utf8'); });
-      const deadline = started + 8000;
-      let health = null;
-      while (Date.now() < deadline && !health) {
-        try { health = await get(port, '/health'); } catch {
-          if (child.exitCode != null) break;
-          await new Promise((resolve) => setTimeout(resolve, 40));
-        }
-      }
+      const code = await new Promise((resolve) => {
+        const timer = setTimeout(() => resolve('timeout'), 8000);
+        child.once('close', (status) => {
+          clearTimeout(timer);
+          resolve(status);
+        });
+      });
       const elapsed = Date.now() - started;
-      assert.ok(health, `server did not listen in ${elapsed}ms ${scrub(output).slice(0, 500)}`);
-      assert.equal(health.status, 200);
+      assert.equal(code, 1, scrub(output).slice(0, 800));
       assert.ok(elapsed < 8000, `boot took ${elapsed}ms`);
-      const gate = await get(port, '/api/prospects');
-      assert.equal(gate.status, 503);
+      await assert.rejects(get(port, '/health'));
       const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       assert.ok(lines.includes('55P03'), scrub(output).slice(0, 800));
       assert.equal(output.includes('canceling statement'), false);
       assert.equal(output.includes('Startup migration/rescore failed'), false);
       assert.equal(output.includes('Fit scores refreshed'), false);
+      assert.equal(output.includes('FlowForward Engine running'), false);
       await holder.query('SELECT 1');
-      console.log(`[schema-boot] advisory-lock boot ${elapsed}ms health=200 code=55P03`);
+      console.log(`[schema-boot] advisory-lock boot ${elapsed}ms exit=1 code=55P03`);
     } finally {
       if (child && child.exitCode == null) {
         child.kill('SIGTERM');
@@ -559,6 +566,79 @@ describe('schema boot lock', () => {
       }
       await holder.query('ROLLBACK').catch(() => {});
       holder.release();
+    }
+  });
+
+  it('retries the advisory lock and then applies the schema', async () => {
+    const calls = [];
+    let locks = 0;
+    let released = 0;
+    const original = pool.connect;
+    pool.connect = async () => ({
+      async query(text) {
+        const sql = String(text);
+        calls.push(sql);
+        if (sql.includes('pg_advisory_xact_lock')) {
+          locks += 1;
+          if (locks < 3) throw pgError('55P03', 'canceling statement due to lock timeout');
+        }
+        return { rows: [] };
+      },
+      release() { released += 1; },
+    });
+    const origExit = process.exit;
+    let exited = false;
+    process.exit = () => { exited = true; throw new Error('process.exit'); };
+    try {
+      await applyMainSchema();
+      assert.equal(exited, false);
+      assert.equal(locks, 3);
+      assert.equal(calls.filter((sql) => sql === 'COMMIT').length, 1);
+      assert.equal(calls.filter((sql) => sql === 'ROLLBACK').length, 2);
+      assert.equal(calls.filter((sql) => sql.length > 1000).length, 1);
+      assert.equal(released, 3);
+    } finally {
+      process.exit = origExit;
+      pool.connect = original;
+    }
+  });
+
+  it('exits non-zero after three advisory-lock failures and logs only the SQLSTATE', async () => {
+    const calls = [];
+    let released = 0;
+    const original = pool.connect;
+    pool.connect = async () => ({
+      async query(text) {
+        const sql = String(text);
+        calls.push(sql);
+        if (sql.includes('pg_advisory_xact_lock')) throw pgError('55P03', 'canceling statement due to lock timeout');
+        return { rows: [] };
+      },
+      release() { released += 1; },
+    });
+    const origExit = process.exit;
+    const origError = console.error;
+    const logged = [];
+    let exitCode = null;
+    console.error = (...args) => { logged.push(args.map(String).join(' ')); };
+    process.exit = (code) => {
+      exitCode = code;
+      throw new Error('process.exit');
+    };
+    try {
+      await assert.rejects(applyMainSchema(), (err) => err && err.message === 'process.exit');
+      assert.equal(exitCode, 1);
+      assert.deepEqual(logged, ['55P03']);
+      assert.equal(logged.some((line) => /canceling|lock timeout|statement/i.test(line)), false);
+      assert.equal(calls.filter((sql) => sql.includes('pg_advisory_xact_lock')).length, 3);
+      assert.equal(calls.some((sql) => sql.length > 1000), false);
+      assert.equal(calls.includes('COMMIT'), false);
+      assert.equal(calls.filter((sql) => sql === 'ROLLBACK').length, 3);
+      assert.equal(released, 3);
+    } finally {
+      process.exit = origExit;
+      console.error = origError;
+      pool.connect = original;
     }
   });
 });

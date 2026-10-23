@@ -4,16 +4,20 @@
 // one client in one transaction: lock_timeout 5s and statement_timeout 60s,
 // then the advisory lock, then the file, then COMMIT. The lock wait uses
 // that same lock_timeout, so a held lock ends as 55P03 instead of waiting
-// with no bound. Those two SET LOCAL statements are fixed literals. A test
-// override is a positive integer millisecond count and applies only when
-// NODE_ENV is exactly test; it is passed to set_config as a bound parameter.
-// Any other value uses the literals. A lock or statement timeout rolls that
-// transaction back. The thrown error's message is the SQLSTATE only. Brand,
-// estimate, and pilot steps do not run after that throw. Those three files
-// still run after a successful commit, each in its own transaction. SET LOCAL
-// lock_timeout and statement_timeout of 5s and 15s apply only there. A brand,
-// estimate, or pilot failure cannot roll the main schema back. A brand-check
-// or estimate-check failure is logged and does not throw.
+// with no bound. That acquisition is tried 3 times. Between tries the wait
+// is 100ms, then 200ms, and never more than 500ms. If all 3 fail, the
+// process logs 55P03 and exits non-zero. It does not listen. A lock timeout
+// after the advisory lock is held, or a statement timeout, still throws.
+// The thrown error's message is the SQLSTATE only. Those two SET LOCAL
+// statements are fixed literals. A test override is a positive integer
+// millisecond count and applies only when NODE_ENV is exactly test; it is
+// passed to set_config as a bound parameter. Any other value uses the
+// literals. Brand, estimate, and pilot steps do not run after that throw.
+// Those three files still run after a successful commit, each in its own
+// transaction. SET LOCAL lock_timeout and statement_timeout of 5s and 15s
+// apply only there. A brand, estimate, or pilot failure cannot roll the
+// main schema back. A brand-check or estimate-check failure is logged and
+// does not throw.
 //
 // schema.sql has no statement that Postgres refuses inside a transaction
 // (no CONCURRENTLY, VACUUM, CREATE/DROP DATABASE, or top-level COMMIT).
@@ -29,6 +33,8 @@ const pool = require('./client');
 // boots do not run schema.sql at the same time. lock_timeout is set first,
 // so this wait is bounded by the same 5s (or the test override).
 const MAIN_SCHEMA_ADVISORY_LOCK = 89089001;
+const ADVISORY_LOCK_ATTEMPTS = 3;
+const ADVISORY_LOCK_BACKOFF_CAP_MS = 500;
 // Positive integer milliseconds, 1..999999. No unit suffix. Anchored so a
 // longer string cannot sneak through on a digit prefix.
 const POSITIVE_MS = /^\d{1,6}$/;
@@ -108,40 +114,71 @@ function mainSchemaTimeouts() {
   };
 }
 
+function advisoryLockBackoffMs(failedAttempts) {
+  const ms = 100 * (2 ** (failedAttempts - 1));
+  return ms > ADVISORY_LOCK_BACKOFF_CAP_MS ? ADVISORY_LOCK_BACKOFF_CAP_MS : ms;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function applyMainSchema() {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const timeouts = mainSchemaTimeouts();
-    // Second gate, on purpose. mainSchemaTimeouts() already returns nulls
-    // unless NODE_ENV is exactly test. This check still runs so production
-    // cannot reach set_config if that first gate is removed. canonicalMs
-    // rejects a non-digit even when a value was stored. The bound value is
-    // the canonical digit string, not an environment value.
-    const lockMs = process.env.NODE_ENV === 'test' ? canonicalMs(timeouts.lockTimeout) : null;
-    const statementMs = process.env.NODE_ENV === 'test' ? canonicalMs(timeouts.statementTimeout) : null;
-    if (lockMs) {
-      await client.query("SELECT set_config('lock_timeout', $1, true)", [lockMs]);
-    } else {
-      await client.query("SET LOCAL lock_timeout = '5s'");
+  let lastLockErr = null;
+  for (let attempt = 1; attempt <= ADVISORY_LOCK_ATTEMPTS; attempt += 1) {
+    const client = await pool.connect();
+    let failedLock = false;
+    let retryLock = false;
+    try {
+      await client.query('BEGIN');
+      const timeouts = mainSchemaTimeouts();
+      // Second gate, on purpose. mainSchemaTimeouts() already returns nulls
+      // unless NODE_ENV is exactly test. This check still runs so production
+      // cannot reach set_config if that first gate is removed. canonicalMs
+      // rejects a non-digit even when a value was stored. The bound value is
+      // the canonical digit string, not an environment value.
+      const lockMs = process.env.NODE_ENV === 'test' ? canonicalMs(timeouts.lockTimeout) : null;
+      const statementMs = process.env.NODE_ENV === 'test' ? canonicalMs(timeouts.statementTimeout) : null;
+      if (lockMs) {
+        await client.query("SELECT set_config('lock_timeout', $1, true)", [lockMs]);
+      } else {
+        await client.query("SET LOCAL lock_timeout = '5s'");
+      }
+      if (statementMs) {
+        await client.query("SELECT set_config('statement_timeout', $1, true)", [statementMs]);
+      } else {
+        await client.query("SET LOCAL statement_timeout = '60s'");
+      }
+      // lock_timeout is already set, so a held lock ends as 55P03.
+      try {
+        await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [MAIN_SCHEMA_ADVISORY_LOCK]);
+      } catch (err) {
+        if (isBootTimeout(err) && timeoutSqlState(err) === '55P03') failedLock = true;
+        throw err;
+      }
+      await client.query(sql);
+      await client.query('COMMIT');
+      return;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (failedLock) {
+        lastLockErr = mainSchemaTimeout(err);
+        lastLockErr.advisoryLock = true;
+        retryLock = attempt < ADVISORY_LOCK_ATTEMPTS;
+        if (!retryLock) break;
+      } else if (isBootTimeout(err)) {
+        throw mainSchemaTimeout(err);
+      } else {
+        throw err;
+      }
+    } finally {
+      client.release();
     }
-    if (statementMs) {
-      await client.query("SELECT set_config('statement_timeout', $1, true)", [statementMs]);
-    } else {
-      await client.query("SET LOCAL statement_timeout = '60s'");
-    }
-    // lock_timeout is already set, so a held lock ends as 55P03.
-    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [MAIN_SCHEMA_ADVISORY_LOCK]);
-    await client.query(sql);
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    if (isBootTimeout(err)) throw mainSchemaTimeout(err);
-    throw err;
-  } finally {
-    client.release();
+    if (retryLock) await sleep(advisoryLockBackoffMs(attempt));
   }
+  console.error(lastLockErr.code);
+  process.exit(1);
 }
 
 async function applyBrandConstraints() {

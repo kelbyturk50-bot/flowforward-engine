@@ -8,6 +8,7 @@ require('./preload');
 // which is the case that used to send Access-Control-Allow-Origin: *.
 
 const { spawn } = require('child_process');
+const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { describe, it, before, after } = require('node:test');
@@ -69,7 +70,7 @@ function freePort() {
   });
 }
 
-describe('issue 90 public prototype limits and CORS', { timeout: 120000 }, () => {
+describe('issue 90 public prototype limits and CORS', { timeout: 180000 }, () => {
   let child;
   let port;
   let output = '';
@@ -322,5 +323,126 @@ describe('issue 90 public prototype limits and CORS', { timeout: 120000 }, () =>
     assert.equal(health.status, 200);
     assert.equal(health.headers['access-control-allow-origin'], '*');
     console.log('[issue-90] chat and flags still echo an allowed origin; /health still uses global CORS');
+  });
+
+  it('CRM-origin 401 and 503 on /api/chat keep ACAO when CORS_ORIGINS is set', { timeout: 120000 }, async () => {
+    const serverSrc = fs.readFileSync(path.join(ROOT, 'src/server.js'), 'utf8');
+    const corsAt = serverSrc.indexOf('const corsMiddleware = cors(');
+    const chatAuthAt = serverSrc.indexOf("app.use('/api/chat', requireApiKey)");
+    const parserAt = serverSrc.indexOf("app.use(express.json({ limit: '1mb' }))");
+    assert.ok(corsAt > 0 && corsAt < chatAuthAt && chatAuthAt < parserAt);
+
+    async function boot(key) {
+      const listenPort = await freePort();
+      const env = {
+        ...process.env,
+        PORT: String(listenPort),
+        NODE_ENV: 'test',
+        DISABLE_CRON: '1',
+        CORS_ORIGINS: PRODUCTION_ORIGIN,
+        CRM_API_KEY: key,
+        GOOGLE_PLACES_API_KEY: '',
+        ANTHROPIC_API_KEY: '',
+        GMAIL_USER: '',
+        GMAIL_APP_PASSWORD: '',
+      };
+      let log = '';
+      const proc = spawn(process.execPath, [path.join(ROOT, 'src/server.js')], {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      proc.stdout.on('data', (buf) => { log += buf.toString('utf8'); });
+      proc.stderr.on('data', (buf) => { log += buf.toString('utf8'); });
+      await new Promise((resolve, reject) => {
+        const deadline = Date.now() + 20000;
+        const attempt = () => {
+          if (proc.exitCode != null) {
+            reject(new Error(`server exited ${proc.exitCode}: ${log.slice(0, 500)}`));
+            return;
+          }
+          const req = http.request({
+            method: 'GET', hostname: '127.0.0.1', port: listenPort, path: '/health',
+          }, (res) => {
+            res.resume();
+            res.on('end', () => resolve());
+          });
+          req.on('error', () => {
+            if (Date.now() > deadline) reject(new Error(`server did not listen: ${log.slice(0, 500)}`));
+            else setTimeout(attempt, 100);
+          });
+          req.end();
+        };
+        attempt();
+      });
+      return {
+        port: listenPort,
+        async stop() {
+          if (proc.exitCode != null) return;
+          proc.kill('SIGTERM');
+          await new Promise((resolve) => {
+            const timer = setTimeout(() => { proc.kill('SIGKILL'); }, 2000);
+            proc.once('exit', () => { clearTimeout(timer); resolve(); });
+          });
+        },
+      };
+    }
+
+    async function expectAuth(listenPort, status, error) {
+      const cases = [
+        ['GET', '/api/chat'],
+        ['GET', '/api/chat/x'],
+        ['HEAD', '/api/chat'],
+        ['POST', '/api/chat/facts'],
+      ];
+      for (const [method, reqPath] of cases) {
+        const res = await request(listenPort, method, reqPath, { origin: PRODUCTION_ORIGIN });
+        assert.equal(res.status, status, `${status} ${method} ${reqPath}`);
+        if (method !== 'HEAD') assert.equal(res.json && res.json.error, error, `${method} ${reqPath}`);
+        assert.equal(res.headers['access-control-allow-origin'], PRODUCTION_ORIGIN, `${method} ${reqPath}`);
+        assert.notEqual(res.headers['access-control-allow-origin'], '*', `${method} ${reqPath}`);
+      }
+    }
+
+    const ready = await boot(KEY);
+    try {
+      await expectAuth(ready.port, 401, 'Missing or invalid API key');
+      const preflight = await request(ready.port, 'OPTIONS', '/api/chat/facts', {
+        origin: PRODUCTION_ORIGIN,
+        headers: {
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'content-type,x-api-key',
+        },
+      });
+      assert.equal(preflight.status, 204);
+      assert.equal(preflight.headers['access-control-allow-origin'], PRODUCTION_ORIGIN);
+      const prototypes = [
+        ['GET', '/demo/prototype/no-such/extra', 404],
+        ['POST', '/demo/prototype/no-such/extra', 405],
+        ['OPTIONS', '/demo/prototype/no-such/extra', 405],
+        ['GET', '/api/public/prototypes/nope/extra', 404],
+        ['POST', '/api/public/prototypes/nope/extra', 405],
+        ['OPTIONS', '/api/public/prototypes/nope/extra', 405],
+        ['GET', '/demo/prototype-assets/no-such-file.woff2', 404],
+        ['OPTIONS', '/demo/prototype-assets/missing/nested.txt', 405],
+      ];
+      for (const [method, reqPath, status] of prototypes) {
+        const res = await request(ready.port, method, reqPath, {
+          origin: PRODUCTION_ORIGIN,
+          headers: { 'access-control-request-method': 'GET' },
+        });
+        assert.equal(res.status, status, `${method} ${reqPath}`);
+        assert.equal(res.headers['access-control-allow-origin'], undefined, `${method} ${reqPath}`);
+      }
+    } finally {
+      await ready.stop();
+    }
+
+    const closed = await boot('too-short');
+    try {
+      await expectAuth(closed.port, 503, 'api_key_not_configured');
+    } finally {
+      await closed.stop();
+    }
+    console.log('[issue-90] /api/chat 401 and 503 keep the CRM origin; prototype prefixes send no ACAO');
   });
 });

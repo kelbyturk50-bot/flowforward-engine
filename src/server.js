@@ -29,16 +29,6 @@ app.use('/api/public/prototypes', require('./prototypes/public').router);
 chatMount.mountPublicFlags(app);
 
 const pilotDemo = require('./pilot/demo');
-// Authenticate /api/chat before the body parser. A missing or unready key
-// is 401 or 503, including when the body is not valid JSON.
-app.use('/api/chat', requireApiKey);
-app.use(express.json({ limit: '1mb' }));
-// A malformed JSON body on the chat routes is a JSON 400. The handler does
-// not send the parser's HTML page or the stack.
-app.use(require('./api/chat').invalidJson);
-// A body over the JSON limit fails here, before the demo router. Stamp the
-// public demo 413 with the same noindex / no-store headers as a demo 404.
-app.use(pilotDemo.payloadTooLarge);
 
 // Prototype page and fonts. Mounted on their routers, before cors(), so the
 // match is Express's own: case-insensitive, optional trailing slash, and a
@@ -58,6 +48,21 @@ app.use('/demo/prototype', require('./prototypes/page').router);
 const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 const corsMiddleware = cors(origins.length ? { origin: origins } : undefined);
 app.use(corsMiddleware);
+
+// Authenticate /api/chat after cors() and before the body parser. cors()
+// sets Access-Control-Allow-Origin and calls next() for a non-OPTIONS
+// request, so a missing key (401) or an unready key (503) keeps that header
+// when CORS_ORIGINS lists the CRM origin. The check still runs before the
+// parser, including when the body is not valid JSON. OPTIONS preflight is
+// ended by cors() and is not gated.
+app.use('/api/chat', requireApiKey);
+app.use(express.json({ limit: '1mb' }));
+// A malformed JSON body on the chat routes is a JSON 400. The handler does
+// not send the parser's HTML page or the stack.
+app.use(require('./api/chat').invalidJson);
+// A body over the JSON limit fails here, before the demo router. Stamp the
+// public demo 413 with the same noindex / no-store headers as a demo 404.
+app.use(pilotDemo.payloadTooLarge);
 
 // Health check (open — Railway uses it)
 app.get('/health', (req, res) => {
@@ -165,12 +170,14 @@ const PORT = process.env.PORT || 3000;
 
 async function boot() {
   // schema.sql throws on failure, the same as before the pilot. That catch
-  // skips rescore. A lock or statement timeout, including the advisory-lock
-  // wait, is logged as the SQLSTATE only (55P03 or 57014), with no query
-  // text. Brand, estimate, and pilot
-  // steps do not run after that throw. Those steps return reports instead
-  // of throwing, so their own failures do not take this path. A brand-check
-  // or estimate-check failure is a warning. The listen call below still runs.
+  // skips rescore. A statement timeout, or a lock timeout after the advisory
+  // lock is held, is logged as the SQLSTATE only (57014 or 55P03), with no
+  // query text, and the listen call below still runs. Three advisory-lock
+  // 55P03 failures are handled in applyMainSchema: it logs 55P03 and exits
+  // non-zero, so this listen does not run. Brand, estimate, and pilot steps
+  // do not run after that throw. Those steps return reports instead of
+  // throwing, so their own failures do not take this path. A brand-check
+  // or estimate-check failure is a warning.
   let mainOk = false;
   try {
     const report = await applySchema();
