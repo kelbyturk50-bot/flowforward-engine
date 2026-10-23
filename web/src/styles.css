@@ -681,7 +681,6 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 }
 .prototype-cta h2 { margin: 0 0 8px; font-size: 1.1rem; }
 .prototype-cta ol { margin: 0 0 8px; padding-left: 1.2rem; }
-.prototype-cta p { margin: 0.3rem 0; }
 .prototype-cta-link {
   display: flex; align-items: center; justify-content: center; min-height: 44px; margin-top: 12px;
   padding: 10px 16px; border-radius: 10px; text-decoration: none; font-weight: 600;
