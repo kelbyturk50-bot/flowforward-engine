@@ -67,8 +67,8 @@ function at(pathAndSearch) {
   window.history.pushState({}, '', pathAndSearch);
 }
 
-function chatCalls() {
-  return fetchMock.mock.calls
+function chatCalls(mock) {
+  return mock.mock.calls
     .map((call) => String(call[0]))
     .filter((url) => url.includes('/api/public/chat') || url.includes('/api/public/prototypes'));
 }
@@ -171,7 +171,7 @@ describe('live chat demo', () => {
         expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
         expect(screen.queryByText(DISCLOSURE)).not.toBeInTheDocument();
       }
-      expect(chatCalls()).toEqual([]);
+      expect(chatCalls(fetchMock)).toEqual([]);
       expect(refreshSpy).not.toHaveBeenCalled();
       expect(api.flags).not.toHaveBeenCalled();
       for (const call of fetchMock.mock.calls) expectPublicCall(call);
@@ -188,7 +188,7 @@ describe('live chat demo', () => {
     const remote = render(<LiveChatGate />);
     expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
     expect(screen.queryByText(DISCLOSURE)).not.toBeInTheDocument();
-    expect(chatCalls()).toEqual([]);
+    expect(chatCalls(fetchMock)).toEqual([]);
     expect(refreshSpy).not.toHaveBeenCalled();
     expect(api.flags).not.toHaveBeenCalled();
     remote.unmount();
@@ -217,7 +217,7 @@ describe('live chat demo', () => {
     expect(indexHtml).toContain('<meta name="referrer" content="no-referrer"');
     expect(document.head.querySelector('meta[name="robots"]')).toBeNull();
     expect(api.flags).not.toHaveBeenCalled();
-    expect(chatCalls()).toEqual([]);
+    expect(chatCalls(fetchMock)).toEqual([]);
     expect(fetchMock.mock.calls.every((call) => String(call[0]).endsWith('/api/public/flags'))).toBe(true);
     expect(refreshSpy).not.toHaveBeenCalled();
     demo.unmount();
@@ -452,7 +452,7 @@ describe('live chat demo', () => {
       const closed = render(<LiveChatGate />);
       expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
       expect(screen.queryByText(DISCLOSURE)).not.toBeInTheDocument();
-      expect(chatCalls()).toEqual([]);
+      expect(chatCalls(fetchMock)).toEqual([]);
       closed.unmount();
       fetchMock.mockClear();
     }
@@ -475,7 +475,7 @@ describe('live chat demo', () => {
     expect(await screen.findByText(DISCLOSURE)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: BANNER_SUMMARY })).toBeInTheDocument();
     dev.unmount();
-    expect(chatCalls()).toEqual([]);
+    expect(chatCalls(fetchMock)).toEqual([]);
   });
 
   it('scrolls to the latest reply and the typing line, instantly when motion is reduced', async () => {

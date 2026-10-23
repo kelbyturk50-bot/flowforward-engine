@@ -60,8 +60,21 @@ function envelope(extra) {
   };
 }
 
+function stubMatchMedia(matches = false) {
+  window.matchMedia = vi.fn().mockImplementation((query) => ({
+    matches,
+    media: query,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent() { return false; },
+  }));
+}
+
 describe('live chat public API', () => {
   let fetchMock;
+  let matchMedia;
 
   beforeEach(() => {
     window.sessionStorage.clear();
@@ -70,9 +83,12 @@ describe('live chat public API', () => {
     at('/demo/live-chat');
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
+    matchMedia = window.matchMedia;
+    stubMatchMedia(false);
   });
 
   afterEach(() => {
+    window.matchMedia = matchMedia;
     localStorage.removeItem('ff.apiKey');
     _setFlagRuntimeForTests(null);
     vi.stubGlobal('fetch', () => {

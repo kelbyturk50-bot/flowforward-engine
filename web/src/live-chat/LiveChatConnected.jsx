@@ -57,7 +57,7 @@ function chatPath(kind, { slug, token }, action) {
   if (kind === 'sample') {
     return `/api/public/chat/demos/${encodeURIComponent(slug)}/${action}`;
   }
-  return `/api/public/prototypes/${encodeURIComponent(token)}/${action}`;
+  return `/api/public/prototypes/${encodeURIComponent(token)}/chat/${action}`;
 }
 
 function interpretSession(result, extra) {
