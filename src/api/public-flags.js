@@ -1,9 +1,14 @@
 // Public read of the two chat flags. No API key. No other flag and no metadata.
 
 const express = require('express');
+const { flagsCors } = require('../chatdemo/cors');
 const { effective } = require('../flags/resolve');
 
 const router = express.Router();
+
+// Before the method check, so an OPTIONS preflight is 204 from this
+// allowlist and does not fall through to the global cors() middleware.
+router.use(flagsCors);
 
 router.use((req, res, next) => {
   res.set('Cache-Control', 'no-store');
@@ -37,6 +42,13 @@ router.get('/', async (req, res) => {
     FF_PROTOTYPE_GALLERY: gallery,
     FF_LIVE_CHAT_DEMO: demo,
   }));
+});
+
+// Stay on this router. Falling through would hit the global cors() middleware.
+router.use((req, res) => {
+  res.status(404);
+  res.set('Content-Type', 'application/json; charset=utf-8');
+  res.end('{"error":"not_found"}');
 });
 
 module.exports = router;

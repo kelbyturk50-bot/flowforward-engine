@@ -18,13 +18,16 @@ const app = express();
 // ignores a left-most value the caller can spoof. See src/pilot/rate-limit.js.
 app.set('trust proxy', 1);
 
-// Live chat POSTs are mounted before cors() and the global JSON parser so a
-// body over 2 KB never inherits ACAO or the 1 MB parser. See src/chatdemo/mount.js.
+// Live chat and GET /api/public/flags are mounted before cors() and the
+// global JSON parser. Chat bodies over 2 KB never inherit the 1 MB parser.
+// These routes do not use cors() below; their allowlist is src/chatdemo/cors.js.
 const chatMount = require('./chatdemo/mount');
 chatMount.mountBeforeCors(app);
+chatMount.mountPublicFlags(app);
 
 // CORS — restrict to your frontend(s) with CORS_ORIGINS="https://your-app.vercel.app,http://localhost:5173".
 // Unset = allow any origin (the API key still guards access).
+// Does not apply to the public chat routers or GET /api/public/flags.
 const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 app.use(cors(origins.length ? { origin: origins } : undefined));
 const pilotDemo = require('./pilot/demo');
@@ -68,9 +71,6 @@ app.use('/demo/estimate-recovery', pilotDemo.router);
 // Mounted before the API-key guard. Rate limit uses the prototype bucket,
 // separate from the pilot demo.
 app.use('/api/public/prototypes', require('./prototypes/public').router);
-// Public flag booleans for the CRM. After cors(), before the API-key guard.
-// Body is only FF_PROTOTYPE_GALLERY and FF_LIVE_CHAT_DEMO.
-chatMount.mountPublicFlags(app);
 // The prototype page itself: sample homepage + agent click-throughs.
 // Server-rendered, watermarked, no API key (the token is the credential).
 app.use('/demo/prototype-assets', require('./prototypes/page').assets);

@@ -1,6 +1,6 @@
 // Mount points for the live chat demo.
-// Chat POSTs go on before cors(). The public flag read goes on after cors()
-// and before the shared /api guard.
+// Chat routes and the public flag read go on before cors(). Their allowlist
+// is src/chatdemo/cors.js. They do not inherit CORS_ORIGINS or `*`.
 
 const NOT_FOUND = Buffer.from('{"error":"not_found"}');
 
