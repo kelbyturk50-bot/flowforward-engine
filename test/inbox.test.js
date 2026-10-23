@@ -458,6 +458,19 @@ describe('inbox', () => {
     assert.equal(String(failed.rows[0].error).includes(triageLeak), false);
     assert.ok(triageLines.some((line) => line.includes('EAI_AGAIN')));
     assert.equal(triageLines.some((line) => line.includes(triageLeak)), false);
+    // A reply_subject written outside PATCH (triage, a rewrite, or SQL) is
+    // stripped again on the send path.
+    await pool.query(
+      `UPDATE inbox_items SET reply_subject = $2, status = 'ready', error = NULL WHERE id = $1`,
+      [id, 'Re: Hi\r\nBcc: attacker@example.invalid\rX: y\nZ']
+    );
+    const sentBefore = mails.length;
+    const okSend = await fetch(`${base}/api/inbox/${id}/send`, { method: 'POST' });
+    assert.equal(okSend.status, 200);
+    assert.equal(mails.length, sentBefore + 1);
+    const outSubject = mails[mails.length - 1].subject;
+    assert.equal(outSubject, 'Re: HiBcc: attacker@example.invalidX: yZ');
+    assert.equal(/[\r\n]/.test(outSubject), false);
     console.log('[inbox] reply_subject CRLF stripped; send and triage failures log err.code only');
   });
 });

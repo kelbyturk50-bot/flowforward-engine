@@ -443,6 +443,30 @@ describe('prototype on draft', () => {
     assert.equal(still.status, 410);
     assert.equal(still.json.error, 'link_expired');
 
+    // Expired one minute ago: still 410, and restartClock leaves it alone.
+    const recentLead = await seedLead({ google_place_id: 'test-place-proto-restart-recent', email: 'test+restartrecent@example.invalid' });
+    const recent = await store.ensurePrototype(recentLead.id);
+    await pool.query(
+      `UPDATE prototypes SET issued_at = NOW() - INTERVAL '336 hours 1 minute',
+                             expires_at = NOW() - INTERVAL '1 minute'
+        WHERE id = $1`,
+      [recent.id]
+    );
+    const recentBefore = await pool.query('SELECT expires_at FROM prototypes WHERE id = $1', [recent.id]);
+    assert.equal(await store.restartClock(recentLead.id), null);
+    const recentAfter = await pool.query('SELECT expires_at FROM prototypes WHERE id = $1', [recent.id]);
+    assert.equal(new Date(recentAfter.rows[0].expires_at).toISOString(), new Date(recentBefore.rows[0].expires_at).toISOString());
+
+    // A revoked, unexpired row is not restarted either.
+    const revokedLead = await seedLead({ google_place_id: 'test-place-proto-restart-revoked', email: 'test+restartrevoked@example.invalid' });
+    const revokedRow = await store.ensurePrototype(revokedLead.id);
+    await pool.query(`UPDATE prototypes SET revoked_at = NOW() WHERE id = $1`, [revokedRow.id]);
+    const revokedBefore = await pool.query('SELECT issued_at FROM prototypes WHERE id = $1', [revokedRow.id]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(await store.restartClock(revokedLead.id), null);
+    const revokedAfter = await pool.query('SELECT issued_at FROM prototypes WHERE id = $1', [revokedRow.id]);
+    assert.equal(new Date(revokedAfter.rows[0].issued_at).toISOString(), new Date(revokedBefore.rows[0].issued_at).toISOString());
+
     const liveLead = await seedLead({ google_place_id: 'test-place-proto-restart-live', email: 'test+restartlive@example.invalid' });
     const live = await store.ensurePrototype(liveLead.id);
     const liveBefore = await pool.query('SELECT issued_at FROM prototypes WHERE id = $1', [live.id]);
