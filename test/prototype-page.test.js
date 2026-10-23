@@ -63,6 +63,15 @@ const tokenOf = (url) => String(url).split('/').pop();
 const pathOf = (url) => new URL(url).pathname;
 
 // FlowForward's own tiers. A shop sample such as $14,800 is not one of these.
+const DOLLAR_DIGIT = /\$\s?\d/;
+
+function flowForwardSection(html) {
+  const start = html.indexOf('<section class="ffsec"');
+  const end = html.indexOf('</section>', start);
+  assert.ok(start >= 0 && end > start, 'ffsec section');
+  return html.slice(start, end + '</section>'.length);
+}
+
 function assertNoFlowForwardPrices(html, label) {
   assert.equal(html.includes('ff-prices'), false, `${label} ff-prices`);
   assert.equal(html.includes('$1.5'), false, `${label} $1.5`);
@@ -140,6 +149,10 @@ describe('prototype page', () => {
     for (const slot of ['Your Google rating here', 'Your license # here', 'Your Google reviews appear here', 'Your seasonal offer here']) assert.ok(html.includes(slot), slot);
     assert.equal(/★|rated \d|\d+ years|licensed (and|&amp;) insured|24\/7/i.test(html), false, 'no invented trust claims');
     assertNoFlowForwardPrices(html, 'prototype page');
+    const section = flowForwardSection(html);
+    assert.equal(DOLLAR_DIGIT.test(section), false, 'ffsec dollar digit');
+    assert.equal(section.includes('$14,800'), false, 'shop sample stays outside ffsec');
+    assert.ok(html.includes('.ff-card > .ff-talk:first-child{margin-top:0}'));
     assert.match(html, /<div class="ff-card">\s*<a class="ff-talk"/);
     assert.ok(html.includes('Go live, with hosting and maintenance.'));
     assert.ok(html.includes('$14,800'), 'sample shop estimate stays');
@@ -210,6 +223,8 @@ describe('prototype page', () => {
     assert.ok(gone.text.includes('This preview link has expired'));
     assert.ok(gone.text.includes(WATERMARK_TEXT));
     assertNoFlowForwardPrices(gone.text, 'expired page');
+    assert.equal(DOLLAR_DIGIT.test(gone.text), false, '410 page dollar digit');
+    assert.equal(gone.text.includes('<div class="ff-card"'), false, '410 page has no price card');
     const listed = await call(port, 'GET', `/api/proposals/${(await pool.query('SELECT id FROM proposals WHERE prospect_id = $1', [p.id])).rows[0].id}`);
     assert.equal(listed.json.prototype.expired, true);
 

@@ -458,6 +458,7 @@ input[readonly]{background:var(--paper);color:var(--ink-2)}
 .ff-steps{margin:0 0 14px;padding-left:22px}.ff-what{color:#3A4A4F;font-size:16px}
 .ff-card{background:#fff;border:1px solid #D5DEDB;border-radius:6px;padding:20px}
 .ff-talk{display:flex;justify-content:center;align-items:center;min-height:48px;background:#2F6B57;color:#fff;font:700 17px var(--b);border-radius:6px;text-decoration:none;margin-top:12px}
+.ff-card > .ff-talk:first-child{margin-top:0}
 .ff-mail{display:block;text-align:center;margin-top:8px;color:#2F6B57;font-size:15px}.ff-card .small{color:#5B6B70}
 .pt-footer{background:#EEF2F0;color:#5B6B70;font-size:14px;padding:0 0 40px}.pt-footer p{max-width:1200px;margin:0 auto;padding:0 20px}
 /* dialogs, chat, callbar */
