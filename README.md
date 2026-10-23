@@ -130,6 +130,8 @@ cd web && npm test                     # Vitest, mocked API, no network
 cd web && npm run lint
 ```
 
+Public chat (`/api/public/chat`, `/api/public/prototypes/:token/chat`) and `GET /api/public/flags` allow only three production CRM origins. `http://localhost:5173` is not one of them. Local dev that calls those routes must use the Vite proxy, so the browser stays on port 5173, or a same-origin page on the API. A browser request from `http://localhost:5173` to `http://localhost:3000` does not receive `Access-Control-Allow-Origin`.
+
 How the CRM tests run is in `web/README.md`.
 
 Deploy: Vercel → Add New Project → import this repo → set **Root Directory** to `web` → deploy. The production CRM hostnames use the built-in API address on `https` with the default port. A non-default port or `http` does not. Preview hostnames do not call an API until `VITE_API_URL` points at a staging API (or someone types an address in Settings). On first open, enter the API key in Settings (stored per device). See `web/README.md`.

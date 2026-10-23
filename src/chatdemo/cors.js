@@ -2,22 +2,19 @@
 // This is not the global cors() middleware and it does not read CORS_ORIGINS.
 // A missing or disallowed Origin gets no Access-Control-Allow-Origin.
 // There is no Access-Control-Allow-Credentials and no `*`.
+// Allowed preflights send Access-Control-Max-Age: 600.
+// http://localhost:5173 is not allowlisted. Local dev uses the Vite proxy
+// or a same-origin page.
 
 // Production CRM hosts from web/src/api-base.js PRODUCTION_HOSTS.
-// Compared with === only. https, no path, no port.
+// Compared with === only. https, no path, no port. No preview pattern.
 const PRODUCTION_CRM_ORIGINS = Object.freeze([
   'https://flowforward-engine-six.vercel.app',
   'https://flowforward-engine-turk11.vercel.app',
   'https://flowforward-engine-git-main-turk11.vercel.app',
 ]);
 
-// Vercel preview hosts for this project and the turk11 team. https only.
-// A deployment hash is exactly 9 lowercase letters or digits.
-// A git preview is flowforward-engine-git-<branch>-turk11.vercel.app.
-// Fully anchored: a prefix, a suffix, a dot, http, or the wrong length does not match.
-// The three production origins above are exact. The team alias does not match either pattern.
-const HASH_PREVIEW_ORIGIN = /^https:\/\/flowforward-engine-[a-z0-9]{9}-turk11\.vercel\.app$/;
-const GIT_PREVIEW_ORIGIN = /^https:\/\/flowforward-engine-git-[a-z0-9-]+-turk11\.vercel\.app$/;
+const PREFLIGHT_MAX_AGE = '600';
 
 const CHAT_PREFLIGHT = Object.freeze({
   methods: 'POST, OPTIONS',
@@ -30,9 +27,7 @@ const FLAGS_PREFLIGHT = Object.freeze({
 
 function originAllowed(origin) {
   if (typeof origin !== 'string') return false;
-  // JavaScript `$` also matches before a final newline. Reject controls
-  // before the pattern so that cannot widen a match, and so a header
-  // value cannot carry a newline.
+  // A header value cannot carry a control character or a newline.
   for (let i = 0; i < origin.length; i += 1) {
     const code = origin.charCodeAt(i);
     if (code <= 0x1f || code === 0x7f) return false;
@@ -40,14 +35,17 @@ function originAllowed(origin) {
   for (let i = 0; i < PRODUCTION_CRM_ORIGINS.length; i += 1) {
     if (PRODUCTION_CRM_ORIGINS[i] === origin) return true;
   }
-  return HASH_PREVIEW_ORIGIN.test(origin) || GIT_PREVIEW_ORIGIN.test(origin);
+  return false;
 }
 
 function writeCors(res, origin, spec) {
   res.vary('Origin');
   if (!originAllowed(origin)) return false;
   res.set('Access-Control-Allow-Origin', origin);
-  if (spec.methods) res.set('Access-Control-Allow-Methods', spec.methods);
+  if (spec.methods) {
+    res.set('Access-Control-Allow-Methods', spec.methods);
+    res.set('Access-Control-Max-Age', PREFLIGHT_MAX_AGE);
+  }
   if (spec.headers) res.set('Access-Control-Allow-Headers', spec.headers);
   return true;
 }
@@ -78,8 +76,6 @@ function flagsCors(req, res, next) {
 
 module.exports = {
   PRODUCTION_CRM_ORIGINS,
-  HASH_PREVIEW_ORIGIN,
-  GIT_PREVIEW_ORIGIN,
   originAllowed,
   chatCors,
   flagsCors,
