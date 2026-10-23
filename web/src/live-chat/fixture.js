@@ -48,9 +48,8 @@ export const SLOTS_LABEL = 'Sample times, not real availability.';
 export const MOCK_ALERT_LABEL = 'Mock alert, not sent';
 export const CRM_CARD_TITLE = 'Request created in your CRM (sample)';
 
-const OPEN_DAYS = new Set(['Mon', 'Tue', 'Wed', 'Thu', 'Fri']);
-const OPEN_START = 8 * 60;
-const OPEN_END = 17 * 60;
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 export function messageCodePoints(value) {
   return Array.from(String(value ?? '').normalize('NFKC')).length;
@@ -123,11 +122,47 @@ function zonedParts(date, timeZone) {
   };
 }
 
+function titleDay(value) {
+  const raw = String(value || '');
+  return raw.slice(0, 1).toUpperCase() + raw.slice(1).toLowerCase();
+}
+
+function clockToMinutes(hourText, minuteText, meridiem) {
+  let hour = Number(hourText);
+  const minute = minuteText ? Number(minuteText) : 0;
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+  if (hour < 1 || hour > 12 || minute < 0 || minute > 59) return null;
+  const pm = String(meridiem).toUpperCase() === 'PM';
+  if (hour === 12) hour = 0;
+  if (pm) hour += 12;
+  return hour * 60 + minute;
+}
+
+// "Monday–Friday, 8:00 AM–5:00 PM". Hyphen, en dash, or em dash. Unparseable
+// hours do not claim the office is closed.
+export function parseOfficeHours(text) {
+  if (typeof text !== 'string') return null;
+  const match = text.match(/^\s*(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s*[-–—]\s*(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s*,\s*(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\s*[-–—]\s*(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\s*$/i);
+  if (!match) return null;
+  const startDay = WEEKDAYS.indexOf(titleDay(match[1]));
+  const endDay = WEEKDAYS.indexOf(titleDay(match[2]));
+  const open = clockToMinutes(match[3], match[4], match[5]);
+  const close = clockToMinutes(match[6], match[7], match[8]);
+  if (startDay < 0 || endDay < 0 || open == null || close == null || open >= close) return null;
+  return { startDay, endDay, open, close };
+}
+
 export function officeClosed(facts, now = DEMO_NOW) {
-  if (!facts?.hours) return false;
-  const parts = zonedParts(now, facts.time_zone);
-  if (!OPEN_DAYS.has(parts.weekday)) return true;
-  return parts.minutesOfDay < OPEN_START || parts.minutesOfDay >= OPEN_END;
+  const hours = parseOfficeHours(facts?.hours);
+  if (!hours) return false;
+  const parts = zonedParts(now, facts?.time_zone);
+  const day = WEEKDAY_SHORT.indexOf(parts.weekday);
+  if (day < 0) return false;
+  const openToday = hours.startDay <= hours.endDay
+    ? day >= hours.startDay && day <= hours.endDay
+    : day >= hours.startDay || day <= hours.endDay;
+  if (!openToday) return true;
+  return parts.minutesOfDay < hours.open || parts.minutesOfDay >= hours.close;
 }
 
 export function afterHoursNotice(facts, now = DEMO_NOW) {

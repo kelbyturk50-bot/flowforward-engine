@@ -108,7 +108,21 @@ const CHIP_INTENT = Object.freeze({
   chip_area: 'area',
 });
 
+let fixtureFailures = 0;
+
+// Test seam. A countdown throws fixture_reply_failed before any reply is built.
+// Production never calls this. The demo catches it and offers Retry.
+export function _failNextFixtureReply(times = 1) {
+  fixtureFailures = times;
+}
+
 export function respond({ facts, message, chipId }) {
+  if (fixtureFailures > 0) {
+    fixtureFailures -= 1;
+    const error = new Error('fixture_reply_failed');
+    error.code = 'fixture_reply_failed';
+    throw error;
+  }
   if (!chipId && asksIfAi(message)) {
     return { text: IDENTITY_REPLY, tools: [], source: 'fixture' };
   }

@@ -108,6 +108,8 @@ describe('demo code split', () => {
       expect(entry.text).not.toContain('PROTOTYPE, not live');
       expect(entry.text).not.toContain('/api/campaigns');
       expect(entry.text).not.toContain('TEST: HVAC-Oct');
+      expect(entry.text).not.toContain('Sample Home Services');
+      expect(entry.text).not.toContain("I'm an AI receptionist demo");
       const campaigns = files.find((file) => file.text.includes('/api/campaigns') && file.text.includes('TEST: HVAC-Oct'));
       expect(campaigns, names.join(', ')).toBeTruthy();
       expect(campaigns.name).not.toBe(entry.name);
@@ -119,6 +121,9 @@ describe('demo code split', () => {
       const gallery = files.find(file => file.text.includes('TEST: Wasatch Heating'));
       expect(gallery, names.join(', ')).toBeTruthy();
       expect(gallery.name).not.toBe(entry.name);
+      const liveChat = files.find((file) => file.text.includes('Sample Home Services') && file.text.includes("I'm an AI receptionist demo"));
+      expect(liveChat, names.join(', ')).toBeTruthy();
+      expect(liveChat.name).not.toBe(entry.name);
       const watermark = files.find(file => file.text.includes('PROTOTYPE, not live'));
       expect(watermark, names.join(', ')).toBeTruthy();
       expect(watermark.name).not.toBe(entry.name);

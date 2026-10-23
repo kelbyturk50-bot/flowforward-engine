@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { SampleTag, liveToast, usePrototypeNotify } from '../components/PrototypeWatermark';
 import { presentBrand } from '../prototypes/brand';
 import PrototypeLayout from '../prototypes/PrototypeLayout';
@@ -21,14 +21,25 @@ import {
 } from './fixture.js';
 import { INITIAL_LEAD, nextLead, respond, serviceLabel } from './respond.js';
 
-function ToolCard({ tool }) {
+const TYPING_MS = 400;
+const NEAR_LIMIT = 50;
+
+function leadChanged(before, after) {
+  return before.service !== after.service
+    || before.urgency !== after.urgency
+    || before.alerted !== after.alerted
+    || before.captured !== after.captured
+    || before.customer !== after.customer
+    || before.phone !== after.phone;
+}
+
+function ToolCard({ tool, open }) {
   const notify = usePrototypeNotify();
   if (!tool?.name) return null;
   if (tool.name === 'offer_sample_slots') {
     return (
-      <article className="live-chat-tool" data-tool="offer_sample_slots">
-        <h3>Sample times</h3>
-        <p>{SLOTS_LABEL}</p>
+      <details className="live-chat-tool" data-tool="offer_sample_slots" open={open}>
+        <summary className="live-chat-expand">{SLOTS_LABEL}</summary>
         <ul className="live-chat-slots">
           {SAMPLE_SLOTS.map((slot) => (
             <li key={slot}>
@@ -39,39 +50,38 @@ function ToolCard({ tool }) {
             </li>
           ))}
         </ul>
-      </article>
+      </details>
     );
   }
   if (tool.name === 'flag_emergency') {
     return (
-      <article className="live-chat-tool" data-tool="flag_emergency">
-        <h3>Escalation</h3>
+      <details className="live-chat-tool" data-tool="flag_emergency" open={open}>
+        <summary className="live-chat-expand">Flagged as an emergency in the sample.</summary>
         <p>Urgency is {tool.args?.urgency || 'emergency'}.</p>
         <button type="button" className="live-chat-action" onClick={() => notify?.(liveToast('alert the on-call tech'))}>
           Note the emergency
         </button>
-      </article>
+      </details>
     );
   }
   if (tool.name === 'capture_lead') {
     return (
-      <article className="live-chat-tool" data-tool="capture_lead">
-        <h3>Lead captured</h3>
+      <details className="live-chat-tool" data-tool="capture_lead" open={open}>
+        <summary className="live-chat-expand">Lead card updated in the sample.</summary>
         <p>{INITIAL_LEAD.customer}<SampleTag /></p>
         <p>{INITIAL_LEAD.phone}<SampleTag /></p>
         <p>{serviceLabel(tool.args?.service)}<SampleTag /></p>
-      </article>
+      </details>
     );
   }
   if (tool.name === 'handoff_to_human') {
     return (
-      <article className="live-chat-tool" data-tool="handoff_to_human">
-        <h3>Handoff</h3>
-        <p>{HANDOFF_LINE}</p>
+      <details className="live-chat-tool" data-tool="handoff_to_human" open={open}>
+        <summary className="live-chat-expand">{HANDOFF_LINE}</summary>
         <button type="button" className="live-chat-action" onClick={() => notify?.(liveToast('ring the on-call tech'))}>
           Ring the on-call tech
         </button>
-      </article>
+      </details>
     );
   }
   return null;
@@ -86,7 +96,25 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
   const [draft, setDraft] = useState('');
   const [turns, setTurns] = useState([]);
   const [lead, setLead] = useState(INITIAL_LEAD);
+  const [usedChips, setUsedChips] = useState(() => new Set());
+  const [bannerOpen, setBannerOpen] = useState(false);
+  const [ownerOpen, setOwnerOpen] = useState(false);
+  const [ownerUpdates, setOwnerUpdates] = useState(0);
+  const [typing, setTyping] = useState(false);
+  const threadRef = useRef(null);
+  const leadRef = useRef(INITIAL_LEAD);
+  const timers = useRef(new Set());
+  const pending = useRef(0);
+  const seq = useRef(0);
+  const ownerOpenRef = useRef(false);
   const count = messageCodePoints(draft);
+  const remaining = MAX_MESSAGE_CHARS - count;
+  const nearLimit = remaining <= NEAR_LIMIT;
+  const latestBotId = [...turns].reverse().find((turn) => turn.role === 'bot')?.id;
+
+  useEffect(() => {
+    ownerOpenRef.current = ownerOpen;
+  }, [ownerOpen]);
 
   useEffect(() => {
     const previous = document.title;
@@ -94,88 +122,215 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
     return () => { document.title = previous; };
   }, [brand.name]);
 
+  useEffect(() => () => {
+    for (const id of timers.current) window.clearTimeout(id);
+    timers.current.clear();
+  }, []);
+
+  useEffect(() => {
+    const node = threadRef.current;
+    if (!node) return;
+    const last = node.querySelector('.live-chat-turn:last-child');
+    if (!last) return;
+    const target = last.querySelector('.live-chat-tool') || last;
+    const delta = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    node.scrollTop += delta;
+  }, [turns, typing]);
+
+  function finishPending() {
+    pending.current = Math.max(0, pending.current - 1);
+    setTyping(pending.current > 0);
+  }
+
+  function deliver(text, chipId, userId) {
+    pending.current += 1;
+    setTyping(true);
+    const id = window.setTimeout(() => {
+      timers.current.delete(id);
+      finishPending();
+      try {
+        const reply = respond({ facts: SAMPLE_FACTS, message: text, chipId });
+        setTurns((current) => current
+          .map((turn) => (turn.id === userId ? { ...turn, pending: false, failed: false } : turn))
+          .concat({
+            id: `${userId}-bot`,
+            role: 'bot',
+            text: reply.text,
+            tools: reply.tools,
+          }));
+        const next = nextLead(leadRef.current, reply.tools);
+        const changed = !ownerOpenRef.current && leadChanged(leadRef.current, next);
+        leadRef.current = next;
+        setLead(next);
+        if (changed) setOwnerUpdates((updates) => updates + 1);
+      } catch {
+        setTurns((current) => current.map((turn) => (
+          turn.id === userId ? { ...turn, pending: false, failed: true, chipId } : turn
+        )));
+      }
+    }, TYPING_MS);
+    timers.current.add(id);
+  }
+
   function pushTurn(text, chipId) {
-    const reply = respond({ facts: SAMPLE_FACTS, message: text, chipId });
+    const userId = `u-${seq.current}`;
+    seq.current += 1;
     setTurns((current) => [
       ...current,
-      { id: `${current.length}-user`, role: 'user', text },
-      { id: `${current.length}-bot`, role: 'bot', text: reply.text, tools: reply.tools },
+      { id: userId, role: 'user', text, pending: true, failed: false, chipId },
     ]);
-    setLead((current) => nextLead(current, reply.tools));
+    if (chipId) {
+      setUsedChips((current) => {
+        const next = new Set(current);
+        next.add(chipId);
+        return next;
+      });
+    }
+    deliver(text, chipId, userId);
+  }
+
+  function retry(turn) {
+    setTurns((current) => current.map((item) => (
+      item.id === turn.id ? { ...item, pending: true, failed: false } : item
+    )));
+    deliver(turn.text, turn.chipId, turn.id);
   }
 
   function sendDraft() {
     const text = draft.trim();
     if (!text) return;
-    pushTurn(text);
     setDraft('');
+    pushTurn(text);
   }
+
+  const unused = chips.filter((chip) => !usedChips.has(chip.id));
+  const spent = chips.filter((chip) => usedChips.has(chip.id));
+  const limitText = remaining === 0
+    ? `Character limit reached. ${MAX_MESSAGE_CHARS} of ${MAX_MESSAGE_CHARS}.`
+    : `${remaining} characters left.`;
 
   return (
     <PrototypeLayout brand={brand}>
       <main id="prototype-main" className="live-chat">
-        <p className="live-chat-banner" role="note">{banner}</p>
+        <h1 className="live-chat-title">{brand.name}</h1>
+        <div className={`live-chat-banner${bannerOpen ? ' is-open' : ''}`}>
+          <button
+            type="button"
+            className="live-chat-banner-toggle"
+            aria-expanded={bannerOpen}
+            onClick={() => setBannerOpen((open) => !open)}
+          >
+            {bannerOpen ? 'Hide the not-affiliated notice' : 'Not affiliated. Show notice'}
+          </button>
+          <p className={bannerOpen ? 'live-chat-banner-copy' : 'live-chat-banner-copy live-chat-sr'}>{banner}</p>
+        </div>
         {afterHours ? <p className="live-chat-after" role="status">{afterHours}</p> : null}
+        <button
+          type="button"
+          className="live-chat-owner-toggle"
+          aria-expanded={ownerOpen}
+          aria-controls="live-chat-owner"
+          onClick={() => {
+            setOwnerOpen((open) => !open);
+            setOwnerUpdates(0);
+          }}
+        >
+          <span>{ownerOpen ? 'Hide owner panel' : 'View owner panel'}</span>
+          {ownerUpdates > 0 && !ownerOpen ? (
+            <span className="live-chat-badge">{ownerUpdates} update{ownerUpdates === 1 ? '' : 's'}</span>
+          ) : null}
+        </button>
         <div className="live-chat-stage">
           <section className="live-chat-phone" aria-label="Text-back">
             <header className="live-chat-phone-head">
-              <span
-                className="prototype-wordmark live-chat-wordmark"
-                style={{ backgroundColor: 'var(--proto-accent)', color: 'var(--proto-on-accent)' }}
-              >
-                {brand.name}
-              </span>
               <span className="live-chat-ai">{AI_DEMO_LABEL}</span>
             </header>
-            <div className="live-chat-thread" role="log" aria-live="polite" aria-relevant="additions" aria-label="Messages">
+            <div
+              ref={threadRef}
+              className="live-chat-thread"
+              role="log"
+              aria-live="polite"
+              aria-relevant="additions"
+              aria-label="Messages"
+            >
               <p className="live-chat-bubble is-in" data-disclosure="true">{disclosure}</p>
               {turns.map((turn) => (
                 <div key={turn.id} className="live-chat-turn">
                   <p className={`live-chat-bubble ${turn.role === 'user' ? 'is-out' : 'is-in'}`}>{turn.text}</p>
+                  {turn.failed ? (
+                    <p className="live-chat-failed" role="alert">
+                      {"This sample reply didn't load."}
+                      <button type="button" className="live-chat-action" onClick={() => retry(turn)}>Retry</button>
+                    </p>
+                  ) : null}
                   {turn.tools?.map((tool) => (
-                    <ToolCard key={`${turn.id}-${tool.name}`} tool={tool} />
+                    <ToolCard key={`${turn.id}-${tool.name}`} tool={tool} open={turn.id === latestBotId} />
                   ))}
                 </div>
               ))}
+              {typing ? <p className="live-chat-typing" role="status">Typing…</p> : null}
             </div>
-            <div className="live-chat-chips" role="group" aria-label="Suggestions">
-              {chips.map((chip) => (
-                <button
-                  key={chip.id}
-                  type="button"
-                  className="live-chat-chip"
-                  data-chip={chip.id}
-                  onClick={() => pushTurn(chip.label, chip.id)}
-                >
-                  {chip.label}
+            <div className="live-chat-dock">
+              <div className="live-chat-chips" role="group" aria-label="Suggestions">
+                <div className="live-chat-chip-row">
+                  {unused.map((chip) => (
+                    <button
+                      key={chip.id}
+                      type="button"
+                      className="live-chat-chip"
+                      data-chip={chip.id}
+                      onClick={() => pushTurn(chip.label, chip.id)}
+                    >
+                      {chip.label}
+                    </button>
+                  ))}
+                </div>
+                {spent.length > 0 ? (
+                  <details className="live-chat-earlier">
+                    <summary className="live-chat-expand">Earlier suggestions</summary>
+                    {spent.map((chip) => (
+                      <button
+                        key={chip.id}
+                        type="button"
+                        className="live-chat-chip"
+                        data-chip={chip.id}
+                        onClick={() => pushTurn(chip.label, chip.id)}
+                      >
+                        {chip.label}
+                      </button>
+                    ))}
+                  </details>
+                ) : null}
+              </div>
+              <div className="live-chat-compose">
+                <label className="live-chat-label" htmlFor="live-chat-input">Text the business</label>
+                <textarea
+                  id="live-chat-input"
+                  className="live-chat-input"
+                  rows={2}
+                  value={draft}
+                  aria-describedby="live-chat-count"
+                  onChange={(event) => setDraft(capMessage(event.target.value))}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      sendDraft();
+                    }
+                  }}
+                />
+                <p id="live-chat-count" className="live-chat-count">
+                  {count} / {MAX_MESSAGE_CHARS}
+                </p>
+                <p className="live-chat-limit" role="status" aria-live="polite">
+                  {nearLimit ? limitText : ''}
+                </p>
+                <button type="button" className="live-chat-send" disabled={!draft.trim()} onClick={sendDraft}>
+                  Send
                 </button>
-              ))}
-            </div>
-            <div className="live-chat-compose">
-              <label className="live-chat-label" htmlFor="live-chat-input">Text the business</label>
-              <textarea
-                id="live-chat-input"
-                className="live-chat-input"
-                rows={2}
-                value={draft}
-                aria-describedby="live-chat-count"
-                onChange={(event) => setDraft(capMessage(event.target.value))}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault();
-                    sendDraft();
-                  }
-                }}
-              />
-              <p id="live-chat-count" className="live-chat-count" aria-live="polite">
-                {count} / {MAX_MESSAGE_CHARS}
-              </p>
-              <button type="button" className="live-chat-send" disabled={!draft.trim()} onClick={sendDraft}>
-                Send
-              </button>
+              </div>
             </div>
           </section>
-          <aside className="live-chat-owner" aria-label="Owner panel">
+          <aside id="live-chat-owner" className={`live-chat-owner${ownerOpen ? ' is-open' : ''}`} aria-label="Owner panel">
             <article className="prototype-card">
               <h2>Lead</h2>
               <p>{lead.customer}<SampleTag /></p>

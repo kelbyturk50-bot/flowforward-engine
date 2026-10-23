@@ -1,6 +1,7 @@
-// Public fixture preview. The flag gate is the only switch. A matching path
-// does not authenticate anyone. The route sits under /demo so the existing
-// X-Robots-Tag on /demo/:path* covers it.
+// Public fixture preview. Token-less. A matching path does not authenticate
+// anyone. LiveChatGate opens it only when both FF_PROTOTYPE_GALLERY and
+// FF_LIVE_CHAT_DEMO are on in the local preview override. The route sits under
+// /demo so the /demo/:path* response headers cover it.
 
 const LIVE_CHAT = /^\/demo\/live-chat\/?$/;
 

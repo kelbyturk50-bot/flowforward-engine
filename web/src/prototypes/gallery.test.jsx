@@ -447,6 +447,10 @@ describe('prototype gallery', () => {
     expect(config.headers[0].source).toBe('/demo/:path*');
     expect(config.headers[0].headers).toEqual([
       { key: 'X-Robots-Tag', value: 'noindex, nofollow' },
+      { key: 'Referrer-Policy', value: 'no-referrer' },
+      { key: 'Cache-Control', value: 'no-store' },
+      { key: 'X-Content-Type-Options', value: 'nosniff' },
+      { key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'none'" },
     ]);
     const galleryPath = `/demo/gallery/${TOKEN}/estimate-follow-up`;
     expect(galleryPath.startsWith('/demo/')).toBe(true);
