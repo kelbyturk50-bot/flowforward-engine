@@ -55,13 +55,14 @@ router.get('/summary', async (req, res) => {
     }));
     const eligibleParams = [cfg.TIERS];
     const gateSql = appendDraftExclusion(eligibleParams, cfg.EXCLUDED_INDUSTRIES);
-    const [spend, sentToday, eligible] = await Promise.all([
+    const [spend, sentToday, eligible, chatSpend] = await Promise.all([
       pool.query(`SELECT COALESCE(SUM(cost_usd), 0)::float AS month FROM proposals WHERE created_at >= date_trunc('month', NOW())`),
       send.sentToday(),
       pool.query(`SELECT COUNT(*)::int AS n FROM prospects p WHERE p.fit_tier = ANY($1) AND p.stage = 'found' AND NOT p.do_not_contact
                     AND p.archived_at IS NULL
                     AND ${gateSql} AND (p.website IS NOT NULL OR p.email IS NOT NULL)
                     AND NOT EXISTS (SELECT 1 FROM proposals pr WHERE pr.prospect_id = p.id)`, eligibleParams),
+      pool.query(`SELECT COALESCE(SUM(cost_usd), 0)::float AS month FROM chat_demo_turns WHERE created_at >= date_trunc('month', NOW())`),
     ]);
     const [unreviewed, activeJobs] = await Promise.all([
       pool.query(`SELECT COUNT(*)::int AS n FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.status = 'draft' AND pr.reviewed_at IS NULL AND p.archived_at IS NULL`),
@@ -77,6 +78,7 @@ router.get('/summary', async (req, res) => {
       counts, setup, running: isRunning(),
       email: { mode: await send.mailMode(), gmail: gstatus },
       spend_this_month: spend.rows[0].month,
+      chat_demo_this_month: chatSpend.rows[0].month,
       sent_today: sentToday, daily_limit: cfg.SEND_DAILY_LIMIT,
       eligible_leads: eligible.rows[0].n,
       config: {

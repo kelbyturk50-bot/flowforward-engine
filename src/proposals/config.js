@@ -50,6 +50,7 @@ const config = {
   SENDER,
   PUBLIC_BASE_URL,
   MODEL,
+  PRICES,
   costOf,
   // Which leads the nightly run drafts for
   NIGHTLY_COUNT:       num(process.env.PROPOSAL_NIGHTLY_COUNT, 5),

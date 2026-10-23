@@ -1204,3 +1204,225 @@ BEGIN
   RETURN NEXT;
 END;
 $$;
+
+-- BEGIN chat demo (F-007).
+-- Idempotent. Applied on every boot. No clock defaults in this section.
+-- Caps match CHAT_CAPS in src/chatdemo/caps.js. The ceiling is not stored.
+
+CREATE TABLE IF NOT EXISTS prototype_facts (
+  id           SERIAL PRIMARY KEY,
+  prospect_id  INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  field        TEXT NOT NULL,
+  value        TEXT NOT NULL,
+  source       TEXT NOT NULL,
+  source_url   TEXT,
+  snippet      TEXT,
+  captured_at  TIMESTAMPTZ NOT NULL,
+  test_tag     TEXT NOT NULL,
+  CONSTRAINT prototype_facts_field_check CHECK (
+    field IN (
+      'business_name', 'services', 'service_area', 'phone', 'address', 'hours',
+      'emergency_247', 'financing', 'free_estimate', 'maintenance_plan', 'price',
+      'license', 'license_number', 'insurance', 'bonding', 'warranty', 'guarantee',
+      'years_in_business', 'time_zone'
+    )
+  ),
+  CONSTRAINT prototype_facts_value_len CHECK (char_length(value) BETWEEN 1 AND 500),
+  CONSTRAINT prototype_facts_value_chars CHECK (
+    value !~ U&'[[:cntrl:]<>\200B-\200F\202A-\202E\2060-\2064\2066-\2069\FEFF]'
+  ),
+  CONSTRAINT prototype_facts_yes_fields CHECK (
+    field NOT IN (
+      'free_estimate', 'emergency_247', 'financing', 'maintenance_plan',
+      'license', 'insurance', 'bonding'
+    )
+    OR value = 'yes'
+  ),
+  CONSTRAINT prototype_facts_source_check CHECK (source IN ('manual', 'cached_research', 'fixture')),
+  CONSTRAINT prototype_facts_source_url CHECK (
+    source_url IS NULL OR (
+      char_length(source_url) BETWEEN 8 AND 300
+      AND source_url ~ '^https://'
+      AND source_url !~ '://[^/?#]*@'
+      AND source_url !~ '[[:space:][:cntrl:]]'
+    )
+  ),
+  CONSTRAINT prototype_facts_research_url CHECK (source <> 'cached_research' OR source_url IS NOT NULL),
+  CONSTRAINT prototype_facts_snippet_len CHECK (snippet IS NULL OR char_length(snippet) BETWEEN 1 AND 300),
+  CONSTRAINT prototype_facts_research_snippet CHECK (source <> 'cached_research' OR snippet IS NOT NULL),
+  CONSTRAINT prototype_facts_tag_check CHECK (
+    test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+    AND char_length(test_tag) <= 80
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prototype_facts_prospect_field
+  ON prototype_facts (prospect_id, field);
+
+CREATE TABLE IF NOT EXISTS chat_demo_sessions (
+  id             UUID PRIMARY KEY,
+  prototype_id   INTEGER REFERENCES prototypes(id) ON DELETE CASCADE,
+  link_key       TEXT NOT NULL,
+  session_hash   BYTEA NOT NULL,
+  message_count  INTEGER NOT NULL,
+  test_tag       TEXT NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL,
+  expires_at     TIMESTAMPTZ NOT NULL,
+  CONSTRAINT chat_demo_sessions_message_count_cap CHECK (message_count >= 0 AND message_count <= 20),
+  CONSTRAINT chat_demo_sessions_tag_check CHECK (
+    char_length(test_tag) <= 80
+    AND (
+      test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+      OR test_tag ~ '^demo-[a-z0-9]+(-[a-z0-9]+)*$'
+    )
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_demo_sessions_hash ON chat_demo_sessions (session_hash);
+
+CREATE TABLE IF NOT EXISTS chat_demo_turns (
+  id                  UUID PRIMARY KEY,
+  session_id          UUID NOT NULL REFERENCES chat_demo_sessions(id) ON DELETE CASCADE,
+  input_chars         INTEGER NOT NULL,
+  input_bound_tokens  INTEGER,
+  output_tokens       INTEGER,
+  cost_usd            NUMERIC(12,6),
+  source              TEXT,
+  created_at          TIMESTAMPTZ NOT NULL,
+  CONSTRAINT chat_demo_turns_input_chars_cap CHECK (input_chars >= 0 AND input_chars <= 500),
+  CONSTRAINT chat_demo_turns_input_bound_cap CHECK (
+    input_bound_tokens IS NULL OR (input_bound_tokens >= 0 AND input_bound_tokens <= 16000)
+  ),
+  CONSTRAINT chat_demo_turns_output_tokens_cap CHECK (
+    output_tokens IS NULL OR (output_tokens >= 0 AND output_tokens <= 300)
+  ),
+  CONSTRAINT chat_demo_turns_source_check CHECK (source IS NULL OR source IN ('fixture', 'live'))
+);
+
+CREATE TABLE IF NOT EXISTS chat_demo_links (
+  link_key       TEXT PRIMARY KEY,
+  message_count  INTEGER NOT NULL,
+  session_count  INTEGER NOT NULL,
+  CONSTRAINT chat_demo_links_message_count_cap CHECK (message_count >= 0 AND message_count <= 100),
+  CONSTRAINT chat_demo_links_session_count_cap CHECK (session_count >= 0 AND session_count <= 10)
+);
+
+CREATE TABLE IF NOT EXISTS chat_demo_link_days (
+  link_key       TEXT NOT NULL,
+  day            DATE NOT NULL,
+  message_count  INTEGER NOT NULL,
+  PRIMARY KEY (link_key, day),
+  CONSTRAINT chat_demo_link_days_message_count_cap CHECK (message_count >= 0 AND message_count <= 40)
+);
+
+CREATE TABLE IF NOT EXISTS chat_demo_global_days (
+  day            DATE PRIMARY KEY,
+  session_count  INTEGER NOT NULL,
+  CONSTRAINT chat_demo_global_days_session_count_cap CHECK (session_count >= 0 AND session_count <= 300)
+);
+
+CREATE TABLE IF NOT EXISTS chat_demo_ip_hours (
+  ip_hash     TEXT NOT NULL,
+  hour        TIMESTAMPTZ NOT NULL,
+  mint_count  INTEGER NOT NULL,
+  PRIMARY KEY (ip_hash, hour),
+  CONSTRAINT chat_demo_ip_hours_mint_count_cap CHECK (mint_count >= 0 AND mint_count <= 5)
+);
+
+CREATE TABLE IF NOT EXISTS chat_demo_ip_days (
+  ip_hash     TEXT NOT NULL,
+  day         DATE NOT NULL,
+  mint_count  INTEGER NOT NULL,
+  PRIMARY KEY (ip_hash, day),
+  CONSTRAINT chat_demo_ip_days_mint_count_cap CHECK (mint_count >= 0 AND mint_count <= 20)
+);
+
+CREATE TABLE IF NOT EXISTS chat_demo_rate_minutes (
+  link_key  TEXT NOT NULL,
+  ip_hash   TEXT NOT NULL,
+  minute    TIMESTAMPTZ NOT NULL,
+  count     INTEGER NOT NULL,
+  PRIMARY KEY (link_key, ip_hash, minute),
+  CONSTRAINT chat_demo_rate_minutes_count_cap CHECK (count >= 0 AND count <= 10)
+);
+
+CREATE TABLE IF NOT EXISTS chat_demo_spend_days (
+  day               DATE PRIMARY KEY,
+  spent_micros      BIGINT NOT NULL,
+  reserved_micros   BIGINT NOT NULL,
+  overshoot_micros  BIGINT NOT NULL,
+  CONSTRAINT chat_demo_spend_days_spent_nonneg CHECK (spent_micros >= 0),
+  CONSTRAINT chat_demo_spend_days_reserved_nonneg CHECK (reserved_micros >= 0),
+  CONSTRAINT chat_demo_spend_days_overshoot_nonneg CHECK (overshoot_micros >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS chat_demo_reservations (
+  id             UUID PRIMARY KEY,
+  day            DATE NOT NULL,
+  turn_id        UUID REFERENCES chat_demo_turns(id) ON DELETE CASCADE,
+  status         TEXT NOT NULL,
+  amount_micros  BIGINT NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL,
+  settled_at     TIMESTAMPTZ,
+  expired_at     TIMESTAMPTZ,
+  released_at    TIMESTAMPTZ,
+  actual_micros  BIGINT,
+  CONSTRAINT chat_demo_reservations_status_check CHECK (
+    status IN ('reserved', 'settled', 'expired', 'released')
+  ),
+  CONSTRAINT chat_demo_reservations_amount_nonneg CHECK (amount_micros >= 0),
+  CONSTRAINT chat_demo_reservations_actual_nonneg CHECK (actual_micros IS NULL OR actual_micros >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS chat_demo_events (
+  id            UUID PRIMARY KEY,
+  prototype_id  INTEGER,
+  session_id    UUID,
+  event_type    TEXT NOT NULL,
+  chip_id       TEXT,
+  tool          TEXT,
+  rule          TEXT,
+  created_at    TIMESTAMPTZ NOT NULL,
+  CONSTRAINT chat_demo_events_type_check CHECK (
+    event_type IN (
+      'chat_viewed', 'session_started', 'chip_clicked', 'message_sent',
+      'tool_card_shown', 'validator_rewrote', 'validator_fallback', 'cap_hit',
+      'demo_paused', 'responder_live', 'responder_fixture', 'responder_fallback',
+      'spend_overshoot', 'reservation_expired', 'cta_clicked', 'input_bound_exceeded',
+      'model_unpriced', 'prompt_over_cap', 'cap_store_unavailable', 'ip_purge_failed',
+      'tool_call_dropped'
+    )
+  ),
+  CONSTRAINT chat_demo_events_chip_check CHECK (
+    chip_id IS NULL OR chip_id IN (
+      'chip_emergency', 'chip_booking', 'chip_price', 'chip_hours', 'chip_area'
+    )
+  ),
+  CONSTRAINT chat_demo_events_tool_check CHECK (
+    tool IS NULL OR tool IN (
+      'offer_sample_slots', 'flag_emergency', 'capture_lead', 'handoff_to_human'
+    )
+  )
+);
+
+CREATE TABLE IF NOT EXISTS chat_demo_leads (
+  id            SERIAL PRIMARY KEY,
+  prototype_id  INTEGER,
+  session_id    UUID NOT NULL,
+  service       TEXT NOT NULL,
+  urgency       TEXT NOT NULL,
+  test_tag      TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL,
+  CONSTRAINT chat_demo_leads_service_check CHECK (
+    service IN ('water_heater', 'furnace', 'general', 'drain')
+  ),
+  CONSTRAINT chat_demo_leads_urgency_check CHECK (
+    urgency IN ('low', 'normal', 'urgent', 'emergency')
+  ),
+  CONSTRAINT chat_demo_leads_tag_check CHECK (
+    test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+    OR test_tag ~ '^demo-[a-z0-9]+(-[a-z0-9]+)*$'
+  )
+);
+
+-- END chat demo (F-007).

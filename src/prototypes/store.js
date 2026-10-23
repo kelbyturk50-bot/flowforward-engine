@@ -308,16 +308,20 @@ async function restartClock(prospectId) {
 
 // Unknown, malformed, and revoked are 404. Expired and still active is 410.
 // A row that is both revoked and expired is 404.
-async function lookupToken(raw) {
+// `at` is the injected clock. Chat passes the engine clock. Callers that
+// omit it use the process clock. The comparison is never SQL now().
+async function lookupToken(raw, at) {
+  const now = at instanceof Date && Number.isFinite(at.getTime()) ? at : new Date();
   const wellFormed = tokens.tokenWellFormed(raw);
   const computed = wellFormed ? tokens.hashToken(raw) : tokens.DUMMY_HASH;
   const { rows } = await pool.query(
     `SELECT pt.id, pt.prospect_id, pt.agent_type, pt.brand_name, pt.color_primary, pt.color_secondary,
-            pt.token_hash, pt.issued_at, pt.expires_at, pt.revoked_at, (NOW() >= pt.expires_at) AS expired,
+            pt.token_hash, pt.issued_at, pt.expires_at, pt.revoked_at,
+            ($2::timestamptz >= pt.expires_at) AS expired,
             p.industry, p.city, p.archived_at
        FROM prototypes pt JOIN prospects p ON p.id = pt.prospect_id
       WHERE pt.token_hash = $1`,
-    [computed]
+    [computed, now]
   );
   const row = rows[0] || null;
   const stored = row && row.token_hash ? Buffer.from(row.token_hash) : null;
