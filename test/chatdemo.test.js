@@ -856,20 +856,29 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
   it('message length uses NFKC code points in express and postgres', async () => {
     await setFlags(true);
     const opened = await request('POST', '/api/public/chat/demos/wasatch-heating/session', { body: {} });
+    // 494 emoji are 988 UTF-16 units and 1976 UTF-8 bytes. They fit in the
+    // 2 KB body and stay under the 500 code-point cap. A UTF-16 length check
+    // would reject them.
+    const emoji = '😀'.repeat(494);
+    assert.ok(emoji.length > 500);
+    assert.ok(Buffer.byteLength(JSON.stringify({
+      sessionId: opened.json.sessionId,
+      text: emoji,
+    })) <= 2048);
     const ok = await request('POST', '/api/public/chat/demos/wasatch-heating/message', {
-      body: { sessionId: opened.json.sessionId, text: '😀'.repeat(500) },
+      body: { sessionId: opened.json.sessionId, text: emoji },
     });
     assert.equal(ok.status, 200);
     const too = await request('POST', '/api/public/chat/demos/wasatch-heating/message', {
-      body: { sessionId: opened.json.sessionId, text: '😀'.repeat(501) },
+      body: { sessionId: opened.json.sessionId, text: 'a'.repeat(501) },
     });
     assert.equal(too.status, 413);
     assert.equal(too.json.error, 'message_too_long');
     assert.equal(too.json.banner, banner('Wasatch Heating'));
-    const counted = await pool.query(`SELECT char_length($1::text)::int AS n`, ['😀'.repeat(500)]);
-    assert.equal(counted.rows[0].n, 500);
+    const counted = await pool.query(`SELECT char_length($1::text)::int AS n`, [emoji]);
+    assert.equal(counted.rows[0].n, 494);
     const chars = await pool.query(`SELECT input_chars FROM chat_demo_turns`);
-    assert.equal(Number(chars.rows[0].input_chars), 500);
+    assert.equal(Number(chars.rows[0].input_chars), 494);
   });
 
   it('cap checks match CHAT_CAPS and a raw write past each cap is 23514', async () => {
@@ -1120,8 +1129,11 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     process.env.FF_LIVE_CHAT_MODEL = 'true';
     assert.equal(await flags('FF_LIVE_CHAT_MODEL'), true);
     const chatSrc = fs.readFileSync(path.join(__dirname, '../src/api/chat.js'), 'utf8');
-    assert.equal(chatSrc.includes('CHAT_DEMO_DAILY_CEILING_USD'), true);
-    assert.equal(chatSrc.includes('process.env.CHAT_DEMO_DAILY_CEILING_USD ='), false);
+    const ceilingSrc = fs.readFileSync(path.join(__dirname, '../src/chatdemo/ceiling.js'), 'utf8');
+    assert.equal(ceilingSrc.includes('CHAT_DEMO_DAILY_CEILING_USD'), true);
+    assert.equal(chatSrc.includes('readCeiling'), true);
+    assert.equal(chatSrc.includes('CHAT_DEMO_DAILY_CEILING_USD'), false);
+    assert.equal(chatSrc.includes('process.env.CHAT_DEMO_DAILY_CEILING_USD'), false);
   });
 
   it('logs omit the IP, session id, user text, and model text', async () => {
@@ -1201,10 +1213,16 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
 
   it('campaign touches are written only when the flag is on and the lead is tagged TEST', async () => {
     await setFlags(true);
+    await pool.query(
+      `UPDATE feature_flags SET enabled = false, updated_at = NULL, updated_by = NULL WHERE name = 'FF_CAMPAIGNS'`
+    );
     const proto = await makeProto();
     const opened = await request('POST', `/api/public/prototypes/${proto.token}/chat/session`, { body: {} });
     assert.equal(opened.status, 201);
-    let touches = await pool.query(`SELECT COUNT(*)::int AS n FROM campaign_touches`);
+    let touches = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM campaign_touches WHERE lead_id = $1`,
+      [proto.lead.id]
+    );
     assert.equal(touches.rows[0].n, 0);
     await pool.query(
       `UPDATE feature_flags SET enabled = true, updated_at = NULL, updated_by = NULL WHERE name = 'FF_CAMPAIGNS'`
@@ -1216,7 +1234,8 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
       body: { sessionId: second.json.sessionId },
     });
     touches = await pool.query(
-      `SELECT type, external_ref, source, channel FROM campaign_touches ORDER BY type`
+      `SELECT type, external_ref, source, channel FROM campaign_touches WHERE lead_id = $1 ORDER BY type`,
+      [again.lead.id]
     );
     assert.equal(touches.rows.length, 2);
     const sessionRow = await pool.query(`SELECT id FROM chat_demo_sessions ORDER BY created_at DESC LIMIT 1`);
