@@ -69,6 +69,11 @@ async function purge(at) {
         WHERE day < (($1::timestamptz - interval '48 hours') AT TIME ZONE 'America/Denver')::date`,
       [when]
     );
+    await pool.query(
+      `DELETE FROM chat_demo_ip_day_keys
+        WHERE day < (($1::timestamptz - interval '48 hours') AT TIME ZONE 'America/Denver')::date`,
+      [when]
+    );
     return true;
   } catch (err) {
     logErr('ip_purge_failed', err);

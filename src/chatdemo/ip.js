@@ -1,20 +1,67 @@
-// IP bucketing and the discarded daily HMAC key.
-// The key stays in process memory. It is not derived from the CRM key.
+// IP bucketing and the daily HMAC key.
+// The key for an America/Denver day is one row in chat_demo_ip_day_keys.
+// This process caches that row until the day changes. A restart or another
+// instance loads the same row. The key is not derived from CRM_API_KEY and
+// is not logged. A missing row is inserted once; a lost race reads the winner.
 
 const crypto = require('crypto');
 const net = require('net');
 const { zoneDay, FLOWFORWARD_ZONE } = require('./copy');
+const { pool } = require('./tx');
 
-let dayKey = crypto.randomBytes(32);
-let dayKeyDay = zoneDay(new Date(), FLOWFORWARD_ZONE);
+let dayKey = null;
+let dayKeyDay = null;
 
-function rotate(now) {
-  const day = zoneDay(now instanceof Date ? now : new Date(now), FLOWFORWARD_ZONE);
-  if (day !== dayKeyDay) {
-    dayKey = crypto.randomBytes(32);
-    dayKeyDay = day;
+function asDate(now) {
+  if (now instanceof Date) return now;
+  if (now == null || now === '') return new Date();
+  return new Date(now);
+}
+
+function denverDay(now) {
+  return zoneDay(asDate(now), FLOWFORWARD_ZONE);
+}
+
+function asKey(value) {
+  if (!value) return null;
+  const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  return buf.length === 32 ? buf : null;
+}
+
+async function loadDayKey(now) {
+  const day = denverDay(now);
+  if (dayKey && dayKeyDay === day) return dayKey;
+  const found = await pool.query(
+    'SELECT key_bytes FROM chat_demo_ip_day_keys WHERE day = $1::date',
+    [day]
+  );
+  let stored = asKey(found.rows[0] && found.rows[0].key_bytes);
+  if (!stored) {
+    const fresh = crypto.randomBytes(32);
+    const inserted = await pool.query(
+      `INSERT INTO chat_demo_ip_day_keys (day, key_bytes)
+       VALUES ($1::date, $2)
+       ON CONFLICT (day) DO NOTHING
+       RETURNING key_bytes`,
+      [day, fresh]
+    );
+    stored = asKey(inserted.rows[0] && inserted.rows[0].key_bytes);
+    if (!stored) {
+      const again = await pool.query(
+        'SELECT key_bytes FROM chat_demo_ip_day_keys WHERE day = $1::date',
+        [day]
+      );
+      stored = asKey(again.rows[0] && again.rows[0].key_bytes);
+    }
   }
-  return { key: dayKey, day: dayKeyDay };
+  if (!stored) {
+    const err = new Error('ip_key');
+    err.code = 'ip_key';
+    throw err;
+  }
+  dayKey = Buffer.from(stored);
+  dayKeyDay = day;
+  return dayKey;
 }
 
 function hextet(value) {
@@ -74,20 +121,22 @@ function bucketIp(ip) {
   return `${compress(prefix)}/64`;
 }
 
-function ipHash(bucketedIp, now) {
-  const { key, day } = rotate(now || new Date());
+async function ipHash(bucketedIp, now) {
+  const at = asDate(now);
+  const day = denverDay(at);
+  const key = await loadDayKey(at);
   return crypto.createHmac('sha256', key).update(`v1|${bucketedIp}|${day}`).digest('hex');
 }
 
 function _dayKeyForTests() {
   if (process.env.NODE_ENV !== 'test') throw new Error('test only');
-  return Buffer.from(dayKey);
+  return dayKey ? Buffer.from(dayKey) : null;
 }
 
 function _resetIpKeyForTests() {
   if (process.env.NODE_ENV !== 'test') throw new Error('test only');
-  dayKey = crypto.randomBytes(32);
-  dayKeyDay = zoneDay(new Date(), FLOWFORWARD_ZONE);
+  dayKey = null;
+  dayKeyDay = null;
 }
 
 module.exports = { bucketIp, ipHash, _dayKeyForTests, _resetIpKeyForTests };

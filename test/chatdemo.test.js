@@ -187,13 +187,8 @@ describe('live chat pure checks', () => {
     assert.equal(a, b);
     assert.equal(a, '2001:db8:1:2::/64');
     assert.notEqual(bucketIp('2001:db8:1:3::1'), a);
-    const at = new Date('2026-10-25T18:00:00Z');
-    _resetIpKeyForTests();
-    const first = ipHash('10.1.2.3', at);
-    _resetIpKeyForTests();
-    const second = ipHash('10.1.2.3', at);
-    assert.notEqual(first, second);
-    assert.equal(first.length, 64);
+    assert.equal(typeof ipHash, 'function');
+    assert.equal(typeof _resetIpKeyForTests, 'function');
   });
 
   it('fixed rate buckets roll on the injected key and two-arg consume stays rolling', () => {
@@ -383,7 +378,7 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     await pool.query(`TRUNCATE
       chat_demo_leads, chat_demo_events, chat_demo_reservations, chat_demo_turns,
       chat_demo_sessions, chat_demo_links, chat_demo_link_days, chat_demo_global_days,
-      chat_demo_ip_hours, chat_demo_ip_days, chat_demo_rate_minutes, chat_demo_spend_days,
+      chat_demo_ip_hours, chat_demo_ip_days, chat_demo_ip_day_keys, chat_demo_rate_minutes, chat_demo_spend_days,
       prototype_facts
       RESTART IDENTITY`);
     _resetExpressCacheForTests();
@@ -1371,6 +1366,69 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     const reseeded = await prepareMint({ linkKey: 'prototype:reseed', ipHash: 'h', at: before });
     assert.equal(reseeded.ok, false);
     console.log('[chatdemo] daily caps reset at midnight; lifetime link messages do not; express cache stays bounded');
+  });
+
+  it('the per-IP day key is one Postgres row and a missing key pauses the demo', async () => {
+    const { ipHash, _resetIpKeyForTests: resetKey } = require('../src/chatdemo/ip');
+    const { purge } = require('../src/chatdemo/counters');
+    const at = new Date('2026-10-25T18:00:00Z');
+    const next = new Date('2026-10-26T18:00:00Z');
+    resetKey();
+    const [left, right] = await Promise.all([
+      ipHash('10.0.0.1', at),
+      ipHash('10.0.0.2', at),
+    ]);
+    assert.equal(left.length, 64);
+    assert.notEqual(left, right);
+    resetKey();
+    assert.equal(await ipHash('10.0.0.1', at), left);
+    assert.equal(await ipHash('10.0.0.2', at), right);
+    const sameDay = await pool.query(
+      `SELECT count(*)::int AS n, max(octet_length(key_bytes))::int AS bytes
+         FROM chat_demo_ip_day_keys WHERE day = '2026-10-25'`
+    );
+    assert.equal(sameDay.rows[0].n, 1);
+    assert.equal(sameDay.rows[0].bytes, 32);
+    const planted = crypto.randomBytes(32);
+    await pool.query(
+      `INSERT INTO chat_demo_ip_day_keys (day, key_bytes) VALUES ('2026-10-26', $1)`,
+      [planted]
+    );
+    resetKey();
+    const expected = crypto.createHmac('sha256', planted).update('v1|10.1.2.3|2026-10-26').digest('hex');
+    assert.equal(await ipHash('10.1.2.3', next), expected);
+    await assert.rejects(
+      () => pool.query(
+        `INSERT INTO chat_demo_ip_day_keys (day, key_bytes) VALUES ('2026-10-01', $1)`,
+        [Buffer.alloc(16)]
+      ),
+      (err) => err.code === '23514'
+    );
+    await pool.query(
+      `INSERT INTO chat_demo_ip_day_keys (day, key_bytes) VALUES ('2026-10-20', $1)`,
+      [crypto.randomBytes(32)]
+    );
+    assert.equal(await purge(next), true);
+    const leftDays = await pool.query(
+      `SELECT day::text AS day FROM chat_demo_ip_day_keys ORDER BY day`
+    );
+    assert.deepEqual(leftDays.rows.map((row) => row.day), ['2026-10-25', '2026-10-26']);
+
+    await setFlags(true);
+    const proto = await makeProto();
+    await pool.query('ALTER TABLE chat_demo_ip_day_keys RENAME TO chat_demo_ip_day_keys_held');
+    resetKey();
+    try {
+      const paused = await request('POST', `/api/public/prototypes/${proto.token}/chat/session`, { body: {} });
+      assert.equal(paused.status, 503);
+      assert.equal(paused.json.error, 'demo_paused');
+      const sessions = await pool.query('SELECT count(*)::int AS n FROM chat_demo_sessions');
+      assert.equal(sessions.rows[0].n, 0);
+    } finally {
+      await pool.query('ALTER TABLE chat_demo_ip_day_keys_held RENAME TO chat_demo_ip_day_keys');
+      resetKey();
+    }
+    console.log('[chatdemo] per-IP day key reloads from Postgres; a missing key pauses the demo');
   });
 
   it('session tag check is replaced when an older TEST-only constraint is present', async () => {

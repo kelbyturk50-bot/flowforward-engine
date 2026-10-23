@@ -1366,6 +1366,14 @@ CREATE TABLE IF NOT EXISTS chat_demo_ip_days (
   CONSTRAINT chat_demo_ip_days_mint_count_cap CHECK (mint_count >= 0 AND mint_count <= 20)
 );
 
+-- One HMAC key per America/Denver day, shared by every process that uses
+-- this database. Not derived from CRM_API_KEY. No seed and no UPDATE.
+CREATE TABLE IF NOT EXISTS chat_demo_ip_day_keys (
+  day        DATE PRIMARY KEY,
+  key_bytes  BYTEA NOT NULL,
+  CONSTRAINT chat_demo_ip_day_keys_len CHECK (octet_length(key_bytes) = 32)
+);
+
 CREATE TABLE IF NOT EXISTS chat_demo_rate_minutes (
   link_key  TEXT NOT NULL,
   ip_hash   TEXT NOT NULL,

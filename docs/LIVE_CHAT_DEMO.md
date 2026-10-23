@@ -285,11 +285,11 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   - IPv6 is bucketed by /64: the first four hextets, canonicalized lowercase and zero-compressed per RFC 5952, then `::/64`.
   - IPv4 is used as-is.
   - Tests: spoofed left-most XFF entries land in the same bucket as the real client, and two addresses in one /64 share a bucket.
-- [ ] **IP storage: a discarded daily secret.** The existing limiter never writes IPs. Postgres stores only `ip_hash = HMAC-SHA256(dayKey, 'v1|' + bucketedIp + '|' + YYYY-MM-DD)`, where the date is the America/Denver day.
-  - `dayKey` is `crypto.randomBytes(32)`. It is held in process memory only, never persisted or logged, and dropped and regenerated at the America/Denver day rollover. It is **not** derived from `CRM_API_KEY` or any long-lived key, so a DB read plus any CRM key can't reverse the hashes.
-  - **Trade-off:** a process restart generates a new key, which effectively resets the DB per-IP buckets for the rest of that day. The global, link, session and spend caps still hold, because they aren't IP-keyed.
-  - **Replica assumption:** the app runs as **one instance**. If it ever scales out, the per-day key must be shared across instances before then (a spec change reviewed by Warden).
-- [ ] **Purge (48 h).** One statement, `DELETE FROM <table> WHERE bucket < $now - interval '48 hours'`, runs for each of `chat_demo_ip_hours`, `chat_demo_ip_days` and `chat_demo_rate_minutes`. It runs at boot, hourly, and before every mint.
+- [ ] **IP storage: a shared daily secret.** The limiter never writes IPs. Postgres stores only `ip_hash = HMAC-SHA256(dayKey, 'v1|' + bucketedIp + '|' + YYYY-MM-DD)`, where the date is the America/Denver day.
+  - `dayKey` is `crypto.randomBytes(32)`, one row in `chat_demo_ip_day_keys` for that Denver day. Each process caches the row until the day changes. A restart or a second instance loads the same row, so the per-IP buckets survive both. The key is **not** derived from `CRM_API_KEY`. It is not logged. A lost insert reads the row the other writer stored.
+  - **Trade-off:** a database read of `chat_demo_ip_day_keys` plus the hash rows can match an IP to that day's bucket. The key is deleted with the 48 h purge, on the same cutoff as `chat_demo_ip_days`. A missing table or a failed read pauses the demo (0 responder calls). Global, link, session, and spend caps still do not use the IP key.
+  - **Replicas:** every process that uses this database shares the key. No extra env var.
+- [ ] **Purge (48 h).** One statement, `DELETE FROM <table> WHERE bucket < $now - interval '48 hours'`, runs for each of `chat_demo_ip_hours`, `chat_demo_ip_days`, `chat_demo_rate_minutes`, and `chat_demo_ip_day_keys`. It runs at boot, hourly, and before every mint.
   - On the mint path it runs as a **separate statement before the mint transaction opens**, never inside it, so a purge error can't abort the mint transaction.
   - A failed purge logs `ip_purge_failed` with `err.code` only and doesn't block mints.
   - A test with an injected clock shows rows older than 48 h are gone.
@@ -474,7 +474,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 - [ ] **Injected clock reaches Postgres:** every chat statement gets `$now` from the clock. A static test greps `src/chatdemo/**` SQL and `schema.sql` chat tables for `now()`, `CURRENT_TIMESTAMP` and `DEFAULT now` and expects 0 hits. The time-zone and sweep tests drive the time only through the clock, with no row backdating and no `pg_sleep`.
 - [ ] **Security tests (Warden):**
   - **IP:** spoofed left-most XFF entries share the real client's bucket; two addresses in one /64 share a bucket; `::ffff:` is folded to IPv4.
-  - **IP hash:** `ip_hash` changes when `dayKey` rotates, and the key never appears in the DB, logs or env.
+  - **IP hash:** `ip_hash` changes when the Denver day changes. The key is the `chat_demo_ip_day_keys` row for that day. It is not logged and it is not an env var. A memory reset reloads the same row.
   - **Purge:** under an injected clock, rows older than 48 h are deleted; a failed purge doesn't block a mint.
   - **Cap store down:** a pool stub that throws on each cap/ceiling/reservation statement gives 503 "Demo paused" and 0 responder calls; a failed seed read denies the request.
   - **Ordering:** the counters are committed before the call (a call that throws still consumed the cap); no lock is held during the call; a lock timeout gives 503.
