@@ -97,6 +97,11 @@ function compress(parts) {
 // Rate-limit key. Fold IPv4-mapped ::ffff: to IPv4. Key IPv6 by /64.
 // A value this function already returned (/64 suffix) comes back unchanged.
 // Chat's bucketIp delegates here so the two layers do not disagree.
+// A value that is not an IP (brackets, host:port, a %zone, or other garbage)
+// becomes one shared `unknown` key. Railway writes the right-most hop, so a
+// client cannot choose that bucket. The dotted form ::ffff:198.51.100.50
+// folds to IPv4. The hex-mapped form ::ffff:cb00:7107 stays IPv6 and is keyed
+// by /64 (`::/64`), not as 203.0.113.7. One /64 shares one cap.
 function bucketAddress(ip) {
   let value = String(ip || '').trim().toLowerCase();
   if (!value) return 'unknown';

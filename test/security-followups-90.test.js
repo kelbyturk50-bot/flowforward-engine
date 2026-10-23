@@ -224,6 +224,49 @@ describe('issue 90 public prototype limits and CORS', { timeout: 120000 }, () =>
     console.log('[issue-90] prototype JSON 200/404/410, page, and font responses have no ACAO');
   });
 
+  it('mixed-case GET and OPTIONS on prototype routes send no ACAO', async () => {
+    const preflight = { 'access-control-request-method': 'GET', 'x-forwarded-for': '203.0.113.40' };
+    const cases = [
+      ['GET', `/API/Public/Prototypes/${liveToken}`, 200, { 'x-forwarded-for': '203.0.113.41' }],
+      ['OPTIONS', `/Api/Public/Prototypes/${liveToken}`, null, preflight],
+      ['GET', `/Demo/Prototype/${liveToken}`, 200, { 'x-forwarded-for': '203.0.113.42' }],
+      ['OPTIONS', `/DEMO/prototype/${liveToken}`, null, { ...preflight, 'x-forwarded-for': '203.0.113.43' }],
+      ['GET', '/DEMO/PROTOTYPE-ASSETS/OFL-LICENSE.txt', 200, { 'x-forwarded-for': '203.0.113.44' }],
+      ['OPTIONS', '/demo/Prototype-Assets/OFL-LICENSE.txt', null, { ...preflight, 'x-forwarded-for': '203.0.113.45' }],
+      ['GET', `/demo/prototype/${liveToken}/`, 200, { 'x-forwarded-for': '203.0.113.46' }],
+      ['OPTIONS', `/demo/prototype/${liveToken}/`, null, { ...preflight, 'x-forwarded-for': '203.0.113.47' }],
+      ['GET', `/demo/prototype//${liveToken}`, 200, { 'x-forwarded-for': '203.0.113.48' }],
+    ];
+    for (const [method, reqPath, status, headers] of cases) {
+      const res = await request(port, method, reqPath, { origin: EVIL_ORIGIN, headers });
+      if (status != null) assert.equal(res.status, status, reqPath);
+      assertNoStar(res, `${method} ${reqPath}`);
+    }
+    const unrouted = await request(port, 'GET', `/demo//prototype/${liveToken}`, {
+      origin: EVIL_ORIGIN,
+      headers: { 'x-forwarded-for': '203.0.113.49' },
+    });
+    assert.equal(unrouted.status, 404);
+    assert.equal(unrouted.headers['access-control-allow-origin'], '*');
+    console.log('[issue-90] mixed-case GET and OPTIONS on prototype routes have no ACAO');
+  });
+
+  it('a malformed JSON body on the public prototype read is a stamped 400', async () => {
+    const res = await request(port, 'GET', `/api/public/prototypes/${liveToken}`, {
+      body: Buffer.from('{'),
+      origin: EVIL_ORIGIN,
+      headers: { 'x-forwarded-for': '203.0.113.39' },
+    });
+    assert.equal(res.status, 400);
+    assert.deepEqual(res.json, { error: 'invalid_body' });
+    assert.equal(res.headers['cache-control'], 'no-store');
+    assert.equal(res.headers['x-robots-tag'], 'noindex, nofollow');
+    assert.equal(res.headers['x-content-type-options'], 'nosniff');
+    assertNoStar(res, 'malformed');
+    assert.equal(res.text.includes('<html'), false);
+    console.log('[issue-90] malformed public prototype JSON is a stamped 400');
+  });
+
   it('keeps chat and flag allowlists and global CORS on other routes', async () => {
     const preflight = await request(port, 'OPTIONS', '/api/public/chat/demos/wasatch-heating/session', {
       origin: PRODUCTION_ORIGIN,

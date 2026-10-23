@@ -341,6 +341,10 @@ async function update(id, patch) {
 
 function placeholdersIn(text) { return String(text || '').match(PLACEHOLDER) || []; }
 
+// Fixed sentence. The inbox toast and the stored error both show it, and it
+// does not include the transport error text.
+const SEND_FAILED_MESSAGE = "The reply didn't send. Try again.";
+
 async function sendReply(id) {
   const item = await getItem(id);
   if (!item) throw httpError('Not found', 404);
@@ -373,8 +377,8 @@ async function sendReply(id) {
     });
   } catch (err) {
     console.error('[inbox] send failed:', errCode(err));
-    await pool.query(`UPDATE inbox_items SET status = 'ready', error = $2 WHERE id = $1`, [id, 'Send failed']);
-    const wrapped = httpError('Something went wrong.', 500);
+    await pool.query(`UPDATE inbox_items SET status = 'ready', error = $2 WHERE id = $1`, [id, SEND_FAILED_MESSAGE]);
+    const wrapped = httpError(SEND_FAILED_MESSAGE, 500);
     wrapped.code = err && err.code;
     throw wrapped;
   }
@@ -520,6 +524,7 @@ async function applySentMessages(sentMessages) {
 
 module.exports = {
   recordInbound, alreadyRecorded, dedupeKey, threadFor, work, recover, kick, list, counts, detail, update, sendReply,
+  SEND_FAILED_MESSAGE,
   setStatus, reopen, rewrite, applySuggestion, markSeen, applySentMessages, cleanTriage, placeholdersIn,
   isWorking: () => working,
 };

@@ -268,7 +268,11 @@ describe('live chat pure checks', () => {
     assert.ok(flagsAt < corsAt);
     assert.ok(corsAt < guardAt);
     assert.ok(flagsAt < guardAt);
-    assert.ok(server.indexOf('publicPrototypeSurface') < corsAt);
+    const assetsAt = server.indexOf("app.use('/demo/prototype-assets'");
+    const pageAt = server.indexOf("app.use('/demo/prototype',");
+    assert.ok(assetsAt > flagsAt && assetsAt < corsAt);
+    assert.ok(pageAt > assetsAt && pageAt < corsAt);
+    assert.equal(server.includes('publicPrototypeSurface'), false);
     assert.match(server, /app\.set\('trust proxy',\s*1\)/);
     const { demoRouter } = require('../src/chatdemo/public');
     assert.equal(demoRouter.stack[0].name, 'jsonParser');

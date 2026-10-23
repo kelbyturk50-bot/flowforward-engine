@@ -405,7 +405,7 @@ describe('inbox', () => {
       const sent = await fetch(`${base}/api/inbox/${id}/send`, { method: 'POST' });
       const body = await sent.json();
       assert.equal(sent.status, 500);
-      assert.deepEqual(body, { error: 'Something went wrong.' });
+      assert.deepEqual(body, { error: "The reply didn't send. Try again." });
       assert.equal(JSON.stringify(body).includes(leak), false);
     } finally {
       console.error = originalError;
@@ -418,7 +418,7 @@ describe('inbox', () => {
     }
     const afterSend = await pool.query('SELECT status, error FROM inbox_items WHERE id = $1', [id]);
     assert.equal(afterSend.rows[0].status, 'ready');
-    assert.equal(afterSend.rows[0].error, 'Send failed');
+    assert.equal(afterSend.rows[0].error, "The reply didn't send. Try again.");
     assert.equal(String(afterSend.rows[0].error).includes(leak), false);
     assert.ok(lines.some((line) => line.includes('ECONN')));
     assert.equal(lines.some((line) => line.includes(leak)), false);

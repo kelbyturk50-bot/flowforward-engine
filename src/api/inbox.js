@@ -11,6 +11,10 @@ function fail(res, err) {
     return res.status(status).json({ error: err.message || 'Not found' });
   }
   console.error('[inbox] request failed:', err && err.code ? err.code : 'error');
+  // The send path throws this fixed sentence on purpose. Anything else stays generic.
+  if (status === 500 && err && err.message === inbox.SEND_FAILED_MESSAGE) {
+    return res.status(500).json({ error: inbox.SEND_FAILED_MESSAGE });
+  }
   return res.status(500).json({ error: 'Something went wrong.' });
 }
 

@@ -28,27 +28,6 @@ chatMount.mountBeforeCors(app);
 app.use('/api/public/prototypes', require('./prototypes/public').router);
 chatMount.mountPublicFlags(app);
 
-// The prototype page, its fonts, and the public JSON read do not use cors().
-// Unset CORS_ORIGINS would otherwise send Access-Control-Allow-Origin: *.
-function publicPrototypeSurface(req) {
-  const raw = String((req && (req.originalUrl || req.url)) || '');
-  const path = raw.split('?')[0];
-  if (path === '/demo/prototype' || path.startsWith('/demo/prototype/')) return true;
-  if (path === '/demo/prototype-assets' || path.startsWith('/demo/prototype-assets/')) return true;
-  if (path === '/api/public/prototypes' || path.startsWith('/api/public/prototypes/')) return true;
-  return false;
-}
-
-// CORS — restrict to your frontend(s) with CORS_ORIGINS="https://your-app.vercel.app,http://localhost:5173".
-// Unset = allow any origin (the API key still guards access).
-// Does not apply to the public chat routers, GET /api/public/flags, or the
-// public prototype page, fonts, and JSON read.
-const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-const corsMiddleware = cors(origins.length ? { origin: origins } : undefined);
-app.use((req, res, next) => {
-  if (publicPrototypeSurface(req)) return next();
-  return corsMiddleware(req, res, next);
-});
 const pilotDemo = require('./pilot/demo');
 app.use(express.json({ limit: '1mb' }));
 // A malformed JSON body on the chat routes is a JSON 400. The handler does
@@ -57,6 +36,23 @@ app.use(require('./api/chat').invalidJson);
 // A body over the JSON limit fails here, before the demo router. Stamp the
 // public demo 413 with the same noindex / no-store headers as a demo 404.
 app.use(pilotDemo.payloadTooLarge);
+
+// Prototype page and fonts. Mounted on their routers, before cors(), so the
+// match is Express's own: case-insensitive, optional trailing slash, and a
+// repeated slash after the mount (`/demo/prototype//<token>`). OPTIONS is
+// answered here and never reaches cors(). A path Express does not route,
+// such as `/demo//prototype/<token>`, is not one of these responses.
+// Unset CORS_ORIGINS would otherwise send Access-Control-Allow-Origin: *.
+app.use('/demo/prototype-assets', require('./prototypes/page').assets);
+app.use('/demo/prototype', require('./prototypes/page').router);
+
+// CORS — restrict to your frontend(s) with CORS_ORIGINS="https://your-app.vercel.app,http://localhost:5173".
+// Unset = allow any origin (the API key still guards access).
+// Does not apply to the public chat routers, GET /api/public/flags, or the
+// prototype page, fonts, and JSON read mounted above.
+const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+const corsMiddleware = cors(origins.length ? { origin: origins } : undefined);
+app.use(corsMiddleware);
 
 // Health check (open — Railway uses it)
 app.get('/health', (req, res) => {
@@ -86,12 +82,8 @@ app.use('/p', require('./proposals/onepager').router);
 // 404 unless the master flag is effectively on. No mint route.
 app.use('/demo/estimate-recovery', pilotDemo.router);
 
-// The prototype page itself: sample homepage + agent click-throughs.
-// Server-rendered, watermarked, no API key (the token is the credential).
-app.use('/demo/prototype-assets', require('./prototypes/page').assets);
 // FlowForward logo for the email signature (public, cached, no key).
 app.use('/brand', require('express').static(require('path').join(__dirname, 'brand', 'assets'), { index: false, fallthrough: false, maxAge: '30d' }));
-app.use('/demo/prototype', require('./prototypes/page').router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
 // requireApiKey fail-closes every /api route (503 api_key_not_configured)

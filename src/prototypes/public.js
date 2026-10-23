@@ -45,9 +45,18 @@ router.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
   const status = err && (err.status || err.statusCode);
   const tooLarge = status === 413 || (err && err.type === 'entity.too.large');
-  if (!tooLarge) return next(err);
+  if (tooLarge) {
+    stamp(res);
+    return res.status(413).json({ error: 'Payload too large' });
+  }
+  const parseError = err && (
+    err.type === 'entity.parse.failed'
+    || (err instanceof SyntaxError && (status === 400))
+  );
+  if (!parseError) return next(err);
+  // Same JSON body as the chat invalid_body contract. Stamp this route.
   stamp(res);
-  return res.status(413).json({ error: 'Payload too large' });
+  return res.status(400).json({ error: 'invalid_body' });
 });
 
 module.exports = { router };
