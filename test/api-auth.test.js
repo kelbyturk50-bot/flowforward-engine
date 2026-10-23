@@ -364,12 +364,16 @@ describe('api auth fails closed', { concurrency: false }, () => {
     // on the existing flags router, which stays behind the guard.
     assert.equal(mounts.some((mount) => mount.path.startsWith('/demo/live-chat')), false);
     assert.equal(mounts.some((mount) => mount.path.startsWith('/api/live-chat')), false);
+    const chatAuth = serverSrc.indexOf("app.use('/api/chat', requireApiKey)");
+    const parser = serverSrc.indexOf("app.use(express.json({ limit: '1mb' }))");
+    assert.ok(chatAuth > 0 && chatAuth < parser, '/api/chat checks the key before the body parser');
     for (const mount of mounts) {
       if (mount.path !== '/api' && !mount.path.startsWith('/api/')) continue;
       if (mount.index === auth.index) continue;
       const preGuard = mount.path === '/api/public/prototypes'
         || mount.window.includes('requireFlagApiKey')
-        || mount.window.includes('flagGate');
+        || mount.window.includes('flagGate')
+        || (mount.path === '/api/chat' && mount.window.includes('requireApiKey'));
       if (preGuard) {
         assert.ok(mount.index < auth.index, mount.path);
       } else {

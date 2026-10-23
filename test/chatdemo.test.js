@@ -1335,10 +1335,11 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     assert.equal(lifetime.ok, false);
     await pool.query(`DELETE FROM chat_demo_reservations`);
     await pool.query(`DELETE FROM chat_demo_spend_days`);
+    const soon = new Date(before.getTime() + 60 * 1000);
     const held = await reserve({ day: '2026-10-24', amountMicros: 5000, ceilingMicros: 5000, at: before });
     assert.ok(held);
     assert.equal(await reserve({ day: '2026-10-24', amountMicros: 1, ceilingMicros: 5000, at: before }), null);
-    assert.ok(await reserve({ day: '2026-10-25', amountMicros: 1, ceilingMicros: 5000, at: after }));
+    assert.ok(await reserve({ day: '2026-10-25', amountMicros: 1, ceilingMicros: 5000, at: soon }));
     const still = await readSpend('2026-10-24');
     assert.equal(still.reserved_micros, 5000);
 

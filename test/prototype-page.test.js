@@ -141,15 +141,28 @@ describe('prototype page', () => {
   });
 
   it('escapes a hostile business name and the watermark stays', async () => {
-    const p = await lead({ company: 'TEST: <style>.pt-ribbon{display:none}</style></div><script>alert(1)</script>' });
+    const hostile = 'TEST: <style>.pt-ribbon{display:none}</style></div><script>alert(1)</script>';
+    const p = await lead({ company: hostile });
     const made = await call(port, 'POST', '/api/prototypes', { body: { prospect_id: p.id } });
-    const page = await call(port, 'GET', pathOf(made.json.prototype.url), { key: '' });
-    assert.equal(page.status, 200);
-    assert.equal(page.text.includes('<style>.pt-ribbon{display:none}</style>'), false);
-    assert.equal(page.text.includes('<script>alert(1)</script>'), false);
-    assert.ok(page.text.includes('&lt;style&gt;.pt-ribbon{display:none}&lt;/style&gt;'));
-    assert.ok(page.text.includes(WATERMARK_TEXT));
-    console.log('[prototype-page] hostile name escaped; ribbon intact');
+    assert.equal(made.status, 400);
+    assert.equal(made.json.code, 'invalid_brand_name');
+    const none = await pool.query('SELECT COUNT(*)::int AS n FROM prototypes WHERE prospect_id = $1', [p.id]);
+    assert.equal(none.rows[0].n, 0);
+    const { renderPrototype } = require('../src/prototypes/page');
+    const html = renderPrototype({
+      brand_name: hostile,
+      industry: 'HVAC',
+      city: 'Provo',
+      color_primary: '#112233',
+      color_secondary: '#445566',
+      agent_type: 'estimate_followup',
+      expires_at: new Date('2026-11-06T00:00:00Z'),
+    });
+    assert.equal(html.includes('<style>.pt-ribbon{display:none}</style>'), false);
+    assert.equal(html.includes('<script>alert(1)</script>'), false);
+    assert.ok(html.includes('&lt;style&gt;.pt-ribbon{display:none}&lt;/style&gt;'));
+    assert.ok(html.includes(WATERMARK_TEXT));
+    console.log('[prototype-page] hostile name refused on create; renderer still escapes');
   });
 
   it('CRM: manual create falls back to estimate follow-up, refuses pest and franchise, and fresh revokes the old link', async () => {

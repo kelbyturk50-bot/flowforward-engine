@@ -1,5 +1,5 @@
-// Malformed JSON becomes one JSON body. The handler does not read NODE_ENV
-// and does not send err.message or err.stack.
+// Malformed JSON becomes one JSON body. The handler does not branch on
+// the environment and does not copy the parser error onto the response.
 
 const INVALID_BODY = Buffer.from('{"error":"invalid_body"}');
 
