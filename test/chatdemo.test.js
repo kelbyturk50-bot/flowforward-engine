@@ -272,33 +272,31 @@ describe('live chat pure checks', () => {
     assert.equal(demoRouter.stack[0].name, 'jsonParser');
   });
 
-  it('public chat and flag allowlist is the production CRM origins plus the two preview shapes', () => {
-    const { PRODUCTION_CRM_ORIGINS, HASH_PREVIEW_ORIGIN, GIT_PREVIEW_ORIGIN, originAllowed } = require('../src/chatdemo/cors');
+  it('public chat and flag allowlist is the three production CRM origins', () => {
+    const cors = require('../src/chatdemo/cors');
+    const { PRODUCTION_CRM_ORIGINS, originAllowed } = cors;
     const root = path.join(__dirname, '..');
-    const hashPreview = 'https://flowforward-engine-abc123def-turk11.vercel.app';
-    const gitPreview = 'https://flowforward-engine-git-my-branch-turk11.vercel.app';
     assert.deepEqual([...PRODUCTION_CRM_ORIGINS], [
       'https://flowforward-engine-six.vercel.app',
       'https://flowforward-engine-turk11.vercel.app',
       'https://flowforward-engine-git-main-turk11.vercel.app',
     ]);
-    assert.equal(HASH_PREVIEW_ORIGIN.source, '^https:\\/\\/flowforward-engine-[a-z0-9]{9}-turk11\\.vercel\\.app$');
-    assert.equal(HASH_PREVIEW_ORIGIN.flags, '');
-    assert.equal(GIT_PREVIEW_ORIGIN.source, '^https:\\/\\/flowforward-engine-git-[a-z0-9-]+-turk11\\.vercel\\.app$');
-    assert.equal(GIT_PREVIEW_ORIGIN.flags, '');
+    assert.equal(cors.HASH_PREVIEW_ORIGIN, undefined);
+    assert.equal(cors.GIT_PREVIEW_ORIGIN, undefined);
+    const corsSrc = fs.readFileSync(path.join(root, 'src', 'chatdemo', 'cors.js'), 'utf8');
+    assert.equal(corsSrc.includes('HASH_PREVIEW'), false);
+    assert.equal(corsSrc.includes('GIT_PREVIEW'), false);
+    assert.equal(/\[a-z0-9\]\{9\}/.test(corsSrc), false);
+    assert.equal(corsSrc.includes('flowforward-engine-git-['), false);
     const apiBase = fs.readFileSync(path.join(root, 'web', 'src', 'api-base.js'), 'utf8');
     for (const origin of PRODUCTION_CRM_ORIGINS) {
       assert.equal(originAllowed(origin), true, origin);
       assert.ok(apiBase.includes(origin.slice('https://'.length)), origin);
     }
-    assert.equal(HASH_PREVIEW_ORIGIN.test('https://flowforward-engine-turk11.vercel.app'), false);
-    assert.equal(GIT_PREVIEW_ORIGIN.test('https://flowforward-engine-turk11.vercel.app'), false);
-    assert.equal(originAllowed(hashPreview), true);
-    assert.equal(HASH_PREVIEW_ORIGIN.test(hashPreview), true);
-    assert.equal(originAllowed(gitPreview), true);
-    assert.equal(GIT_PREVIEW_ORIGIN.test(gitPreview), true);
     const denied = [
+      'https://flowforward-engine-abc123def-turk11.vercel.app',
       'https://flowforward-engine-x-turk11.vercel.app',
+      'https://flowforward-engine-git-my-branch-turk11.vercel.app',
       'https://flowforward-engine-abcdefgh-turk11.vercel.app',
       'https://flowforward-engine-ABCDEFGHI-turk11.vercel.app',
       'https://flowforward-engine-abc123def-turk11.vercel.app.evil.com',
@@ -310,10 +308,16 @@ describe('live chat pure checks', () => {
       'https://flowforward-engine-abc123def-turk11.vercel.app:444',
       'https://flowforward-engine-abc123def-turk11.vercel.app/',
       'https://evil@flowforward-engine-abc123def-turk11.vercel.app',
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
       'null',
       '*',
       '',
       'https://flowforward-engine-abc123def-turk11.vercel.app\n',
+      'https://flowforward-engine-six.vercel.app\n',
+      'https://flowforward-engine-six.vercel.app.evil.com',
+      'https://flowforward-engine-six.vercel.app:443',
+      'https://flowforward-engine-six.vercel.app/',
     ];
     for (const origin of denied) assert.equal(originAllowed(origin), false, origin);
     assert.equal(originAllowed(undefined), false);
@@ -937,16 +941,17 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
       'https://flowforward-engine-six.vercel.app',
       'https://flowforward-engine-turk11.vercel.app',
       'https://flowforward-engine-git-main-turk11.vercel.app',
-      'https://flowforward-engine-abc123def-turk11.vercel.app',
-      'https://flowforward-engine-git-my-branch-turk11.vercel.app',
     ];
     const denied = [
+      'https://flowforward-engine-abc123def-turk11.vercel.app',
       'https://flowforward-engine-x-turk11.vercel.app',
+      'https://flowforward-engine-git-my-branch-turk11.vercel.app',
       'https://flowforward-engine-abcdefgh-turk11.vercel.app',
       'https://flowforward-engine-ABCDEFGHI-turk11.vercel.app',
       'https://flowforward-engine-abc123def-turk11.vercel.app.evil.com',
       'http://flowforward-engine-abc123def-turk11.vercel.app',
       'https://evil-flowforward-engine-abc123def-turk11.vercel.app',
+      'http://localhost:5173',
       'null',
       'http://crm.test',
     ];
@@ -955,6 +960,8 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
       assert.equal(res.headers['access-control-allow-methods'], undefined, label);
       assert.equal(res.headers['access-control-allow-headers'], undefined, label);
       assert.equal(res.headers['access-control-allow-credentials'], undefined, label);
+      assert.equal(res.headers['access-control-max-age'], undefined, label);
+      assert.equal(res.headers['vary'], 'Origin', label);
       assert.notEqual(res.headers['access-control-allow-origin'], '*', label);
     }
     const preflightHeaders = {
@@ -971,6 +978,7 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
       assert.equal(preflight.headers['vary'], 'Origin', origin);
       assert.equal(preflight.headers['access-control-allow-methods'], 'POST, OPTIONS', origin);
       assert.equal(preflight.headers['access-control-allow-headers'], 'Content-Type', origin);
+      assert.equal(preflight.headers['access-control-max-age'], '600', origin);
       assert.equal(preflight.headers['access-control-allow-credentials'], undefined, origin);
       const protoPreflight = await request('OPTIONS', '/api/public/prototypes/not-a-token/chat/session', {
         origin,
@@ -979,6 +987,7 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
       assert.equal(protoPreflight.status, 204, origin);
       assert.equal(protoPreflight.headers['access-control-allow-origin'], origin, origin);
       assert.equal(protoPreflight.headers['access-control-allow-methods'], 'POST, OPTIONS', origin);
+      assert.equal(protoPreflight.headers['access-control-max-age'], '600', origin);
       assert.equal(protoPreflight.headers['access-control-allow-credentials'], undefined, origin);
       const posted = await request('POST', '/api/public/chat/demos/no-such-demo/session', {
         origin,
@@ -989,6 +998,7 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
       assert.equal(posted.headers['vary'], 'Origin', origin);
       assert.equal(posted.headers['access-control-allow-credentials'], undefined, origin);
       assert.equal(posted.headers['access-control-allow-methods'], undefined, origin);
+      assert.equal(posted.headers['access-control-max-age'], undefined, origin);
       const listed = await request('GET', '/api/public/chat/demos', { origin });
       assert.equal(listed.status, 200, origin);
       assert.equal(listed.headers['access-control-allow-origin'], origin, origin);
@@ -1006,6 +1016,7 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
       assert.equal(flagPreflight.headers['vary'], 'Origin', origin);
       assert.equal(flagPreflight.headers['access-control-allow-methods'], 'GET', origin);
       assert.equal(flagPreflight.headers['access-control-allow-headers'], undefined, origin);
+      assert.equal(flagPreflight.headers['access-control-max-age'], '600', origin);
       assert.equal(flagPreflight.headers['access-control-allow-credentials'], undefined, origin);
     }
     for (const origin of denied) {
@@ -1056,13 +1067,19 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
       body: {},
     });
     assert.equal(openedPreview.status, 201);
-    assert.equal(openedPreview.headers['access-control-allow-origin'], 'https://flowforward-engine-abc123def-turk11.vercel.app');
+    assertNoAcao(openedPreview, 'hash lookalike');
     const openedGit = await request('POST', '/api/public/chat/demos/wasatch-heating/session', {
       origin: 'https://flowforward-engine-git-my-branch-turk11.vercel.app',
       body: {},
     });
     assert.equal(openedGit.status, 201);
-    assert.equal(openedGit.headers['access-control-allow-origin'], 'https://flowforward-engine-git-my-branch-turk11.vercel.app');
+    assertNoAcao(openedGit, 'git lookalike');
+    const openedShort = await request('POST', '/api/public/chat/demos/wasatch-heating/session', {
+      origin: 'https://flowforward-engine-x-turk11.vercel.app',
+      body: {},
+    });
+    assert.equal(openedShort.status, 201);
+    assertNoAcao(openedShort, 'short lookalike');
     const openedGlobal = await request('POST', '/api/public/chat/demos/wasatch-heating/session', {
       origin: 'http://crm.test',
       body: {},
@@ -1080,6 +1097,115 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     const control = await request('GET', '/api/cors-control', { origin: 'http://crm.test', key: true });
     assert.equal(control.status, 200);
     assert.equal(control.headers['access-control-allow-origin'], 'http://crm.test');
+  });
+
+  it('text and form posts are 415 before a cap counter', async () => {
+    await setFlags(true);
+    const proto = await makeProto();
+    const counters = require('../src/chatdemo/counters');
+    const orig = {
+      prepareMint: counters.prepareMint,
+      prepareMessage: counters.prepareMessage,
+      rememberBumps: counters.rememberBumps,
+      runMint: counters.runMint,
+      runMessage: counters.runMessage,
+    };
+    const hits = { prepare: 0, bump: 0, run: 0 };
+    counters.prepareMint = async (...args) => {
+      hits.prepare += 1;
+      return orig.prepareMint(...args);
+    };
+    counters.prepareMessage = async (...args) => {
+      hits.prepare += 1;
+      return orig.prepareMessage(...args);
+    };
+    counters.rememberBumps = (keys) => {
+      hits.bump += 1;
+      return orig.rememberBumps(keys);
+    };
+    counters.runMint = async (...args) => {
+      hits.run += 1;
+      return orig.runMint(...args);
+    };
+    counters.runMessage = async (...args) => {
+      hits.run += 1;
+      return orig.runMessage(...args);
+    };
+    const origQuery = pool.query.bind(pool);
+    let queries = 0;
+    pool.query = async (...args) => {
+      queries += 1;
+      return origQuery(...args);
+    };
+    const paths = [
+      '/api/public/chat/demos/wasatch-heating/session',
+      '/api/public/chat/demos/wasatch-heating/message',
+      '/api/public/chat/demos/wasatch-heating/cta',
+      `/api/public/prototypes/${proto.token}/chat/session`,
+      `/api/public/prototypes/${proto.token}/chat/message`,
+      `/api/public/prototypes/${proto.token}/chat/cta`,
+    ];
+    const bodies = [
+      ['text/plain', 'hello'],
+      ['text/plain; charset=utf-8', 'hello'],
+      ['application/x-www-form-urlencoded', 'sessionId=abc'],
+      ['multipart/form-data; boundary=----ff', '------ff\r\n'],
+      ['application/json; foo=bar', '{}'],
+      ['application/json; charset=utf-8; foo=bar', '{}'],
+      ['application/json; charset=utf-8; charset=utf-8', '{}'],
+      ['application/json; charset=', '{}'],
+      ['application/jsonx', '{}'],
+      ['application/json-patch+json', '{}'],
+    ];
+    try {
+      for (const reqPath of paths) {
+        for (const [type, raw] of bodies) {
+          const res = await request('POST', reqPath, {
+            raw: Buffer.from(raw),
+            headers: { 'content-type': type },
+            origin: 'https://flowforward-engine-six.vercel.app',
+          });
+          assert.equal(res.status, 415, `${type} ${reqPath}`);
+          assert.equal(res.text, '{"error":"unsupported_media_type"}', reqPath);
+          assert.equal(res.headers['x-robots-tag'], 'noindex, nofollow', reqPath);
+          assert.equal(res.headers['referrer-policy'], 'no-referrer', reqPath);
+          assert.equal(res.headers['cache-control'], 'no-store', reqPath);
+          assert.equal(res.headers['x-content-type-options'], 'nosniff', reqPath);
+          assert.match(String(res.headers['content-type']), /^application\/json/, reqPath);
+        }
+      }
+      for (const reqPath of paths) {
+        // No Content-Type at all is also a simple CORS POST.
+        const res = await request('POST', reqPath, { origin: 'https://flowforward-engine-six.vercel.app' });
+        assert.equal(res.status, 415, `no content-type ${reqPath}`);
+        assert.equal(res.text, '{"error":"unsupported_media_type"}', reqPath);
+      }
+      assert.equal(hits.prepare, 0);
+      assert.equal(hits.bump, 0);
+      assert.equal(hits.run, 0);
+      assert.equal(queries, 0);
+      const charset = await request('POST', '/api/public/chat/demos/wasatch-heating/session', {
+        body: {},
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      });
+      assert.equal(charset.status, 201, charset.text);
+      const packed = await request('POST', `/api/public/prototypes/${proto.token}/chat/session`, {
+        body: {},
+        headers: { 'content-type': 'application/json;charset=UTF-8' },
+      });
+      assert.equal(packed.status, 201, packed.text);
+      assert.ok(hits.prepare >= 2);
+      assert.ok(hits.bump >= 2);
+      assert.ok(hits.run >= 2);
+      assert.ok(queries > 0);
+    } finally {
+      pool.query = origQuery;
+      counters.prepareMint = orig.prepareMint;
+      counters.prepareMessage = orig.prepareMessage;
+      counters.rememberBumps = orig.rememberBumps;
+      counters.runMint = orig.runMint;
+      counters.runMessage = orig.runMessage;
+    }
   });
 
   it('message length uses NFKC code points in express and postgres', async () => {
