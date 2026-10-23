@@ -2,7 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { SampleTag, liveToast, usePrototypeNotify } from '../components/PrototypeWatermark';
 import { normalizeHex, presentBrand } from '../prototypes/brand';
 import PrototypeLayout from '../prototypes/PrototypeLayout';
-import { INVALID_ERROR, LIMIT_MESSAGE, PAUSE_MESSAGE, TOO_LONG_ERROR } from './contract.js';
+import {
+  INVALID_ERROR,
+  LIMIT_NOTICE,
+  PAUSE_LOCKED_MESSAGE,
+  PAUSE_MESSAGE,
+  TOO_LONG_ERROR,
+} from './contract.js';
 import {
   AI_DEMO_LABEL,
   CRM_CARD_TITLE,
@@ -266,17 +272,21 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND, transport = nu
         return;
       }
       if (status === 429) {
-        dropTurn(userId, chipId);
-        if (restore != null) setDraft(restore);
+        setTurns((current) => current.map((turn) => (
+          turn.id === userId ? { ...turn, pending: false, failed: false } : turn
+        )));
+        setDraft('');
         setLocked(true);
-        setNotice({ kind: 'limit', text: data.message || LIMIT_MESSAGE });
+        setNotice({ kind: 'limit', text: LIMIT_NOTICE });
         return;
       }
       if (status === 503) {
-        dropTurn(userId, chipId);
-        if (restore != null) setDraft(restore);
+        setTurns((current) => current.map((turn) => (
+          turn.id === userId ? { ...turn, pending: false, failed: false } : turn
+        )));
+        setDraft('');
         setLocked(true);
-        setNotice({ kind: 'pause', text: data.pause_message || PAUSE_MESSAGE });
+        setNotice({ kind: 'pause', text: PAUSE_LOCKED_MESSAGE });
         return;
       }
       if (status === 410) {
@@ -339,9 +349,13 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND, transport = nu
       <main
         id="prototype-main"
         className="live-chat"
-        style={secondary ? { boxShadow: `inset 0 4px 0 ${secondary}` } : undefined}
       >
-        <h1 className="live-chat-title">{brand.name}</h1>
+        <h1
+          className="live-chat-title"
+          style={secondary ? { boxShadow: `inset 0 -3px 0 ${secondary}` } : undefined}
+        >
+          {brand.name}
+        </h1>
         <div className={`live-chat-banner${bannerOpen ? ' is-open' : ''}`}>
           <button
             type="button"

@@ -44,6 +44,7 @@ describe('PrototypeCard', () => {
     const { unmount } = render(<PrototypeCard prospectId={12} prototype={live} />);
     await userEvent.click(screen.getByRole('button', { name: 'Turn off link' }));
     expect(api.revokePrototype).not.toHaveBeenCalled();
+    expect(screen.getByText('The prototype and chat link will stop working for anyone who has them.')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Turn off' }));
     expect(api.revokePrototype).toHaveBeenCalledWith(4);
     expect(await screen.findByRole('button', { name: 'Make a prototype' })).toBeInTheDocument();
@@ -68,10 +69,11 @@ describe('PrototypeCard', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Create demo link' }));
     expect(api.createPrototype).toHaveBeenCalledWith(12, false);
     expect(await screen.findByText(chat)).toBeInTheDocument();
-    expect(screen.getByText(/Works until November 6, 2026 \(Mountain Time\)/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Works until Nov 6, 2026, 11:00 AM MT/).length).toBeGreaterThan(0);
     expect(screen.queryByText(railway, { selector: '.demo-link-url' })).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Copy demo link' }));
     expect(writeText).toHaveBeenCalledWith(chat);
+    expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument();
     created.unmount();
 
     api.createPrototype.mockClear();
@@ -79,8 +81,20 @@ describe('PrototypeCard', () => {
     render(<PrototypeCard prospectId={12} prototype={{ ...live, url: railway, expired: true }} />);
     expect(screen.queryByRole('button', { name: 'Copy demo link' })).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Create demo link' }));
+    expect(api.createPrototype).not.toHaveBeenCalled();
+    expect(screen.getByText('The current link will stop working.')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Create demo link' }));
     expect(api.createPrototype).toHaveBeenCalledWith(12, true);
     const css = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../styles.css'), 'utf8');
     expect(css).toMatch(/\.demo-link-copy\s*\{[^}]*min-height:\s*44px/);
+  });
+
+  it('asks before replacing a live link', async () => {
+    render(<PrototypeCard prospectId={12} prototype={live} />);
+    await userEvent.click(screen.getByRole('button', { name: 'New link' }));
+    expect(api.createPrototype).not.toHaveBeenCalled();
+    expect(screen.getByText('The current link will stop working.')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'New link' }));
+    expect(api.createPrototype).toHaveBeenCalledWith(12, true);
   });
 });

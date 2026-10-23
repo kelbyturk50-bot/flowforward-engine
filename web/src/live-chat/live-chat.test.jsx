@@ -174,6 +174,7 @@ describe('live chat demo', () => {
       expect(chatCalls(fetchMock)).toEqual([]);
       expect(refreshSpy).not.toHaveBeenCalled();
       expect(api.flags).not.toHaveBeenCalled();
+      if (open) expect(fetchMock).not.toHaveBeenCalled();
       for (const call of fetchMock.mock.calls) expectPublicCall(call);
       view.unmount();
     }
@@ -217,8 +218,7 @@ describe('live chat demo', () => {
     expect(indexHtml).toContain('<meta name="referrer" content="no-referrer"');
     expect(document.head.querySelector('meta[name="robots"]')).toBeNull();
     expect(api.flags).not.toHaveBeenCalled();
-    expect(chatCalls(fetchMock)).toEqual([]);
-    expect(fetchMock.mock.calls.every((call) => String(call[0]).endsWith('/api/public/flags'))).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(refreshSpy).not.toHaveBeenCalled();
     demo.unmount();
 
@@ -274,7 +274,7 @@ describe('live chat demo', () => {
 
     await user.click(screen.getByRole('button', { name: 'How much for a new furnace?' }));
     expect(await screen.findByText(DECLINE_PRICE)).toBeInTheDocument();
-    expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument();
+    expect(container.querySelector('.live-chat-thread').textContent).not.toMatch(/\$\d/);
 
     await user.click(screen.getByRole('button', { name: 'Are you open Saturday?' }));
     expect(await screen.findByText(/Hours on file are Monday–Friday, 8:00 AM–5:00 PM/)).toBeInTheDocument();
@@ -420,11 +420,16 @@ describe('live chat demo', () => {
     expect(phoneRules[0]).toContain('flex-direction: column');
     expect(phoneRules[0]).toContain('height: calc(100vh - 8.75rem)');
     expect(phoneRules[0]).toContain('height: calc(100dvh - 8.75rem)');
-    expect(phoneRules[0]).toContain('min-height: calc(200px + 13.75rem)');
+    expect(phoneRules[0]).toContain('min-height: 0');
+    expect(phoneRules[0]).toContain('max-height: calc(100dvh - 8.75rem)');
     expect(phoneRules[0]).toContain('overflow: hidden');
     const threadRule = css.slice(css.indexOf('.live-chat-thread {'), css.indexOf('.live-chat-dock'));
     expect(threadRule).toContain('flex: 1 1 auto');
-    expect(threadRule).toContain('min-height: 200px');
+    expect(threadRule).toContain('min-height: 0');
+    const outRule = css.slice(css.indexOf('.live-chat-bubble.is-out {'), css.indexOf('.live-chat-chips'));
+    expect(outRule).toContain('background: var(--juniper)');
+    expect(outRule).not.toContain('proto-accent');
+    expect(css).toMatch(/\.live-chat-input:disabled\s*\{[^}]*background:\s*#E4EBE8/);
     expect(threadRule).toContain('overflow-y: auto');
     expect(threadRule).not.toContain('42dvh');
     expect(css).toMatch(/\.live-chat-chip \{[^}]*border-color:\s*#3E4C4F/);
@@ -464,6 +469,7 @@ describe('live chat demo', () => {
     });
     const preview = render(<LiveChatGate />);
     expect(await screen.findByText(DISCLOSURE)).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
     preview.unmount();
 
     window.sessionStorage.clear();
@@ -474,6 +480,7 @@ describe('live chat demo', () => {
     const dev = render(<LiveChatGate />);
     expect(await screen.findByText(DISCLOSURE)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: BANNER_SUMMARY })).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
     dev.unmount();
     expect(chatCalls(fetchMock)).toEqual([]);
   });

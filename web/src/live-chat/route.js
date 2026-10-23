@@ -1,3 +1,5 @@
+import { PREVIEW_QUERY_BUILD } from '../flags.js';
+
 // Public chat routes. A matching path does not authenticate anyone.
 // /demo/live-chat is the sample demo. /demo/prototype/:token is one shop's
 // chat. The token is 43 unpadded base64url characters, the same shape the
@@ -56,6 +58,7 @@ function encodeList(value) {
 }
 
 export function liveChatHref(search = '') {
+  if (!PREVIEW_QUERY_BUILD) return LIVE_CHAT_PATH;
   const current = new URLSearchParams(String(search || '').replace(/^\?/, ''));
   const flags = current.get('flags');
   if (!flags) return LIVE_CHAT_PATH;

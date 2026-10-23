@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react';
+import PrototypeWatermark from '../components/PrototypeWatermark';
 import NotFound from '../NotFound';
 import { normalizeHex } from '../prototypes/brand';
 import LiveChatDemo from './LiveChatDemo';
 import {
   EXPIRED_TITLE,
-  LIMIT_MESSAGE,
+  LIMIT_NOTICE,
+  LINK_LIFETIME,
+  LINK_NEXT_STEP,
   LOAD_ERROR,
-  PAUSE_MESSAGE,
+  PAUSE_LOCKED_MESSAGE,
 } from './contract.js';
-import { formatDenverDate } from './dates.js';
+import { formatDenverDateTime } from './dates.js';
 import { chipsFor } from './fixture.js';
 import { publicJson } from './public-client.js';
 
@@ -72,7 +75,7 @@ function interpretSession(result, extra) {
       status: 'ready',
       data,
       locked: true,
-      notice: { kind: 'pause', text: data.pause_message || PAUSE_MESSAGE },
+      notice: { kind: 'pause', text: PAUSE_LOCKED_MESSAGE },
       ...extra,
     };
   }
@@ -81,7 +84,7 @@ function interpretSession(result, extra) {
       status: 'ready',
       data,
       locked: true,
-      notice: { kind: 'limit', text: data.message || LIMIT_MESSAGE },
+      notice: { kind: 'limit', text: LIMIT_NOTICE },
       ...extra,
     };
   }
@@ -106,14 +109,19 @@ async function openPrototype(token) {
 }
 
 function ExpiredDemo({ expiresAt }) {
-  const when = formatDenverDate(expiresAt);
+  const when = formatDenverDateTime(expiresAt);
   return (
-    <main className="not-found">
-      <div className="not-found-card">
-        <h1>{EXPIRED_TITLE}</h1>
-        <p>{when ? `It expired on ${when} (Mountain Time).` : 'This link is no longer active.'}</p>
-      </div>
-    </main>
+    <div className="prototype-root">
+      <PrototypeWatermark />
+      <main className="live-chat-expired">
+        <div className="not-found-card">
+          <h1>{EXPIRED_TITLE}</h1>
+          <p>{LINK_LIFETIME}</p>
+          <p>{when ? `This one expired on ${when}.` : 'This link is no longer active.'}</p>
+          <p>{LINK_NEXT_STEP}</p>
+        </div>
+      </main>
+    </div>
   );
 }
 

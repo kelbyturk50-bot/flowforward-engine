@@ -3,13 +3,20 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { WATERMARK_TEXT } from '../components/PrototypeWatermark';
 import { _setFlagRuntimeForTests } from '../flags';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   INVALID_ERROR,
-  LIMIT_MESSAGE,
+  LIMIT_NOTICE,
+  LINK_LIFETIME,
+  LINK_NEXT_STEP,
+  PAUSE_LOCKED_MESSAGE,
   PAUSE_MESSAGE,
   TOO_LONG_ERROR,
 } from './contract.js';
 import LiveChatGate from './LiveChatGate';
+import { parsePublicFlags } from './public-flags.js';
 
 const SESSION = 's'.repeat(43);
 const TOKEN = 'p'.repeat(43);
@@ -147,7 +154,8 @@ describe('live chat public API', () => {
     expect(screen.getByRole('button', { name: 'Do you service Salt Lake City?' })).toBeInTheDocument();
     expect(container.querySelector('img')).toBeNull();
     expect(container.innerHTML).not.toContain('evil.example');
-    expect(container.querySelector('.live-chat').getAttribute('style')).toMatch(/#F4D03F/i);
+    expect(container.querySelector('.live-chat-title').getAttribute('style')).toMatch(/#F4D03F/i);
+    expect(container.querySelector('.live-chat').getAttribute('style')).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Sample Home Services' })).toBeNull();
 
     await user.click(screen.getByRole('button', { name: 'My water heater is leaking all over the garage' }));
@@ -175,7 +183,7 @@ describe('live chat public API', () => {
     expect(await screen.findByRole('heading', { level: 1, name: 'Sample Home Services' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Are you open Saturday?' }));
     expect(await screen.findByText(/Hours on file are Monday–Friday/)).toBeInTheDocument();
-    expect(paths().filter((path) => path.includes('/chat') || path.includes('/prototypes'))).toEqual([]);
+    expect(paths()).toEqual([]);
   }, 15000);
 
   it('shows not-found when flags are off, malformed, or the API says not_found', async () => {
@@ -226,9 +234,14 @@ describe('live chat public API', () => {
     });
     render(<LiveChatGate token={TOKEN} />);
     expect(await screen.findByRole('heading', { name: 'This demo link has expired' })).toBeInTheDocument();
-    expect(screen.getByText(/October 23, 2026/)).toBeInTheDocument();
-    expect(screen.getByText(/Mountain Time/)).toBeInTheDocument();
+    expect(screen.getByText(LINK_LIFETIME)).toBeInTheDocument();
+    expect(screen.getByText('This one expired on Oct 23, 2026, 11:30 PM MT.')).toBeInTheDocument();
+    expect(screen.getByText(LINK_NEXT_STEP)).toBeInTheDocument();
+    expect(screen.getByText(WATERMARK_TEXT)).toBeInTheDocument();
     expect(screen.queryByLabelText('Text the business')).toBeNull();
+    const store = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../../../src/prototypes/store.js'), 'utf8');
+    expect(store).toContain("INTERVAL '336 hours'");
+    expect(LINK_LIFETIME).toContain('14 days');
   });
 
   it('disables the composer for a paused demo and a reached limit', async () => {
@@ -241,7 +254,8 @@ describe('live chat public API', () => {
       throw new Error(`unexpected ${path}`);
     });
     const paused = render(<LiveChatGate />);
-    expect(await screen.findByText(PAUSE_MESSAGE)).toBeInTheDocument();
+    expect(await screen.findByText(PAUSE_LOCKED_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(PAUSE_MESSAGE)).toBeNull();
     expect(screen.getByLabelText('Text the business')).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
     paused.unmount();
@@ -250,12 +264,12 @@ describe('live chat public API', () => {
       if (path === '/api/public/flags') return { status: 200, body: FLAGS_ON };
       if (path === '/api/public/chat/demos') return { status: 200, body: { watermark: WATERMARK_TEXT, demos: [wasatch()] } };
       if (path.endsWith('/session')) {
-        return { status: 429, body: envelope({ error: 'demo_limit', message: LIMIT_MESSAGE }) };
+        return { status: 429, body: envelope({ error: 'demo_limit', message: 'Demo limit reached' }) };
       }
       throw new Error(`unexpected ${path}`);
     });
     render(<LiveChatGate />);
-    expect(await screen.findByText(LIMIT_MESSAGE)).toBeInTheDocument();
+    expect(await screen.findByText(LIMIT_NOTICE)).toBeInTheDocument();
     expect(screen.getByLabelText('Text the business')).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'My water heater is leaking all over the garage' })).toBeDisabled();
@@ -395,4 +409,104 @@ describe('live chat public API', () => {
     expect(await screen.findByText('Canyon sample reply.')).toBeInTheDocument();
     expect(paths().some((path) => path === `/api/public/prototypes/${TOKEN}/chat/message`)).toBe(true);
   }, 15000);
+
+  it('keeps a token URL on not-found when the preview override is on and real flags are off', async () => {
+    at(`/demo/prototype/${TOKEN}?flags=FF_PROTOTYPE_GALLERY,FF_LIVE_CHAT_DEMO`);
+    install(async (path) => {
+      if (path === '/api/public/flags') {
+        return { status: 200, body: { FF_PROTOTYPE_GALLERY: false, FF_LIVE_CHAT_DEMO: false } };
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+    render(<LiveChatGate token={TOKEN} />);
+    expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+    expect(screen.queryByText(/I'm an AI receptionist demo/)).toBeNull();
+    expect(paths().some((path) => path.includes('/chat/'))).toBe(false);
+  });
+
+  it('stays not-found when the gallery flag is off, on the sample route and the token route', async () => {
+    const galleryOff = { FF_PROTOTYPE_GALLERY: false, FF_LIVE_CHAT_DEMO: true };
+    install(async (path) => {
+      if (path === '/api/public/flags') return { status: 200, body: galleryOff };
+      throw new Error(`unexpected ${path}`);
+    });
+    const sample = render(<LiveChatGate />);
+    expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+    expect(paths().some((path) => path.includes('/chat/'))).toBe(false);
+    sample.unmount();
+
+    fetchMock.mockClear();
+    at(`/demo/prototype/${TOKEN}`);
+    install(async (path) => {
+      if (path === '/api/public/flags') return { status: 200, body: galleryOff };
+      throw new Error(`unexpected ${path}`);
+    });
+    render(<LiveChatGate token={TOKEN} />);
+    expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+    expect(paths().some((path) => path.includes('/chat/'))).toBe(false);
+  });
+
+  it('rejects a public flags payload with an extra key', () => {
+    expect(parsePublicFlags({ ...FLAGS_ON, extra: true })).toBeNull();
+  });
+
+  it('treats a non-200 flags response as closed even when the body lists both flags', async () => {
+    install(async (path) => {
+      if (path === '/api/public/flags') return { status: 404, body: FLAGS_ON };
+      throw new Error(`unexpected ${path}`);
+    });
+    render(<LiveChatGate />);
+    expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+    expect(paths().some((path) => path.includes('/chat/'))).toBe(false);
+  });
+
+  it('keeps the sent bubble when a later message hits the limit', async () => {
+    const user = userEvent.setup();
+    install(async (path) => {
+      if (path === '/api/public/flags') return { status: 200, body: FLAGS_ON };
+      if (path === '/api/public/chat/demos') return { status: 200, body: { watermark: WATERMARK_TEXT, demos: [wasatch()] } };
+      if (path.endsWith('/session')) {
+        return { status: 201, body: envelope({ sessionId: SESSION, disclosure: WASATCH_DISCLOSURE }) };
+      }
+      if (path.endsWith('/message')) return { status: 429, body: envelope({ error: 'demo_limit', message: 'Demo limit reached' }) };
+      throw new Error(`unexpected ${path}`);
+    });
+    render(<LiveChatGate />);
+    const box = await screen.findByLabelText('Text the business');
+    await user.type(box, 'Are you open Saturday?');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText(LIMIT_NOTICE)).toBeInTheDocument();
+    expect(document.querySelector('.live-chat-bubble.is-out')).toHaveTextContent('Are you open Saturday?');
+    expect(screen.getByLabelText('Text the business')).toHaveValue('');
+    expect(screen.getByLabelText('Text the business')).toBeDisabled();
+  });
+
+  it('ignores a saved API address and never sends credentials', async () => {
+    localStorage.setItem('ff.apiUrl', 'https://evil.example');
+    const seen = [];
+    install(async (path, init) => {
+      seen.push({ url: String(fetchMock.mock.calls.at(-1)[0]), credentials: init.credentials });
+      if (path === '/api/public/flags') return { status: 200, body: FLAGS_ON };
+      if (path === '/api/public/chat/demos') return { status: 200, body: { watermark: WATERMARK_TEXT, demos: [wasatch()] } };
+      if (path.endsWith('/session')) {
+        return { status: 201, body: envelope({ sessionId: SESSION, disclosure: WASATCH_DISCLOSURE }) };
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+    render(<LiveChatGate />);
+    expect(await screen.findByText(WASATCH_DISCLOSURE)).toBeInTheDocument();
+    expect(seen.length).toBeGreaterThan(0);
+    for (const call of seen) {
+      expect(call.url.startsWith('http://localhost:3000')).toBe(true);
+      expect(call.url).not.toContain('evil.example');
+      expect(call.credentials).toBe('omit');
+    }
+    const source = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'public-client.js'), 'utf8');
+    expect(source).toContain("credentials: 'omit'");
+    expect(source).not.toMatch(/credentials:\s*['"]include['"]/);
+    expect(source).not.toMatch(/credentials:\s*['"]same-origin['"]/);
+    expect(source).not.toContain('ff.apiUrl');
+    expect(source).not.toContain('*');
+    expect(source).not.toMatch(/x-api-key/i);
+  });
 });

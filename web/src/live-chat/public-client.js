@@ -3,11 +3,8 @@
 
 import { resolveApiBase } from '../api-base.js';
 
-function readSavedUrl() {
-  try { return localStorage.getItem('ff.apiUrl') || ''; }
-  catch { return ''; }
-}
-
+// Demo pages ignore a Settings-saved API address. The origin is the one baked
+// into the build (VITE_API_URL, otherwise the dev or production default).
 export function publicApiBase() {
   return resolveApiBase({
     viteApiUrl: import.meta.env.VITE_API_URL,
@@ -16,7 +13,7 @@ export function publicApiBase() {
     hostname: typeof window !== 'undefined' ? window.location.hostname : '',
     port: typeof window !== 'undefined' ? window.location.port : '',
     protocol: typeof window !== 'undefined' ? window.location.protocol : '',
-    savedUrl: readSavedUrl(),
+    savedUrl: '',
   });
 }
 
