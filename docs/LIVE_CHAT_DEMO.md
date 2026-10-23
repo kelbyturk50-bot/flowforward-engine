@@ -154,6 +154,22 @@ Fixture copy must avoid these words, e.g. no "How can I help today?".
   4. "Use the tools for slots, emergencies, lead capture and handoff. Never promise these in prose."
   5. "Never mention reviews or star ratings."
   6. Stay on the business's service topics. Decline anything else briefly.
+- [ ] **Prompt construction under the input cap** (`buildPrompt` in `src/chatdemo/prompt.js`, a pure function with no I/O):
+  - **Measurement.** The size is a deterministic, local, conservative bound, `boundTokens`, with no tokenizer and no network call:
+    - each part counts its **UTF-8 byte length**: the system text, each tool definition as `JSON.stringify`, the `<business_facts>` block, and each history message and the current message;
+    - plus **8 tokens of overhead** per message, block and tool.
+    - Byte length works as an upper bound because a byte-level BPE token always covers at least one byte, so the token count can't exceed the byte count. For English it overcounts about 3–4×, which is intended. If the actual `usage` input ever exceeds the bound, settlement still records it as overshoot (§8.3) and logs `input_bound_exceeded`.
+  - **Never trimmed:**
+    - the static system prompt with rules 1–6 and the four tool definitions;
+    - the pinned facts `business_name`, `phone` and `time_zone`, which the disclosure and banner need;
+    - the current user message, which is at most 500 chars, so at most 2,000 bytes.
+  - **History window.** Only the last 8 messages (4 user/assistant exchanges) of the in-memory context are candidates.
+  - **Trim order**, deterministic, one step at a time until `boundTokens ≤ CHAT_CAPS.maxInputTokens`:
+    1. Drop the **oldest history exchange**, user and assistant together, so the conversation still starts with a user message. Repeat until no history is left.
+    2. Then drop facts **lowest priority first**, in the fixed exported order `FACT_TRIM_ORDER`: `years_in_business`, `warranty`, `guarantee`, `bonding`, `maintenance_plan`, `financing`, `free_estimate`, `address`, `license_number`, `license`, `insurance`, `price`, `service_area`, `services`, `emergency_247`, `hours`.
+  - **Still too big?** If the never-trimmed parts plus the current message still exceed the cap, the turn uses the fixture responder and logs `prompt_over_cap`. The model is never called with an oversized prompt.
+  - **Dropped facts can't be claimed.** The validator (§5) checks the reply against the facts **actually sent**, so the model can't claim a dropped fact.
+  - **Static part checked in CI.** A test asserts the static part (system, tools and pinned facts at 500 chars each) stays at or under 6,000 bound tokens, so a prompt edit can't push it over the cap unnoticed.
 
 ## 8. Caps, ceiling and gates (binding: all ship before any live call is possible)
 Links reuse the existing `prototypes` row and token (`src/prototypes/tokens.js`, 14-day expiry, `prototypes_expires_14d`). Links are minted only in the CRM, behind the API key. A **session** is minted publicly when a chat opens.
@@ -177,6 +193,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 | `maxMintsPerIpHour` | session mints per IP per hour | 5 | clock hour (UTC `date_trunc('hour')`) |
 | `maxMintsPerIpDay` | session mints per IP per day | 20 | FlowForward day |
 | `maxMessagesPerTokenIpMinute` | messages per token + IP per minute | 10 | clock minute (UTC `date_trunc('minute')`) |
+| `maxInputTokens` | input context per live request (`boundTokens`, §7) | 16000 | per request |
 | `maxOutputTokens` | live output per reply (`max_tokens`) | 300 | per reply |
 | `reservationTtlMs` | unsettled reservation expiry | 600000 (10 min) | per reservation |
 | daily spend ceiling | global live spend per day | **Kelby sets**; no default ships | FlowForward day |
@@ -185,6 +202,13 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   - A *business-local day* uses the business's `time_zone` fact (§3), defaulting to `America/Denver` when unknown.
   - Windows that aren't tied to one business (global sessions, per-IP day, spend ceiling) use FlowForward's zone, `America/Denver`.
   - Both layers compute the bucket key the same way, with `(now() AT TIME ZONE tz)::date` in Postgres and the same zone in Express.
+- **Why 16,000 input tokens.** These are bound tokens, which overcount real tokens about 3–4× for English. The budget:
+  - system prompt + rules + 4 tools ≈ 4,000;
+  - a typical sourced facts sheet ≈ 3,000 (full worst case ≈ 10,000, which is where trimming takes over);
+  - the last 8 messages ≈ 6,800 (4 × 500-char user messages + 4 × ~1,200-byte replies at 300 output tokens);
+  - the current message ≤ 2,000;
+  - the total is ≈ 15,800, rounded to **16,000**.
+  - At the default `claude-sonnet-5-5` prices in `PRICES`, the reservation is 16,000 × $2 × 1.25 / 1M + 300 × $10 / 1M = **$0.043 per turn**.
 - **IP limits are two separate limits**, 5/hour and 20/day. Each is enforced in both layers. The hourly limit stops bursts and the daily limit stops slow farming. They don't replace each other.
 
 ### 8.2 Enforcement in each layer
@@ -199,6 +223,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 | `maxMintsPerIpHour` | `rate-limit.js` bucket `chatdemo_mint_hour` | `chat_demo_ip_hours.mint_count` CHECK ≤ 5, keyed `(ip_hash, hour)` |
 | `maxMintsPerIpDay` | `rate-limit.js` bucket `chatdemo_mint_day` | `chat_demo_ip_days.mint_count` CHECK ≤ 20, keyed `(ip_hash, day)` |
 | `maxMessagesPerTokenIpMinute` | `rate-limit.js` bucket `chatdemo_msg_minute`, keyed by token id + IP | `chat_demo_rate_minutes.count` CHECK ≤ 10, keyed `(prototype_id, ip_hash, minute)` |
+| `maxInputTokens` | `buildPrompt` trims to ≤ 16000 bound tokens, or falls back to fixtures (§7) | `chat_demo_turns.input_bound_tokens` CHECK ≤ 16000 |
 | `maxOutputTokens` | `max_tokens: 300` on every live request | `chat_demo_turns.output_tokens` CHECK ≤ 300 |
 
 - [ ] **Express counters are lazily seeded.** On first use after a restart, a counter is seeded by a pre-read of the matching Postgres row. Express is the fast first line, and Postgres can't be bypassed.
@@ -213,11 +238,10 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 - [ ] **Tables.**
   - `chat_demo_spend_days (day, spent_usd, reserved_usd, overshoot_usd)`. All columns are CHECK ≥ 0. There is **no** CHECK tying them to the ceiling, so a settle can never fail.
   - `chat_demo_reservations (id, day, turn_id, amount_usd, created_at, settled_at, expired_at, actual_usd)`.
-- [ ] **Reserve the exact worst case, never an estimate.**
-  - After the full request (system, tools, `<business_facts>`, history, message) is built, the server gets its exact input token count from the same client's `messages.countTokens` with that exact request.
-  - It then prices that count at the highest input rate `costOf` applies, which is the 1.25× cache-write rate. The reserve is `costOf(MODEL, { cacheWrite: inputTokens, output: CHAT_CAPS.maxOutputTokens })`.
-  - Actual cost can't exceed this unless pricing changes mid-call.
-  - The `countTokens` call is stubbed in tests like every other client call. If it fails, the turn uses the fixture responder.
+- [ ] **Reserve the fixed worst case, never an estimate.**
+  - The reservation is the input cap priced at the highest input rate `costOf` applies (the 1.25× cache-write rate), plus `max_tokens` at the output rate: `reserve = costOf(MODEL, { cacheWrite: CHAT_CAPS.maxInputTokens, output: CHAT_CAPS.maxOutputTokens })`.
+  - It is fully deterministic: the same for every turn for a given `MODEL`, and computed locally with no network call. It's exported as `reservationUsd(model)`.
+  - Because `buildPrompt` guarantees the prompt is within `maxInputTokens` bound tokens, actual cost can't exceed the reserve unless the bound is beaten or pricing changes mid-call. Either case is recorded as overshoot.
 - [ ] **Reserve atomically.** One statement does it: `UPDATE chat_demo_spend_days SET reserved_usd = reserved_usd + $r WHERE day = $d AND spent_usd + reserved_usd + $r <= $ceiling RETURNING …`, plus the reservation row insert in the same transaction.
   - New reservations are blocked once `spent_usd + reserved_usd` reaches the ceiling (no row returned).
   - A blocked reservation means the turn uses the fixture responder. The chat shows **"Demo paused. The live AI is resting for today; you're seeing sample replies."** for the rest of the FlowForward day, and the server logs `demo_paused`.
@@ -297,20 +321,28 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 
 ## 12. Tests and CI (Gauge verifies)
 - [ ] All tests use fixtures and recorded responses. The live branch is exercised only with a stub `liveGate` plus a recorded fake client injected through `_setClient`, the same as proposals.
-- [ ] **No outbound model call in test:** with the default gate, the network guard (`test/guard.js`, which already lists `ANTHROPIC_API_KEY`) active and the fake client unset, opening a chat and sending each chip makes 0 HTTP requests and 0 calls on the Anthropic client (including `countTokens`). Even with all flags on and a ceiling set, `defaultLiveGate` returns false because `NODE_ENV=test`.
+- [ ] **No outbound model call in test:** with the default gate, the network guard (`test/guard.js`, which already lists `ANTHROPIC_API_KEY`) active and the fake client unset, opening a chat and sending each chip makes 0 HTTP requests and 0 calls on the Anthropic client. Even with all flags on and a ceiling set, `defaultLiveGate` returns false because `NODE_ENV=test`.
 - [ ] **Gate stub AC:** a test injects `liveGate: async () => true` and asserts `LiveResponder` and the fake client are used. A second test injects `async () => false` and asserts the fixture responder is used with 0 client calls. A third covers each of the default gate's conditions (a)–(g) independently.
 - [ ] **Caps parity:** `CHAT_CAPS` equals the CHECK numbers parsed from `pg_constraint` (§8.1).
 - [ ] **Each cap in both layers:** every row of §8.2 has an Express test (429/413 before the responder runs) and a Postgres test (a raw `UPDATE`/`INSERT` past the limit gives 23514). The IP hour and day limits are tested separately.
 - [ ] **Time zones:** with an injected clock, a business with `time_zone = America/Los_Angeles` rolls its per-link day at its own midnight. A business with no `time_zone` and the spend ceiling roll at midnight `America/Denver`.
 - [ ] **Spend:**
   - an unset ceiling uses fixtures;
-  - the reservation equals `costOf(MODEL, { cacheWrite: countTokens, output: 300 })`;
+  - the reservation equals the fixed formula `costOf(MODEL, { cacheWrite: CHAT_CAPS.maxInputTokens, output: CHAT_CAPS.maxOutputTokens })` for every turn, whatever the prompt size; for `claude-sonnet-5-5` that is exactly $0.043;
+  - reserving makes 0 calls on the Anthropic client;
   - concurrent reservations never let `spent + reserved` pass the ceiling;
   - a blocked reservation shows "Demo paused" with the watermark;
   - actual < reserved settles to actual;
   - actual > reserved (forced fake usage) settles without error and records `overshoot_usd`;
   - a ceiling lowered mid-call lets the in-flight settle succeed and blocks the next reservation;
   - an unsettled reservation older than 10 min (injected clock) is expired by the sweep and moved to spent, and a late settle applies only the delta.
+- [ ] **Input cap and trim order** (`buildPrompt` unit tests, fixtures only):
+  - **Size measurement:** `boundTokens` is deterministic, giving the same input the same number, and is at least the UTF-8 byte length (multibyte and NFKC cases included).
+  - **Trim order:** with oversized fixture history and facts, the oldest exchange is dropped first, one exchange at a time, and the conversation always starts with a user message. Facts are dropped only after all history is gone, strictly in `FACT_TRIM_ORDER`. The system prompt, rules, tools, pinned facts and current message are never dropped.
+  - **Never over the cap:** a property test over randomized facts, history and messages (seeded) asserts every built prompt is within `CHAT_CAPS.maxInputTokens`, or the turn is fixture with `prompt_over_cap`. The fake client never receives an over-cap request.
+  - **Pinned overflow:** pinned parts plus the message over the cap give a fixture reply and 0 client calls.
+  - **Validator uses the trimmed facts:** the validator blocks a reply that claims a fact that was trimmed out.
+  - **Postgres:** a turn row with `input_bound_tokens` > 16000 gives 23514.
 - [ ] Validator unit tests (§5), including NFKC cases, plus every fixture reply × every fixture facts sheet giving zero hits.
 - [ ] Hostile brand name, `?watermark=0` and flag combinations: the watermark is still present on the chat, the paused state and the cap-hit state.
 - [ ] `chat_demo_leads` has no PII columns (asserted from `information_schema`).
