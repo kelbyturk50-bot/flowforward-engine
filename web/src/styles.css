@@ -777,10 +777,9 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   display: flex;
   flex-direction: column;
   min-width: 0;
-  min-height: 0;
-  height: calc(100dvh - 300px);
-  max-height: calc(100dvh - 300px);
-  overflow: hidden;
+  height: auto;
+  max-height: none;
+  overflow: visible;
   background: var(--surface);
   color: var(--ink);
   border: 1px solid var(--line);
@@ -803,8 +802,10 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   flex-direction: column;
   gap: 8px;
   min-width: 0;
-  min-height: 0;
   flex: 1 1 auto;
+  min-height: 200px;
+  height: 42vh;
+  height: 42dvh;
   overflow: auto;
 }
 .live-chat-dock { flex: none; display: flex; flex-direction: column; gap: 8px; margin-top: 8px; background: var(--surface); }
@@ -845,7 +846,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   margin: 0;
   padding: 0;
 }
-.live-chat-chip-row { flex-direction: row; flex-wrap: nowrap; overflow-x: auto; }
+.live-chat-chip-row { flex-direction: row; flex-wrap: wrap; overflow: visible; }
 .live-chat-slots { flex-direction: column; }
 .live-chat-expand {
   display: flex;
@@ -863,7 +864,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .live-chat-chip, .live-chat-action {
   background: var(--paper); color: var(--ink); border: 1px solid var(--line);
 }
-.live-chat-chip { width: auto; flex: 0 0 auto; max-width: 260px; }
+.live-chat-chip { width: auto; flex: 1 1 auto; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .live-chat-chip:focus-visible, .live-chat-action:focus-visible, .live-chat-send:focus-visible {
   outline: 2px solid var(--ink); outline-offset: 2px;
 }
@@ -941,7 +942,8 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 @media (min-width: 1280px) {
   .prototype-root:has(.live-chat) .prototype-screen { max-width: 1112px; padding: 12px 16px 24px; }
   .live-chat-owner-toggle { display: none; }
-  .live-chat-phone { height: calc(100dvh - 220px); max-height: calc(100dvh - 220px); }
+  .live-chat-phone { height: auto; max-height: none; }
+  .live-chat-thread { min-height: 200px; height: 48vh; height: 48dvh; }
   .live-chat-stage {
     display: grid;
     grid-template-columns: minmax(0, 1.2fr) minmax(240px, .8fr);

@@ -65,6 +65,8 @@ export function disclosureText(business, phone) {
   return `Hi! I'm an AI receptionist demo FlowForward built for ${name}. I'm not connected to their team. If you're a real customer, please ${call}.`;
 }
 
+export const BANNER_SUMMARY = 'Sample by FlowForward · not affiliated · no real bookings · Details';
+
 export function affiliationBanner(business) {
   const name = business || SAMPLE_BUSINESS;
   return `Sample concept built by FlowForward for ${name}. Not affiliated with or operated by ${name}. No real bookings are made.`;

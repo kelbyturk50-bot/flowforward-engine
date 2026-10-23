@@ -12,6 +12,7 @@ import {
   SAMPLE_FACTS,
   SAMPLE_SLOTS,
   SLOTS_LABEL,
+  BANNER_SUMMARY,
   affiliationBanner,
   afterHoursNotice,
   capMessage,
@@ -23,6 +24,18 @@ import { INITIAL_LEAD, nextLead, respond, serviceLabel } from './respond.js';
 
 const TYPING_MS = 400;
 const NEAR_LIMIT = 50;
+
+function prefersReducedMotion() {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+}
+
+function threadScrollTarget(node, typing) {
+  if (!node) return null;
+  if (typing) return node.querySelector('.live-chat-typing');
+  const turn = node.querySelector('.live-chat-turn:last-child');
+  if (!turn) return null;
+  return turn.querySelector('.live-chat-bubble') || turn;
+}
 
 function leadChanged(before, after) {
   return before.service !== after.service
@@ -129,12 +142,12 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
 
   useEffect(() => {
     const node = threadRef.current;
-    if (!node) return;
-    const last = node.querySelector('.live-chat-turn:last-child');
-    if (!last) return;
-    const target = last.querySelector('.live-chat-tool') || last;
-    const delta = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
-    node.scrollTop += delta;
+    const target = threadScrollTarget(node, typing);
+    if (!node || !target) return;
+    const top = node.scrollTop + (target.getBoundingClientRect().top - node.getBoundingClientRect().top);
+    const behavior = prefersReducedMotion() ? 'auto' : 'smooth';
+    if (typeof node.scrollTo === 'function') node.scrollTo({ top, behavior });
+    else node.scrollTop = top;
   }, [turns, typing]);
 
   function finishPending() {
@@ -220,7 +233,7 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
             aria-expanded={bannerOpen}
             onClick={() => setBannerOpen((open) => !open)}
           >
-            {bannerOpen ? 'Hide the not-affiliated notice' : 'Not affiliated. Show notice'}
+            {BANNER_SUMMARY}
           </button>
           <p className={bannerOpen ? 'live-chat-banner-copy' : 'live-chat-banner-copy live-chat-sr'}>{banner}</p>
         </div>

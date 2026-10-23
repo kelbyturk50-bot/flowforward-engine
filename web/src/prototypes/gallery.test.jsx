@@ -450,8 +450,8 @@ describe('prototype gallery', () => {
       { key: 'Referrer-Policy', value: 'no-referrer' },
       { key: 'Cache-Control', value: 'no-store' },
       { key: 'X-Content-Type-Options', value: 'nosniff' },
-      { key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'none'" },
     ]);
+    expect(config.headers[0].headers.some((header) => header.key === 'Content-Security-Policy')).toBe(false);
     const galleryPath = `/demo/gallery/${TOKEN}/estimate-follow-up`;
     expect(galleryPath.startsWith('/demo/')).toBe(true);
     expect(galleryRouteFromPath(galleryPath).screen).toBe('estimate-follow-up');

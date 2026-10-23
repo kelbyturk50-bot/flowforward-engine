@@ -2,10 +2,11 @@ import { lazy, Suspense } from 'react';
 import NotFound from '../NotFound';
 import { FF_LIVE_CHAT_DEMO, FF_PROTOTYPE_GALLERY, previewFlagsOverride } from '../flags';
 
-// Local sources only. previewFlagsOverride is the preview-host and dev-localhost
-// ?flags= query (and the session value it stored). Anything else, including the
-// remote GET /api/flags snapshot, stays off. Production has no public read-only
-// flag source yet, so this route renders the not-found view there.
+// Local sources only. previewFlagsOverride is the dev or preview-build ?flags=
+// query (and the session value it stored) on an allowed host. Anything else,
+// including the remote GET /api/flags snapshot, stays off. Production builds
+// ignore that query on every host. There is no public read-only flag source
+// yet, so this route renders the not-found view in production.
 const LiveChatDemo = lazy(() => import('./LiveChatDemo.jsx'));
 
 function previewFlagOn(name) {

@@ -6,7 +6,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { api } from '../api';
 import { WATERMARK_TEXT } from '../components/PrototypeWatermark';
-import { _setFeatureFlagsForTests, resetRemoteFlags } from '../flags';
+import { _setFeatureFlagsForTests, _setFlagRuntimeForTests, resetRemoteFlags } from '../flags';
 import GalleryGate from '../prototypes/GalleryGate';
 import { GALLERY_PREVIEW_TOKEN } from '../prototypes/route';
 import * as remoteFlags from '../remote-flags';
@@ -22,6 +22,7 @@ import {
   SAMPLE_CUSTOMER_PHONE,
   SAMPLE_FACTS,
   SLOTS_LABEL,
+  BANNER_SUMMARY,
   affiliationBanner,
   afterHoursNotice,
   capMessage,
@@ -131,6 +132,7 @@ describe('live chat demo', () => {
     refreshSpy.mockRestore();
     resetRemoteFlags();
     _failNextFixtureReply(0);
+    _setFlagRuntimeForTests(null);
     window.sessionStorage.clear();
     vi.stubGlobal('fetch', () => {
       throw new Error('Tests must not call fetch. The API client is mocked.');
@@ -188,7 +190,7 @@ describe('live chat demo', () => {
     const demo = render(<LiveChatGate />);
     expect(await screen.findByText(DISCLOSURE)).toBeInTheDocument();
     expect(screen.getByText(BANNER)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Not affiliated\. Show notice/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: BANNER_SUMMARY })).toBeInTheDocument();
     expect(screen.getByText(AFTER_HOURS)).toBeInTheDocument();
     expect(screen.getByText('AI demo')).toBeInTheDocument();
     expect(screen.getByRole('note', { name: WATERMARK_TEXT })).toBeInTheDocument();
@@ -378,7 +380,105 @@ describe('live chat demo', () => {
     expect(css).not.toMatch(/\.live-chat-send:disabled\s*\{[^}]*opacity:\s*\.55/);
     expect(css).toContain('.live-chat-bubble.is-out');
     expect(css).toContain('.live-chat-send {');
+    const phoneRules = css.match(/\.live-chat-phone \{[^}]*\}/g) || [];
+    expect(phoneRules.length).toBeGreaterThan(0);
+    for (const rule of phoneRules) expect(rule).not.toMatch(/100dvh\s*-\s*\d+px/);
+    const threadRule = css.slice(css.indexOf('.live-chat-thread {'), css.indexOf('.live-chat-dock'));
+    expect(threadRule).toContain('min-height: 200px');
+    expect(threadRule).toContain('height: 42vh');
+    expect(threadRule).toContain('height: 42dvh');
+    expect(css).toMatch(/\.live-chat-chip-row \{[^}]*flex-wrap:\s*wrap/);
+    expect(BANNER_SUMMARY).toBe('Sample by FlowForward · not affiliated · no real bookings · Details');
   });
+
+  function runtimeLocation(hostname, search) {
+    return {
+      protocol: hostname === 'localhost' ? 'http:' : 'https:',
+      port: hostname === 'localhost' ? '5173' : '',
+      hostname,
+      search,
+    };
+  }
+
+  it('keeps the route not-found on a production build, and opens it for preview and dev', async () => {
+    const hostname = 'flowforward-engine-abc123-turk11.vercel.app';
+    const search = `?flags=${BOTH}`;
+    for (const env of [{ DEV: false, VERCEL_ENV: 'production' }, { DEV: false, VERCEL_ENV: '' }]) {
+      window.sessionStorage.clear();
+      _setFlagRuntimeForTests({ env, location: runtimeLocation(hostname, search) });
+      const closed = render(<LiveChatGate />);
+      expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+      expect(screen.queryByText(DISCLOSURE)).not.toBeInTheDocument();
+      expect(fetchMock).not.toHaveBeenCalled();
+      closed.unmount();
+    }
+
+    window.sessionStorage.clear();
+    _setFlagRuntimeForTests({
+      env: { DEV: false, VERCEL_ENV: 'preview' },
+      location: runtimeLocation(hostname, search),
+    });
+    const preview = render(<LiveChatGate />);
+    expect(await screen.findByText(DISCLOSURE)).toBeInTheDocument();
+    preview.unmount();
+
+    window.sessionStorage.clear();
+    _setFlagRuntimeForTests({
+      env: { DEV: true, VERCEL_ENV: '' },
+      location: runtimeLocation('localhost', search),
+    });
+    const dev = render(<LiveChatGate />);
+    expect(await screen.findByText(DISCLOSURE)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: BANNER_SUMMARY })).toBeInTheDocument();
+    dev.unmount();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('scrolls to the latest reply and the typing line, instantly when motion is reduced', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<LiveChatDemo />);
+    const thread = container.querySelector('.live-chat-thread');
+    const calls = [];
+    thread.scrollTo = (options) => { calls.push(options); };
+    const original = Element.prototype.getBoundingClientRect;
+    const box = (top) => ({
+      x: 0, y: top, top, left: 0, bottom: top + 24, right: 120, width: 120, height: 24, toJSON() {},
+    });
+    const rects = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function mockRect() {
+      if (this.classList?.contains('live-chat-typing')) return box(640);
+      if (this.classList?.contains('live-chat-tool')) return box(900);
+      if (this.classList?.contains('live-chat-thread')) return box(0);
+      if (this.classList?.contains('live-chat-bubble') && this.closest('.live-chat-turn')) return box(480);
+      return original.call(this);
+    });
+
+    try {
+      await user.click(screen.getByRole('button', { name: 'My water heater is leaking all over the garage' }));
+      expect(await screen.findByText('Typing…')).toBeInTheDocument();
+      expect(calls.some((call) => call.top === 640 && call.behavior === 'smooth')).toBe(true);
+      expect(await screen.findByText(/marked this sample lead as an emergency/)).toBeInTheDocument();
+      expect(calls.at(-1)).toMatchObject({ top: 480, behavior: 'smooth' });
+      expect(calls.some((call) => call.top === 900)).toBe(false);
+
+      window.matchMedia = vi.fn().mockImplementation((query) => ({
+        matches: String(query).includes('prefers-reduced-motion'),
+        media: query,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {},
+        dispatchEvent() { return false; },
+      }));
+      calls.length = 0;
+      await user.click(screen.getByRole('button', { name: 'How much for a new furnace?' }));
+      expect(await screen.findByText('Typing…')).toBeInTheDocument();
+      expect(calls.some((call) => call.behavior === 'auto')).toBe(true);
+      expect(calls.some((call) => call.behavior === 'smooth')).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      rects.mockRestore();
+    }
+  }, 20000);
 
   it('does not call fetch from the live chat import graph', () => {
     const files = readdirSync(here).filter((name) => (name.endsWith('.js') || name.endsWith('.jsx')) && !name.endsWith('.test.jsx'));
