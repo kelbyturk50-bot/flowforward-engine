@@ -293,10 +293,13 @@ async function liveLink(prospectId) {
 // Restart the 14 days when the link is first shared (the first email goes
 // out), so a draft that sat in review does not send a link that is about to
 // expire. Same token; only issued_at and expires_at move.
+// An already-expired row is left alone. restartClock must not turn a 410
+// back into a 200.
 async function restartClock(prospectId) {
   const { rows } = await pool.query(
     `UPDATE prototypes SET issued_at = NOW(), expires_at = NOW() + INTERVAL '336 hours'
-      WHERE prospect_id = $1 AND revoked_at IS NULL RETURNING ${ROW_COLS}`, [prospectId]);
+      WHERE prospect_id = $1 AND revoked_at IS NULL AND expires_at > NOW()
+      RETURNING ${ROW_COLS}`, [prospectId]);
   return rows[0] || null;
 }
 
