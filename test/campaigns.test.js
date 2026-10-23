@@ -399,6 +399,24 @@ describe('campaigns', { concurrency: 1 }, () => {
     }
   });
 
+  it('campaigns: key not ready is 503 even when the flag is off', async () => {
+    const saved = process.env.CRM_API_KEY;
+    try {
+      await campaignsFlag(false);
+      for (const key of ['', ' '.repeat(32), 'x'.repeat(31), `${'x'.repeat(16)}${' '.repeat(16)}y`]) {
+        process.env.CRM_API_KEY = key;
+        const res = await request('GET', '/api/campaigns', { headers: { 'x-api-key': key } });
+        assert.equal(res.status, 503, JSON.stringify(key));
+        assert.deepEqual(res.json, { error: 'api_key_not_configured' });
+        const metrics = await request('GET', '/api/campaigns/metrics');
+        assert.equal(metrics.status, 503);
+        assert.deepEqual(metrics.json, { error: 'api_key_not_configured' });
+      }
+    } finally {
+      process.env.CRM_API_KEY = saved;
+    }
+  });
+
   it('campaigns: fixture Responded 3/8, Converted 1/8, Opened-no-response 1/8', async () => {
     await campaignsFlag(true);
     const res = await request('GET', metricsPath(`?campaign_id=${fixture.hvacId}`), { headers: authHeaders() });

@@ -68,15 +68,16 @@ app.use('/brand', require('express').static(require('path').join(__dirname, 'bra
 app.use('/demo/prototype', require('./prototypes/page').router);
 
 // ─── Routes ───────────────────────────────────────────────────────────────
-// GET and PUT /api/flags only. crmApiKeyReady() trims CRM_API_KEY and
-// drops every whitespace character. Unset, empty, spaces-only, or fewer
-// than 32 non-whitespace characters returns 503 from this guard.
-// requireApiKey is unchanged and still covers every other /api route.
+// requireApiKey fail-closes every /api route (503 api_key_not_configured)
+// unless crmApiKeyReady(). A ready key still requires the header (401 if
+// it is missing or wrong). OPTIONS is not gated. /api/public/prototypes
+// is mounted above and stays public.
+// The flags guard is mounted first and returns that same 503 for GET and PUT
+// when the key is not ready. The campaigns gate is also mounted first: not
+// ready -> 503 before the flag is read; ready and FF_CAMPAIGNS off -> the
+// same 404 as an unknown path, with or without a request key.
 const flagsApi = require('./api/flags');
 app.use('/api/flags', flagsApi.requireFlagApiKey);
-// Campaigns gate is mounted before API-key auth. FF_CAMPAIGNS effectively
-// off (flag service) -> the same 404 as an unknown path. On, but CRM_API_KEY
-// not ready (crmApiKeyReady) -> 503 api_key_not_configured. Then the key.
 const campaignsApi = require('./api/campaigns');
 app.use('/api/campaigns', campaignsApi.flagGate);
 app.use('/api', requireApiKey);
@@ -91,8 +92,9 @@ app.use('/api/prototypes', require('./api/prototypes'));
 app.use('/api/brands',    require('./api/brands'));
 app.use('/api/rubric',    require('./api/rubric'));
 app.use('/api/flags',     flagsApi);
-// CSV intake for Pilot #1. 404 unless the master flag is effectively on
-// (database row true, and the env var is not a trimmed case-insensitive
+// CSV intake for Pilot #1. The shared guard returns 503 when the key is
+// not ready. When the key is ready, 404 unless the master flag is effectively
+// on (database row true, and the env var is not a trimmed case-insensitive
 // "false", "off", "0", or "no"). These routes do not send mail.
 app.use('/api/pilot/estimate-recovery', require('./api/pilot-estimates'));
 // Tracking only. GET /api/campaigns and /api/campaigns/metrics. Does not send.

@@ -3,11 +3,12 @@
 //
 // Order, from the outside in (flagGate is mounted in server.js before the
 // shared /api API-key middleware):
-//   1. FF_CAMPAIGNS effectively off (flag service, src/campaigns/flags.js)
-//      -> the same 404 Express gives an unknown path, with or without a key.
-//   2. CRM_API_KEY not ready (crmApiKeyReady: fewer than 32 non-whitespace
-//      characters, or unset) -> 503 { error: 'api_key_not_configured' }.
-//      The routes never serve data while the shared middleware is open.
+//   1. CRM_API_KEY not ready (crmApiKeyReady: fewer than 32 non-whitespace
+//      characters, or unset) -> 503 { error: 'api_key_not_configured' },
+//      whether or not the flag is on. The routes never serve data.
+//   2. FF_CAMPAIGNS effectively off (flag service, src/campaigns/flags.js)
+//      -> the same 404 Express gives an unknown path, with or without a
+//      request key. This runs only after the key is ready.
 //   3. requireApiKey -> 401 for a missing or wrong key.
 
 const express = require('express');
@@ -23,6 +24,12 @@ const {
 const router = express.Router();
 
 async function flagGate(req, res, next) {
+  if (req.method === 'OPTIONS') return next();
+  if (!crmApiKeyReady()) {
+    console.log('[campaigns] refused; api key not configured');
+    res.set('Cache-Control', 'no-store');
+    return res.status(503).json({ error: 'api_key_not_configured' });
+  }
   let on = false;
   try {
     on = await isFlagOn('FF_CAMPAIGNS');
@@ -31,13 +38,8 @@ async function flagGate(req, res, next) {
     on = false;
   }
   // Leave the app router. The default final handler writes the same 404 an
-  // unknown path gets, including when the API key is missing.
+  // unknown path gets, including when the request key is missing.
   if (!on) return next('router');
-  if (!crmApiKeyReady()) {
-    console.log('[campaigns] refused; api key not configured');
-    res.set('Cache-Control', 'no-store');
-    return res.status(503).json({ error: 'api_key_not_configured' });
-  }
   return next();
 }
 

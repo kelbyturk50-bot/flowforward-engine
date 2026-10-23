@@ -4,7 +4,15 @@ require('./preload');
 // No Places, Anthropic, Gmail, or live site.
 
 process.env.EXCLUDED_INDUSTRIES = 'Pest Control';
-process.env.CRM_API_KEY = '';
+process.env.CRM_API_KEY = 'test-pest-name-gate-key-32chars-ok!';
+const realFetch = global.fetch;
+global.fetch = (input, init) => {
+  const url = typeof input === 'string' ? input : (input && input.url) || '';
+  if (!url.includes('/api/')) return realFetch(input, init);
+  const headers = new Headers((init && init.headers) || undefined);
+  if (!headers.has('x-api-key')) headers.set('x-api-key', process.env.CRM_API_KEY);
+  return realFetch(input, { ...init, headers });
+};
 // Follow-ups send only inside the Denver window. Open it in this process so
 // the skip can be tested at any hour. Set before proposals/config loads.
 process.env.SEND_HOURS = '0,24';
