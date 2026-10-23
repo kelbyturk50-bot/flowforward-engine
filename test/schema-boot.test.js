@@ -61,6 +61,35 @@ function freePort() {
   });
 }
 
+// Swaps pool.connect for a recording client. No database.
+async function withStubClient(fail, fn) {
+  const calls = [];
+  const params = [];
+  let released = 0;
+  const original = pool.connect;
+  pool.connect = async () => ({
+    async query(text, values) {
+      calls.push(String(text));
+      params.push(values == null ? [] : [].concat(values));
+      if (fail && String(text).length > 1000) throw fail;
+      return { rows: [] };
+    },
+    release() { released += 1; },
+  });
+  try {
+    return await fn(calls, () => released, params);
+  } finally {
+    pool.connect = original;
+  }
+}
+
+function pgError(code, message) {
+  const err = new Error(message);
+  if (code) err.code = code;
+  err.where = 'SQL statement "ALTER TABLE prototypes ADD COLUMN secret_marker text"';
+  return err;
+}
+
 describe('schema boot lock', () => {
   after(async () => {
     _setMainSchemaTimeouts(null);
@@ -160,7 +189,7 @@ describe('schema boot lock', () => {
   });
 
   it('takes the advisory lock before lock_timeout, so a short timeout still waits', async () => {
-    _setMainSchemaTimeouts({ lockTimeout: '200ms', statementTimeout: '60s' });
+    _setMainSchemaTimeouts({ lockTimeout: '200', statementTimeout: '60000' });
     const holder = await pool.connect();
     let pending = Promise.resolve();
     try {
@@ -203,8 +232,8 @@ describe('schema boot lock', () => {
           NODE_ENV: 'test',
           DISABLE_CRON: '1',
           CRM_API_KEY: '',
-          FF_MAIN_SCHEMA_LOCK_TIMEOUT: `${LOCK_TIMEOUT_MS}ms`,
-          FF_MAIN_SCHEMA_STATEMENT_TIMEOUT: '30s',
+          FF_MAIN_SCHEMA_LOCK_TIMEOUT: String(LOCK_TIMEOUT_MS),
+          FF_MAIN_SCHEMA_STATEMENT_TIMEOUT: '30000',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -255,6 +284,201 @@ describe('schema boot lock', () => {
       }
       await holder.query('ROLLBACK').catch(() => {});
       holder.release();
+    }
+  });
+
+  it('runs BEGIN, lock, SET LOCAL timeouts, schema, COMMIT in that order', async () => {
+    _setMainSchemaTimeouts(null);
+    await withStubClient(null, async (calls, released) => {
+      await applyMainSchema();
+      const head = calls.slice(0, 4);
+      assert.deepEqual(head, [
+        'BEGIN',
+        'SELECT pg_advisory_xact_lock($1::bigint)',
+        "SET LOCAL lock_timeout = '5s'",
+        "SET LOCAL statement_timeout = '60s'",
+      ]);
+      assert.ok(calls[4].length > 1000);
+      assert.equal(calls[5], 'COMMIT');
+      assert.equal(calls.length, 6);
+      assert.equal(released(), 1);
+    });
+    _setMainSchemaTimeouts({ lockTimeout: '200', statementTimeout: '2000' });
+    try {
+      await withStubClient(null, async (calls, released, params) => {
+        await applyMainSchema();
+        assert.deepEqual(calls.slice(0, 4), [
+          'BEGIN',
+          'SELECT pg_advisory_xact_lock($1::bigint)',
+          "SELECT set_config('lock_timeout', $1, true)",
+          "SELECT set_config('statement_timeout', $1, true)",
+        ]);
+        assert.deepEqual(params[2], ['200']);
+        assert.deepEqual(params[3], ['2000']);
+        assert.equal(calls[5], 'COMMIT');
+        assert.equal(released(), 1);
+      });
+    } finally {
+      _setMainSchemaTimeouts(null);
+    }
+  });
+
+  it('rolls back and throws a bare SQLSTATE on 55P03 and 57014', async () => {
+    _setMainSchemaTimeouts(null);
+    const cases = [
+      [pgError('57014', 'canceling statement due to statement timeout'), '57014'],
+      [pgError('55P03', 'canceling statement due to lock timeout'), '55P03'],
+      [pgError(null, 'canceling statement due to statement timeout'), '57014'],
+      [pgError(null, 'canceling statement due to lock timeout'), '55P03'],
+    ];
+    for (const [fail, code] of cases) {
+      await withStubClient(fail, async (calls, released) => {
+        let thrown = null;
+        try { await applyMainSchema(); } catch (err) { thrown = err; }
+        assert.ok(thrown, code);
+        assert.equal(thrown.message, code);
+        assert.equal(thrown.code, code);
+        assert.equal(thrown.where, undefined);
+        assert.equal(calls[calls.length - 1], 'ROLLBACK');
+        assert.equal(calls.includes('COMMIT'), false);
+        assert.equal(released(), 1);
+      });
+    }
+    const other = pgError('42P01', 'relation does not exist');
+    await withStubClient(other, async (calls) => {
+      await assert.rejects(applyMainSchema(), (err) => err === other);
+      assert.equal(calls[calls.length - 1], 'ROLLBACK');
+    });
+  });
+
+  it('keeps test timeouts out of other NODE_ENV values and checks the literal', async () => {
+    _setMainSchemaTimeouts(null);
+    assert.throws(
+      () => _setMainSchemaTimeouts({ lockTimeout: "1'; DROP TABLE prospects; --" }),
+      /invalid schema timeout/
+    );
+    await withStubClient(null, async (calls, released, params) => {
+      await applyMainSchema();
+      assert.equal(calls[2], "SET LOCAL lock_timeout = '5s'");
+      assert.equal(calls[3], "SET LOCAL statement_timeout = '60s'");
+      assert.equal(calls.some((text) => text.includes('DROP TABLE')), false);
+      assert.equal(params.some((row) => row.some((item) => String(item).includes('DROP'))), false);
+    });
+    const savedEnv = process.env.NODE_ENV;
+    const savedLock = process.env.FF_MAIN_SCHEMA_LOCK_TIMEOUT;
+    const savedStatement = process.env.FF_MAIN_SCHEMA_STATEMENT_TIMEOUT;
+    _setMainSchemaTimeouts(null);
+    try {
+      process.env.FF_MAIN_SCHEMA_LOCK_TIMEOUT = "5'; SELECT 1; --";
+      process.env.FF_MAIN_SCHEMA_STATEMENT_TIMEOUT = '1ms';
+      await withStubClient(null, async (calls, released, params) => {
+        await applyMainSchema();
+        assert.equal(calls[2], "SET LOCAL lock_timeout = '5s'");
+        assert.equal(calls[3], "SET LOCAL statement_timeout = '60s'");
+        assert.equal(calls.some((text) => text.includes('SELECT 1;')), false);
+        assert.equal(params.some((row) => row.some((item) => String(item).includes('SELECT 1'))), false);
+      });
+      _setMainSchemaTimeouts({ lockTimeout: '200', statementTimeout: '1000' });
+      process.env.FF_MAIN_SCHEMA_LOCK_TIMEOUT = '200';
+      process.env.FF_MAIN_SCHEMA_STATEMENT_TIMEOUT = '1000';
+      for (const env of ['production', 'development', '', 'TEST']) {
+        process.env.NODE_ENV = env;
+        assert.throws(
+          () => _setMainSchemaTimeouts({ lockTimeout: '200' }),
+          /only available when NODE_ENV=test/,
+          env
+        );
+        await withStubClient(null, async (calls) => {
+          await applyMainSchema();
+          assert.equal(calls[2], "SET LOCAL lock_timeout = '5s'", env);
+          assert.equal(calls[3], "SET LOCAL statement_timeout = '60s'", env);
+        });
+      }
+    } finally {
+      process.env.NODE_ENV = savedEnv;
+      if (savedLock == null) delete process.env.FF_MAIN_SCHEMA_LOCK_TIMEOUT;
+      else process.env.FF_MAIN_SCHEMA_LOCK_TIMEOUT = savedLock;
+      if (savedStatement == null) delete process.env.FF_MAIN_SCHEMA_STATEMENT_TIMEOUT;
+      else process.env.FF_MAIN_SCHEMA_STATEMENT_TIMEOUT = savedStatement;
+      _setMainSchemaTimeouts(null);
+    }
+  });
+
+  it('rejects non-integer timeout overrides and uses the fixed defaults', async () => {
+    const bad = [
+      '200ms', '2s', '1ms', '0', '000000', '-1', '1.5', '1e3',
+      ' 200', '200 ', '+200', '9999999', "5'; SELECT 1; --",
+    ];
+    const savedLock = process.env.FF_MAIN_SCHEMA_LOCK_TIMEOUT;
+    const savedStatement = process.env.FF_MAIN_SCHEMA_STATEMENT_TIMEOUT;
+    _setMainSchemaTimeouts(null);
+    try {
+      for (const value of bad) {
+        assert.throws(
+          () => _setMainSchemaTimeouts({ lockTimeout: value, statementTimeout: '2000' }),
+          /invalid schema timeout/,
+          value
+        );
+        process.env.FF_MAIN_SCHEMA_LOCK_TIMEOUT = value;
+        process.env.FF_MAIN_SCHEMA_STATEMENT_TIMEOUT = value;
+        await withStubClient(null, async (calls, released, params) => {
+          await applyMainSchema();
+          assert.equal(calls[2], "SET LOCAL lock_timeout = '5s'", value);
+          assert.equal(calls[3], "SET LOCAL statement_timeout = '60s'", value);
+          const sent = params.slice(2, 4).flat().map((item) => String(item));
+          assert.equal(sent.some((item) => item.includes(value)), false, value);
+        });
+      }
+    } finally {
+      if (savedLock == null) delete process.env.FF_MAIN_SCHEMA_LOCK_TIMEOUT;
+      else process.env.FF_MAIN_SCHEMA_LOCK_TIMEOUT = savedLock;
+      if (savedStatement == null) delete process.env.FF_MAIN_SCHEMA_STATEMENT_TIMEOUT;
+      else process.env.FF_MAIN_SCHEMA_STATEMENT_TIMEOUT = savedStatement;
+      _setMainSchemaTimeouts(null);
+    }
+  });
+
+  it('logs only 57014 when the main schema hits statement_timeout, and still listens', async () => {
+    const port = await freePort();
+    let output = '';
+    const child = spawn(process.execPath, [path.join(__dirname, '../src/server.js')], {
+      env: {
+        ...process.env,
+        PORT: String(port),
+        NODE_ENV: 'test',
+        DISABLE_CRON: '1',
+        CRM_API_KEY: '',
+        FF_MAIN_SCHEMA_LOCK_TIMEOUT: '5000',
+        FF_MAIN_SCHEMA_STATEMENT_TIMEOUT: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (buf) => { output += buf.toString('utf8'); });
+    child.stderr.on('data', (buf) => { output += buf.toString('utf8'); });
+    try {
+      const deadline = Date.now() + 10000;
+      let health = null;
+      while (Date.now() < deadline && !health) {
+        try { health = await get(port, '/health'); } catch {
+          if (child.exitCode != null) break;
+          await new Promise((resolve) => setTimeout(resolve, 40));
+        }
+      }
+      assert.ok(health, scrub(output).slice(0, 500));
+      assert.equal(health.status, 200);
+      const gate = await get(port, '/api/prospects');
+      assert.equal(gate.status, 503);
+      const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      assert.ok(lines.includes('57014'), scrub(output).slice(0, 800));
+      assert.equal(output.includes('canceling statement'), false);
+      assert.equal(output.includes('Startup migration/rescore failed'), false);
+      assert.equal(output.includes('Fit scores refreshed'), false);
+      assert.equal(output.includes('ALTER TABLE'), false);
+    } finally {
+      if (child.exitCode == null) {
+        child.kill('SIGTERM');
+        await new Promise((resolve) => child.once('exit', resolve));
+      }
     }
   });
 });

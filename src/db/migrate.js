@@ -2,14 +2,17 @@
 // Applies schema.sql to DATABASE_URL, then brand-constraint validation, then
 // estimate-constraint validation, then the pilot repair. schema.sql runs on
 // one client in one transaction: an advisory lock, then lock_timeout 5s and
-// statement_timeout 60s, then the file, then COMMIT. A lock or statement
-// timeout rolls that transaction back. The thrown error's message is the
-// SQLSTATE only. Brand, estimate, and pilot steps do not run after that
-// throw. Those three files still run after a successful commit, each in its
-// own transaction. SET LOCAL lock_timeout and statement_timeout of 5s and
-// 15s apply only there. A brand, estimate, or pilot failure cannot roll the
-// main schema back. A brand-check or estimate-check failure is logged and
-// does not throw.
+// statement_timeout 60s, then the file, then COMMIT. Those two SET LOCAL
+// statements are fixed literals. A test override is a positive integer
+// millisecond count and applies only when NODE_ENV is exactly test; it is
+// passed to set_config as a bound parameter. Any other value uses the
+// literals. A lock or statement timeout rolls that transaction back. The
+// thrown error's message is the SQLSTATE only. Brand, estimate, and pilot
+// steps do not run after that throw. Those three files still run after a
+// successful commit, each in its own transaction. SET LOCAL lock_timeout
+// and statement_timeout of 5s and 15s apply only there. A brand, estimate,
+// or pilot failure cannot roll the main schema back. A brand-check or
+// estimate-check failure is logged and does not throw.
 //
 // schema.sql has no statement that Postgres refuses inside a transaction
 // (no CONCURRENTLY, VACUUM, CREATE/DROP DATABASE, or top-level COMMIT).
@@ -25,11 +28,19 @@ const pool = require('./client');
 // boots do not run schema.sql at the same time. Taken before lock_timeout
 // is set, so the wait for this lock is not cut off by the 5s table-lock bound.
 const MAIN_SCHEMA_ADVISORY_LOCK = 89089001;
-const MAIN_SCHEMA_LOCK_TIMEOUT = '5s';
-const MAIN_SCHEMA_STATEMENT_TIMEOUT = '60s';
-const TIMEOUT_LITERAL = /^[1-9][0-9]{0,6}(ms|s|min|h)$/;
+// Positive integer milliseconds, 1..999999. No unit suffix. Anchored so a
+// longer string cannot sneak through on a digit prefix.
+const POSITIVE_MS = /^\d{1,6}$/;
 
 let testTimeouts = null;
+
+// Returns a canonical millisecond count, or null. Never returns the raw input.
+function canonicalMs(value) {
+  if (typeof value !== 'string' || !POSITIVE_MS.test(value)) return null;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) return null;
+  return String(n);
+}
 
 function isBootTimeout(err) {
   const code = err && err.code;
@@ -52,14 +63,15 @@ function mainSchemaTimeout(err) {
   return wrapped;
 }
 
-function checkedTimeout(value, fallback) {
-  if (value == null || value === '') return fallback;
-  if (!TIMEOUT_LITERAL.test(value)) throw new Error('invalid schema timeout');
-  return value;
+// null means "use the fixed default". false means the caller supplied a bad value.
+function overrideMs(value) {
+  if (value == null || value === '') return null;
+  const ms = canonicalMs(value);
+  return ms == null ? false : ms;
 }
 
 // Tests pass a short lock_timeout so a held table lock fails fast.
-// Refuses to run outside the test process. Production always uses 5s and 60s.
+// Refuses to run outside the test process. A bad value clears any override.
 function _setMainSchemaTimeouts(timeouts) {
   if (process.env.NODE_ENV !== 'test') {
     throw new Error('_setMainSchemaTimeouts is only available when NODE_ENV=test');
@@ -68,29 +80,30 @@ function _setMainSchemaTimeouts(timeouts) {
     testTimeouts = null;
     return;
   }
-  testTimeouts = {
-    lockTimeout: checkedTimeout(timeouts.lockTimeout, MAIN_SCHEMA_LOCK_TIMEOUT),
-    statementTimeout: checkedTimeout(timeouts.statementTimeout, MAIN_SCHEMA_STATEMENT_TIMEOUT),
-  };
+  const lockTimeout = overrideMs(timeouts.lockTimeout);
+  const statementTimeout = overrideMs(timeouts.statementTimeout);
+  if (lockTimeout === false || statementTimeout === false) {
+    testTimeouts = null;
+    throw new Error('invalid schema timeout');
+  }
+  testTimeouts = { lockTimeout, statementTimeout };
 }
 
+function envOverrideMs(name) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return null;
+  return canonicalMs(raw);
+}
+
+// Overrides exist only when NODE_ENV is exactly test. Anywhere else, and for
+// any value that is not a positive integer millisecond count, both sides stay
+// null and the SQL below uses the fixed literals.
 function mainSchemaTimeouts() {
+  if (process.env.NODE_ENV !== 'test') return { lockTimeout: null, statementTimeout: null };
   if (testTimeouts) return testTimeouts;
-  // A spawned test server cannot call the setter. NODE_ENV=test may pass
-  // the same literals through the environment. Any other environment ignores them.
-  if (process.env.NODE_ENV === 'test') {
-    const lock = process.env.FF_MAIN_SCHEMA_LOCK_TIMEOUT;
-    const statement = process.env.FF_MAIN_SCHEMA_STATEMENT_TIMEOUT;
-    if (lock || statement) {
-      return {
-        lockTimeout: checkedTimeout(lock, MAIN_SCHEMA_LOCK_TIMEOUT),
-        statementTimeout: checkedTimeout(statement, MAIN_SCHEMA_STATEMENT_TIMEOUT),
-      };
-    }
-  }
   return {
-    lockTimeout: MAIN_SCHEMA_LOCK_TIMEOUT,
-    statementTimeout: MAIN_SCHEMA_STATEMENT_TIMEOUT,
+    lockTimeout: envOverrideMs('FF_MAIN_SCHEMA_LOCK_TIMEOUT'),
+    statementTimeout: envOverrideMs('FF_MAIN_SCHEMA_STATEMENT_TIMEOUT'),
   };
 }
 
@@ -101,12 +114,19 @@ async function applyMainSchema() {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [MAIN_SCHEMA_ADVISORY_LOCK]);
     const timeouts = mainSchemaTimeouts();
-    if (timeouts.lockTimeout === '5s' && timeouts.statementTimeout === '60s') {
-      await client.query("SET LOCAL lock_timeout = '5s'");
-      await client.query("SET LOCAL statement_timeout = '60s'");
+    // Re-check at the query. Production never reaches set_config. The bound
+    // value is the canonical digit string, not an environment value.
+    const lockMs = process.env.NODE_ENV === 'test' ? canonicalMs(timeouts.lockTimeout) : null;
+    const statementMs = process.env.NODE_ENV === 'test' ? canonicalMs(timeouts.statementTimeout) : null;
+    if (lockMs) {
+      await client.query("SELECT set_config('lock_timeout', $1, true)", [lockMs]);
     } else {
-      await client.query(`SET LOCAL lock_timeout = '${timeouts.lockTimeout}'`);
-      await client.query(`SET LOCAL statement_timeout = '${timeouts.statementTimeout}'`);
+      await client.query("SET LOCAL lock_timeout = '5s'");
+    }
+    if (statementMs) {
+      await client.query("SELECT set_config('statement_timeout', $1, true)", [statementMs]);
+    } else {
+      await client.query("SET LOCAL statement_timeout = '60s'");
     }
     await client.query(sql);
     await client.query('COMMIT');
