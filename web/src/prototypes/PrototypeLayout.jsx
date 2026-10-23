@@ -4,7 +4,7 @@ import CtaPanel from './CtaPanel';
 import { BrandMark } from './logo';
 
 // Shared chrome for every prototype screen. The ribbon is not optional.
-export default function PrototypeLayout({ brand, children }) {
+export default function PrototypeLayout({ brand, children, watermark }) {
   const accent = brand.theme.accent;
   const onAccent = brand.theme.onAccent;
   const darkAccent = brand.darkTheme?.accent || accent;
@@ -17,6 +17,7 @@ export default function PrototypeLayout({ brand, children }) {
       onAccent={onAccent}
       darkAccent={darkAccent}
       darkOnAccent={darkOnAccent}
+      watermark={watermark}
     >
       <div className="prototype-frame">
         <div className="prototype-column">

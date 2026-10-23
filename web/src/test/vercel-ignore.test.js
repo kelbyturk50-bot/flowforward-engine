@@ -215,12 +215,15 @@ describe('web/vercel.json ignoreCommand', () => {
       { key: 'Cache-Control', value: 'no-store' },
       { key: 'X-Content-Type-Options', value: 'nosniff' },
     ];
-    const csp = [{ key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'none'" }];
+    const csp = [{ key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src https://flowforward-engine-production.up.railway.app; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'none'" }];
+    const prototypeHeaders = [...demoHeaders, ...csp];
     expect(config.headers).toEqual([
       { source: '/demo/:path*', headers: demoHeaders },
       { source: '/demo/:path*/', headers: demoHeaders },
       { source: '/demo/live-chat', headers: csp },
       { source: '/demo/live-chat/', headers: csp },
+      { source: '/demo/prototype/:token', headers: prototypeHeaders },
+      { source: '/demo/prototype/:token/', headers: prototypeHeaders },
     ]);
     expect(config.rewrites).toEqual([
       { source: '/about', destination: '/about.html' },

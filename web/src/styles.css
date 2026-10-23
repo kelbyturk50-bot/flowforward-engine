@@ -714,7 +714,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   .prototype-cta { position: sticky; top: 16px; margin-top: 0; }
 }
 
-/* ── Live chat demo (F-007). Fixtures only. ────────────── */
+/* ── Live chat demo (F-007). ────────────── */
 .prototype-column:has(.live-chat) .prototype-brandbar { display: none; }
 .prototype-root:has(.live-chat) .prototype-screen {
   box-sizing: border-box;
@@ -858,6 +858,20 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   gap: 8px;
   margin: 0;
   color: var(--ink);
+  font-weight: 600;
+}
+.live-chat-status,
+.live-chat-inline {
+  flex: none;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fff4df;
+  color: #1E2A2F;
+  border: 1px solid #3E4C4F;
+  overflow-wrap: anywhere;
+  font-size: 1rem;
+  line-height: 1.4;
   font-weight: 600;
 }
 .live-chat-turn { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -1454,3 +1468,22 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
 .proto-swatch:focus-visible { outline: 3px solid var(--ochre); outline-offset: 2px; }
 .proto-addon { display: grid; gap: .25rem; margin-top: .4rem; border-left: 3px solid var(--ochre); padding: .4rem .6rem; background: var(--ochre-wash); border-radius: 4px; }
 .proto-addon pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .9rem; }
+.demo-link-block { display: grid; gap: .45rem; }
+.demo-link-block .col-title { margin: 0; font-size: 1rem; }
+.demo-link-url {
+  margin: 0;
+  padding: .7rem .8rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-size: 1rem;
+  line-height: 1.45;
+  user-select: all;
+}
+.demo-link-copy { min-height: 44px; }
+@media (max-width: 720px) {
+  .demo-link-copy { width: 100%; }
+}

@@ -31,7 +31,7 @@ import {
   messageCodePoints,
   officeClosed,
 } from './fixture.js';
-import { liveChatHref, liveChatRouteFromPath } from './route.js';
+import { liveChatHref, liveChatRouteFromPath, prototypeChatFromPath } from './route.js';
 import { _failNextFixtureReply, respond } from './respond.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -65,6 +65,19 @@ const WITHIN = /\bwithin \d+ (minutes?|hours?)\b/i;
 
 function at(pathAndSearch) {
   window.history.pushState({}, '', pathAndSearch);
+}
+
+function chatCalls() {
+  return fetchMock.mock.calls
+    .map((call) => String(call[0]))
+    .filter((url) => url.includes('/api/public/chat') || url.includes('/api/public/prototypes'));
+}
+
+function expectPublicCall(call) {
+  const headers = call[1]?.headers || {};
+  const names = Object.keys(headers).map((name) => name.toLowerCase());
+  expect(names).not.toContain('x-api-key');
+  expect(names).not.toContain('authorization');
 }
 
 function walkImports(startFile, seen = new Set()) {
@@ -139,7 +152,7 @@ describe('live chat demo', () => {
     });
   });
 
-  it('stays closed unless both preview flags are on, and never calls fetch', async () => {
+  it('stays closed unless both preview flags are on, and never calls the chat API', async () => {
     const cases = [
       ['', false],
       ['?flags=FF_LIVE_CHAT_DEMO', false],
@@ -148,18 +161,20 @@ describe('live chat demo', () => {
     ];
     for (const [search, open] of cases) {
       window.sessionStorage.clear();
+      fetchMock.mockClear();
       at(`/demo/live-chat${search}`);
       const view = render(<LiveChatGate />);
       if (open) {
         expect(await screen.findByText(DISCLOSURE)).toBeInTheDocument();
         expect(screen.getByRole('heading', { level: 1, name: SAMPLE_BUSINESS })).toBeInTheDocument();
       } else {
-        expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+        expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
         expect(screen.queryByText(DISCLOSURE)).not.toBeInTheDocument();
       }
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(chatCalls()).toEqual([]);
       expect(refreshSpy).not.toHaveBeenCalled();
       expect(api.flags).not.toHaveBeenCalled();
+      for (const call of fetchMock.mock.calls) expectPublicCall(call);
       view.unmount();
     }
 
@@ -168,15 +183,17 @@ describe('live chat demo', () => {
       { name: 'FF_PROTOTYPE_GALLERY', enabled: true, env_forced_off: false },
       { name: 'FF_LIVE_CHAT_DEMO', enabled: true, env_forced_off: false },
     ]);
+    fetchMock.mockClear();
     at('/demo/live-chat');
     const remote = render(<LiveChatGate />);
-    expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
     expect(screen.queryByText(DISCLOSURE)).not.toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(chatCalls()).toEqual([]);
     expect(refreshSpy).not.toHaveBeenCalled();
     expect(api.flags).not.toHaveBeenCalled();
     remote.unmount();
 
+    fetchMock.mockClear();
     at(`/demo/gallery/${GALLERY_PREVIEW_TOKEN}?flags=FF_PROTOTYPE_GALLERY`);
     render(<GalleryGate route={{ token: GALLERY_PREVIEW_TOKEN, screen: 'index' }} />);
     expect(await screen.findByRole('heading', { name: 'Prototype gallery' })).toBeInTheDocument();
@@ -200,10 +217,12 @@ describe('live chat demo', () => {
     expect(indexHtml).toContain('<meta name="referrer" content="no-referrer"');
     expect(document.head.querySelector('meta[name="robots"]')).toBeNull();
     expect(api.flags).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(chatCalls()).toEqual([]);
+    expect(fetchMock.mock.calls.every((call) => String(call[0]).endsWith('/api/public/flags'))).toBe(true);
     expect(refreshSpy).not.toHaveBeenCalled();
     demo.unmount();
 
+    fetchMock.mockClear();
     const search = `?flags=${BOTH}`;
     at(`/demo/gallery/${GALLERY_PREVIEW_TOKEN}${search}`);
     const gallery = render(<GalleryGate route={{ token: GALLERY_PREVIEW_TOKEN, screen: 'index' }} />);
@@ -338,6 +357,17 @@ describe('live chat demo', () => {
     expect(disclosureText(SAMPLE_BUSINESS, '')).toContain('please call the business directly.');
     expect(liveChatRouteFromPath('/demo/live-chat')).toEqual({ screen: 'live-chat' });
     expect(liveChatRouteFromPath('/demo/live-chat/extra')).toBeNull();
+    expect(liveChatRouteFromPath(`/demo/prototype/${'a'.repeat(43)}`)).toBeNull();
+    expect(prototypeChatFromPath('/demo/live-chat')).toBeNull();
+    expect(prototypeChatFromPath(`/demo/prototype/${'a'.repeat(43)}`)).toEqual({
+      token: 'a'.repeat(43),
+      screen: 'prototype-chat',
+    });
+    expect(prototypeChatFromPath(`/demo/prototype/${'a'.repeat(43)}/`)).toEqual({
+      token: 'a'.repeat(43),
+      screen: 'prototype-chat',
+    });
+    expect(prototypeChatFromPath(`/demo/prototype/${'a'.repeat(42)}`)).toEqual({ token: '', malformed: true });
 
     const visible = [
       DISCLOSURE,
@@ -420,10 +450,11 @@ describe('live chat demo', () => {
       window.sessionStorage.clear();
       _setFlagRuntimeForTests({ env, location: runtimeLocation(hostname, search) });
       const closed = render(<LiveChatGate />);
-      expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+      expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
       expect(screen.queryByText(DISCLOSURE)).not.toBeInTheDocument();
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(chatCalls()).toEqual([]);
       closed.unmount();
+      fetchMock.mockClear();
     }
 
     window.sessionStorage.clear();
@@ -444,7 +475,7 @@ describe('live chat demo', () => {
     expect(await screen.findByText(DISCLOSURE)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: BANNER_SUMMARY })).toBeInTheDocument();
     dev.unmount();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(chatCalls()).toEqual([]);
   });
 
   it('scrolls to the latest reply and the typing line, instantly when motion is reduced', async () => {
@@ -510,14 +541,20 @@ describe('live chat demo', () => {
     const names = [...seen].map((file) => path.basename(file));
     expect(names).toContain('LiveChatDemo.jsx');
     expect(names).toContain('fixture.js');
+    expect(names).toContain('public-client.js');
     expect(names).not.toContain('api.js');
     expect(names).not.toContain('remote-flags.js');
     for (const file of seen) {
       const text = readFileSync(file, 'utf8');
-      expect(text, file).not.toMatch(/\bfetch\s*\(/);
+      const base = path.basename(file);
+      if (base !== 'public-client.js') expect(text, file).not.toMatch(/\bfetch\s*\(/);
+      expect(text, file).not.toMatch(/x-api-key/i);
       expect(text, file).not.toMatch(/from ['"][^'"]*\/api(?:\.js)?['"]/);
       expect(text, file).not.toMatch(/from ['"][^'"]*remote-flags(?:\.js)?['"]/);
       expect(text, file).not.toMatch(/anthropic|googleapis|twilio|sendMail|nodemailer/i);
     }
+    const client = readFileSync(path.join(here, 'public-client.js'), 'utf8');
+    expect(client).toMatch(/\bfetch\s*\(/);
+    expect(client).toMatch(/credentials:\s*'omit'/);
   });
 });

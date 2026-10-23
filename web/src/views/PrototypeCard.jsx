@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api';
+import { formatDenverDate } from '../live-chat/dates';
+import { demoChatUrl } from '../live-chat/route';
 import { toast } from '../ui';
 
 export const AGENT_LABELS = {
@@ -40,6 +42,19 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
     catch { toast('Copy failed. Open the link and copy it from the address bar.'); }
   };
 
+  const chatUrl = proto?.url && !proto.expired ? demoChatUrl(proto.url) : '';
+  const chatExpiry = formatDenverDate(proto?.expires_at);
+  const copyDemo = async () => {
+    if (!chatUrl) return;
+    try { await navigator.clipboard.writeText(chatUrl); toast('Demo link copied.'); }
+    catch { toast('Select the demo link and copy it.'); }
+  };
+  const createDemo = () => run(
+    'demo',
+    () => api.createPrototype(prospectId, Boolean(proto?.expired)),
+    'Demo link ready.',
+  );
+
   if (!proto) {
     return (
       <section className="proto-card" aria-label="Prototype">
@@ -48,6 +63,13 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
         <button className="btn" disabled={!!busy} onClick={() => run('make', () => api.createPrototype(prospectId), 'Prototype ready.')}>
           {busy === 'make' ? 'Making…' : 'Make a prototype'}
         </button>
+        <div className="demo-link-block">
+          <h4 className="col-title">Live chat demo</h4>
+          <p className="muted small">A text-back demo for this shop. Sample replies until the live model is on.</p>
+          <button type="button" className="btn demo-link-copy" disabled={!!busy} onClick={createDemo}>
+            {busy === 'demo' ? 'Creating…' : 'Create demo link'}
+          </button>
+        </div>
       </section>
     );
   }
@@ -76,6 +98,25 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
           <code className="proto-url" title={proto.url}>{proto.url}</code>
         </div>
       )}
+      <div className="demo-link-block">
+        <h4 className="col-title">Live chat demo</h4>
+        {chatUrl ? (
+          <>
+            {chatExpiry ? <p className="muted small">Works until {chatExpiry} (Mountain Time).</p> : null}
+            <p className="demo-link-url" id="demo-chat-url">{chatUrl}</p>
+            <button type="button" className="btn demo-link-copy" aria-describedby="demo-chat-url" onClick={copyDemo}>
+              Copy demo link
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="muted small">A text-back demo for this shop. Sample replies until the live model is on.</p>
+            <button type="button" className="btn demo-link-copy" disabled={!!busy} onClick={createDemo}>
+              {busy === 'demo' ? 'Creating…' : 'Create demo link'}
+            </button>
+          </>
+        )}
+      </div>
       <div className="proto-grid">
         <label>Lead with
           <select className="input" value={proto.agent_type} disabled={!!busy}
