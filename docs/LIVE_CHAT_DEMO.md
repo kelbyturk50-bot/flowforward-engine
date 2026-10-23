@@ -235,7 +235,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 | `maxInputTokens` | input context per live request (`boundTokens`, §7) | 16000 | per request |
 | `maxOutputTokens` | live output per reply (`max_tokens`) | 300 | per reply |
 | `reservationTtlMs` | unsettled reservation expiry | 600000 (10 min) | per reservation |
-| daily spend ceiling | global live spend per day | **Kelby sets**; no default ships | FlowForward day |
+| daily spend ceiling | global live spend per day | **Kelby sets** it in the Railway env as `CHAT_DEMO_DAILY_CEILING_USD`; no default ships | FlowForward day |
 
 - **Time zones.**
   - A *business-local day* uses the business's `time_zone` fact (§3), defaulting to `America/Denver` when unknown.
@@ -278,10 +278,10 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   - No counter or spend-row lock is ever held across the 15 s model call. Every chat transaction sets `SET LOCAL lock_timeout = '2s'` and `SET LOCAL statement_timeout = '5s'`, and a timeout is handled as a cap-store failure (below).
   - A CHECK violation (SQLSTATE `23514`) maps to a 429 with a friendly "Demo limit reached" card that keeps the watermark.
 - [ ] **Fail closed when the cap store is down.**
-  - Any Postgres error or timeout on the session mint, a counter increment, the Express counter seed read, the ceiling read or the reservation means **0 responder calls**, neither live nor fixture. The response is a 503 "Demo paused" card with the watermark.
+  - Any Postgres error or timeout on the session mint, a counter increment, the Express counter seed read or the reservation means **0 responder calls**, neither live nor fixture. The response is a 503 "Demo paused" card with the watermark.
   - An Express counter whose seed read failed denies the request. A failed read is never treated as 0.
   - Tested with a pool stubbed to throw on each of those statements.
-- [ ] **IP source.** Both layers take the IP only from `clientIp(req)` in `src/pilot/rate-limit.js`. That is the right-most `X-Forwarded-For` entry under `trust proxy` 1, matching one Railway hop. The left-most XFF entry is never used.
+- [ ] **IP source.** Both layers take the IP only from `clientIp(req)` in `src/pilot/rate-limit.js`. That is the right-most `X-Forwarded-For` entry under `trust proxy` 1, matching one Railway hop. The left-most XFF entry is never used. A test asserts `app.get('trust proxy') === 1`.
 - [ ] **IP bucketing (both layers, the Express key and the hash input).**
   - An IPv4-mapped `::ffff:a.b.c.d` is folded to IPv4 `a.b.c.d`.
   - IPv6 is bucketed by /64: the first four hextets, canonicalized lowercase and zero-compressed per RFC 5952, then `::/64`.
@@ -291,16 +291,26 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   - `dayKey` is `crypto.randomBytes(32)`. It is held in process memory only, never persisted or logged, and dropped and regenerated at the America/Denver day rollover. It is **not** derived from `CRM_API_KEY` or any long-lived key, so a DB read plus any CRM key can't reverse the hashes.
   - **Trade-off:** a process restart generates a new key, which effectively resets the DB per-IP buckets for the rest of that day. The global, link, session and spend caps still hold, because they aren't IP-keyed.
   - **Replica assumption:** the app runs as **one instance**. If it ever scales out, the per-day key must be shared across instances before then (a spec change reviewed by Warden).
-- [ ] **Purge (48 h).** One statement, `DELETE FROM <table> WHERE bucket < $now - interval '48 hours'`, runs for each of `chat_demo_ip_hours`, `chat_demo_ip_days` and `chat_demo_rate_minutes`. It runs at boot, hourly, and at the start of every mint transaction, the same pattern as the sweep.
+- [ ] **Purge (48 h).** One statement, `DELETE FROM <table> WHERE bucket < $now - interval '48 hours'`, runs for each of `chat_demo_ip_hours`, `chat_demo_ip_days` and `chat_demo_rate_minutes`. It runs at boot, hourly, and before every mint.
+  - On the mint path it runs as a **separate statement before the mint transaction opens**, never inside it, so a purge error can't abort the mint transaction.
   - A failed purge logs `ip_purge_failed` with `err.code` only and doesn't block mints.
   - A test with an injected clock shows rows older than 48 h are gone.
   - Warden signs off.
 
 ### 8.3 Spend ceiling, reservations and sweep
-- [ ] **Ceiling value.**
-  - The ceiling is read on every reservation from `app_settings` key `chat_demo_daily_ceiling_usd`, a dollar value that Kelby enters, and parsed to integer `ceiling_micros`. **Kelby sets the value.** No default ships, and an unset, empty, zero, negative, non-finite (`NaN`, `Infinity`) or otherwise invalid value means the live path is off. Only a finite value greater than 0 enables it.
-  - **There is no API write path.** No route, including the flags and settings APIs, writes `chat_demo_daily_ceiling_usd`. Kelby sets it directly in the database, and no agent, routine, migration or seed sets it. A test enumerates every mounted route and asserts that none writes this key, and a schema test asserts it isn't seeded.
-  - The day resets at midnight `America/Denver`.
+- [ ] **Ceiling value: env-only** (Warden B12). Raising the ceiling is the one change that increases real spend, so it lives where only Kelby can change it.
+  - It's read on every reservation from the env var **`CHAT_DEMO_DAILY_CEILING_USD`**, a dollar value Kelby sets in the Railway env, and parsed to integer `ceiling_micros`.
+  - The reader is `readCeiling(env = process.env)` in `src/chatdemo/ceiling.js`. It's a pure function, so tests pass a plain env object.
+  - **Kelby sets the value.** No default ships, and no PR, test, routine, migration, seed or agent sets it. Nothing changes Railway env vars.
+  - Unset, empty, non-numeric, non-finite (`NaN`, `Infinity`), zero or negative means the live path stays off (`readCeiling` returns null). Only a finite value greater than 0 enables it.
+  - **Nothing in the database holds the ceiling.** It isn't stored in `app_settings` or any other table, it isn't seeded, and no `app_settings` key exists for it.
+  - **No write path.** No route, including the flags and settings APIs, writes the ceiling.
+  - The CRM may show the **effective value read-only**, from `readCeiling()`, with no edit control.
+  - **Tests:**
+    - every mounted route is enumerated, and none writes the ceiling;
+    - a static test finds no lowercase `chat_demo_daily_ceiling_usd` key (case-sensitive; the env var name is uppercase) in `schema.sql` or `src/**`, and no `app_settings` query in `src/chatdemo/**`;
+    - with `app_settings` spied, a full live turn under a stub gate makes 0 `app_settings` reads or writes for the ceiling;
+    - changing the env object changes the effective ceiling, and inserting an `app_settings` row named like the ceiling changes nothing.
 - [ ] **Tables.**
   - `chat_demo_spend_days (day, spent_micros, reserved_micros, overshoot_micros)`. All columns are CHECK ≥ 0. There is **no** CHECK tying them to the ceiling, so a settle can never fail.
   - `chat_demo_reservations (id, day, turn_id, status, amount_micros, created_at, settled_at, expired_at, released_at, actual_micros)`.
@@ -345,14 +355,14 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 ### 8.4 Live gate (stubbable)
 - [ ] The engine is built as `createChatEngine({ liveGate, fixtureResponder, liveResponder, clock, spend })`. `liveGate(ctx) → Promise<boolean>` is injectable.
 - [ ] The default gate is built by a factory with injectable inputs: `makeDefaultLiveGate({ nodeEnv, flags, ceiling, caps, anthropicConfigured, priced })`.
-  - `flags(name)` resolves a flag; `ceiling()` returns the configured ceiling in micros or null; `caps(ctx)` reports whether any cap is hit; `anthropicConfigured()` is a function.
-  - Production wiring is exactly `makeDefaultLiveGate({ nodeEnv: process.env.NODE_ENV, flags: resolveFlag, ceiling: readCeiling, caps: checkCaps, anthropicConfigured: cfg.anthropicConfigured, priced: () => Boolean(cfg.PRICES[cfg.MODEL]) })`, exported from `src/chatdemo/wiring.js` as `defaultLiveGate`.
+  - `flags(name)` resolves a flag; `ceiling()` returns the configured ceiling in micros or null, sourced from env via `readCeiling(process.env)` (never the database); `caps(ctx)` reports whether any cap is hit; `anthropicConfigured()` is a function.
+  - Production wiring is exactly `makeDefaultLiveGate({ nodeEnv: process.env.NODE_ENV, flags: resolveFlag, ceiling: () => readCeiling(process.env), caps: checkCaps, anthropicConfigured: cfg.anthropicConfigured, priced: () => Boolean(cfg.PRICES[cfg.MODEL]) })`, exported from `src/chatdemo/wiring.js` as `defaultLiveGate`.
   - The gate itself never reserves (see §8.3). It returns true only when **all** of these hold:
   - (a) `FF_PROTOTYPE_GALLERY` is on.
   - (b) `FF_LIVE_CHAT_DEMO` is on.
   - (c) `FF_LIVE_CHAT_MODEL` is on. It's env-only and is on only when `process.env.FF_LIVE_CHAT_MODEL === "true"` exactly (§9).
   - (d) `NODE_ENV !== 'test'`.
-  - (e) the ceiling is set (non-null, > 0).
+  - (e) the ceiling is set: `CHAT_DEMO_DAILY_CEILING_USD` parses to a finite value greater than 0.
   - (f) no cap in §8.1 is hit.
   - (g) `cfg.anthropicConfigured()` is true.
   - (h) `PRICES[MODEL]` exists, so the model is priced. Otherwise the turn uses fixtures and logs `model_unpriced`.
@@ -396,7 +406,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 
   - The 404 body, headers and timing path are identical in all four 404 cases. It reveals nothing about whether the token exists, was revoked, or the feature is off, and a test asserts byte equality across them.
   - Every cap hit returns 429 (§8.2).
-- [ ] **Body limit (2 KB).** `server.js` mounts `express.json({ limit: '1mb' })` globally, before the public routes, so a route-level parser mounted later never applies. The chat routes are therefore mounted **before** the global parser, with their own `express.json({ limit: '2kb' })`. A test asserts a 2,049-byte body gets 413 and the responder isn't called.
+- [ ] **Body limit (2 KB).** `server.js` mounts `express.json({ limit: '1mb' })` globally, before the public routes, so a route-level parser mounted later never applies. The chat routes are therefore mounted **before both `cors()` (`server.js`, which runs before the parser and answers OPTIONS preflights itself) and the global parser**, with their own `express.json({ limit: '2kb' })`. Mounting before the parser alone isn't enough, because `cors()` would still add ACAO and answer preflights. A test asserts a 2,049-byte body gets 413 and the responder isn't called.
 - [ ] **No CORS.** The page is same-origin (`/demo/prototype` is served by `server.js`), so the chat routes send **no** `Access-Control-Allow-Origin`, whatever `CORS_ORIGINS` says, including when it's unset. A test sends a foreign-origin preflight and a foreign-origin POST and asserts no ACAO header.
 - [ ] Every chat response sends:
   - `X-Robots-Tag: noindex, nofollow`
@@ -433,7 +443,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 - [ ] Views and events are recorded server-side only. No pixel and no client analytics.
 - [ ] **CRM proof events (flag-gated).** Only when `FF_CAMPAIGNS` is on (in addition to the chat flags), the first `chat_viewed` per session writes the existing `prototype_viewed` to `campaign_touches` (`source = 'system'`, `channel = 'prototype_link'`, `external_ref = 'chatdemo:<session_id>'`), and `cta_clicked` writes `prototype_cta_clicked`. Both are allowed by `campaign_touches_type_check` and the manual-type check. With `FF_CAMPAIGNS` off, nothing is written to `campaign_touches`. The funnel stays viewed → cta → call_booked → mvp_sold.
 - [ ] In tests (and pre-prod), these touches belong only to `TEST:` prospects, and their `external_ref` carries the `TEST:` prefix (`TEST:chatdemo:<session_id>`). Cleanup matches on `=`/`IN`, never `LIKE`.
-- [ ] The CRM prototype card shows sessions, chips used, tool cards shown, live vs fixture turns, and today's spend, reserved and overshoot vs the ceiling. It also shows the **alert banner** for the §8.3 alert events, which is the only alert surface besides the server log.
+- [ ] The CRM prototype card shows sessions, chips used, tool cards shown, live vs fixture turns, and today's spend, reserved and overshoot vs the ceiling. The ceiling is shown as the **effective env value, read-only**, with no edit control. It also shows the **alert banner** for the §8.3 alert events, which is the only alert surface besides the server log.
 - [ ] `session_id` in events and `external_ref` is the internal session UUID, never the bearer `sessionId`.
 
 ## 12. Tests and CI (Gauge verifies)
@@ -451,9 +461,11 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   - **Validator and tools:** the prompt-injection fixtures give 0 escapes; a free-text tool arg or an unknown tool is dropped and gives the canned line.
   - **Session:** `sessionId` is 43 base64url chars, and only its SHA-256 is stored; using it under another token gives 404; it expires at 30 min.
   - **Logging:** the captured logs contain no IP, `ip_hash`, `sessionId`, user text, model output or Anthropic error text.
-  - **Flag and ceiling:** `PUT /api/flags/FF_LIVE_CHAT_MODEL` gives 400 `flag_not_writable`; the env value `"TRUE"` or `"1"` means off; no route writes `chat_demo_daily_ceiling_usd`; `0`, `-1`, `NaN` and `Infinity` ceilings mean off.
+  - **Flag and ceiling:** `PUT /api/flags/FF_LIVE_CHAT_MODEL` gives 400 `flag_not_writable`; the env value `"TRUE"` or `"1"` means off; no route writes the ceiling, and `app_settings` is never read or written for it; `CHAT_DEMO_DAILY_CEILING_USD` unset, `""`, `"abc"`, `0`, `-1`, `NaN` and `Infinity` mean off.
   - **Model:** an unpriced `MODEL` fails gate (h) and gives fixtures.
-  - **Body and CORS:** a 2,049-byte body gives 413; a foreign-origin preflight gets no ACAO.
+  - **Body and CORS:** a 2,049-byte body gives 413; a foreign-origin preflight gets no ACAO (proving the routes sit before `cors()`).
+  - **Trust proxy:** `app.get('trust proxy') === 1`, because `clientIp`'s trust-all branch would fall back to the left-most XFF.
+  - **Purge isolation:** a purge that throws still lets the mint succeed, and the mint transaction is never aborted by it.
   - **Alerts:** each alert event shows the CRM card banner and makes 0 outbound requests.
 - [ ] **Status codes:** unknown, malformed, flag-off, revoked, archived and revoked+expired each return 404 with a byte-identical body. Expired returns 410 with `renderGone`'s copy and the watermark.
 - [ ] **Caps parity:** `CHAT_CAPS` equals the CHECK numbers parsed from `pg_constraint` (§8.1).
@@ -500,7 +512,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 | S3 LiveResponder (PROPOSAL_MODEL, `costOf`, fail-closed `reservationUsd`, the reserve/settle/release seam, settle-vs-sweep race handling) | **Canyon** | S1 merged (caps and ceiling first) |
 | Review: public token routes, caps, ip_hash (daily in-memory key), IP bucketing, purge, session ids, logging, privacy page, body limit/CORS, capture_lead PII, robots/headers, `schema.sql` | **Warden** (required on S1 and S3) | — |
 | QA on preview plus test DB, against §12 | **Gauge** | each slice |
-| Prod enable: `FF_LIVE_CHAT_DEMO` (DB), `FF_LIVE_CHAT_MODEL` (Railway env, exactly `"true"`), ceiling value (set directly in the DB; no API) | **Kelby** | S1–S3 merged **and** Kelby's answer to the §2 persona question (**PENDING KELBY**). `FF_LIVE_CHAT_DEMO` stays OFF in prod until then. |
+| Prod enable: `FF_LIVE_CHAT_DEMO` (DB), Kelby sets `FF_LIVE_CHAT_MODEL` (Railway env, exactly `"true"`) and `CHAT_DEMO_DAILY_CEILING_USD` (Railway env; no DB row, no API) | **Kelby** | S1–S3 merged **and** Kelby's answer to the §2 persona question (**PENDING KELBY**). `FF_LIVE_CHAT_DEMO` stays OFF in prod until then. |
 
 - The chat attaches to the existing prototype page as a "Try it live" panel next to the call-agent and speed-to-lead screens. In v1 it doesn't remove any scripted screen. Swapping out scripted screens is a later Scout call based on §11 data.
 - Every change follows branch → PR → gates (PLAYBOOK). Nothing changes Railway or Vercel settings or env vars.
