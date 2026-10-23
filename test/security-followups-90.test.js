@@ -393,9 +393,12 @@ describe('issue 90 public prototype limits and CORS', { timeout: 180000 }, () =>
         ['GET', '/api/chat/x'],
         ['HEAD', '/api/chat'],
         ['POST', '/api/chat/facts'],
+        // Malformed JSON: the real server must answer with auth, not the
+        // parser's 400, so the key check runs before express.json().
+        ['POST', '/api/chat/facts', '{"a":'],
       ];
-      for (const [method, reqPath] of cases) {
-        const res = await request(listenPort, method, reqPath, { origin: PRODUCTION_ORIGIN });
+      for (const [method, reqPath, body] of cases) {
+        const res = await request(listenPort, method, reqPath, { origin: PRODUCTION_ORIGIN, body });
         assert.equal(res.status, status, `${status} ${method} ${reqPath}`);
         if (method !== 'HEAD') assert.equal(res.json && res.json.error, error, `${method} ${reqPath}`);
         assert.equal(res.headers['access-control-allow-origin'], PRODUCTION_ORIGIN, `${method} ${reqPath}`);

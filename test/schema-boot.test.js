@@ -83,6 +83,18 @@ async function withStubClient(fail, fn) {
   }
 }
 
+// Records the delays applyMainSchema sleeps between advisory-lock tries.
+// The fake client below never calls setTimeout, so only the backoff does.
+function spySleeps() {
+  const original = global.setTimeout;
+  const delays = [];
+  global.setTimeout = (fn, ms, ...rest) => {
+    delays.push(ms);
+    return original(fn, ms, ...rest);
+  };
+  return { delays, restore() { global.setTimeout = original; } };
+}
+
 function pgError(code, message) {
   const err = new Error(message);
   if (code) err.code = code;
@@ -589,8 +601,11 @@ describe('schema boot lock', () => {
     const origExit = process.exit;
     let exited = false;
     process.exit = () => { exited = true; throw new Error('process.exit'); };
+    const sleeps = spySleeps();
     try {
       await applyMainSchema();
+      sleeps.restore();
+      assert.deepEqual(sleeps.delays, [100, 200], 'backoff is 100ms, then 200ms');
       assert.equal(exited, false);
       assert.equal(locks, 3);
       assert.equal(calls.filter((sql) => sql === 'COMMIT').length, 1);
@@ -598,6 +613,7 @@ describe('schema boot lock', () => {
       assert.equal(calls.filter((sql) => sql.length > 1000).length, 1);
       assert.equal(released, 3);
     } finally {
+      sleeps.restore();
       process.exit = origExit;
       pool.connect = original;
     }
@@ -625,8 +641,11 @@ describe('schema boot lock', () => {
       exitCode = code;
       throw new Error('process.exit');
     };
+    const sleeps = spySleeps();
     try {
       await assert.rejects(applyMainSchema(), (err) => err && err.message === 'process.exit');
+      sleeps.restore();
+      assert.deepEqual(sleeps.delays, [100, 200], 'no pause after the last try');
       assert.equal(exitCode, 1);
       assert.deepEqual(logged, ['55P03']);
       assert.equal(logged.some((line) => /canceling|lock timeout|statement/i.test(line)), false);
@@ -636,8 +655,53 @@ describe('schema boot lock', () => {
       assert.equal(calls.filter((sql) => sql === 'ROLLBACK').length, 3);
       assert.equal(released, 3);
     } finally {
+      sleeps.restore();
       process.exit = origExit;
       console.error = origError;
+      pool.connect = original;
+    }
+  });
+
+  it('does not retry or exit on an advisory-lock error other than 55P03', async () => {
+    const cases = [
+      [pgError('57014', 'canceling statement due to statement timeout'), (err) => err.code === '57014' && err.message === '57014'],
+      [pgError('08006', 'connection failure'), (err) => err.code === '08006' && err.message === 'connection failure'],
+    ];
+    const original = pool.connect;
+    const origExit = process.exit;
+    let exited = false;
+    process.exit = () => { exited = true; throw new Error('process.exit'); };
+    try {
+      for (const [lockErr, check] of cases) {
+        const calls = [];
+        let released = 0;
+        pool.connect = async () => ({
+          async query(text) {
+            const sql = String(text);
+            calls.push(sql);
+            if (sql.includes('pg_advisory_xact_lock')) throw lockErr;
+            return { rows: [] };
+          },
+          release() { released += 1; },
+        });
+        const sleeps = spySleeps();
+        try {
+          await assert.rejects(applyMainSchema(), (err) => {
+            assert.notEqual(err.message, 'process.exit', `${lockErr.code} exited`);
+            assert.ok(check(err), `${lockErr.code} rethrown as ${err.code} ${err.message}`);
+            return true;
+          });
+        } finally {
+          sleeps.restore();
+        }
+        assert.equal(exited, false, `${lockErr.code} exited`);
+        assert.deepEqual(sleeps.delays, [], `${lockErr.code} slept`);
+        assert.equal(calls.filter((sql) => sql.includes('pg_advisory_xact_lock')).length, 1, `${lockErr.code} retried`);
+        assert.equal(calls.filter((sql) => sql === 'ROLLBACK').length, 1);
+        assert.equal(released, 1);
+      }
+    } finally {
+      process.exit = origExit;
       pool.connect = original;
     }
   });
