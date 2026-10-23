@@ -712,10 +712,10 @@ describe('prototype on draft', () => {
         else process.env.CRM_API_KEY = value;
         const res = await request(port, 'POST', `/api/prototypes/${row.id}/revoke`, { key: STRONG_KEY });
         assert.equal(res.status, 503, `value ${JSON.stringify(value)}`);
-        assert.deepEqual(res.json, { error: 'writes_disabled' });
+        assert.deepEqual(res.json, { error: 'api_key_not_configured' });
         const nope = await request(port, 'POST', '/api/prototypes/nope/revoke', { key: STRONG_KEY });
         assert.equal(nope.status, 503);
-        assert.deepEqual(nope.json, { error: 'writes_disabled' });
+        assert.deepEqual(nope.json, { error: 'api_key_not_configured' });
       }
       const still = await pool.query('SELECT revoked_at FROM prototypes WHERE id = $1', [row.id]);
       assert.equal(still.rows[0].revoked_at, null);
@@ -912,13 +912,8 @@ describe('prototype on draft', () => {
         const started = await boot(item.key);
         try {
           const res = await request(started.listenPort, 'POST', `/api/prototypes/${weakRow.id}/revoke`, { key: item.header });
-          // Closed either way: the outer /api guard answers 401 for a set-but-blank
-          // key (the header cannot carry only spaces); the router answers 503.
-          if (item.name === 'spaces') assert.ok([401, 503].includes(res.status), item.name);
-          else {
-            assert.equal(res.status, 503, item.name);
-            assert.deepEqual(res.json, { error: 'writes_disabled' });
-          }
+          assert.equal(res.status, 503, item.name);
+          assert.deepEqual(res.json, { error: 'api_key_not_configured' });
           const secret = String(item.header || '').trim();
           if (secret) assert.equal(started.output().includes(secret), false, item.name);
         } finally {

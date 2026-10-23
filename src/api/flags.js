@@ -1,7 +1,7 @@
 // GET/PUT /api/flags. Does not send mail.
 // requireFlagApiKey is mounted in server.js before the shared /api guard.
-// It uses crmApiKeyReady() and applies only to these two methods. Other
-// /api routes keep requireApiKey. Env-only flags are refused by the PUT handler.
+// Both this guard and requireApiKey return 503 api_key_not_configured when
+// crmApiKeyReady() is false. Env-only flags are refused by the PUT handler.
 
 const express = require('express');
 const { crmApiKeyReady } = require('./crm-key');

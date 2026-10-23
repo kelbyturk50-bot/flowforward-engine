@@ -13,7 +13,15 @@ process.env.MIN_RATING = '0';
 process.env.SEND_HOURS = '0,24';
 process.env.SEND_DAYS = '0,1,2,3,4,5,6';
 process.env.SENDER_ADDRESS = '1 Test Street, Provo, UT 84601';
-process.env.CRM_API_KEY = '';
+process.env.CRM_API_KEY = 'test-pest-archive-key-32chars-ok!';
+const realFetch = global.fetch;
+global.fetch = (input, init) => {
+  const url = typeof input === 'string' ? input : (input && input.url) || '';
+  if (!url.includes('/api/')) return realFetch(input, init);
+  const headers = new Headers((init && init.headers) || undefined);
+  if (!headers.has('x-api-key')) headers.set('x-api-key', process.env.CRM_API_KEY);
+  return realFetch(input, { ...init, headers });
+};
 
 const fs = require('fs');
 const os = require('os');

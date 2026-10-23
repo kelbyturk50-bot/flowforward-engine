@@ -709,8 +709,8 @@ describe('feature flags', { concurrency: 1 }, () => {
     const routerAt = serverSrc.indexOf('flagsApi);');
     assert.ok(guardAt !== -1 && authAt > guardAt);
     assert.ok(routerAt > authAt);
-    assert.equal(authSrc.includes('api_key_not_configured'), false);
-    assert.equal(authSrc.includes('503'), false);
+    assert.equal(authSrc.includes('api_key_not_configured'), true);
+    assert.equal(authSrc.includes('503'), true);
     const app = await bootRealServer(API_KEY);
     try {
       assert.equal(app.output().includes(API_KEY), false);
@@ -797,12 +797,12 @@ describe('feature flags', { concurrency: 1 }, () => {
     assert.equal(innerSpaces.trim().length, 33);
     assert.equal(innerSpaces.replace(/\s/g, '').length, 17);
     const cases = [
-      { label: 'unset', key: undefined, fixturesWithout: 200 },
-      { label: 'empty', key: '', fixturesWithout: 200 },
-      { label: 'short', key: 'a'.repeat(31), fixturesWithout: 401, fixturesWith: 200 },
-      { label: 'spaces', key: ' '.repeat(32), fixturesWithout: 401, fixturesWith: 401 },
-      { label: 'padded', key: `${'b'.repeat(31)} `, fixturesWithout: 401 },
-      { label: 'inner-spaces', key: innerSpaces, fixturesWithout: 401, fixturesWith: 200 },
+      { label: 'unset', key: undefined },
+      { label: 'empty', key: '' },
+      { label: 'short', key: 'a'.repeat(31) },
+      { label: 'spaces', key: ' '.repeat(32) },
+      { label: 'padded', key: `${'b'.repeat(31)} ` },
+      { label: 'inner-spaces', key: innerSpaces },
     ];
     for (const item of cases) {
       const app = await bootRealServer(item.key);
@@ -839,28 +839,14 @@ describe('feature flags', { concurrency: 1 }, () => {
         assert.equal(app.output().includes(API_KEY), false, item.label);
         assert.deepEqual(await snapshot(), beforeRows, item.label);
         const fixturesBare = await request('GET', '/api/brands/fixtures', { port: app.port });
-        assert.equal(fixturesBare.status, item.fixturesWithout, `${item.label} fixtures`);
-        assert.notEqual(fixturesBare.status, 503, `${item.label} fixtures`);
-        if (item.fixturesWithout === 401) {
-          assert.deepEqual(fixturesBare.json, { error: 'Missing or invalid API key' });
-        } else {
-          assert.equal(Array.isArray(fixturesBare.json.brands), true, item.label);
-          assert.equal(fixturesBare.json.brands.length > 0, true, item.label);
-        }
-        if (item.fixturesWith != null) {
-          const fixturesAuthed = await request('GET', '/api/brands/fixtures', {
-            port: app.port,
-            headers: withKey,
-          });
-          assert.equal(fixturesAuthed.status, item.fixturesWith, `${item.label} fixtures with key`);
-          assert.notEqual(fixturesAuthed.status, 503, `${item.label} fixtures with key`);
-          if (item.fixturesWith === 200) {
-            assert.equal(Array.isArray(fixturesAuthed.json.brands), true, item.label);
-            assert.equal(fixturesAuthed.json.brands[0].name.startsWith('TEST:'), true, item.label);
-          } else {
-            assert.deepEqual(fixturesAuthed.json, { error: 'Missing or invalid API key' });
-          }
-        }
+        assert.equal(fixturesBare.status, 503, `${item.label} fixtures`);
+        assert.deepEqual(fixturesBare.json, { error: 'api_key_not_configured' });
+        const fixturesAuthed = await request('GET', '/api/brands/fixtures', {
+          port: app.port,
+          headers: withKey,
+        });
+        assert.equal(fixturesAuthed.status, 503, `${item.label} fixtures with key`);
+        assert.deepEqual(fixturesAuthed.json, { error: 'api_key_not_configured' });
         assert.deepEqual(await snapshot(), beforeRows, item.label);
         console.log(`[flags] real server GET/PUT 503 api_key_not_configured key=${item.label}`);
       } finally {

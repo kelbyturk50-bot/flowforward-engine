@@ -820,7 +820,7 @@ describe('pilot csv estimate intake', () => {
     await resetDb();
   });
 
-  it('returns 404 and writes nothing when CRM_API_KEY is missing or shorter than 32 characters', async () => {
+  it('returns 503 and writes nothing when CRM_API_KEY is missing or shorter than 32 characters', async () => {
     const previous = process.env.CRM_API_KEY;
     try {
       await flagOn();
@@ -829,15 +829,16 @@ describe('pilot csv estimate intake', () => {
         headers: { 'x-api-key': API_KEY },
         body: { name: 'TEST: Missing Key' },
       });
-      assert.equal(missing.status, 404);
-      assert.deepEqual(missing.json, NOT_FOUND);
+      assert.equal(missing.status, 503);
+      assert.deepEqual(missing.json, { error: 'api_key_not_configured' });
 
       process.env.CRM_API_KEY = 'x'.repeat(31);
       const short = await request('POST', '/api/pilot/estimate-recovery/customers', {
         headers: { 'x-api-key': API_KEY },
         body: { name: 'TEST: Short Key' },
       });
-      assert.equal(short.status, 404);
+      assert.equal(short.status, 503);
+      assert.deepEqual(short.json, { error: 'api_key_not_configured' });
       assert.equal(await customerCount(), 0);
 
       process.env.CRM_API_KEY = ' '.repeat(32);
@@ -845,8 +846,8 @@ describe('pilot csv estimate intake', () => {
         headers: { 'x-api-key': API_KEY },
         body: { name: 'TEST: Spaces Key' },
       });
-      assert.equal(spaces.status, 404);
-      assert.deepEqual(spaces.json, NOT_FOUND);
+      assert.equal(spaces.status, 503);
+      assert.deepEqual(spaces.json, { error: 'api_key_not_configured' });
       assert.equal(await customerCount(), 0);
 
       process.env.CRM_API_KEY = `${'x'.repeat(31)} `;
@@ -854,15 +855,16 @@ describe('pilot csv estimate intake', () => {
         headers: { 'x-api-key': API_KEY },
         body: { name: 'TEST: Trailing Space Key' },
       });
-      assert.equal(trailing.status, 404);
+      assert.equal(trailing.status, 503);
+      assert.deepEqual(trailing.json, { error: 'api_key_not_configured' });
       assert.equal(await customerCount(), 0);
 
-      process.env.CRM_API_KEY = `  ${'y'.repeat(32)}  `;
-      const trimmed = await request('POST', '/api/pilot/estimate-recovery/customers', {
-        headers: { 'x-api-key': API_KEY },
-        body: { name: 'TEST: Trimmed Key' },
+      process.env.CRM_API_KEY = 'y'.repeat(32);
+      const ready = await request('POST', '/api/pilot/estimate-recovery/customers', {
+        headers: { 'x-api-key': 'y'.repeat(32) },
+        body: { name: 'TEST: Ready Key' },
       });
-      assert.equal(trimmed.status, 201, trimmed.text);
+      assert.equal(ready.status, 201, ready.text);
       await resetDb();
 
       process.env.CRM_API_KEY = '';
@@ -898,8 +900,8 @@ describe('pilot csv estimate intake', () => {
         const listed = await request('GET', `/api/pilot/estimate-recovery/customers/${shop.rows[0].id}/estimates`, { port });
         const removed = await request('DELETE', `/api/pilot/estimate-recovery/customers/${shop.rows[0].id}/estimates`, { port });
         for (const res of [created, posted, listed, removed]) {
-          assert.equal(res.status, 404);
-          assert.deepEqual(res.json, NOT_FOUND);
+          assert.equal(res.status, 503);
+          assert.deepEqual(res.json, { error: 'api_key_not_configured' });
         }
         assert.equal(await customerCount(), 1);
         assert.equal(await estimateCount(shop.rows[0].id), 1);

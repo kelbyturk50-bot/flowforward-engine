@@ -1,8 +1,9 @@
 // Create, restyle, and revoke prototypes from the CRM. Writes stay closed unless CRM_API_KEY has at least
 // 32 non-whitespace characters (crmApiKeyReady, the pilot CSV rule).
-// A short, blank, or missing key returns 503 and does not write, including
-// when the outer API guard is open. When the key is strong enough, this
-// router requires that key. Does not send mail.
+// A short, blank, or missing key returns 503 writes_disabled and does not write.
+// The shared /api guard returns 503 api_key_not_configured first, so this
+// gate is defense in depth. When the key is strong enough, this router
+// requires that key. Does not send mail.
 
 const crypto = require('crypto');
 const express = require('express');

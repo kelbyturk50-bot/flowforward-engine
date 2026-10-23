@@ -1030,8 +1030,8 @@ describe('pilot estimate recovery', () => {
       const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, {
         headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.152' },
       });
-      assert.equal(minted.status, 404);
-      assert.deepEqual(minted.json, NOT_FOUND);
+      assert.equal(minted.status, 503);
+      assert.deepEqual(minted.json, { error: 'api_key_not_configured' });
       const after = await pool.query('SELECT COUNT(*)::int AS n FROM pilot_tokens');
       assert.equal(after.rows[0].n, before.rows[0].n);
       assert.ok(lines.some((line) => line.includes('CRM_API_KEY') && line.includes('[pilot]')));
@@ -1080,8 +1080,8 @@ describe('pilot estimate recovery', () => {
       const minted = await request('POST', `/api/proposals/${row.id}/demo-token`, {
         headers: { 'x-api-key': API_KEY, 'x-forwarded-for': '203.0.113.172' },
       });
-      assert.equal(minted.status, 404);
-      assert.deepEqual(minted.json, NOT_FOUND);
+      assert.equal(minted.status, 503);
+      assert.deepEqual(minted.json, { error: 'api_key_not_configured' });
       const after = await pool.query('SELECT COUNT(*)::int AS n FROM pilot_tokens');
       assert.equal(after.rows[0].n, before.rows[0].n);
       assert.ok(lines.some((line) => line.includes('32') && line.includes('[pilot]')));

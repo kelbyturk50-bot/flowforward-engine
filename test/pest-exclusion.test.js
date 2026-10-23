@@ -1,3 +1,13 @@
+process.env.CRM_API_KEY = 'test-pest-exclusion-key-32chars-ok!';
+const realFetch = global.fetch;
+global.fetch = (input, init) => {
+  const url = typeof input === 'string' ? input : (input && input.url) || '';
+  if (!url.includes('/api/')) return realFetch(input, init);
+  const headers = new Headers((init && init.headers) || undefined);
+  if (!headers.has('x-api-key')) headers.set('x-api-key', process.env.CRM_API_KEY);
+  return realFetch(input, { ...init, headers });
+};
+
 require('./preload');
 
 // The default exclusion list is Pest Control. Set it before discover.js and

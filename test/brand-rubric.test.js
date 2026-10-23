@@ -1,3 +1,5 @@
+process.env.CRM_API_KEY = 'test-brand-rubric-key-32chars-ok!!';
+
 require('./preload');
 
 // Brand v1 and the prototype rubric. Disposable Postgres, static TEST fixtures,
