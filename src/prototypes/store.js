@@ -2,6 +2,7 @@
 // recommendPrototypes is called on the module object so tests can stub it.
 
 const pool = require('../db/client');
+const { crmApiKeyReady } = require('../api/crm-key');
 const scoring = require('../scoring/prototypes');
 const { loadRubric } = require('../scoring/rubric-store');
 const { isPestCompanyName } = require('../scoring/industry');
@@ -299,7 +300,10 @@ async function restartClock(prospectId) {
   return rows[0] || null;
 }
 
-// Unknown, malformed, and revoked are 404. Expired and still active is 410.
+// Unknown, malformed, revoked, and archived are 404. A hash match still
+// recomputes tokenFor(nonce) with the current key and compares it to the
+// presented token in constant time. A mismatch, or a key that is not ready,
+// is 404 rather than 410. Expired and still active is 410.
 // A row that is both revoked and expired is 404.
 // `at` is the injected clock. Chat passes the engine clock. Callers that
 // omit it use the process clock. The comparison is never SQL now().
@@ -309,7 +313,7 @@ async function lookupToken(raw, at) {
   const computed = wellFormed ? tokens.hashToken(raw) : tokens.DUMMY_HASH;
   const { rows } = await pool.query(
     `SELECT pt.id, pt.prospect_id, pt.agent_type, pt.brand_name, pt.color_primary, pt.color_secondary,
-            pt.token_hash, pt.issued_at, pt.expires_at, pt.revoked_at,
+            pt.token_hash, pt.nonce, pt.issued_at, pt.expires_at, pt.revoked_at,
             ($2::timestamptz >= pt.expires_at) AS expired,
             p.industry, p.city, p.archived_at
        FROM prototypes pt JOIN prospects p ON p.id = pt.prospect_id
@@ -320,6 +324,10 @@ async function lookupToken(raw, at) {
   const stored = row && row.token_hash ? Buffer.from(row.token_hash) : null;
   const equal = tokens.hashesEqual(stored, computed);
   if (!wellFormed || !row || !equal || row.revoked_at || row.archived_at) return { status: 404, row: null };
+  const nonce = row.nonce ? Buffer.from(row.nonce) : Buffer.alloc(0);
+  const ready = crmApiKeyReady();
+  const recomputed = ready ? tokens.tokenFor(nonce) : null;
+  if (!ready || !tokens.tokensEqual(recomputed, raw)) return { status: 404, row: null };
   if (row.expired === true) return { status: 410, row };
   return { status: 200, row };
 }

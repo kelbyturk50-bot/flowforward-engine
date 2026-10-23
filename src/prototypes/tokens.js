@@ -9,9 +9,13 @@
 // restart because the server recomputes it from the nonce.
 //
 // CRM_API_KEY must have at least 32 non-whitespace characters. Without it,
-// new prototypes are refused and existing links cannot be recomputed.
-// Rotating CRM_API_KEY changes every recomputed link: old links stop
-// matching their stored hash and return 404.
+// new prototypes are refused, existing links cannot be recomputed, and a
+// presented link returns 404.
+// Rotating CRM_API_KEY invalidates every existing link. Lookup still matches
+// the stored SHA-256, then recomputes tokenFor(nonce) with the current key
+// and returns 404 unless that token equals the one presented. A key that
+// is not ready returns 404 the same way. Expiry stays 410 only after that
+// check passes.
 
 const crypto = require('crypto');
 const { crmApiKeyReady } = require('../api/crm-key');
@@ -64,6 +68,16 @@ function hashesEqual(stored, computed) {
   return crypto.timingSafeEqual(left, right) && left !== DUMMY_HASH && Buffer.isBuffer(stored);
 }
 
+// Length-safe: a different length compares the dummy to itself and is not a match.
+function tokensEqual(expected, presented) {
+  const left = typeof expected === 'string' ? Buffer.from(expected, 'utf8') : null;
+  const right = typeof presented === 'string' ? Buffer.from(presented, 'utf8') : null;
+  const comparable = left && right && left.length === right.length && left.length > 0;
+  const a = comparable ? left : DUMMY_HASH;
+  const b = comparable ? right : DUMMY_HASH;
+  return crypto.timingSafeEqual(a, b) && a !== DUMMY_HASH;
+}
+
 function publicPath(token) {
   return `/demo/prototype/${token}`;
 }
@@ -80,6 +94,7 @@ module.exports = {
   mintToken,
   hashToken,
   hashesEqual,
+  tokensEqual,
   publicPath,
   tokenWellFormed,
   DUMMY_HASH,

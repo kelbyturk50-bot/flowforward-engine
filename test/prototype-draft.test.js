@@ -171,8 +171,11 @@ describe('prototype on draft', () => {
     _setClient(fakeClaude());
     const app = express();
     app.set('trust proxy', 1);
+    const { prototypeChatRouter } = require('../src/chatdemo/public');
+    app.use('/api/public/prototypes/:token/chat', prototypeChatRouter);
     app.use(express.json());
     app.use('/api/public/prototypes', require('../src/prototypes/public').router);
+    app.use('/demo/prototype', require('../src/prototypes/page').router);
     app.use('/api', require('../src/api/auth'));
     app.use('/api/proposals', require('../src/api/proposals'));
     app.use('/api/prototypes', require('../src/api/prototypes'));
@@ -380,25 +383,27 @@ describe('prototype on draft', () => {
     const id = (await prototypeRows(lead.id))[0].id;
     assert.equal(Buffer.from(token, 'base64url').length, 32);
 
-    async function shift(issuedSql) {
+    async function shift(expiresAt) {
       const { rows } = await pool.query(
         `UPDATE prototypes
-            SET issued_at = ${issuedSql},
-                expires_at = (${issuedSql}) + INTERVAL '14 days'
+            SET issued_at = $2::timestamptz - INTERVAL '14 days',
+                expires_at = $2::timestamptz
           WHERE id = $1
           RETURNING expires_at`,
-        [id]
+        [id, expiresAt]
       );
       return { token, expires_at: new Date(rows[0].expires_at).toISOString() };
     }
 
-    const early = await shift("NOW() - INTERVAL '14 days' + INTERVAL '1 second'");
+    // Millisecond clocks: SQL NOW() carries microseconds, so a same-millisecond
+    // read can land before that instant. Anchor both sides to a JS date.
+    const early = await shift(new Date(Date.now() + 1000));
     const earlyRes = await request(port, 'GET', `/api/public/prototypes/${early.token}`, { key: '' });
     assert.equal(earlyRes.status, 200);
     assert.equal(earlyRes.json.expires_at, early.expires_at);
     assert.equal(earlyRes.headers['x-content-type-options'], 'nosniff');
 
-    const due = await shift("NOW() - INTERVAL '14 days'");
+    const due = await shift(new Date());
     const dueRes = await request(port, 'GET', `/api/public/prototypes/${due.token}`, { key: '' });
     assert.equal(dueRes.status, 410);
     assert.deepEqual(dueRes.json, { error: 'link_expired', expires_at: due.expires_at });
@@ -697,6 +702,82 @@ describe('prototype on draft', () => {
       process.env.CRM_API_KEY = saved;
     }
     console.log('[prototype] restart: same url recomputed; rotated key: url null, link_problem key_changed');
+  });
+
+  it('prototype: rotating or unsetting the key returns 404; the same key stays 200', async () => {
+    process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
+    const saved = process.env.CRM_API_KEY;
+    const keyB = 'rotated-prototype-key-32chars-minimum!!';
+    const fwd = (ip) => ({ 'x-forwarded-for': ip });
+    try {
+      await pool.query(
+        `UPDATE feature_flags
+            SET enabled = true, updated_at = NULL, updated_by = NULL
+          WHERE name = ANY($1::text[])`,
+        [['FF_PROTOTYPE_GALLERY', 'FF_LIVE_CHAT_DEMO']]
+      );
+      const lead = await seedLead({ google_place_id: 'test-place-proto-key-rotate' });
+      const proposal = await draftProposal(lead.id);
+      const got = await request(port, 'GET', `/api/proposals/${proposal.id}`);
+      const token = tokenOf(got.json.prototype.url);
+      assert.equal(token.length, 43);
+
+      const liveJson = await request(port, 'GET', `/api/public/prototypes/${token}`, { key: '', headers: fwd('203.0.113.87') });
+      assert.equal(liveJson.status, 200);
+      const livePage = await request(port, 'GET', `/demo/prototype/${token}`, { key: '', headers: fwd('203.0.113.87') });
+      assert.equal(livePage.status, 200);
+      const liveChat = await request(port, 'POST', `/api/public/prototypes/${token}/chat/session`, {
+        key: '', headers: fwd('203.0.113.87'), body: {},
+      });
+      assert.equal(liveChat.status, 201);
+
+      const store = require('../src/prototypes/store');
+      const future = new Date(Date.now() + 400 * 3600 * 1000);
+      assert.equal((await store.lookupToken(token, future)).status, 410);
+      assert.equal((await store.lookupToken(token, new Date(Date.now() - 60 * 1000))).status, 200);
+
+      for (const k of Object.keys(require.cache)) if (k.includes('/src/prototypes/')) delete require.cache[k];
+      process.env.CRM_API_KEY = keyB;
+      const fresh = require('../src/prototypes/store');
+      assert.equal((await fresh.lookupToken(token, future)).status, 404);
+
+      const jsonB = await request(port, 'GET', `/api/public/prototypes/${token}`, { key: '', headers: fwd('203.0.113.88') });
+      assert.equal(jsonB.status, 404);
+      assert.equal(jsonB.json.error, 'not_found');
+      const pageB = await request(port, 'GET', `/demo/prototype/${token}`, { key: '', headers: fwd('203.0.113.89') });
+      assert.equal(pageB.status, 404);
+      const chatB = await request(port, 'POST', `/api/public/prototypes/${token}/chat/session`, {
+        key: '', headers: fwd('203.0.113.70'), body: {},
+      });
+      assert.equal(chatB.status, 404);
+      assert.equal(chatB.json.error, 'not_found');
+
+      delete process.env.CRM_API_KEY;
+      assert.equal((await store.lookupToken(token, future)).status, 404);
+      const jsonUnset = await request(port, 'GET', `/api/public/prototypes/${token}`, { key: '', headers: fwd('203.0.113.71') });
+      assert.equal(jsonUnset.status, 404);
+      const pageUnset = await request(port, 'GET', `/demo/prototype/${token}`, { key: '', headers: fwd('203.0.113.72') });
+      assert.equal(pageUnset.status, 404);
+      const chatUnset = await request(port, 'POST', `/api/public/prototypes/${token}/chat/session`, {
+        key: '', headers: fwd('203.0.113.73'), body: {},
+      });
+      assert.equal(chatUnset.status, 404);
+
+      process.env.CRM_API_KEY = saved;
+      const jsonA = await request(port, 'GET', `/api/public/prototypes/${token}`, { key: '', headers: fwd('203.0.113.74') });
+      assert.equal(jsonA.status, 200);
+      const pageA = await request(port, 'GET', `/demo/prototype/${token}`, { key: '', headers: fwd('203.0.113.75') });
+      assert.equal(pageA.status, 200);
+      console.log('[prototype] key A 200; key B and unset key 404 on public, page, and chat; expiry stays 410 only under the same key');
+    } finally {
+      process.env.CRM_API_KEY = saved;
+      await pool.query(
+        `UPDATE feature_flags
+            SET enabled = false, updated_at = NULL, updated_by = NULL
+          WHERE name = ANY($1::text[])`,
+        [['FF_PROTOTYPE_GALLERY', 'FF_LIVE_CHAT_DEMO']]
+      );
+    }
   });
 
   it('prototype: revoke fails closed unless the API key has 32 non-whitespace characters', async () => {
