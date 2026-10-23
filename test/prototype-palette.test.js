@@ -4,13 +4,44 @@ require('./preload');
 // Brand colors read from a shop's own site for the prototype page.
 // The site is served by the in-process mock transport; no real fetch.
 
+const http = require('http');
+const express = require('express');
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { _setResolver, _setTransport } = require('../src/net/safeFetch');
 const { mockTransport, requestedUrl } = require('./mock-transport');
-const { extractPalette, detectBrandColors } = require('../src/prototypes/palette');
-const store = require('../src/prototypes/store');
+const palette = require('../src/prototypes/palette');
+const { extractPalette, detectBrandColors } = palette;
 const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
+
+const FALLBACK_PRIMARY = '#2f6b57';
+const FALLBACK_SECONDARY = '#1e2a2f';
+const detectCalls = [];
+const realDetect = palette.detectBrandColors;
+
+function call(port, method, path, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body == null ? null : Buffer.from(JSON.stringify(body));
+    const headers = { 'x-api-key': process.env.CRM_API_KEY };
+    if (payload) {
+      headers['content-type'] = 'application/json';
+      headers['content-length'] = String(payload.length);
+    }
+    const req = http.request({ hostname: '127.0.0.1', port, path, method, headers }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* html or empty */ }
+        resolve({ status: res.statusCode, json, text });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
 
 // A WordPress-style plumbing site: navy/blue brand with a yellow accent,
 // plus the usual neutrals and a WordPress admin blue that must be ignored.
@@ -26,8 +57,14 @@ footer{background:#1b1b1b;color:#ccc}a{color:#0a3d7a}.wp-admin{color:#2271b1}`;
 
 describe('prototype brand colors', () => {
   const calls = [];
+  let server;
+  let port;
   before(async () => {
     await resetDb();
+    palette.detectBrandColors = async (website, opts) => {
+      detectCalls.push(website);
+      return realDetect(website, opts);
+    };
     _setResolver({ async resolve4() { return ['8.8.8.8']; }, async resolve6() { return []; } });
     _setTransport(mockTransport((options) => {
       const url = requestedUrl(options);
@@ -37,8 +74,20 @@ describe('prototype brand colors', () => {
       if (url === 'https://nocolor.example/') return { status: 200, headers: { 'content-type': 'text/html' }, body: '<html><body style="color:#222;background:#fafafa">Hi</body></html>' };
       return { status: 404, headers: {}, body: '' };
     }));
+    const app = express();
+    app.use('/api', require('../src/api/auth'));
+    app.use('/api/prototypes', require('../src/api/prototypes'));
+    server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    port = server.address().port;
   });
-  after(async () => { _setResolver(null); _setTransport(null); await closePool(); });
+  after(async () => {
+    palette.detectBrandColors = realDetect;
+    _setResolver(null);
+    _setTransport(null);
+    if (server) await new Promise((resolve) => server.close(resolve));
+    await closePool();
+  });
 
   it('scores theme-color, brand variables, and header/button colors; ignores neutrals and vendor blues', () => {
     const got = extractPalette(HOME, [CSS]);
@@ -82,23 +131,47 @@ describe('prototype brand colors', () => {
     console.log(`[prototype-palette] detected ${got.primary} / ${got.secondary} from ${calls.length} requests`);
   });
 
-  it('a new prototype uses the colors found on the site; Match their website updates an existing one', async () => {
+  it('CRM create uses fallback colors and does not call detectBrandColors; match-site calls it once', async () => {
+    detectCalls.length = 0;
+    const transportBefore = calls.length;
     const p = await insertProspect({ company: 'TEST: Erics Plumbing', industry: 'Plumbing', city: 'Spanish Fork', state: 'UT', website: 'https://ericsplumbing.example/', google_place_id: 'test-place-palette-1' });
-    const row = await store.ensurePrototype(p.id);
-    assert.equal(row.color_primary, '#0a3d7a');
-    assert.equal(row.color_secondary, '#ffc20e');
+    const stored = await pool.query(
+      `SELECT p.research, (SELECT COUNT(*)::int FROM prospect_brands b WHERE b.prospect_id = p.id) AS brands
+         FROM prospects p WHERE p.id = $1`,
+      [p.id]
+    );
+    assert.equal(stored.rows[0].research, null);
+    assert.equal(stored.rows[0].brands, 0);
+
+    const made = await call(port, 'POST', '/api/prototypes', { prospect_id: p.id });
+    assert.equal(made.status, 200);
+    assert.equal(detectCalls.length, 0);
+    assert.equal(calls.length, transportBefore);
+    assert.equal(made.json.prototype.colors.primary, FALLBACK_PRIMARY);
+    assert.equal(made.json.prototype.colors.secondary, FALLBACK_SECONDARY);
     const cached = await pool.query(`SELECT research->'site'->'brand_colors'->>'primary' AS c FROM prospects WHERE id = $1`, [p.id]);
-    assert.equal(cached.rows[0].c, '#0a3d7a');
+    assert.equal(cached.rows[0].c, null);
 
-    await store.setColors(row.id, { primary: '#2f6b57', secondary: '#1e2a2f' });
-    const matched = await store.matchSiteColors(row.id);
-    assert.equal(matched.row.color_primary, '#0a3d7a');
-    assert.ok(matched.swatches.length >= 2);
+    const matched = await call(port, 'POST', `/api/prototypes/${made.json.prototype.id}/match-site`);
+    assert.equal(matched.status, 200);
+    assert.equal(detectCalls.length, 1);
+    assert.equal(detectCalls[0], 'https://ericsplumbing.example/');
+    assert.ok(calls.length > transportBefore);
+    assert.equal(matched.json.prototype.colors.primary, '#0a3d7a');
+    assert.equal(matched.json.prototype.colors.secondary, '#ffc20e');
+    assert.ok(matched.json.swatches.length >= 2);
 
+    detectCalls.length = 0;
     const q = await insertProspect({ company: 'TEST: No Color Co', industry: 'Plumbing', state: 'UT', website: 'https://nocolor.example/', google_place_id: 'test-place-palette-2' });
-    const plain = await store.ensurePrototype(q.id);
-    assert.equal(plain.color_primary, '#2f6b57');
-    await assert.rejects(() => store.matchSiteColors(plain.id), (err) => err.status === 422);
-    console.log('[prototype-palette] new prototype took site colors; match-site restored them; no-color site falls back');
+    const plain = await call(port, 'POST', '/api/prototypes', { prospect_id: q.id });
+    assert.equal(plain.status, 200);
+    assert.equal(detectCalls.length, 0);
+    assert.equal(plain.json.prototype.colors.primary, FALLBACK_PRIMARY);
+    const missed = await call(port, 'POST', `/api/prototypes/${plain.json.prototype.id}/match-site`);
+    assert.equal(missed.status, 422);
+    assert.equal(missed.json.code, 'no_colors');
+    assert.equal(detectCalls.length, 1);
+    assert.equal(detectCalls[0], 'https://nocolor.example/');
+    console.log('[prototype-palette] CRM create did not fetch; match-site called detectBrandColors once');
   });
 });
