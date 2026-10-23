@@ -39,8 +39,8 @@ New table `prototype_facts`. There is one row per known fact. **Unknown facts ha
 | Column | Rule |
 |---|---|
 | `prospect_id` | FK `prospects(id) ON DELETE CASCADE` |
-| `field` | CHECK in (`business_name`, `services`, `service_area`, `phone`, `address`, `hours`, `emergency_247`, `financing`, `free_estimate`, `maintenance_plan`, `price`, `license`, `insurance`, `bonding`, `warranty`, `guarantee`, `years_in_business`). There is **no** `review`/`rating` field. |
-| `value` | TEXT NOT NULL, 1–500 chars, no control or bidi characters (same pattern as `prospect_brands_name_test`) |
+| `field` | CHECK in (`business_name`, `services`, `service_area`, `phone`, `address`, `hours`, `emergency_247`, `financing`, `free_estimate`, `maintenance_plan`, `price`, `license`, `license_number`, `insurance`, `bonding`, `warranty`, `guarantee`, `years_in_business`, `time_zone`). There is **no** `review`/`rating` field. |
+| `value` | TEXT NOT NULL, 1–500 chars, no control or bidi characters (same pattern as `prospect_brands_name_test`). The yes/no fields (`free_estimate`, `emergency_247`, `financing`, `maintenance_plan`, `license`, `insurance`, `bonding`) must equal `yes` (CHECK); a no or unknown has no row. `time_zone` must be an IANA name, validated on write; when missing, the business is treated as `America/Denver`. |
 | `source` | CHECK in (`manual`, `cached_research`, `fixture`) |
 | `source_url` | NULL or `https://` (same URL checks as `prospect_brands_logo_https`). Required when `source = 'cached_research'`. |
 | `snippet` | Verbatim supporting text, ≤ 300 chars. Required when `source = 'cached_research'`. |
@@ -66,7 +66,7 @@ Reuse the prototype shell, tokens, `fixAccent` and the wordmark from `src/protot
   - `chip_price`: "How much for a new furnace?" → decline-to-guess line (or "the site lists X; the team will confirm" when a sourced price fact exists).
   - `chip_hours`: "Are you open Saturday?" → reads `hours`, or "the team will confirm" if unknown.
   - `chip_area`: "Do you service <first service_area town>?" → reads `service_area`, or the confirm line.
-- [ ] **After-hours banner:** shown only when sourced `hours` say the business is closed at the viewer's local time: "It's <h:mm PM>. Your office is closed. The AI still answered." It uses no invented response-time figure.
+- [ ] **After-hours banner:** shown only when sourced `hours` say the business is closed in the business's `time_zone` (§3; default `America/Denver`), never the viewer's clock: "It's <h:mm PM>. Your office is closed. The AI still answered." It uses no invented response-time figure.
 - [ ] **Owner panel:** a lead card (Sample customer, service, urgency `low|normal|urgent|emergency`), a **mock** owner alert labeled "Mock alert, not sent", and a "Request created in your CRM (sample)" card. Every datum carries a Sample tag.
 - [ ] **Tool cards:**
   - `offer_sample_slots`: 3 slots computed from fixtures, labeled "Sample times, not real availability."
@@ -78,24 +78,56 @@ Reuse the prototype shell, tokens, `fixAccent` and the wordmark from `src/protot
 - [ ] Layout is verified at 390 and 1280. Axe reports no contrast violations. Brand strings are escaped (the hostile-name test from prototype-system §6 also covers the chat).
 
 ## 5. Claims validator (deterministic; Canyon)
-`src/chatdemo/validator.js`, `validate(reply, facts) → { ok, reply, hits[] }`. It is rule-based (regex plus substring) and never calls a model.
+`src/chatdemo/validator.js`, `validate(reply, facts) → { ok, reply, hits[] }`. It uses fixed phrase lists, a few explicit patterns and substring checks. It never calls a model.
 
-| Rule | Detects (case-insensitive) | Passes only if |
+**Normalization.** The reply and every fact value are normalized the same way before matching:
+1. Unicode **NFKC**, so `＄` becomes `$`, NBSP becomes a space, and full-width digits become ASCII.
+2. Lowercase.
+3. Collapse whitespace runs to a single space.
+
+Price and number comparisons also drop `,` inside digit groups. Matching is on whole words or phrases, and every phrase list below is in normalized form.
+
+**Value rules (fact must contain the matched text):**
+
+| Rule | Triggers | Passes only if |
 |---|---|---|
-| `price` | `$` amounts, "N dollars", "per hour/visit", "starting at", "flat rate", "free" + estimate/quote/service call | a `price` (or `free_estimate`) fact contains the matched text |
-| `license` | licensed, license #, license-number patterns (e.g. `\b\d{5,}-\d{4}\b`, `#\s?\d{4,}`) | a `license` fact contains it |
-| `insurance` / `bonding` | insured, insurance, bonded | the matching fact exists and contains it |
-| `warranty` / `guarantee` | warranty, guarantee(d), "satisfaction guaranteed", "money back" | the matching fact contains it |
-| `availability` | same-day, 24/7, "within N hours/minutes", "today", "tonight" as a promise | `emergency_247`/`hours` fact contains it, else must be inside an `offer_sample_slots` card, never prose |
-| `tenure` | "N years in business/experience", "since 19xx/20xx", "family-owned since" | `years_in_business` fact contains it |
-| `phone` | NANP phone patterns | equals the `phone` fact or is in 555-01xx |
-| `rating` | stars, rated, reviews, "#1", "best in" | **never passes** |
+| `price` | the pattern `\$\s?\d`, plus the phrases "dollars", "per hour", "per visit", "starting at", "flat rate", "service call fee", "trip charge" | a `price` fact contains the matched amount or phrase |
+| `license_number` | the patterns `#\s?\d{4,}` and `\b\d{5,}-\d{4}\b`, plus the phrases "license number", "license #", "lic #" | a `license_number` fact contains the matched number |
+| `warranty` / `guarantee` | "warranty", "warranties", "guarantee", "guaranteed", "satisfaction guaranteed", "money back", "money-back" | a `warranty`/`guarantee` fact contains the matched phrase |
+| `tenure` | the patterns `\b\d+ years? (in business\|of experience\|experience)\b` and `\bsince (19\|20)\d{2}\b` | a `years_in_business` fact contains the number or year |
+| `phone` | NANP patterns, e.g. `\(?\d{3}\)?[ .-]?\d{3}[ .-]?\d{4}` | the digits equal the `phone` fact, or the number is in 555-01xx |
+| `rating` | "stars", "star rating", "rated", "reviews", "#1", "number one", "best in" | **never passes** |
 
-- [ ] "Contains" means a normalized substring match against a fact row whose `source` is not null. Normalization is lowercase, collapsed whitespace and stripped `$,.`.
+**Yes/no rules (explicit keyword table).** These fields store only the canonical value `yes` (CHECK). A "no" or an unknown fact has no row. Any trigger phrase in the reply passes only if that field's `yes` row exists with a source.
+
+| Field | Trigger phrases |
+|---|---|
+| `free_estimate` | "free estimate", "free estimates", "free quote", "free quotes", "free in-home estimate", "no-charge estimate", "no charge estimate" |
+| `emergency_247` | "24/7", "24-7", "24 hours a day", "24 hours", "around the clock", "emergency service", "after-hours service", "after hours service", "nights and weekends" |
+| `financing` | "financing", "finance options", "payment plan", "payment plans", "0% apr", "zero percent", "no interest" |
+| `maintenance_plan` | "maintenance plan", "service plan", "service agreement", "membership plan", "comfort club" |
+| `license` | "licensed", "fully licensed" |
+| `insurance` | "insured", "fully insured", "liability insurance" |
+| `bonding` | "bonded" |
+
+**Availability rule (fixed phrase list).** These phrases never pass in prose. Availability exists only inside an `offer_sample_slots` card, except that the phrases also listed under `emergency_247` pass when that fact is `yes`.
+- "same day", "same-day", "today", "tonight", "right away", "right now", "asap", "immediately"
+- "within the hour", "within an hour", "in under an hour", "within 30 minutes", "within 60 minutes", "within 2 hours"
+- The pattern `\bwithin \d+ (minutes?|hours?)\b`
+- "on your doorstep", "on the way", "guaranteed arrival"
+
+Fixture copy must avoid these words, e.g. no "How can I help today?".
+
+- [ ] The phrase lists and the keyword table are exported constants in `validator.js`. Tests import them, so the doc and the code can't drift silently.
 - [ ] **Live replies:** on any hit, regenerate once with a corrective note. If it still hits, the offending sentences are replaced with "I don't want to guess on that; the team will confirm." The prospect never sees an unvalidated live reply, and streaming to the browser is off.
 - [ ] **Fixture replies** go through the same validator. A CI test runs every fixture reply against every fixture facts sheet and expects zero hits.
 - [ ] Validator outcomes are logged as enums only (`validator_pass|validator_rewrote|validator_fallback` plus the rule id). The reply text is not logged.
-- [ ] **Unit tests:** each rule gets a positive case, a negative case and a sourced-pass case, plus unicode lookalikes (`＄`, NBSP), split tokens ("$ 99", "li-censed"), and an empty facts sheet (everything blocks).
+- [ ] **Unit tests:**
+  - every value rule, yes/no row and availability phrase gets a positive case, a negative case and (where allowed) a sourced-pass case;
+  - NFKC cases: `＄99`, NBSP inside "free&nbsp;estimate", full-width digits;
+  - a yes/no field with no row blocks;
+  - an empty facts sheet blocks everything;
+  - a `rating` phrase blocks even when a fact contains it.
 
 ## 6. capture_lead and PII (Warden required)
 - [ ] `chat_demo_leads` holds `prototype_id`, `session_id`, `service` enum, `urgency` enum, `test_tag` (`TEST:`/`demo-` tagged) and `created_at`. **It has no name, phone, email, address or free-text column**, and CHECKs plus a test confirm it. The card displays a "Sample customer" with a 555-01xx phone, whatever the user typed.
@@ -110,10 +142,10 @@ Reuse the prototype shell, tokens, `fixAccent` and the wordmark from `src/protot
 ```
 - [ ] **FixtureResponder** (`src/chatdemo/fixture-responder.js`): `chipId` maps to a scripted intent, and free text goes through keyword matching (emergency words → emergency intent, "price/cost/how much" → decline, "open/hours" → hours, a town name → area, "book/come out/appointment" → slots). Anything else gets "Good question. The team will confirm that for you. Want me to have someone reach out?" plus `handoff_to_human`. Replies are templated from the facts. A missing fact yields the confirm line.
 - [ ] **LiveResponder** (`src/chatdemo/live-responder.js`):
-  - **Model:** `cfg.MODEL` from `src/proposals/config.js:27` (`process.env.PROPOSAL_MODEL || 'claude-sonnet-5-5'`). **No new model env var.**
-  - **Client:** `getClient()` from `src/proposals/draft.js:322` (the same `ANTHROPIC_API_KEY` client). Tests swap it with `_setClient` (`draft.js:26`, test-only).
-  - **Cost:** `cfg.costOf(cfg.MODEL, usage)` (`src/proposals/config.js`, `PRICES` plus cache multipliers), the same tracking proposals use (`draft.js:122`, `inbox.js:164`). The per-turn `cost_usd` goes into `chat_demo_turns` and the daily spend row (§8). The CRM cost readout that sums `proposals.cost_usd` (`src/api/proposals.js:59`) adds a "Chat demo, this month" line from the same table.
-  - `max_tokens` is 300. A 15 s timeout falls back to the fixture responder for that turn and logs `responder_fallback`.
+  - **Model:** `MODEL` from `src/proposals/config.js` (read from `PROPOSAL_MODEL`). **No new model env var.**
+  - **Client:** `getClient()` exported from `src/proposals/draft.js` (the same `ANTHROPIC_API_KEY` client). Tests swap it with `_setClient` in the same module, which throws outside `NODE_ENV=test`.
+  - **Cost:** `cfg.costOf(cfg.MODEL, usage)` (`costOf` and `PRICES` in `src/proposals/config.js`), the same tracking proposals use (`writeWithClaude` in `src/proposals/draft.js`, `callClaude` in `src/proposals/inbox.js`). The per-turn `cost_usd` goes into `chat_demo_turns` and the daily spend row (§8.3). The CRM's monthly cost readout, the `SUM(cost_usd)` query in `src/api/proposals.js`, adds a "Chat demo, this month" line from the same table.
+  - `max_tokens` is `CHAT_CAPS.maxOutputTokens` (300). A 15 s timeout falls back to the fixture responder for that turn and logs `responder_fallback`.
   - Tools are defined as Claude tools (`offer_sample_slots`, `flag_emergency`, `capture_lead`, `handoff_to_human`) and rendered as cards. Prose never promises availability.
 - [ ] **System prompt rules** (static block, cache breakpoint 1; `<business_facts>` block, breakpoint 2; then the conversation):
   1. "You may only state facts that appear in `<business_facts>`. If a fact isn't there, say the team will confirm. Never guess prices, availability, licensing, insurance, bonding, warranties, guarantees, years in business, or ratings."
@@ -126,35 +158,93 @@ Reuse the prototype shell, tokens, `fixAccent` and the wordmark from `src/protot
 ## 8. Caps, ceiling and gates (binding: all ship before any live call is possible)
 Links reuse the existing `prototypes` row and token (`src/prototypes/tokens.js`, 14-day expiry, `prototypes_expires_14d`). Links are minted only in the CRM, behind the API key. A **session** is minted publicly when a chat opens.
 
-| Cap | Number | Express (in memory) | Postgres (can't be bypassed) |
-|---|---|---|---|
-| Message length | 500 chars | 413 before the responder | not stored (§6); `chat_demo_turns.input_chars` CHECK ≤ 500 |
-| Messages per session | 20 | session counter | `chat_demo_sessions.message_count` CHECK ≤ 20, incremented with `UPDATE … RETURNING` |
-| Messages per link per day (America/Denver) | 40 | — | `chat_demo_link_days.message_count` CHECK ≤ 40 |
-| Messages per link lifetime | 100 | — | `chat_demo_links.message_count` CHECK ≤ 100 |
-| Sessions per link lifetime | 10 | — | `chat_demo_links.session_count` CHECK ≤ 10 |
-| Per-IP session mints | 5 / hour | `rate-limit.js` new bucket `chatdemo_mint` | `chat_demo_ip_days.mint_count` CHECK ≤ 20 per day, keyed by `ip_hash` (below) |
-| Per token+IP request rate | 10 messages / min | `rate-limit.js` bucket `chatdemo_msg`, keyed by token id + IP | — |
-| Global sessions per day | 300 | — | `chat_demo_global_days.session_count` CHECK ≤ 300 |
-| **Global daily spend ceiling** | **Kelby sets** (no default value) | checked before every live call | `chat_demo_spend_days.spent_usd + reserved_usd` CHECK ≤ `ceiling_usd` |
-| Live output per reply | `max_tokens` 300 | — | `chat_demo_turns.output_tokens` CHECK ≤ 300 |
+### 8.1 Cap config (single source of truth)
+This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/chatdemo/caps.js`:
+- Express reads it directly.
+- `schema.sql` writes the same numbers into its CHECK constraints.
+- A test reads each CHECK definition from `pg_constraint` and asserts it equals `CHAT_CAPS`, so changing a number in only one layer fails CI.
 
-- [ ] Every counter increment happens in the same transaction as the turn or session insert. A CHECK violation (SQLSTATE `23514`) maps to a 429 with a friendly "Demo limit reached" card that keeps the watermark. An Express miss can't bypass the database.
-- [ ] **IP storage:** the existing limiter never writes IPs. The DB-level IP cap stores only `ip_hash = HMAC(HKDF(CRM_API_KEY, 'ff-chatdemo-ip'), ip ‖ day)`, so no new secret is needed and the hash rotates daily. Rows are purged after 48 h. Warden signs off.
-- [ ] **Spend ceiling:**
-  - `ceiling_usd` is read from `app_settings` key `chat_demo_daily_ceiling_usd`. **Kelby sets the value.** No default ships, and an unset, empty, zero or invalid value means the live path is off.
-  - Before each live call, reserve the worst case (`costOf(MODEL, { input: <prompt tokens est.>, output: 300 })`) with a single conditional `UPDATE … WHERE spent_usd + reserved_usd + $r <= ceiling_usd`. After the call, settle to the actual `costOf(usage)`. A failed reservation means the turn uses the fixture responder, and the chat shows **"Demo paused. The live AI is resting for today; you're seeing sample replies."** for the rest of the day (America/Denver). It logs `demo_paused`.
-- [ ] **Live path gate.** A turn uses `LiveResponder` only when **all** of these hold:
+**Every cap is enforced in both layers with the same number.**
+
+| Key | Cap | Value | Window (fixed bucket) |
+|---|---|---|---|
+| `maxMessageChars` | message length | 500 chars | per message |
+| `maxMessagesPerSession` | messages per session | 20 | session lifetime |
+| `maxMessagesPerLinkDay` | messages per link per day | 40 | business-local day |
+| `maxMessagesPerLink` | messages per link, lifetime | 100 | link lifetime (≤ 14 days) |
+| `maxSessionsPerLink` | sessions per link, lifetime | 10 | link lifetime |
+| `maxSessionsGlobalDay` | sessions per day, all links | 300 | FlowForward day |
+| `maxMintsPerIpHour` | session mints per IP per hour | 5 | clock hour (UTC `date_trunc('hour')`) |
+| `maxMintsPerIpDay` | session mints per IP per day | 20 | FlowForward day |
+| `maxMessagesPerTokenIpMinute` | messages per token + IP per minute | 10 | clock minute (UTC `date_trunc('minute')`) |
+| `maxOutputTokens` | live output per reply (`max_tokens`) | 300 | per reply |
+| `reservationTtlMs` | unsettled reservation expiry | 600000 (10 min) | per reservation |
+| daily spend ceiling | global live spend per day | **Kelby sets**; no default ships | FlowForward day |
+
+- **Time zones.**
+  - A *business-local day* uses the business's `time_zone` fact (§3), defaulting to `America/Denver` when unknown.
+  - Windows that aren't tied to one business (global sessions, per-IP day, spend ceiling) use FlowForward's zone, `America/Denver`.
+  - Both layers compute the bucket key the same way, with `(now() AT TIME ZONE tz)::date` in Postgres and the same zone in Express.
+- **IP limits are two separate limits**, 5/hour and 20/day. Each is enforced in both layers. The hourly limit stops bursts and the daily limit stops slow farming. They don't replace each other.
+
+### 8.2 Enforcement in each layer
+| Key | Express (before the responder runs; 429 or 413) | Postgres (in the turn/session transaction; 23514 maps to 429) |
+|---|---|---|
+| `maxMessageChars` | rejects `text.length > 500` with 413 | `chat_demo_turns.input_chars` CHECK ≤ 500 |
+| `maxMessagesPerSession` | in-memory session counter | `chat_demo_sessions.message_count` CHECK ≤ 20 |
+| `maxMessagesPerLinkDay` | in-memory counter keyed `(prototype_id, local day)` | `chat_demo_link_days.message_count` CHECK ≤ 40 |
+| `maxMessagesPerLink` | in-memory counter keyed `prototype_id` | `chat_demo_links.message_count` CHECK ≤ 100 |
+| `maxSessionsPerLink` | in-memory counter keyed `prototype_id` | `chat_demo_links.session_count` CHECK ≤ 10 |
+| `maxSessionsGlobalDay` | in-memory counter keyed by FlowForward day | `chat_demo_global_days.session_count` CHECK ≤ 300 |
+| `maxMintsPerIpHour` | `rate-limit.js` bucket `chatdemo_mint_hour` | `chat_demo_ip_hours.mint_count` CHECK ≤ 5, keyed `(ip_hash, hour)` |
+| `maxMintsPerIpDay` | `rate-limit.js` bucket `chatdemo_mint_day` | `chat_demo_ip_days.mint_count` CHECK ≤ 20, keyed `(ip_hash, day)` |
+| `maxMessagesPerTokenIpMinute` | `rate-limit.js` bucket `chatdemo_msg_minute`, keyed by token id + IP | `chat_demo_rate_minutes.count` CHECK ≤ 10, keyed `(prototype_id, ip_hash, minute)` |
+| `maxOutputTokens` | `max_tokens: 300` on every live request | `chat_demo_turns.output_tokens` CHECK ≤ 300 |
+
+- [ ] **Express counters are lazily seeded.** On first use after a restart, a counter is seeded by a pre-read of the matching Postgres row. Express is the fast first line, and Postgres can't be bypassed.
+- [ ] `rate-limit.js`'s `consume()` takes `{ max, windowMs }` per bucket from `CHAT_CAPS` and uses the same fixed buckets as Postgres, not windows that start at the first hit. Existing pilot and prototype buckets are unchanged.
+- [ ] Every counter increment happens in the same transaction as the turn or session insert. A CHECK violation (SQLSTATE `23514`) maps to a 429 with a friendly "Demo limit reached" card that keeps the watermark.
+- [ ] **IP storage.** The existing limiter never writes IPs. Postgres stores only `ip_hash = HMAC(HKDF(CRM_API_KEY, 'ff-chatdemo-ip'), ip ‖ FlowForward day)`, so no new secret is needed and the hash rotates daily. Rows in the IP and minute tables are purged after 48 h. Warden signs off.
+
+### 8.3 Spend ceiling, reservations and sweep
+- [ ] **Ceiling value.**
+  - `ceiling_usd` is read on every reservation from `app_settings` key `chat_demo_daily_ceiling_usd`. **Kelby sets the value.** No default ships, and an unset, empty, zero or invalid value means the live path is off.
+  - The day resets at midnight `America/Denver`.
+- [ ] **Tables.**
+  - `chat_demo_spend_days (day, spent_usd, reserved_usd, overshoot_usd)`. All columns are CHECK ≥ 0. There is **no** CHECK tying them to the ceiling, so a settle can never fail.
+  - `chat_demo_reservations (id, day, turn_id, amount_usd, created_at, settled_at, expired_at, actual_usd)`.
+- [ ] **Reserve the exact worst case, never an estimate.**
+  - After the full request (system, tools, `<business_facts>`, history, message) is built, the server gets its exact input token count from the same client's `messages.countTokens` with that exact request.
+  - It then prices that count at the highest input rate `costOf` applies, which is the 1.25× cache-write rate. The reserve is `costOf(MODEL, { cacheWrite: inputTokens, output: CHAT_CAPS.maxOutputTokens })`.
+  - Actual cost can't exceed this unless pricing changes mid-call.
+  - The `countTokens` call is stubbed in tests like every other client call. If it fails, the turn uses the fixture responder.
+- [ ] **Reserve atomically.** One statement does it: `UPDATE chat_demo_spend_days SET reserved_usd = reserved_usd + $r WHERE day = $d AND spent_usd + reserved_usd + $r <= $ceiling RETURNING …`, plus the reservation row insert in the same transaction.
+  - New reservations are blocked once `spent_usd + reserved_usd` reaches the ceiling (no row returned).
+  - A blocked reservation means the turn uses the fixture responder. The chat shows **"Demo paused. The live AI is resting for today; you're seeing sample replies."** for the rest of the FlowForward day, and the server logs `demo_paused`.
+- [ ] **Settle.** After the call, one transaction does it:
+  - Move the reserved amount out and the actual `costOf(MODEL, usage)` in: `reserved_usd -= amount`, `spent_usd += actual`.
+  - Set `settled_at` and `actual_usd`.
+  - If `actual > amount`, add the difference to `overshoot_usd` and log `spend_overshoot`.
+  - Settling never fails and never clamps, so `spent_usd` is always the true cost. A ceiling that Kelby lowers mid-day only blocks new reservations, and in-flight calls still settle.
+- [ ] **Expiry sweep (10 min).** One statement runs every 60 s, from an in-process `setInterval` started with the chat routes. The same statement also runs at the start of every reservation transaction, so a stopped timer can't leave budget locked.
+  - It finds reservations with `settled_at IS NULL AND expired_at IS NULL AND created_at < now() - interval '10 minutes'` (`FOR UPDATE SKIP LOCKED`).
+  - It sets `expired_at`, moves each `amount_usd` from `reserved_usd` into `spent_usd` (conservative: a crashed call may still have been billed), and logs `reservation_expired`.
+  - A late settle for an expired reservation applies only the delta: `spent_usd += actual - amount`, plus `overshoot_usd` if positive.
+  - The live call's 15 s timeout is far inside the 10-minute TTL.
+
+### 8.4 Live gate (stubbable)
+- [ ] The engine is built as `createChatEngine({ liveGate, fixtureResponder, liveResponder, clock })`. `liveGate(ctx) → Promise<boolean>` is injectable, and its default, `defaultLiveGate`, returns true only when **all** of these hold:
   - (a) `FF_PROTOTYPE_GALLERY` is on.
   - (b) `FF_LIVE_CHAT_DEMO` is on.
   - (c) `FF_LIVE_CHAT_MODEL` is on.
   - (d) `NODE_ENV !== 'test'`.
   - (e) the ceiling is set and the reservation succeeded.
-  - (f) the session, link and global caps are not hit.
+  - (f) no cap in §8.1 is hit.
   - (g) `cfg.anthropicConfigured()` is true.
 
-  Otherwise the turn uses `FixtureResponder`. A unit test covers each condition independently.
-- [ ] **Shipping order:** caps, ceiling and validator merge in the same PR as, or before, `LiveResponder`. A PR that adds `LiveResponder` without them fails review.
+  Otherwise the turn uses `FixtureResponder`.
+- [ ] **Tests inject the gate.** Tests pass a stub `liveGate` (and `clock`) to drive the live branch with the recorded fake client set through `_setClient`. `LiveResponder` unit tests may also call it directly. Neither bypasses the default gate in production code, because `_setClient` throws outside `NODE_ENV=test`.
+- [ ] **Shipping order:** caps, ceiling, sweep and validator merge in the same PR as, or before, `LiveResponder`. A PR that adds `LiveResponder` without them fails review.
 
 ## 9. Flags
 | Flag | Gates | Default |
@@ -196,21 +286,36 @@ Links reuse the existing `prototypes` row and token (`src/prototypes/tokens.js`,
 - `responder_live`
 - `responder_fixture`
 - `responder_fallback`
+- `spend_overshoot`
+- `reservation_expired`
 - `cta_clicked`
 
 - [ ] Views and events are recorded server-side only. No pixel and no client analytics.
-- [ ] The first `chat_viewed` per session also writes the existing CRM proof event `prototype_viewed` to `campaign_touches` (`source = 'system'`, `channel = 'prototype_link'`). `cta_clicked` writes `prototype_cta_clicked`. Both are allowed by `campaign_touches_type_check` and the manual-type check. The funnel stays viewed → cta → call_booked → mvp_sold.
-- [ ] The CRM prototype card shows sessions, chips used, tool cards shown, live vs fixture turns, and today's spend vs ceiling.
+- [ ] **CRM proof events (flag-gated).** Only when `FF_CAMPAIGNS` is on (in addition to the chat flags), the first `chat_viewed` per session writes the existing `prototype_viewed` to `campaign_touches` (`source = 'system'`, `channel = 'prototype_link'`, `external_ref = 'chatdemo:<session_id>'`), and `cta_clicked` writes `prototype_cta_clicked`. Both are allowed by `campaign_touches_type_check` and the manual-type check. With `FF_CAMPAIGNS` off, nothing is written to `campaign_touches`. The funnel stays viewed → cta → call_booked → mvp_sold.
+- [ ] In tests (and pre-prod), these touches belong only to `TEST:` prospects, and their `external_ref` carries the `TEST:` prefix (`TEST:chatdemo:<session_id>`). Cleanup matches on `=`/`IN`, never `LIKE`.
+- [ ] The CRM prototype card shows sessions, chips used, tool cards shown, live vs fixture turns, and today's spend, reserved and overshoot vs the ceiling.
 
 ## 12. Tests and CI (Gauge verifies)
-- [ ] All tests use fixtures and recorded responses. `LiveResponder` tests inject a recorded fake client through `_setClient`, the same as proposals.
-- [ ] **No outbound model call in test:** with the network guard (`test/guard.js`, which already lists `ANTHROPIC_API_KEY`) active and the fake client unset, opening a chat and sending each chip makes 0 HTTP requests and 0 calls on the Anthropic client. Even with all flags on and a ceiling set, the turn uses the fixture responder because `NODE_ENV=test`.
-- [ ] Each cap has a test proving it holds in Postgres directly, by raw `UPDATE` past the limit (23514), and in Express (429).
-- [ ] Ceiling tests: unset → fixture; reservation fails → "Demo paused" with the watermark; settlement records `costOf(usage)`.
-- [ ] Validator unit tests (§5), plus every fixture reply × every fixture facts sheet giving zero hits.
-- [ ] Hostile brand name, `?watermark=0` and flag combinations: the watermark is still present on the chat and the paused state.
-- [ ] `capture_lead` table has no PII columns (asserted from `information_schema`).
-- [ ] Tagged `TEST:` data only. Cleanup matches `test_tag` with `=`/`IN`, never `LIKE` (schema.sql rule).
+- [ ] All tests use fixtures and recorded responses. The live branch is exercised only with a stub `liveGate` plus a recorded fake client injected through `_setClient`, the same as proposals.
+- [ ] **No outbound model call in test:** with the default gate, the network guard (`test/guard.js`, which already lists `ANTHROPIC_API_KEY`) active and the fake client unset, opening a chat and sending each chip makes 0 HTTP requests and 0 calls on the Anthropic client (including `countTokens`). Even with all flags on and a ceiling set, `defaultLiveGate` returns false because `NODE_ENV=test`.
+- [ ] **Gate stub AC:** a test injects `liveGate: async () => true` and asserts `LiveResponder` and the fake client are used. A second test injects `async () => false` and asserts the fixture responder is used with 0 client calls. A third covers each of the default gate's conditions (a)–(g) independently.
+- [ ] **Caps parity:** `CHAT_CAPS` equals the CHECK numbers parsed from `pg_constraint` (§8.1).
+- [ ] **Each cap in both layers:** every row of §8.2 has an Express test (429/413 before the responder runs) and a Postgres test (a raw `UPDATE`/`INSERT` past the limit gives 23514). The IP hour and day limits are tested separately.
+- [ ] **Time zones:** with an injected clock, a business with `time_zone = America/Los_Angeles` rolls its per-link day at its own midnight. A business with no `time_zone` and the spend ceiling roll at midnight `America/Denver`.
+- [ ] **Spend:**
+  - an unset ceiling uses fixtures;
+  - the reservation equals `costOf(MODEL, { cacheWrite: countTokens, output: 300 })`;
+  - concurrent reservations never let `spent + reserved` pass the ceiling;
+  - a blocked reservation shows "Demo paused" with the watermark;
+  - actual < reserved settles to actual;
+  - actual > reserved (forced fake usage) settles without error and records `overshoot_usd`;
+  - a ceiling lowered mid-call lets the in-flight settle succeed and blocks the next reservation;
+  - an unsettled reservation older than 10 min (injected clock) is expired by the sweep and moved to spent, and a late settle applies only the delta.
+- [ ] Validator unit tests (§5), including NFKC cases, plus every fixture reply × every fixture facts sheet giving zero hits.
+- [ ] Hostile brand name, `?watermark=0` and flag combinations: the watermark is still present on the chat, the paused state and the cap-hit state.
+- [ ] `chat_demo_leads` has no PII columns (asserted from `information_schema`).
+- [ ] `campaign_touches` gets 0 rows when `FF_CAMPAIGNS` is off. When it's on, the test rows use `TEST:` prospects and `TEST:`-prefixed `external_ref`.
+- [ ] Tagged `TEST:` data only. Cleanup matches `test_tag`/`external_ref` with `=`/`IN`, never `LIKE` (schema.sql rule).
 - [ ] UI proof: screenshots at 390 and 1280 of the chat, each tool card, the owner panel, the paused state, the cap-hit state, and the yellow, navy and juniper themes.
 
 ## 13. Owners and sequence
