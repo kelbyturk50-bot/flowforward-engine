@@ -163,6 +163,8 @@ Links reuse the existing `prototypes` row and token (`src/prototypes/tokens.js`,
 | `FF_LIVE_CHAT_DEMO` (new, DB) | the chat surface, chat routes and fixture responder | **off everywhere** (seeded `false`; not in `DEFAULT_ON`) |
 | `FF_LIVE_CHAT_MODEL` (new, DB) | the live model path (§8) | **off everywhere** (seeded `false`) |
 
+**Decision (Summit, Oct 22, 2026):** use two flags, both default OFF. `FF_LIVE_CHAT_DEMO` runs the chat on fixtures. `FF_LIVE_CHAT_MODEL` turns on the live model, and only once a ceiling is set. There is no single-flag variant.
+
 - [ ] Both are added to `DB_NAMES`/`NAMES` in `src/flags/registry.js` and seeded in `schema.sql` with `ON CONFLICT DO NOTHING`. They resolve via `src/flags/resolve.js`: env can force them off, never on.
 - [ ] Turning `FF_LIVE_CHAT_MODEL` on in prod is **Kelby's action only**. No PR, test or routine sets it. A schema test asserts the seed is `false`.
 - [ ] With any flag off, the chat routes return the same 404 as an unknown token. The scripted prototype keeps working.
