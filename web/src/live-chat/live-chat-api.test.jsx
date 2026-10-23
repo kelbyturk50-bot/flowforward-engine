@@ -225,19 +225,20 @@ describe('live chat public API', () => {
     expect(screen.getByRole('note', { name: WATERMARK_TEXT })).toBeInTheDocument();
   });
 
-  it('shows an expired prototype link with the Denver date and no composer', async () => {
+  it('shows an expired prototype link with the generic copy and no composer', async () => {
     at(`/demo/prototype/${TOKEN}`);
     install(async (path) => {
       if (path === '/api/public/flags') return { status: 200, body: FLAGS_ON };
       if (path === `/api/public/prototypes/${TOKEN}/chat/session`) {
-        return { status: 410, body: { error: 'link_expired', expires_at: '2026-10-24T05:30:00.000Z' } };
+        return { status: 410, body: { error: 'link_expired' } };
       }
       throw new Error(`unexpected ${path}`);
     });
     render(<LiveChatGate token={TOKEN} />);
     expect(await screen.findByRole('heading', { name: 'This demo link has expired' })).toBeInTheDocument();
     expect(screen.getByText(LINK_LIFETIME)).toBeInTheDocument();
-    expect(screen.getByText('This one expired on Oct 23, 2026, 11:30 PM MT.')).toBeInTheDocument();
+    expect(screen.getByText('This link is no longer active.')).toBeInTheDocument();
+    expect(screen.queryByText(/expired on/i)).toBeNull();
     expect(screen.getByText(LINK_NEXT_STEP)).toBeInTheDocument();
     expect(screen.getByText(WATERMARK_TEXT)).toBeInTheDocument();
     expect(screen.queryByLabelText('Text the business')).toBeNull();

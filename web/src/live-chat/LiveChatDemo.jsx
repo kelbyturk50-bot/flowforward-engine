@@ -291,7 +291,7 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND, transport = nu
         return;
       }
       if (status === 410) {
-        live.onExpired?.(data);
+        live.onExpired?.();
         return;
       }
       if (status === 404) {
