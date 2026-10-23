@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { formatDenverDateTime } from '../live-chat/dates';
+import { demoChatUrl } from '../live-chat/route';
 import { toast } from '../ui';
 
 export const AGENT_LABELS = {
@@ -10,7 +12,8 @@ export const AGENT_LABELS = {
 };
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
-const fmtDate = (d) => new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+const LINK_STOPS = 'The current link will stop working.';
+const TURN_OFF = 'The prototype and chat link will stop working for anyone who has them.';
 
 // The lead's branded prototype: a sample homepage plus four agent demos on
 // sample data. Kelby shares the link; nothing here sends anything.
@@ -20,7 +23,14 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
   const [primary, setPrimary] = useState(prototype?.colors?.primary || '#2f6b57');
   const [secondary, setSecondary] = useState(prototype?.colors?.secondary || '#1e2a2f');
   const [confirmOff, setConfirmOff] = useState(false);
+  const [confirmFresh, setConfirmFresh] = useState(false);
+  const [confirmDemo, setConfirmDemo] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState('');
   const [swatches, setSwatches] = useState([]);
+  const copiedTimer = useRef(null);
+
+  useEffect(() => () => clearTimeout(copiedTimer.current), []);
 
   const run = async (label, fn, msg) => {
     setBusy(label);
@@ -40,6 +50,31 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
     catch { toast('Copy failed. Open the link and copy it from the address bar.'); }
   };
 
+  const chatUrl = proto?.url && !proto.expired ? demoChatUrl(proto.url) : '';
+  const chatExpiry = formatDenverDateTime(proto?.expires_at);
+  const copyDemo = async () => {
+    if (!chatUrl) return;
+    try {
+      await navigator.clipboard.writeText(chatUrl);
+      setCopyError('');
+      setCopied(true);
+      clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+      setCopyError('Select the demo link and copy it.');
+    }
+  };
+  const createDemo = () => run(
+    'demo',
+    () => api.createPrototype(prospectId, Boolean(proto?.expired)),
+    'Demo link ready.',
+  );
+  const askDemo = () => {
+    if (proto?.expired) setConfirmDemo(true);
+    else createDemo();
+  };
+
   if (!proto) {
     return (
       <section className="proto-card" aria-label="Prototype">
@@ -48,6 +83,13 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
         <button className="btn" disabled={!!busy} onClick={() => run('make', () => api.createPrototype(prospectId), 'Prototype ready.')}>
           {busy === 'make' ? 'Making…' : 'Make a prototype'}
         </button>
+        <div className="demo-link-block">
+          <h4 className="col-title">Live chat demo</h4>
+          <p className="muted small">A text-back demo for this shop. Sample replies until the live model is on.</p>
+          <button type="button" className="btn demo-link-copy" disabled={!!busy} onClick={askDemo}>
+            {busy === 'demo' ? 'Creating…' : 'Create demo link'}
+          </button>
+        </div>
       </section>
     );
   }
@@ -61,8 +103,8 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
       <div className="proto-head">
         <h3 className="col-title">Prototype</h3>
         {proto.expired
-          ? <span className="chip chip-warn">Expired {fmtDate(proto.expires_at)}</span>
-          : <span className="muted small">Link works until {fmtDate(proto.expires_at)}</span>}
+          ? <span className="chip chip-warn">Expired {formatDenverDateTime(proto.expires_at)}</span>
+          : <span className="muted small">Works until {formatDenverDateTime(proto.expires_at)}</span>}
       </div>
       {proto.link_problem && (
         <p className="error-note">{proto.link_problem === 'key_missing'
@@ -76,6 +118,40 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
           <code className="proto-url" title={proto.url}>{proto.url}</code>
         </div>
       )}
+      <div className="demo-link-block">
+        <h4 className="col-title">Live chat demo</h4>
+        {chatUrl ? (
+          <>
+            {chatExpiry ? <p className="muted small">Works until {chatExpiry}.</p> : null}
+            <p className="demo-link-url" id="demo-chat-url">{chatUrl}</p>
+            <button
+              type="button"
+              className="btn demo-link-copy"
+              aria-describedby="demo-chat-url"
+              aria-live="polite"
+              onClick={copyDemo}
+            >
+              {copied ? 'Copied' : 'Copy demo link'}
+            </button>
+            {copyError ? <p className="error-note">{copyError}</p> : null}
+          </>
+        ) : confirmDemo ? (
+          <>
+            <p className="small">{LINK_STOPS}</p>
+            <button type="button" className="btn btn-danger demo-link-copy" disabled={!!busy} onClick={() => { setConfirmDemo(false); createDemo(); }}>
+              {busy === 'demo' ? 'Creating…' : 'Create demo link'}
+            </button>
+            <button type="button" className="btn btn-quiet" onClick={() => setConfirmDemo(false)}>Cancel</button>
+          </>
+        ) : (
+          <>
+            <p className="muted small">A text-back demo for this shop. Sample replies until the live model is on.</p>
+            <button type="button" className="btn demo-link-copy" disabled={!!busy} onClick={askDemo}>
+              {busy === 'demo' ? 'Creating…' : 'Create demo link'}
+            </button>
+          </>
+        )}
+      </div>
       <div className="proto-grid">
         <label>Lead with
           <select className="input" value={proto.agent_type} disabled={!!busy}
@@ -117,14 +193,22 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
             {busy === 'colors' ? 'Saving…' : 'Save colors'}
           </button>
         )}
-        <button className="btn btn-quiet" disabled={!!busy}
-          onClick={() => run('fresh', () => api.createPrototype(prospectId, true), 'New link ready. The old one is off.')}>
-          {proto.expired ? 'Make a new link' : 'New link'}
-        </button>
+        {confirmFresh
+          ? <>
+            <span className="small">{LINK_STOPS}</span>
+            <button className="btn btn-danger" disabled={!!busy}
+              onClick={() => { setConfirmFresh(false); run('fresh', () => api.createPrototype(prospectId, true), 'New link ready. The old one is off.'); }}>
+              {proto.expired ? 'Make a new link' : 'New link'}
+            </button>
+            <button className="btn btn-quiet" onClick={() => setConfirmFresh(false)}>Cancel</button>
+          </>
+          : <button className="btn btn-quiet" disabled={!!busy} onClick={() => setConfirmFresh(true)}>
+            {proto.expired ? 'Make a new link' : 'New link'}
+          </button>}
         {!confirmOff
           ? <button className="btn btn-quiet" disabled={!!busy} onClick={() => setConfirmOff(true)}>Turn off link</button>
           : <>
-            <span className="small">Turn it off for good?</span>
+            <span className="small">{TURN_OFF}</span>
             <button className="btn btn-danger" disabled={!!busy} onClick={() => run('off', async () => { await api.revokePrototype(proto.id); return { prototype: null }; }, 'Prototype link turned off.')}>Turn off</button>
             <button className="btn btn-quiet" onClick={() => setConfirmOff(false)}>Cancel</button>
           </>}

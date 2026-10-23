@@ -298,8 +298,8 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 - [ ] **Ceiling value: env-only** (Warden B12). Raising the ceiling is the one change that increases real spend, so it lives where only Kelby can change it.
   - It's read on every reservation from the env var **`CHAT_DEMO_DAILY_CEILING_USD`**, a dollar value Kelby sets in the Railway env, and parsed to integer `ceiling_micros`.
   - The reader is `readCeiling(env = process.env)` in `src/chatdemo/ceiling.js`. It's a pure function, so tests pass a plain env object.
-  - **Kelby sets the value.** No default ships, and no PR, test, routine, migration, seed or agent sets it. Nothing changes Railway env vars.
-  - **Production (Oct 23, 2026):** `CHAT_DEMO_DAILY_CEILING_USD` is set to **$5** in Railway's environment (Kelby, relayed by Summit). The code still has no default; an unset or invalid value keeps the live path off.
+  - **Kelby sets the value.** No default ships, and no PR, test, routine, migration, seed or agent sets it. Nothing changes Railway env vars. The ceiling comes only from `CHAT_DEMO_DAILY_CEILING_USD`. There is no default in code or the database.
+  - **Production (Oct 23, 2026):** `CHAT_DEMO_DAILY_CEILING_USD` is set to **$5** in Railway's environment (Kelby, relayed by Summit). That env value is not a default in code. An unset or invalid value keeps the live path off.
   - The raw string must match `/^\d+(\.\d{1,2})?$/` (digits, optional dot, at most two decimal places). Spaces, a leading dot, a sign, an exponent (`1e9`), hex (`0x10`), binary (`0b11`), empty, and anything `Number()` would otherwise accept are rejected. The amount must be greater than 0 and at most **100000** dollars (one hundred thousand per America/Denver day). A rejected value leaves the live path off (`readCeiling` returns null).
   - **Nothing in the database holds the ceiling.** It isn't stored in `app_settings` or any other table, it isn't seeded, and no `app_settings` key exists for it.
   - **No write path.** No route, including the flags and settings APIs, writes the ceiling.
@@ -542,3 +542,23 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 - [ ] With all flags off, prod behaves exactly as before.
 - [ ] With the chat flag on and the model flag off, the demo works end-to-end on fixtures at $0.
 - [ ] Reviews from Warden and Gauge are recorded, and Summit accepts.
+
+## 15. Public CORS check
+
+Production CRM pages call the API origin in `connect-src`. That header stays the exact API origin. There is no Vercel rewrite.
+
+The allowlist is `src/chatdemo/cors.js` (#100). It does not use the global `cors()` middleware or `CORS_ORIGINS`. There is no `*` and no `Access-Control-Allow-Credentials`. Production CRM origins match with exact `===` (https, no path, no port):
+
+- `https://flowforward-engine-six.vercel.app`
+- `https://flowforward-engine-turk11.vercel.app`
+- `https://flowforward-engine-git-main-turk11.vercel.app`
+
+#100 also matches two preview patterns: a deployment hash of exactly 9 lowercase letters or digits (`^https://flowforward-engine-[a-z0-9]{9}-turk11\.vercel\.app$`) and a git branch preview (`^https://flowforward-engine-git-[a-z0-9-]+-turk11\.vercel\.app$`). This check does not use those. Preview pages stay on the `?flags=` fixture and do not call the API.
+
+Chat preflight is 204 with `Vary: Origin`, `Access-Control-Allow-Methods: POST, OPTIONS`, and `Access-Control-Allow-Headers: Content-Type`. `GET /api/public/flags` echoes the same production origin and sends `Vary: Origin`.
+
+`scripts/check-public-cors.sh` is read-only. It refuses any CRM origin outside the three production origins, including a preview origin. It sends `GET /api/public/flags` and an `OPTIONS` preflight to `/api/public/chat/demos` (`Access-Control-Request-Method: POST`, `Access-Control-Request-Headers: Content-Type`). It exits non-zero when `Access-Control-Allow-Origin` is missing or is not that exact origin, when `Vary` is not `Origin`, when allow-credentials is `true`, or when the chat preflight methods or headers differ. It does not print the response body.
+
+```bash
+scripts/check-public-cors.sh https://flowforward-engine-production.up.railway.app https://flowforward-engine-six.vercel.app
+```

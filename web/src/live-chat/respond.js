@@ -16,6 +16,7 @@ import {
 const SERVICE_LABEL = Object.freeze({
   water_heater: 'Water heater',
   furnace: 'Furnace',
+  drain: 'Drain',
   general: 'General question',
 });
 

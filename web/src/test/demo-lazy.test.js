@@ -84,7 +84,10 @@ describe('demo code split', () => {
       });
     `);
     try {
-      const result = spawnSync(process.execPath, [scriptPath], { encoding: 'utf8' });
+      const result = spawnSync(process.execPath, [scriptPath], {
+        encoding: 'utf8',
+        env: { ...process.env, NODE_ENV: 'production' },
+      });
       if (result.status !== 0) {
         throw new Error(result.stderr || result.stdout || `vite build exited ${result.status}`);
       }
@@ -157,6 +160,9 @@ describe('demo code split', () => {
       }
       expect(entry.text).not.toContain('fonts.googleapis.com');
       expect(entry.text).not.toContain('fonts.gstatic.com');
+      for (const file of files) {
+        expect(file.text, file.name).not.toContain('ff.pilotFlags');
+      }
       const prototypeCss = cssNames
         .filter(name => name !== entryCssName)
         .map(name => ({ name, text: readFileSync(path.join(assetDir, name), 'utf8') }))

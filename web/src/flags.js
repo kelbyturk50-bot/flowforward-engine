@@ -76,6 +76,10 @@ function overrideBuildAllowed(env) {
   return env?.DEV === true || vercelEnvFrom(env) === 'preview';
 }
 
+// Folded by Vite. A production build (DEV false, VERCEL_ENV not preview)
+// makes this false, and the bundler drops the ?flags= parser under it.
+export const PREVIEW_QUERY_BUILD = import.meta.env.DEV === true || __FF_VERCEL_ENV__ === 'preview';
+
 export function flagOverrideAllowed(loc, env = import.meta.env) {
   const { protocol, port, hostname } = hostFields(loc);
 
@@ -118,6 +122,7 @@ export function readPilotFlags({
   storage = window.sessionStorage,
   env = import.meta.env,
 } = {}) {
+  if (!PREVIEW_QUERY_BUILD) return { ...DEFAULTS };
   if (!flagOverrideAllowed(location, env)) return { ...DEFAULTS };
 
   const params = new URLSearchParams(location?.search || '');
@@ -155,6 +160,7 @@ export function previewFlagsOverride({
   storage,
   env,
 } = {}) {
+  if (!PREVIEW_QUERY_BUILD) return null;
   const resolvedLocation = location ?? testRuntime?.location ?? window.location;
   const resolvedStorage = storage ?? window.sessionStorage;
   const resolvedEnv = env ?? testRuntime?.env ?? import.meta.env;
