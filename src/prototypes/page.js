@@ -11,7 +11,7 @@
 //   free-estimate form -> instant reply      (speed_to_lead)
 //   ...plus the follow-up schedule after it  (estimate_followup)
 //
-// Sample data only. Nothing sends, calls, books, or fetches. Reviews,
+// Sample data only. FlowForward prices are not rendered. Nothing sends, calls, books, or fetches. Reviews,
 // ratings, licenses, offers and years in business are dashed "add yours"
 // slots, never invented. The watermark ribbon, tile, and footer are server
 // markup that no query param, flag, or brand string can remove. Brand
@@ -259,8 +259,6 @@ function flowforward(biz, featured, expiresAt) {
     <p class="ff-what">What's built into this sample: ${order.map(a => `<b>${esc(AGENTS[a].name)}</b>`).join(', ')}.</p>
   </div>
   <div class="ff-card">
-    <ul class="ff-prices"><li><span>Prototype</span><b>$0</b></li><li><span>MVP build</span><b>typically $1.5–3.5K</b></li><li><span>Hosting and maintenance</span><b>typically $150–400/mo</b></li><li><span>Consulting</span><b>typically $125–200/hr</b></li></ul>
-    <p class="small">Typical starting ranges; final scope after a call. The first build may be discounted in exchange for a case study.</p>
     <a class="ff-talk" href="${esc(SENDER.calendly)}" target="_blank" rel="noopener">Talk to Kelby</a>
     <a class="ff-mail" href="${esc(mail)}">or email ${esc(SENDER.email)}</a>
     <p class="small">This preview link expires 14 days after it was shared${expiresAt ? ` (${esc(longDate(expiresAt))})` : ''}.</p>
@@ -459,7 +457,6 @@ input[readonly]{background:var(--paper);color:var(--ink-2)}
 .ffsec h2{font-size:32px;color:#1E2A2F;margin-bottom:14px}.ff-kicker{margin:0 0 6px;font:700 13px var(--b);letter-spacing:.1em;text-transform:uppercase;color:#5B6B70}
 .ff-steps{margin:0 0 14px;padding-left:22px}.ff-what{color:#3A4A4F;font-size:16px}
 .ff-card{background:#fff;border:1px solid #D5DEDB;border-radius:6px;padding:20px}
-.ff-prices{list-style:none;margin:0 0 10px;padding:0;display:grid;gap:8px}.ff-prices li{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid #EEF2F1;padding-bottom:8px;font-size:16px}.ff-prices b{white-space:nowrap}
 .ff-talk{display:flex;justify-content:center;align-items:center;min-height:48px;background:#2F6B57;color:#fff;font:700 17px var(--b);border-radius:6px;text-decoration:none;margin-top:12px}
 .ff-mail{display:block;text-align:center;margin-top:8px;color:#2F6B57;font-size:15px}.ff-card .small{color:#5B6B70}
 .pt-footer{background:#EEF2F0;color:#5B6B70;font-size:14px;padding:0 0 40px}.pt-footer p{max-width:1200px;margin:0 auto;padding:0 20px}

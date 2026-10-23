@@ -62,6 +62,22 @@ async function lead(overrides = {}, res = research()) {
 const tokenOf = (url) => String(url).split('/').pop();
 const pathOf = (url) => new URL(url).pathname;
 
+// FlowForward's own tiers. A shop sample such as $14,800 is not one of these.
+function assertNoFlowForwardPrices(html, label) {
+  assert.equal(html.includes('ff-prices'), false, `${label} ff-prices`);
+  assert.equal(html.includes('$1.5'), false, `${label} $1.5`);
+  assert.equal(html.includes('3.5K'), false, `${label} 3.5K`);
+  assert.equal(html.includes('MVP build'), false, `${label} MVP build`);
+  assert.equal(html.includes('Typical starting ranges'), false, `${label} starting ranges`);
+  assert.equal(html.includes('Hosting and maintenance'), false, `${label} hosting price`);
+  assert.equal(html.includes('per month'), false, `${label} per month`);
+  assert.equal(/\$0(?!\d)/.test(html), false, `${label} $0 tier`);
+  assert.equal(/\$150\b/.test(html), false, `${label} hosting dollars`);
+  assert.equal(/\$125\b/.test(html), false, `${label} consulting dollars`);
+  assert.equal(/\/mo\b/.test(html), false, `${label} /mo`);
+  assert.equal(/\$\s*(?:0|1\.5|150|125)\b/.test(html), false, `${label} dollar tier`);
+}
+
 describe('prototype page', () => {
   let server; let port;
 
@@ -123,9 +139,10 @@ describe('prototype page', () => {
     for (const hook of ['<dialog class="dlg" id="book"', 'data-call', 'data-est-form', 'id="chat"', 'class="fu-line"', 'See the 4 automations', 'class="callbar"']) assert.ok(html.includes(hook), hook);
     for (const slot of ['Your Google rating here', 'Your license # here', 'Your Google reviews appear here', 'Your seasonal offer here']) assert.ok(html.includes(slot), slot);
     assert.equal(/★|rated \d|\d+ years|licensed (and|&amp;) insured|24\/7/i.test(html), false, 'no invented trust claims');
-    for (const anchor of ['$0', 'typically $1.5–3.5K', 'typically $150–400/mo', 'typically $125–200/hr', 'Typical starting ranges; final scope after a call.']) {
-      assert.ok(html.includes(anchor), anchor);
-    }
+    assertNoFlowForwardPrices(html, 'prototype page');
+    assert.match(html, /<div class="ff-card">\s*<a class="ff-talk"/);
+    assert.ok(html.includes('Go live, with hosting and maintenance.'));
+    assert.ok(html.includes('$14,800'), 'sample shop estimate stays');
     assert.match(html, /<a class="ff-talk" href="https:\/\/calendly\.com\//);
     // Yellow is darkened for contrast (prototype-system.md §2).
     assert.ok(html.includes('--brand:#7D7000'));
@@ -192,6 +209,7 @@ describe('prototype page', () => {
     assert.equal(gone.status, 410);
     assert.ok(gone.text.includes('This preview link has expired'));
     assert.ok(gone.text.includes(WATERMARK_TEXT));
+    assertNoFlowForwardPrices(gone.text, 'expired page');
     const listed = await call(port, 'GET', `/api/proposals/${(await pool.query('SELECT id FROM proposals WHERE prospect_id = $1', [p.id])).rows[0].id}`);
     assert.equal(listed.json.prototype.expired, true);
 
