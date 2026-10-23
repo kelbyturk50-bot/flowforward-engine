@@ -155,7 +155,7 @@ async function boot() {
   // only (55P03 or 57014), with no query text. Brand, estimate, and pilot
   // steps do not run after that throw. Those steps return reports instead
   // of throwing, so their own failures do not take this path. A brand-check
-  // or estimate-check failure is a warning. app.listen still runs below.
+  // or estimate-check failure is a warning. The listen call below still runs.
   let mainOk = false;
   try {
     const report = await applySchema();
