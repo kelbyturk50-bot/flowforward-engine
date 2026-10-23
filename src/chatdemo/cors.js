@@ -11,11 +11,13 @@ const PRODUCTION_CRM_ORIGINS = Object.freeze([
   'https://flowforward-engine-git-main-turk11.vercel.app',
 ]);
 
-// Preview hosts for this Vercel project and the turk11 team.
-// Same host shape as web/src/flags.js PREVIEW_HOST_PATTERN, with an https://
-// prefix. Fully anchored: a prefix, a suffix, a dot, or http does not match.
-// `flowforward-engine-turk11.vercel.app` does not match; it is listed above.
-const PREVIEW_ORIGIN_PATTERN = /^https:\/\/flowforward-engine-[a-z0-9-]+-turk11\.vercel\.app$/;
+// Vercel preview hosts for this project and the turk11 team. https only.
+// A deployment hash is exactly 9 lowercase letters or digits.
+// A git preview is flowforward-engine-git-<branch>-turk11.vercel.app.
+// Fully anchored: a prefix, a suffix, a dot, http, or the wrong length does not match.
+// The three production origins above are exact. The team alias does not match either pattern.
+const HASH_PREVIEW_ORIGIN = /^https:\/\/flowforward-engine-[a-z0-9]{9}-turk11\.vercel\.app$/;
+const GIT_PREVIEW_ORIGIN = /^https:\/\/flowforward-engine-git-[a-z0-9-]+-turk11\.vercel\.app$/;
 
 const CHAT_PREFLIGHT = Object.freeze({
   methods: 'POST, OPTIONS',
@@ -38,7 +40,7 @@ function originAllowed(origin) {
   for (let i = 0; i < PRODUCTION_CRM_ORIGINS.length; i += 1) {
     if (PRODUCTION_CRM_ORIGINS[i] === origin) return true;
   }
-  return PREVIEW_ORIGIN_PATTERN.test(origin);
+  return HASH_PREVIEW_ORIGIN.test(origin) || GIT_PREVIEW_ORIGIN.test(origin);
 }
 
 function writeCors(res, origin, spec) {
@@ -76,7 +78,8 @@ function flagsCors(req, res, next) {
 
 module.exports = {
   PRODUCTION_CRM_ORIGINS,
-  PREVIEW_ORIGIN_PATTERN,
+  HASH_PREVIEW_ORIGIN,
+  GIT_PREVIEW_ORIGIN,
   originAllowed,
   chatCors,
   flagsCors,

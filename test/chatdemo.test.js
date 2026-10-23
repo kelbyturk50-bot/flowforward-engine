@@ -272,42 +272,48 @@ describe('live chat pure checks', () => {
     assert.equal(demoRouter.stack[0].name, 'jsonParser');
   });
 
-  it('public chat and flag allowlist is the production CRM origins plus the preview regex', () => {
-    const { PRODUCTION_CRM_ORIGINS, PREVIEW_ORIGIN_PATTERN, originAllowed } = require('../src/chatdemo/cors');
+  it('public chat and flag allowlist is the production CRM origins plus the two preview shapes', () => {
+    const { PRODUCTION_CRM_ORIGINS, HASH_PREVIEW_ORIGIN, GIT_PREVIEW_ORIGIN, originAllowed } = require('../src/chatdemo/cors');
     const root = path.join(__dirname, '..');
+    const hashPreview = 'https://flowforward-engine-abc123def-turk11.vercel.app';
+    const gitPreview = 'https://flowforward-engine-git-my-branch-turk11.vercel.app';
     assert.deepEqual([...PRODUCTION_CRM_ORIGINS], [
       'https://flowforward-engine-six.vercel.app',
       'https://flowforward-engine-turk11.vercel.app',
       'https://flowforward-engine-git-main-turk11.vercel.app',
     ]);
-    assert.equal(PREVIEW_ORIGIN_PATTERN.source, '^https:\\/\\/flowforward-engine-[a-z0-9-]+-turk11\\.vercel\\.app$');
-    assert.equal(PREVIEW_ORIGIN_PATTERN.flags, '');
+    assert.equal(HASH_PREVIEW_ORIGIN.source, '^https:\\/\\/flowforward-engine-[a-z0-9]{9}-turk11\\.vercel\\.app$');
+    assert.equal(HASH_PREVIEW_ORIGIN.flags, '');
+    assert.equal(GIT_PREVIEW_ORIGIN.source, '^https:\\/\\/flowforward-engine-git-[a-z0-9-]+-turk11\\.vercel\\.app$');
+    assert.equal(GIT_PREVIEW_ORIGIN.flags, '');
     const apiBase = fs.readFileSync(path.join(root, 'web', 'src', 'api-base.js'), 'utf8');
-    const flagsSrc = fs.readFileSync(path.join(root, 'web', 'src', 'flags.js'), 'utf8');
-    assert.match(flagsSrc, /PREVIEW_HOST_PATTERN = \/\^flowforward-engine-\[a-z0-9-\]\+-turk11\\\.vercel\\\.app\$\//);
     for (const origin of PRODUCTION_CRM_ORIGINS) {
       assert.equal(originAllowed(origin), true, origin);
       assert.ok(apiBase.includes(origin.slice('https://'.length)), origin);
     }
-    assert.equal(PREVIEW_ORIGIN_PATTERN.test('https://flowforward-engine-turk11.vercel.app'), false);
-    assert.equal(originAllowed('https://flowforward-engine-x-turk11.vercel.app'), true);
-    assert.equal(originAllowed('https://flowforward-engine-git-cursor-live-chat-frontend-cdae-turk11.vercel.app'), true);
+    assert.equal(HASH_PREVIEW_ORIGIN.test('https://flowforward-engine-turk11.vercel.app'), false);
+    assert.equal(GIT_PREVIEW_ORIGIN.test('https://flowforward-engine-turk11.vercel.app'), false);
+    assert.equal(originAllowed(hashPreview), true);
+    assert.equal(HASH_PREVIEW_ORIGIN.test(hashPreview), true);
+    assert.equal(originAllowed(gitPreview), true);
+    assert.equal(GIT_PREVIEW_ORIGIN.test(gitPreview), true);
     const denied = [
-      'https://evil-flowforward-engine-x-turk11.vercel.app',
+      'https://flowforward-engine-x-turk11.vercel.app',
+      'https://flowforward-engine-abcdefgh-turk11.vercel.app',
+      'https://flowforward-engine-ABCDEFGHI-turk11.vercel.app',
+      'https://flowforward-engine-abc123def-turk11.vercel.app.evil.com',
+      'http://flowforward-engine-abc123def-turk11.vercel.app',
+      'https://evil-flowforward-engine-abc123def-turk11.vercel.app',
       'https://evil-flowforward-engine-six.vercel.app',
-      'https://flowforward-engine-x-turk11.vercel.app.evil.com',
-      'https://a.flowforward-engine-x-turk11.vercel.app',
-      'https://xflowforward-engine-x-turk11.vercel.app',
-      'http://flowforward-engine-x-turk11.vercel.app',
+      'https://a.flowforward-engine-abc123def-turk11.vercel.app',
       'http://flowforward-engine-six.vercel.app',
-      'https://flowforward-engine-x-turk11.vercel.app:444',
-      'https://flowforward-engine-x-turk11.vercel.app/',
-      'https://flowforward-engine-X-turk11.vercel.app',
-      'https://evil@flowforward-engine-x-turk11.vercel.app',
+      'https://flowforward-engine-abc123def-turk11.vercel.app:444',
+      'https://flowforward-engine-abc123def-turk11.vercel.app/',
+      'https://evil@flowforward-engine-abc123def-turk11.vercel.app',
       'null',
       '*',
       '',
-      'https://flowforward-engine-x-turk11.vercel.app\n',
+      'https://flowforward-engine-abc123def-turk11.vercel.app\n',
     ];
     for (const origin of denied) assert.equal(originAllowed(origin), false, origin);
     assert.equal(originAllowed(undefined), false);
@@ -931,12 +937,16 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
       'https://flowforward-engine-six.vercel.app',
       'https://flowforward-engine-turk11.vercel.app',
       'https://flowforward-engine-git-main-turk11.vercel.app',
-      'https://flowforward-engine-x-turk11.vercel.app',
+      'https://flowforward-engine-abc123def-turk11.vercel.app',
+      'https://flowforward-engine-git-my-branch-turk11.vercel.app',
     ];
     const denied = [
-      'https://evil-flowforward-engine-x-turk11.vercel.app',
-      'https://flowforward-engine-x-turk11.vercel.app.evil.com',
-      'http://flowforward-engine-x-turk11.vercel.app',
+      'https://flowforward-engine-x-turk11.vercel.app',
+      'https://flowforward-engine-abcdefgh-turk11.vercel.app',
+      'https://flowforward-engine-ABCDEFGHI-turk11.vercel.app',
+      'https://flowforward-engine-abc123def-turk11.vercel.app.evil.com',
+      'http://flowforward-engine-abc123def-turk11.vercel.app',
+      'https://evil-flowforward-engine-abc123def-turk11.vercel.app',
       'null',
       'http://crm.test',
     ];
@@ -1042,11 +1052,17 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     assert.equal(openedProd.headers['access-control-allow-origin'], 'https://flowforward-engine-six.vercel.app');
     assert.equal(openedProd.headers['access-control-allow-credentials'], undefined);
     const openedPreview = await request('POST', '/api/public/chat/demos/wasatch-heating/session', {
-      origin: 'https://flowforward-engine-x-turk11.vercel.app',
+      origin: 'https://flowforward-engine-abc123def-turk11.vercel.app',
       body: {},
     });
     assert.equal(openedPreview.status, 201);
-    assert.equal(openedPreview.headers['access-control-allow-origin'], 'https://flowforward-engine-x-turk11.vercel.app');
+    assert.equal(openedPreview.headers['access-control-allow-origin'], 'https://flowforward-engine-abc123def-turk11.vercel.app');
+    const openedGit = await request('POST', '/api/public/chat/demos/wasatch-heating/session', {
+      origin: 'https://flowforward-engine-git-my-branch-turk11.vercel.app',
+      body: {},
+    });
+    assert.equal(openedGit.status, 201);
+    assert.equal(openedGit.headers['access-control-allow-origin'], 'https://flowforward-engine-git-my-branch-turk11.vercel.app');
     const openedGlobal = await request('POST', '/api/public/chat/demos/wasatch-heating/session', {
       origin: 'http://crm.test',
       body: {},
