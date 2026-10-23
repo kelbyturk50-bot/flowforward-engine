@@ -6,6 +6,7 @@ process.env.FF_PILOT_ESTIMATE_RECOVERY = '';
 process.env.FF_PILOT_LINK_ON_ONEPAGER = '';
 process.env.FF_PILOT_ESTIMATE_SMS = '';
 process.env.FF_PROTOTYPE_GALLERY = '';
+process.env.FF_LIVE_CHAT_DEMO = '';
 process.env.FF_CAMPAIGNS = '';
 process.env.FF_CAMPAIGN_OPEN_PIXEL = '';
 process.env.FF_PROTOTYPE_ON_DRAFT = '';
@@ -268,6 +269,11 @@ describe('feature flags', { concurrency: 1 }, () => {
       assert.equal(row.updated_at, null, row.name);
       assert.equal(row.updated_by, null, row.name);
     }
+    const liveChatSeed = rows.find((row) => row.name === 'FF_LIVE_CHAT_DEMO');
+    assert.ok(liveChatSeed, 'schema seeds FF_LIVE_CHAT_DEMO');
+    assert.equal(liveChatSeed.enabled, false);
+    const schemaSql = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
+    assert.match(schemaSql, /\('FF_LIVE_CHAT_DEMO',\s*false\)/);
     assert.equal(rows.some((row) => row.name === 'FF_PILOT_ESTIMATE_SMS'), false);
     assert.equal(rows.some((row) => row.name === 'FF_CAMPAIGN_OPEN_PIXEL'), false);
     assert.equal(rows.some((row) => row.name === 'FF_PILOT_ESTIMATE_LIVE_SEND'), false);

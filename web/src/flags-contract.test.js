@@ -33,6 +33,7 @@ describe('feature flags contract', () => {
 
   it('lists the campaign flags and leaves live sending and the watermark out', () => {
     expect(FEATURE_FLAG_NAMES).toContain('FF_CAMPAIGNS');
+    expect(FEATURE_FLAG_NAMES).toContain('FF_LIVE_CHAT_DEMO');
     expect(FEATURE_FLAG_NAMES).toContain('FF_CAMPAIGN_OPEN_PIXEL');
     expect(FEATURE_FLAG_NAMES).not.toContain('FF_PILOT_ESTIMATE_LIVE_SEND');
     expect(FEATURE_FLAG_NAMES).not.toContain('FF_HIDE_WATERMARK');

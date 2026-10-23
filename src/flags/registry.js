@@ -2,6 +2,9 @@
 //
 // Database flags are seeded off and can be changed with PUT. The one
 // exception is FF_PROTOTYPE_ON_DRAFT, seeded on (Kelby, Oct 20); see DEFAULT_ON.
+// FF_LIVE_CHAT_DEMO is the fixture chat surface (F-007). It is seeded off
+// and is not in DEFAULT_ON. FF_LIVE_CHAT_MODEL stays out of this list until
+// the live responder exists; that flag is env-only.
 // SMS and the campaign open pixel are listed on GET but are env-only:
 // effective is on only when the env var is exactly "true". They are not
 // seeded. FF_PILOT_ESTIMATE_LIVE_SEND stays out of this list (kill-switch
@@ -12,6 +15,7 @@ const DB_NAMES = Object.freeze([
   'FF_PILOT_ESTIMATE_RECOVERY',
   'FF_PILOT_LINK_ON_ONEPAGER',
   'FF_PROTOTYPE_GALLERY',
+  'FF_LIVE_CHAT_DEMO',
   'FF_CAMPAIGNS',
   'FF_PROTOTYPE_ON_DRAFT',
 ]);
@@ -31,6 +35,7 @@ const NAMES = Object.freeze([
   'FF_PILOT_LINK_ON_ONEPAGER',
   'FF_PILOT_ESTIMATE_SMS',
   'FF_PROTOTYPE_GALLERY',
+  'FF_LIVE_CHAT_DEMO',
   'FF_CAMPAIGNS',
   'FF_CAMPAIGN_OPEN_PIXEL',
   'FF_PROTOTYPE_ON_DRAFT',

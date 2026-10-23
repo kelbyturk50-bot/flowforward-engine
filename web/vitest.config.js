@@ -27,6 +27,9 @@ function mockApiPlugin() {
 
 export default defineConfig({
   plugins: [mockApiPlugin(), react()],
+  define: {
+    __FF_VERCEL_ENV__: JSON.stringify(process.env.VERCEL_ENV ?? ''),
+  },
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.js'],

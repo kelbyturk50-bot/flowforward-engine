@@ -447,7 +447,11 @@ describe('prototype gallery', () => {
     expect(config.headers[0].source).toBe('/demo/:path*');
     expect(config.headers[0].headers).toEqual([
       { key: 'X-Robots-Tag', value: 'noindex, nofollow' },
+      { key: 'Referrer-Policy', value: 'no-referrer' },
+      { key: 'Cache-Control', value: 'no-store' },
+      { key: 'X-Content-Type-Options', value: 'nosniff' },
     ]);
+    expect(config.headers[0].headers.some((header) => header.key === 'Content-Security-Policy')).toBe(false);
     const galleryPath = `/demo/gallery/${TOKEN}/estimate-follow-up`;
     expect(galleryPath.startsWith('/demo/')).toBe(true);
     expect(galleryRouteFromPath(galleryPath).screen).toBe('estimate-follow-up');
