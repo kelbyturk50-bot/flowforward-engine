@@ -510,6 +510,73 @@ describe('prototype on draft', () => {
     console.log('[prototype] hostile and over-long brand names are refused');
   });
 
+  it('prototype: restartClock leaves an expired link at 410', async () => {
+    const store = require('../src/prototypes/store');
+    const lead = await seedLead({ google_place_id: 'test-place-proto-restart-expired', email: 'test+restart@example.invalid' });
+    const row = await store.ensurePrototype(lead.id);
+    const token = tokenOf(store.linkFor(row).url);
+    await pool.query(
+      `UPDATE prototypes
+          SET issued_at = stamp.issued_at,
+              expires_at = stamp.issued_at + INTERVAL '336 hours'
+         FROM (SELECT NOW() - INTERVAL '400 hours' AS issued_at) AS stamp
+        WHERE prototypes.id = $1`,
+      [row.id]
+    );
+    const before = await pool.query('SELECT issued_at, expires_at FROM prototypes WHERE id = $1', [row.id]);
+    const gone = await request(port, 'GET', `/api/public/prototypes/${token}`, {
+      key: '',
+      headers: { 'x-forwarded-for': '198.51.100.21' },
+    });
+    assert.equal(gone.status, 410);
+    assert.equal(gone.json.error, 'link_expired');
+    const restarted = await store.restartClock(lead.id);
+    assert.equal(restarted, null);
+    const after = await pool.query('SELECT issued_at, expires_at FROM prototypes WHERE id = $1', [row.id]);
+    assert.equal(new Date(after.rows[0].expires_at).toISOString(), new Date(before.rows[0].expires_at).toISOString());
+    assert.equal(new Date(after.rows[0].issued_at).toISOString(), new Date(before.rows[0].issued_at).toISOString());
+    const still = await request(port, 'GET', `/api/public/prototypes/${token}`, {
+      key: '',
+      headers: { 'x-forwarded-for': '198.51.100.22' },
+    });
+    assert.equal(still.status, 410);
+    assert.equal(still.json.error, 'link_expired');
+
+    // Expired one minute ago: still 410, and restartClock leaves it alone.
+    const recentLead = await seedLead({ google_place_id: 'test-place-proto-restart-recent', email: 'test+restartrecent@example.invalid' });
+    const recent = await store.ensurePrototype(recentLead.id);
+    await pool.query(
+      `UPDATE prototypes SET issued_at = NOW() - INTERVAL '336 hours 1 minute',
+                             expires_at = NOW() - INTERVAL '1 minute'
+        WHERE id = $1`,
+      [recent.id]
+    );
+    const recentBefore = await pool.query('SELECT expires_at FROM prototypes WHERE id = $1', [recent.id]);
+    assert.equal(await store.restartClock(recentLead.id), null);
+    const recentAfter = await pool.query('SELECT expires_at FROM prototypes WHERE id = $1', [recent.id]);
+    assert.equal(new Date(recentAfter.rows[0].expires_at).toISOString(), new Date(recentBefore.rows[0].expires_at).toISOString());
+
+    // A revoked, unexpired row is not restarted either.
+    const revokedLead = await seedLead({ google_place_id: 'test-place-proto-restart-revoked', email: 'test+restartrevoked@example.invalid' });
+    const revokedRow = await store.ensurePrototype(revokedLead.id);
+    await pool.query(`UPDATE prototypes SET revoked_at = NOW() WHERE id = $1`, [revokedRow.id]);
+    const revokedBefore = await pool.query('SELECT issued_at FROM prototypes WHERE id = $1', [revokedRow.id]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(await store.restartClock(revokedLead.id), null);
+    const revokedAfter = await pool.query('SELECT issued_at FROM prototypes WHERE id = $1', [revokedRow.id]);
+    assert.equal(new Date(revokedAfter.rows[0].issued_at).toISOString(), new Date(revokedBefore.rows[0].issued_at).toISOString());
+
+    const liveLead = await seedLead({ google_place_id: 'test-place-proto-restart-live', email: 'test+restartlive@example.invalid' });
+    const live = await store.ensurePrototype(liveLead.id);
+    const liveBefore = await pool.query('SELECT issued_at FROM prototypes WHERE id = $1', [live.id]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const moved = await store.restartClock(liveLead.id);
+    assert.ok(moved);
+    assert.ok(new Date(moved.issued_at).getTime() >= new Date(liveBefore.rows[0].issued_at).getTime());
+    assert.equal(new Date(moved.expires_at).getTime() - new Date(moved.issued_at).getTime(), 336 * 3600 * 1000);
+    console.log('[prototype] expired link stayed 410 after restartClock; a live link still restarts');
+  });
+
   it('prototype: payload includes issued_at and expires_at = issued_at + 14d', async () => {
     process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
     process.env.FF_HIDE_WATERMARK = 'true';
@@ -740,6 +807,48 @@ describe('prototype on draft', () => {
       assert.match(publicSrc, /consume\(clientIp\(req\), 'prototype'\)/);
       assert.equal(publicSrc.includes("'demo'"), false);
       console.log(`[prototype] rate limit third request => ${third.status} retry-after ${third.headers['retry-after']} (prototype bucket)`);
+
+      const probe = express();
+      probe.set('trust proxy', 1);
+      const asReq = (xff) => ({
+        app: probe,
+        headers: { 'x-forwarded-for': xff },
+        socket: { remoteAddress: '10.0.0.8' },
+      });
+      assert.equal(clientIp(asReq('::ffff:198.51.100.50')), '198.51.100.50');
+      assert.equal(clientIp(asReq('198.51.100.50')), clientIp(asReq('::ffff:198.51.100.50')));
+      assert.equal(clientIp(asReq('2001:db8:1:2::1')), '2001:db8:1:2::/64');
+      assert.equal(clientIp(asReq('2001:db8:1:2::1')), clientIp(asReq('2001:db8:1:2:ffff::9')));
+      assert.notEqual(clientIp(asReq('2001:db8:1:3::1')), clientIp(asReq('2001:db8:1:2::1')));
+      assert.equal(clientIp(asReq('198.51.100.9, 203.0.113.50')), '203.0.113.50');
+      const { bucketIp } = require('../src/chatdemo/ip');
+      assert.equal(bucketIp(clientIp(asReq('2001:db8:1:2::1'))), '2001:db8:1:2::/64');
+      assert.equal(bucketIp('::ffff:198.51.100.50'), '198.51.100.50');
+
+      _resetForTests();
+      process.env.PILOT_DEMO_RATE_MAX = '1';
+      const unknown = 'a'.repeat(43);
+      const hit = (ip) => request(port, 'GET', `/api/public/prototypes/${unknown}`, {
+        key: '',
+        headers: { 'x-forwarded-for': ip },
+      });
+      const v4 = await hit('198.51.100.50');
+      const mapped = await hit('::ffff:198.51.100.50');
+      assert.equal(v4.status, 404);
+      assert.equal(mapped.status, 429);
+      assert.equal(mapped.headers['retry-after'] != null, true);
+      const v6 = await hit('2001:db8:1:2::1');
+      const v6same = await hit('2001:db8:1:2:ffff::9');
+      const v6other = await hit('2001:db8:1:3::1');
+      assert.equal(v6.status, 404);
+      assert.equal(v6same.status, 429);
+      assert.equal(v6other.status, 404);
+      const pageMapped = await request(port, 'GET', `/demo/prototype/${unknown}`, {
+        key: '',
+        headers: { 'x-forwarded-for': '::ffff:198.51.100.50' },
+      });
+      assert.equal(pageMapped.status, 429);
+      console.log('[prototype] ::ffff: folds onto the IPv4 key; IPv6 shares a /64; the next /64 does not');
     } finally {
       if (previousMax == null) delete process.env.PILOT_DEMO_RATE_MAX;
       else process.env.PILOT_DEMO_RATE_MAX = previousMax;
@@ -1010,7 +1119,7 @@ describe('prototype on draft', () => {
     console.log(`[prototype] error logs include code; message absent (${lines.length} lines)`);
   });
 
-  it('prototype: revoke on the server.js mount fails closed when CRM_API_KEY is weak or unset', async () => {
+  it('prototype: revoke on the server.js mount fails closed when CRM_API_KEY is weak or unset', { timeout: 180000 }, async () => {
     process.env.FF_PROTOTYPE_ON_DRAFT = 'true';
     const saved = process.env.CRM_API_KEY;
     process.env.CRM_API_KEY = STRONG_KEY;
@@ -1093,6 +1202,9 @@ describe('prototype on draft', () => {
       { name: 'short', key: 'short', header: 'short' },
       { name: '31', key: 'x'.repeat(31), header: 'x'.repeat(31) },
       { name: 'spaces', key: ' '.repeat(32), header: ' '.repeat(32) },
+      // 17 non-whitespace characters with inner spaces. #90 item 6 measured
+      // 401 or writes_disabled here. #91 already answers 503 api_key_not_configured.
+      { name: 'inner-17', key: `${'n'.repeat(8)}${' '.repeat(20)}${'n'.repeat(9)}`, header: '' },
     ];
     try {
       for (const item of cases) {
@@ -1101,7 +1213,14 @@ describe('prototype on draft', () => {
           const res = await request(started.listenPort, 'POST', `/api/prototypes/${weakRow.id}/revoke`, { key: item.header });
           assert.equal(res.status, 503, item.name);
           assert.deepEqual(res.json, { error: 'api_key_not_configured' });
-          const secret = String(item.header || '').trim();
+          assert.notEqual(res.json.error, 'writes_disabled', item.name);
+          const missingHeader = await request(started.listenPort, 'POST', '/api/prototypes', {
+            key: '',
+            body: { prospect_id: weakRow.prospect_id },
+          });
+          assert.equal(missingHeader.status, 503, `${item.name} missing header`);
+          assert.deepEqual(missingHeader.json, { error: 'api_key_not_configured' });
+          const secret = String(item.header || item.key || '').trim();
           if (secret) assert.equal(started.output().includes(secret), false, item.name);
         } finally {
           await stop(started.child);

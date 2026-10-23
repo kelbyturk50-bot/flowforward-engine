@@ -299,8 +299,8 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 - [ ] **Ceiling value: env-only** (Warden B12). Raising the ceiling is the one change that increases real spend, so it lives where only Kelby can change it.
   - It's read on every reservation from the env var **`CHAT_DEMO_DAILY_CEILING_USD`**, a dollar value Kelby sets in the Railway env, and parsed to integer `ceiling_micros`.
   - The reader is `readCeiling(env = process.env)` in `src/chatdemo/ceiling.js`. It's a pure function, so tests pass a plain env object.
-  - **Kelby sets the value.** No default ships, and no PR, test, routine, migration, seed or agent sets it. Nothing changes Railway env vars.
-  - **Production (Oct 23, 2026):** `CHAT_DEMO_DAILY_CEILING_USD` is set to **$5** in Railway's environment (Kelby, relayed by Summit). The code still has no default; an unset or invalid value keeps the live path off.
+  - **Kelby sets the value.** No default ships, and no PR, test, routine, migration, seed or agent sets it. Nothing changes Railway env vars. The ceiling comes only from `CHAT_DEMO_DAILY_CEILING_USD`. There is no default in code or the database.
+  - **Production (Oct 23, 2026):** `CHAT_DEMO_DAILY_CEILING_USD` is set to **$5** in Railway's environment (Kelby, relayed by Summit). That env value is not a default in code. The code still has no default; an unset or invalid value keeps the live path off.
   - The raw string must match `/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/` (digits, optional dot, at most two decimal places, no leading zero). `0.01` is allowed. `007` is not. Spaces, a leading dot, a sign, an exponent (`1e9`), hex (`0x10`), binary (`0b11`), empty, and anything `Number()` would otherwise accept are rejected. The amount must be greater than 0 and at most **100000** dollars (one hundred thousand per America/Denver day). A rejected value leaves the live path off (`readCeiling` returns null).
   - **Nothing in the database holds the ceiling.** It isn't stored in `app_settings` or any other table, it isn't seeded, and no `app_settings` key exists for it.
   - **No write path.** No route, including the flags and settings APIs, writes the ceiling.
@@ -408,10 +408,11 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 - [ ] **Body limit (2 KB).** `server.js` mounts `express.json({ limit: '1mb' })` globally, before the public routes, so a route-level parser mounted later never applies. The chat routes are therefore mounted **before both `cors()` (`server.js`, which runs before the parser and answers OPTIONS preflights itself) and the global parser**, with their own `express.json({ limit: '2kb' })`. Mounting before the parser alone isn't enough, because `cors()` would still add ACAO and answer preflights. The chat router's own allowlist (`src/chatdemo/cors.js`) is mounted after that 2 KB parser, so a 413 never receives it. `GET /api/public/flags` is mounted before `cors()` for the same allowlist.
 - [ ] **Chat router middleware order.** Within the chat router, `express.json({ limit: '2kb' })` is the **first** middleware. It runs before every Express rate-limit counter, the session mint, the token lookup and any DB query or call. An over-limit body never touches a counter or the DB. The full order is:
   1. `express.json({ limit: '2kb' })` (rejects over-limit bodies with `entity.too.large`);
-  2. the chat response headers (below);
-  3. token lookup, session mint or check, and the Express counters (§8.2);
-  4. the route handler: Tx 1, the responder, Tx 2;
-  5. the router's own error handler, which catches `entity.too.large` and returns 413.
+  2. the chat response headers (below) and the exact-origin allowlist;
+  3. a POST `Content-Type` check: `application/json`, with one optional `charset` parameter. Anything else, including `text/plain` and a form body, is **415** `{ "error": "unsupported_media_type" }` and does not reach a cap counter, a token lookup, or a database query;
+  4. token lookup, session mint or check, and the Express counters (§8.2);
+  5. the route handler: Tx 1, the responder, Tx 2;
+  6. the router's own error handler, which catches `entity.too.large` and returns 413.
 - [ ] **Own 413.** The chat router sits before `app.use(pilotDemo.payloadTooLarge)`, so its 2 KB parser error would otherwise fall through to that later handler. Instead, the chat router has its own error handler for `entity.too.large`. It returns 413 with a chat JSON body (`{ "error": "payload_too_large" }`) and the full chat response headers below (noindex, no-referrer, no-store, nosniff), and never the pilot demo body.
   - Because the parser runs before the header middleware, the 413 handler **sets the four chat headers itself**.
   - The handler logs at most the `payload_too_large` enum (logging allow-list, §6). It never logs the body or any part of it.
@@ -420,13 +421,15 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
     2. **No ACAO:** no `Access-Control-Allow-Origin` header on the 413.
     3. **Exact body:** status 413, the body is byte-equal to `{"error":"payload_too_large"}` (not the pilot demo body), and all four chat headers are present.
     4. **No payload in logs:** the captured log output contains no part of the payload, checked by asserting the marker string doesn't appear. At most `payload_too_large` is logged.
-- [ ] **Exact-origin CORS.** The CRM demo pages call the API from another origin. The public chat routers (`/api/public/chat`, `/api/public/prototypes/:token/chat`) and `GET /api/public/flags` do **not** use the global `cors()` middleware and do not send `*`. The allowlist is in `src/chatdemo/cors.js`. No new env var.
-  - **Production CRM origins** (exact `===`, `https` only, from `PRODUCTION_HOSTS` in `web/src/api-base.js`): `https://flowforward-engine-six.vercel.app`, `https://flowforward-engine-turk11.vercel.app`, `https://flowforward-engine-git-main-turk11.vercel.app`.
-  - **Preview origins:** only these two anchored `https` patterns. A deployment hash is exactly 9 lowercase letters or digits: `^https://flowforward-engine-[a-z0-9]{9}-turk11\.vercel\.app$`. A git branch preview: `^https://flowforward-engine-git-[a-z0-9-]+-turk11\.vercel\.app$`. No other shape. `http` does not match. `flowforward-engine-x-turk11.vercel.app`, an 8-character hash, and uppercase are rejected. The team alias `https://flowforward-engine-turk11.vercel.app` does not match either pattern; it is allowed only as a production origin above.
+- [ ] **Exact-origin CORS.** The CRM demo pages call the API from another origin. The public chat routers (`/api/public/chat`, `/api/public/prototypes/:token/chat`) and `GET /api/public/flags` do **not** use the global `cors()` middleware and do not send `*`. The allowlist is in `src/chatdemo/cors.js`. No new env var. No preview pattern.
+  - **Production CRM origins** (exact `===`, `https` only, from `PRODUCTION_HOSTS` in `web/src/api-base.js`): `https://flowforward-engine-six.vercel.app`, `https://flowforward-engine-turk11.vercel.app`, `https://flowforward-engine-git-main-turk11.vercel.app`. Those three are the whole list.
+  - **No preview hosts.** A deployment hash such as `https://flowforward-engine-abc123def-turk11.vercel.app`, a short lookalike such as `https://flowforward-engine-x-turk11.vercel.app`, and a git preview such as `https://flowforward-engine-git-my-branch-turk11.vercel.app` get no `Access-Control-Allow-Origin`. `http` does not match. A suffix, a prefix, a port, or a trailing slash does not match.
   - **No credentials.** These responses do not send `Access-Control-Allow-Credentials`.
-  - **Methods and headers.** Chat preflight is **204** with `Vary: Origin`, `Access-Control-Allow-Methods: POST, OPTIONS`, and `Access-Control-Allow-Headers: Content-Type`. An allowed origin is echoed exactly on POST and on the simple GET `/api/public/chat/demos`. Flag preflight is **204** with `Vary: Origin` and `Access-Control-Allow-Methods: GET`. An allowed origin is echoed exactly on GET `/api/public/flags`.
-  - **Disallowed.** A missing Origin, `null`, an `http` variant, or a lookalike (`evil-flowforward-engine…`, `….vercel.app.evil.com`) gets no `Access-Control-Allow-Origin`.
+  - **Methods and headers.** Chat preflight is **204** with `Vary: Origin`, `Access-Control-Allow-Methods: POST, OPTIONS`, `Access-Control-Allow-Headers: Content-Type`, and `Access-Control-Max-Age: 600`. An allowed origin is echoed exactly on POST and on the simple GET `/api/public/chat/demos`. Flag preflight is **204** with `Vary: Origin`, `Access-Control-Allow-Methods: GET`, and `Access-Control-Max-Age: 600`. An allowed origin is echoed exactly on GET `/api/public/flags`. `Access-Control-Max-Age` is only on an allowed preflight.
+  - **Disallowed.** A missing Origin, `null`, an `http` variant, `http://localhost:5173`, or a lookalike (`evil-flowforward-engine…`, `….vercel.app.evil.com`, a hash preview, `flowforward-engine-x-turk11`) gets no `Access-Control-Allow-Origin`. The response still sends `Vary: Origin`.
+  - **JSON posts.** Session, message, and CTA POSTs require `Content-Type: application/json`, with one optional `charset` parameter (`application/json; charset=utf-8` counts). `text/plain` and a form body (`application/x-www-form-urlencoded` or `multipart/form-data`) are **415** with a body byte-equal to `{"error":"unsupported_media_type"}`. That response is sent before a cap counter, a token lookup, or a database query, so a cross-site form cannot burn a cap.
   - **413.** The oversized-body path still sends no `Access-Control-Allow-Origin`, including when the Origin is on the allowlist.
+  - **Local dev.** `http://localhost:5173` and `http://127.0.0.1:5173` are not allowlisted. A page on the Vite dev server that calls the API at `http://localhost:3000` is cross-origin and the browser will not read these responses. Use the Vite proxy, so the browser stays on `http://localhost:5173`, or open the demo same-origin on the API. Do not add localhost to `src/chatdemo/cors.js`.
   - **Setup:** the test sets `CORS_ORIGINS` to an origin `cors()` would echo (`http://crm.test`). That origin gets no ACAO on these routes.
   - **Control:** under the same setup, that origin on a normal `/api` route **does** get ACAO. This shows the test is able to fail.
 - [ ] Every chat response sends:
@@ -484,7 +487,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   - **Logging:** the captured logs contain no IP, `ip_hash`, `sessionId`, user text, model output or Anthropic error text.
   - **Flag and ceiling:** `PUT /api/flags/FF_LIVE_CHAT_MODEL` gives 400 `flag_not_writable`; the env value `"TRUE"` or `"1"` means off; no route writes the ceiling, and `app_settings` is never read or written for it; `CHAT_DEMO_DAILY_CEILING_USD` unset, `""`, whitespace, `" 5 "`, `"abc"`, `0`, `0.00`, `007`, `01`, `-1`, `.5`, `1e9`, `0x10`, `0b11`, `NaN`, `Infinity`, and any amount over `100000` mean off. A value matching `/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/` from `0.01` through `100000` is on.
   - **Model:** an unpriced `MODEL` fails gate (h) and gives fixtures.
-  - **Body and CORS:** a 2,049-byte body gives 413 from the router's own handler, with 0 counter increments, 0 DB queries and 0 responder calls (spies), no ACAO, a body byte-equal to `{"error":"payload_too_large"}`, the four chat headers, and no payload marker in the captured logs; `express.json({ limit: '2kb' })` is the first middleware on the chat router; under a pinned CORS setup (`CORS_ORIGINS` is an origin the global `cors()` would echo), that origin, lookalikes (`evil-flowforward-engine…`, `….vercel.app.evil.com`), an `http` variant, and `null` get no ACAO and no `Access-Control-Allow-Methods` on these routes; an allowed production origin and an allowed preview origin get an exact ACAO echo; chat and flag preflights are 204 with `Vary: Origin` and no `Access-Control-Allow-Credentials`; the 413 path still has no ACAO; a control request to a normal `/api` route does get ACAO.
+  - **Body and CORS:** a 2,049-byte body gives 413 from the router's own handler, with 0 counter increments, 0 DB queries and 0 responder calls (spies), no ACAO, a body byte-equal to `{"error":"payload_too_large"}`, the four chat headers, and no payload marker in the captured logs; `express.json({ limit: '2kb' })` is the first middleware on the chat router; under a pinned CORS setup (`CORS_ORIGINS` is an origin the global `cors()` would echo), that origin, lookalikes (`https://flowforward-engine-abc123def-turk11.vercel.app`, `https://flowforward-engine-x-turk11.vercel.app`, `evil-flowforward-engine…`, `….vercel.app.evil.com`), an `http` variant, `http://localhost:5173`, and `null` get no ACAO and no `Access-Control-Allow-Methods`, and they still send `Vary: Origin`; only the three production CRM origins get an exact ACAO echo; an allowed chat or flag preflight is 204 with `Vary: Origin`, `Access-Control-Max-Age: 600`, and no `Access-Control-Allow-Credentials`; a denied preflight has no Max-Age; `text/plain` and form POSTs to session and CTA are 415 `{"error":"unsupported_media_type"}` with 0 counter increments and 0 DB queries; `application/json; charset=utf-8` still opens a session; the 413 path still has no ACAO; a control request to a normal `/api` route does get ACAO.
   - **Trust proxy:** `app.get('trust proxy') === 1`, because `clientIp`'s trust-all branch would fall back to the left-most XFF.
   - **Purge isolation:** a purge that throws still lets the mint succeed, and the mint transaction is never aborted by it.
   - **Alerts:** each alert event shows the CRM card banner and makes 0 outbound requests.
@@ -543,3 +546,23 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 - [ ] With all flags off, prod behaves exactly as before.
 - [ ] With the chat flag on and the model flag off, the demo works end-to-end on fixtures at $0.
 - [ ] Reviews from Warden and Gauge are recorded, and Summit accepts.
+
+## 15. Public CORS check
+
+Production CRM pages call the API origin in `connect-src`. That header stays the exact API origin. There is no Vercel rewrite.
+
+The allowlist is `src/chatdemo/cors.js` (#100). It does not use the global `cors()` middleware or `CORS_ORIGINS`. There is no `*` and no `Access-Control-Allow-Credentials`. Production CRM origins match with exact `===` (https, no path, no port):
+
+- `https://flowforward-engine-six.vercel.app`
+- `https://flowforward-engine-turk11.vercel.app`
+- `https://flowforward-engine-git-main-turk11.vercel.app`
+
+#100 also matches two preview patterns: a deployment hash of exactly 9 lowercase letters or digits (`^https://flowforward-engine-[a-z0-9]{9}-turk11\.vercel\.app$`) and a git branch preview (`^https://flowforward-engine-git-[a-z0-9-]+-turk11\.vercel\.app$`). This check does not use those. Preview pages stay on the `?flags=` fixture and do not call the API.
+
+Chat preflight is 204 with `Vary: Origin`, `Access-Control-Allow-Methods: POST, OPTIONS`, and `Access-Control-Allow-Headers: Content-Type`. `GET /api/public/flags` echoes the same production origin and sends `Vary: Origin`.
+
+`scripts/check-public-cors.sh` is read-only. It refuses any CRM origin outside the three production origins, including a preview origin. It sends `GET /api/public/flags` and an `OPTIONS` preflight to `/api/public/chat/demos` (`Access-Control-Request-Method: POST`, `Access-Control-Request-Headers: Content-Type`). It exits non-zero when `Access-Control-Allow-Origin` is missing or is not that exact origin, when `Vary` is not `Origin`, when allow-credentials is `true`, or when the chat preflight methods or headers differ. It does not print the response body.
+
+```bash
+scripts/check-public-cors.sh https://flowforward-engine-production.up.railway.app https://flowforward-engine-six.vercel.app
+```

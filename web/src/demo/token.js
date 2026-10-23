@@ -4,6 +4,8 @@
 
 export const DEMO_PREVIEW_TOKEN = 'demo-example-heating-air';
 
+const PREVIEW_QUERY_BUILD = import.meta.env.DEV === true || __FF_VERCEL_ENV__ === 'preview';
+
 const TOKEN = /^[A-Za-z0-9_-]{22,64}$/;
 const DEMO_PATH = /^\/demo\/estimate-recovery\/([^/]+)\/?$/;
 
@@ -29,8 +31,10 @@ function encodeList(value) {
 export function demoHref(token = DEMO_PREVIEW_TOKEN, search = '') {
   const current = new URLSearchParams(String(search || '').replace(/^\?/, ''));
   const parts = [];
-  const flags = current.get('flags');
-  if (flags) parts.push(`flags=${encodeList(flags)}`);
+  if (PREVIEW_QUERY_BUILD) {
+    const flags = current.get('flags');
+    if (flags) parts.push(`flags=${encodeList(flags)}`);
+  }
   const company = current.get('company');
   if (company && company.trim()) parts.push(`company=${encodeURIComponent(company.trim().slice(0, 80))}`);
   const query = parts.join('&');

@@ -258,7 +258,11 @@ async function triage(item) {
 
 // ── Worker ────────────────────────────────────────────────────────────────
 let working = false;
-function kick() { setImmediate(() => work().catch(err => console.error('[inbox] worker error:', err.message))); }
+function errCode(err) {
+  return err && err.code ? err.code : 'error';
+}
+
+function kick() { setImmediate(() => work().catch(err => console.error('[inbox] worker error:', errCode(err)))); }
 
 async function work() {
   if (working) return;
@@ -286,8 +290,8 @@ async function work() {
            r.reply_subject, r.reply_body, r.ai_original, (r.cost || 0).toFixed(4), cfg.MODEL]);
         console.log(`[inbox] #${item.id} → ${r.status} (${r.kind})`);
       } catch (err) {
-        await pool.query(`UPDATE inbox_items SET status = 'failed', error = $2, triaged_at = NOW() WHERE id = $1`, [item.id, err.message.slice(0, 500)]);
-        console.error(`[inbox] #${item.id} failed: ${err.message}`);
+        console.error('[inbox] triage failed:', errCode(err));
+        await pool.query(`UPDATE inbox_items SET status = 'failed', error = $2, triaged_at = NOW() WHERE id = $1`, [item.id, 'Something went wrong.']);
       }
     }
   } finally {
@@ -323,7 +327,10 @@ async function update(id, patch) {
   const sets = []; const vals = [id];
   for (const k of ['reply_body', 'reply_subject', 'reply_to']) {
     if (patch[k] === undefined) continue;
-    const v = String(patch[k] ?? '').slice(0, k === 'reply_body' ? 8000 : 300);
+    let v = String(patch[k] ?? '');
+    // A subject is a mail header. CR or LF would inject another header.
+    if (k === 'reply_subject') v = v.replace(/\r\n|\r|\n/g, '');
+    v = v.slice(0, k === 'reply_body' ? 8000 : 300);
     if (k === 'reply_to' && !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(v)) throw httpError("That email address doesn't look right.", 400);
     vals.push(v); sets.push(`${k} = $${vals.length}`);
   }
@@ -333,6 +340,10 @@ async function update(id, patch) {
 }
 
 function placeholdersIn(text) { return String(text || '').match(PLACEHOLDER) || []; }
+
+// Fixed sentence. The inbox toast and the stored error both show it, and it
+// does not include the transport error text.
+const SEND_FAILED_MESSAGE = "The reply didn't send. Try again.";
 
 async function sendReply(id) {
   const item = await getItem(id);
@@ -350,13 +361,14 @@ async function sendReply(id) {
 
   const claim = await pool.query(`UPDATE inbox_items SET status = 'sending' WHERE id = $1 AND status = 'ready' RETURNING id`, [id]);
   if (!claim.rows.length) throw httpError('Already sending.', 409);
+  const subject = String(item.reply_subject || `Re: ${item.message_subject || ''}`).replace(/\r\n|\r|\n/g, '');
   let info;
   try {
     const refs = item.header_message_id ? [item.header_message_id] : undefined;
     info = await (await s.mailer()).sendMail({
       from: { name: cfg.SENDER.name, address: cfg.SENDER.email },
       to: item.reply_to,
-      subject: item.reply_subject || `Re: ${item.message_subject || ''}`,
+      subject,
       text: body,
       html: require('./email-html').renderHtml(body, { company: item.company }, { footer: false }),
       inReplyTo: item.header_message_id || undefined,
@@ -364,13 +376,16 @@ async function sendReply(id) {
       threadId: item.thread_id || undefined,
     });
   } catch (err) {
-    await pool.query(`UPDATE inbox_items SET status = 'ready', error = $2 WHERE id = $1`, [id, `Send failed: ${err.message}`.slice(0, 500)]);
-    throw httpError(`The reply didn't send: ${err.message}`, 502);
+    console.error('[inbox] send failed:', errCode(err));
+    await pool.query(`UPDATE inbox_items SET status = 'ready', error = $2 WHERE id = $1`, [id, SEND_FAILED_MESSAGE]);
+    const wrapped = httpError(SEND_FAILED_MESSAGE, 500);
+    wrapped.code = err && err.code;
+    throw wrapped;
   }
   const out = await insertMessage(pool, {
     prospectId: item.prospect_id, proposalId: item.proposal_id, direction: 'out', to: item.reply_to,
     msg: { id: info.id || null, key: info.id ? null : `out:${crypto.randomUUID()}`, threadId: info.threadId || item.thread_id,
-      messageIdHeader: info.messageId || null, from: cfg.SENDER.email, subject: item.reply_subject, text: body, date: new Date() },
+      messageIdHeader: info.messageId || null, from: cfg.SENDER.email, subject, text: body, date: new Date() },
   });
   await pool.query(`UPDATE inbox_items SET status = 'sent', sent_at = NOW(), sent_message_id = $2, error = NULL, reviewed_at = COALESCE(reviewed_at, NOW()) WHERE id = $1`,
     [id, out?.id || null]);
@@ -509,6 +524,7 @@ async function applySentMessages(sentMessages) {
 
 module.exports = {
   recordInbound, alreadyRecorded, dedupeKey, threadFor, work, recover, kick, list, counts, detail, update, sendReply,
+  SEND_FAILED_MESSAGE,
   setStatus, reopen, rewrite, applySuggestion, markSeen, applySentMessages, cleanTriage, placeholdersIn,
   isWorking: () => working,
 };

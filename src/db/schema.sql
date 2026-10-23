@@ -241,8 +241,9 @@ UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND crea
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Pilot tables. Additive and idempotent, same transaction as the rest of
--- this file, with no session timeout. A catalog check runs first so a boot
--- does not lock pilot_tokens when the table, column, or index is already
+-- this file. This file does not set a session timeout; applyMainSchema sets
+-- the transaction bounds before running it. A catalog check runs first so a
+-- boot does not lock pilot_tokens when the table, column, or index is already
 -- there. Data repairs and the unique active index live in pilot-schema.sql.
 -- ═══════════════════════════════════════════════════════════════════════════
 

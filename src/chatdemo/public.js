@@ -17,6 +17,7 @@ const { publicBrandName } = require('../prototypes/brand-name');
 const NOT_FOUND = Buffer.from('{"error":"not_found"}');
 const TOO_LARGE = Buffer.from('{"error":"payload_too_large"}');
 const INVALID_BODY = Buffer.from('{"error":"invalid_body"}');
+const UNSUPPORTED = Buffer.from('{"error":"unsupported_media_type"}');
 
 let engineOverride = null;
 let defaultEngine = null;
@@ -216,15 +217,53 @@ function pausedBody() {
   );
 }
 
+// application/json, with one optional charset parameter. A form body or
+// text/plain is a simple CORS POST and must not reach a cap counter.
+function jsonContentType(header) {
+  if (typeof header !== 'string') return false;
+  if (header.length === 0 || header.length > 200) return false;
+  for (let i = 0; i < header.length; i += 1) {
+    const code = header.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  const parts = header.split(';');
+  if (parts[0].trim().toLowerCase() !== 'application/json') return false;
+  let sawCharset = false;
+  for (let i = 1; i < parts.length; i += 1) {
+    const param = parts[i].trim();
+    if (!param) continue;
+    const eq = param.indexOf('=');
+    if (eq <= 0) return false;
+    const name = param.slice(0, eq).trim().toLowerCase();
+    const value = param.slice(eq + 1).trim();
+    if (name !== 'charset' || value.length === 0 || sawCharset) return false;
+    sawCharset = true;
+  }
+  return true;
+}
+
+function requireJsonPost(req, res, next) {
+  if (req.method !== 'POST') return next();
+  const header = req.headers['content-type'];
+  const value = Array.isArray(header) ? header.join(', ') : header;
+  if (jsonContentType(value)) return next();
+  stamp(res);
+  res.status(415);
+  res.set('Content-Type', 'application/json; charset=utf-8');
+  res.end(UNSUPPORTED);
+}
+
 function createRouter(kind) {
   const router = express.Router({ mergeParams: true });
   // The 2 KB parser stays first. An oversized body throws before chatCors,
-  // so the 413 handler does not echo an Origin.
+  // so the 413 handler does not echo an Origin. The JSON type check is
+  // next, before any route, so a form or text POST never touches a cap.
   router.use(express.json({ limit: '2kb' }));
   router.use((req, res, next) => {
     stamp(res);
     chatCors(req, res, next);
   });
+  router.use(requireJsonPost);
 
   if (kind === 'demo') {
     router.get('/demos', wrap(async (req, res) => {

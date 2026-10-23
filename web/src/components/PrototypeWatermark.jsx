@@ -185,18 +185,19 @@ export function PrototypeTile() {
 }
 
 export default function PrototypeWatermark() {
+  const label = WATERMARK_TEXT;
   const ref = useRibbonColorLock();
   return (
     <p
       ref={ref}
       className="prototype-ribbon"
       role="note"
-      aria-label={WATERMARK_TEXT}
+      aria-label={label}
       data-prototype-watermark="true"
       data-prototype-ribbon="true"
       style={RIBBON_STYLE}
     >
-      {WATERMARK_TEXT}
+      {label}
     </p>
   );
 }

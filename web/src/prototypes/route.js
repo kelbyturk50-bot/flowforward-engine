@@ -6,6 +6,7 @@
 // selects this preview; it does not authenticate a caller or hide the page.
 
 import { isDemoToken } from '../demo/token';
+import { PREVIEW_QUERY_BUILD } from '../flags.js';
 
 const GALLERY = /^\/demo\/gallery\/([^/]+)(?:\/([^/]+))?\/?$/;
 
@@ -45,8 +46,10 @@ export function galleryHref(token = GALLERY_PREVIEW_TOKEN, screen = 'index', sea
     : `/demo/gallery/${token}`;
   const current = new URLSearchParams(String(search || '').replace(/^\?/, ''));
   const parts = [];
-  const flags = current.get('flags');
-  if (flags) parts.push(`flags=${encodeList(flags)}`);
+  if (PREVIEW_QUERY_BUILD) {
+    const flags = current.get('flags');
+    if (flags) parts.push(`flags=${encodeList(flags)}`);
+  }
   const fixture = current.get('fixture');
   if (fixture === 'hostile' || fixture === 'yellow' || fixture === 'navy') {
     parts.push(`fixture=${fixture}`);
