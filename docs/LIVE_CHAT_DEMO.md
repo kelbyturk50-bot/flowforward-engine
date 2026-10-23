@@ -1,6 +1,6 @@
 # Live chat demo: spec and acceptance criteria (Scout)
 
-**Status:** Product spec, waiting on Summit's accept. Summit's team builds. Tracking issue: F-007.
+**Status:** Product spec, waiting on Summit's accept. Summit's team builds. Tracking issue: F-007 (#84).
 **Source:** the live chat demo plan Kelby approved (`flowforward-demo-research.md`, "Ship live chat first"). It follows [`PROTOTYPE_PLAY.md`](PROTOTYPE_PLAY.md), [`PLAYBOOK.md`](PLAYBOOK.md) and [`design/prototype-system.md`](design/prototype-system.md). Where this doc doesn't cover something, those docs apply.
 **Spend:** Kelby's approval of Claude API spend for this demo was relayed through Summit and Juniper on **Oct 22, 2026**. It covers this demo only, under the conditions in §8. **Turning the live model on in prod is Kelby's action alone.** No agent, routine or PR changes a prod flag, env var, or the spend ceiling.
 
