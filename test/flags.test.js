@@ -6,6 +6,7 @@ process.env.FF_PILOT_ESTIMATE_RECOVERY = '';
 process.env.FF_PILOT_LINK_ON_ONEPAGER = '';
 process.env.FF_PILOT_ESTIMATE_SMS = '';
 process.env.FF_PROTOTYPE_GALLERY = '';
+process.env.FF_LIVE_CHAT_DEMO = '';
 process.env.FF_CAMPAIGNS = '';
 process.env.FF_CAMPAIGN_OPEN_PIXEL = '';
 process.env.FF_PROTOTYPE_ON_DRAFT = '';

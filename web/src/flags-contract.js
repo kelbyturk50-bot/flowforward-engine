@@ -28,6 +28,7 @@ export const FEATURE_FLAG_CATALOG = Object.freeze([
   Object.freeze({ name: 'FF_PILOT_LINK_ON_ONEPAGER', label: 'Recovery link on the one-pager' }),
   Object.freeze({ name: 'FF_PILOT_ESTIMATE_SMS', label: 'Estimate recovery SMS' }),
   Object.freeze({ name: 'FF_PROTOTYPE_GALLERY', label: 'Prototype gallery' }),
+  Object.freeze({ name: 'FF_LIVE_CHAT_DEMO', label: 'Live chat demo' }),
   Object.freeze({ name: 'FF_CAMPAIGNS', label: 'Campaigns' }),
   Object.freeze({ name: 'FF_CAMPAIGN_OPEN_PIXEL', label: 'Campaign open pixel' }),
   Object.freeze({ name: 'FF_PROTOTYPE_ON_DRAFT', label: 'Branded prototype on new proposal drafts' }),

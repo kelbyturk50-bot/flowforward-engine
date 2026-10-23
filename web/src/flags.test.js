@@ -5,6 +5,7 @@ import {
   FF_PILOT_ESTIMATE_SMS,
   FF_PILOT_LINK_ON_ONEPAGER,
   FF_PROTOTYPE_GALLERY,
+  FF_LIVE_CHAT_DEMO,
   FF_CAMPAIGNS,
   FLAG_STORAGE_KEY,
   PREVIEW_HOST_PATTERN,
@@ -23,6 +24,7 @@ const ALL_OFF = {
   [FF_PILOT_LINK_ON_ONEPAGER]: false,
   [FF_PILOT_ESTIMATE_SMS]: false,
   [FF_PROTOTYPE_GALLERY]: false,
+  [FF_LIVE_CHAT_DEMO]: false,
   [FF_CAMPAIGNS]: false,
 };
 
@@ -109,6 +111,7 @@ describe('pilot flags', () => {
       [FF_PILOT_LINK_ON_ONEPAGER]: true,
       [FF_PILOT_ESTIMATE_SMS]: false,
       [FF_PROTOTYPE_GALLERY]: false,
+      [FF_LIVE_CHAT_DEMO]: false,
       [FF_CAMPAIGNS]: false,
     });
     expect(storage.getItem(FLAG_STORAGE_KEY)).toBe(`${FF_PILOT_ESTIMATE_RECOVERY},${FF_PILOT_LINK_ON_ONEPAGER}`);
@@ -234,6 +237,20 @@ describe('feature flag source', () => {
     expect(flagEnabled('FF_CAMPAIGNS', prod)).toBe(true);
     expect(flagEnabled('FF_CAMPAIGN_OPEN_PIXEL', prod)).toBe(false);
     expect(flagEnabled('FF_PROTOTYPE_GALLERY', prod)).toBe(false);
+    expect(flagEnabled('FF_LIVE_CHAT_DEMO', prod)).toBe(false);
+  });
+
+  it('keeps FF_LIVE_CHAT_DEMO off unless a preview host or dev localhost names it', () => {
+    expect(flagEnabled('FF_LIVE_CHAT_DEMO', at(`https://${PREVIEW}/`))).toBe(false);
+    expect(flagEnabled('FF_LIVE_CHAT_DEMO', at(`https://${PREVIEW}/?flags=FF_LIVE_CHAT_DEMO`))).toBe(true);
+    expect(flagEnabled('FF_LIVE_CHAT_DEMO', at(`http://${PREVIEW}/?flags=FF_LIVE_CHAT_DEMO`))).toBe(false);
+    expect(flagEnabled('FF_LIVE_CHAT_DEMO', at(`https://${PREVIEW}:444/?flags=FF_LIVE_CHAT_DEMO`))).toBe(false);
+    expect(flagEnabled('FF_LIVE_CHAT_DEMO', at('http://localhost:5173/?flags=FF_LIVE_CHAT_DEMO', { DEV: true }))).toBe(true);
+    expect(flagEnabled('FF_LIVE_CHAT_DEMO', at('http://localhost:5173/?flags=FF_LIVE_CHAT_DEMO', { DEV: false }))).toBe(false);
+    expect(flagEnabled('FF_LIVE_CHAT_DEMO', at('http://127.0.0.1:5173/?flags=FF_LIVE_CHAT_DEMO', { DEV: true }))).toBe(false);
+    for (const hostname of PRODUCTION_HOSTS) {
+      expect(flagEnabled('FF_LIVE_CHAT_DEMO', at(`https://${hostname}/?flags=FF_LIVE_CHAT_DEMO`, { DEV: true }))).toBe(false);
+    }
   });
 
   it('lets a preview override replace API values', () => {

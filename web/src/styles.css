@@ -714,6 +714,91 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   .prototype-cta { position: sticky; top: 16px; margin-top: 0; }
 }
 
+/* ── Live chat demo (F-007). Fixtures only. ────────────── */
+.live-chat { min-width: 0; }
+.live-chat-banner {
+  position: sticky; top: 0; z-index: 3;
+  margin: 0 0 12px; padding: 10px 12px;
+  background: #F7EBCF; color: #1E2A2F;
+  border: 1px solid #E2C98A; border-radius: 10px;
+  font-size: .92rem; line-height: 1.35;
+}
+.live-chat-after {
+  margin: 0 0 12px; padding: 8px 12px;
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 10px;
+  font-size: .92rem;
+}
+.live-chat-stage { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.live-chat-phone {
+  min-width: 0; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 24px; padding: 12px;
+}
+.live-chat-phone-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  min-height: 44px; margin-bottom: 10px;
+}
+.live-chat-wordmark { max-width: 70%; }
+.live-chat-ai {
+  flex: none; display: inline-flex; align-items: center; min-height: 28px;
+  padding: 0 8px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--paper); color: var(--ink); font-size: .75rem; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.live-chat-thread { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.live-chat-turn { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.live-chat-bubble {
+  margin: 0; max-width: 100%; padding: 10px 12px; overflow-wrap: anywhere;
+  font-size: .95rem; line-height: 1.4;
+}
+.live-chat-bubble.is-in {
+  margin-right: 12%; background: var(--paper); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 16px 16px 16px 4px;
+}
+.live-chat-bubble.is-out {
+  margin-left: 18%;
+  background: var(--proto-accent, var(--juniper));
+  color: var(--proto-on-accent, var(--juniper-ink));
+  border-radius: 16px 16px 4px 16px;
+}
+.live-chat-chips, .live-chat-slots { list-style: none; display: flex; flex-direction: column; gap: 8px; margin: 10px 0 0; padding: 0; }
+.live-chat-chip, .live-chat-action, .live-chat-send {
+  display: flex; align-items: center; width: 100%; min-height: 44px;
+  padding: 10px 12px; border-radius: 10px; text-align: left;
+  font: inherit; font-weight: 600; line-height: 1.3; cursor: pointer;
+}
+.live-chat-chip, .live-chat-action {
+  background: var(--paper); color: var(--ink); border: 1px solid var(--line);
+}
+.live-chat-chip:focus-visible, .live-chat-action:focus-visible, .live-chat-send:focus-visible {
+  outline: 2px solid var(--ink); outline-offset: 2px;
+}
+.live-chat-compose { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.live-chat-label { font-size: .85rem; font-weight: 600; }
+.live-chat-input {
+  width: 100%; min-height: 44px; padding: 10px 12px; resize: vertical;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  color: var(--ink); font: inherit; font-size: 1rem;
+}
+.live-chat-count { margin: 0; color: var(--ink-2); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.live-chat-send {
+  justify-content: center; text-align: center;
+  background: var(--proto-accent, var(--juniper));
+  border: 1px solid var(--proto-accent, var(--juniper));
+  color: var(--proto-on-accent, var(--juniper-ink));
+}
+.live-chat-send:disabled { opacity: .55; cursor: default; }
+.live-chat-tool {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+}
+.live-chat-tool h3 { margin: 0 0 6px; font-size: 1rem; }
+.live-chat-tool p { margin: 0 0 6px; }
+.live-chat-owner { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.live-chat-owner .prototype-card { margin: 0; }
+@media (min-width: 800px) {
+  .live-chat-stage { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(200px, .8fr); align-items: start; }
+}
+
 /* prototype-watermark: literal colors only. Brand custom properties stay out of this rule. */
 .prototype-ribbon {
   position: sticky !important;
