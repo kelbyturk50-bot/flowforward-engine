@@ -32,7 +32,7 @@ async function applyBrandConstraints() {
   const notices = [];
   function onNotice(msg) {
     const text = msg && typeof msg === 'object' ? String(msg.message || '') : String(msg || '');
-    if (text.startsWith('prospect_brands:')) {
+    if (text.startsWith('prospect_brands:') || text.startsWith('prototypes:')) {
       notices.push(text);
       console.warn(`[brand] ${text}`);
     }

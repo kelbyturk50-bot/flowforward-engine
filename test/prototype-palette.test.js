@@ -18,6 +18,8 @@ const FALLBACK_PRIMARY = '#2f6b57';
 const FALLBACK_SECONDARY = '#1e2a2f';
 const detectCalls = [];
 const realDetect = palette.detectBrandColors;
+let budgetNow = 0;
+let advanceMs = 0;
 
 function call(port, method, path, body) {
   return new Promise((resolve, reject) => {
@@ -72,6 +74,21 @@ describe('prototype brand colors', () => {
       if (url === 'https://ericsplumbing.example/') return { status: 200, headers: { 'content-type': 'text/html' }, body: HOME };
       if (url.startsWith('https://ericsplumbing.example/wp-content/themes/plumbpro/style.css')) return { status: 200, headers: { 'content-type': 'text/css' }, body: CSS };
       if (url === 'https://nocolor.example/') return { status: 200, headers: { 'content-type': 'text/html' }, body: '<html><body style="color:#222;background:#fafafa">Hi</body></html>' };
+      if (url === 'https://jsonhome.example/') return { status: 200, headers: { 'content-type': 'application/json' }, body: '{"theme":"#0a3d7a"}' };
+      if (url.startsWith('https://budget.example/')) {
+        budgetNow += advanceMs;
+        if (url.endsWith('.css')) return { status: 200, headers: { 'content-type': 'text/css' }, body: '.btn{background:#123456}' };
+        return {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+          body: `<html><head>
+            <link rel="stylesheet" href="/a.css">
+            <link rel="stylesheet" href="/b.css">
+            <link rel="stylesheet" href="/c.css">
+            <link rel="stylesheet" href="/d.css">
+            </head><body></body></html>`,
+        };
+      }
       return { status: 404, headers: {}, body: '' };
     }));
     const app = express();
@@ -173,5 +190,127 @@ describe('prototype brand colors', () => {
     assert.equal(detectCalls.length, 1);
     assert.equal(detectCalls[0], 'https://nocolor.example/');
     console.log('[prototype-palette] CRM create did not fetch; match-site called detectBrandColors once');
+  });
+
+  it('create uses cached research colors in primary then secondary order, and a brand row wins', async () => {
+    const cached = await insertProspect({
+      company: 'TEST: Cached Colors',
+      industry: 'Plumbing',
+      state: 'UT',
+      website: 'https://cached.example/',
+      google_place_id: 'test-place-palette-cached',
+    });
+    await pool.query(
+      `UPDATE prospects SET research = $2::jsonb WHERE id = $1`,
+      [cached.id, JSON.stringify({ site: { brand_colors: { primary: '#123456', secondary: '#abcdef' } } })]
+    );
+    const made = await call(port, 'POST', '/api/prototypes', { prospect_id: cached.id });
+    assert.equal(made.status, 200);
+    assert.equal(made.json.prototype.colors.primary, '#123456');
+    assert.equal(made.json.prototype.colors.secondary, '#abcdef');
+    assert.equal(detectCalls.includes('https://cached.example/'), false);
+
+    const partial = await insertProspect({
+      company: 'TEST: Partial Cache',
+      industry: 'Plumbing',
+      state: 'UT',
+      google_place_id: 'test-place-palette-partial',
+    });
+    await pool.query(
+      `UPDATE prospects SET research = $2::jsonb WHERE id = $1`,
+      [partial.id, JSON.stringify({ site: { brand_colors: { primary: '#654321' } } })]
+    );
+    const partialMade = await call(port, 'POST', '/api/prototypes', { prospect_id: partial.id });
+    assert.equal(partialMade.json.prototype.colors.primary, '#654321');
+    assert.equal(partialMade.json.prototype.colors.secondary, FALLBACK_SECONDARY);
+
+    const branded = await insertProspect({
+      company: 'TEST: Brand Wins',
+      industry: 'Plumbing',
+      state: 'UT',
+      google_place_id: 'test-place-palette-brand',
+    });
+    await pool.query(
+      `UPDATE prospects SET research = $2::jsonb WHERE id = $1`,
+      [branded.id, JSON.stringify({ site: { brand_colors: { primary: '#123456', secondary: '#abcdef' } } })]
+    );
+    await pool.query(
+      `INSERT INTO prospect_brands (prospect_id, name, logo_url, colors, source, test_tag)
+       VALUES ($1, 'TEST: Brand Wins', NULL, $2::jsonb, 'manual', 'TEST:brand-wins')`,
+      [branded.id, JSON.stringify(['#111111', '#222222'])]
+    );
+    const brandMade = await call(port, 'POST', '/api/prototypes', { prospect_id: branded.id });
+    assert.equal(brandMade.json.prototype.colors.primary, '#111111');
+    assert.equal(brandMade.json.prototype.colors.secondary, '#222222');
+    console.log('[prototype-palette] cached colors keep primary then secondary; a brand row wins');
+  });
+
+  it('match-site refuses a non-http scheme, a non-html homepage, and stacks fetches under one budget', async () => {
+    const before = calls.length;
+    const js = await detectBrandColors('javascript:alert(1)');
+    const ftp = await detectBrandColors('ftp://files.example/a');
+    const file = await detectBrandColors('file:///etc/passwd');
+    assert.ok(js.error);
+    assert.ok(ftp.error);
+    assert.ok(file.error);
+    assert.equal(calls.length, before);
+
+    const jsonHome = await detectBrandColors('https://jsonhome.example/');
+    assert.ok(jsonHome.error);
+    assert.equal(jsonHome.primary, undefined);
+
+    advanceMs = 5000;
+    budgetNow = 1_000_000;
+    const timeouts = [];
+    const budgeted = await detectBrandColors('https://budget.example/', {
+      now: () => budgetNow,
+      timeouts,
+    });
+    advanceMs = 0;
+    assert.deepEqual(timeouts, [12000, 7000, 2000]);
+    assert.equal(timeouts.every((ms) => ms <= palette.TOTAL_BUDGET_MS), true);
+    assert.ok(budgeted.primary || budgeted.error || budgeted.sheets >= 0);
+    console.log(`[prototype-palette] scheme and content-type refused before a parse; budget timeouts ${timeouts.join(',')}`);
+  });
+
+  it('match-site rate limit stops further fetches, and the 502 message is one sentence', async () => {
+    const { _setMatchLimitForTests, _resetMatchLimitForTests } = require('../src/prototypes/match-limit');
+    _setMatchLimitForTests({ max: 2, windowMs: 60_000 });
+    try {
+      const p = await insertProspect({
+        company: 'TEST: Rate Limit Co',
+        industry: 'Plumbing',
+        state: 'UT',
+        website: 'https://ericsplumbing.example/',
+        google_place_id: 'test-place-palette-limit',
+      });
+      const made = await call(port, 'POST', '/api/prototypes', { prospect_id: p.id });
+      detectCalls.length = 0;
+      const first = await call(port, 'POST', `/api/prototypes/${made.json.prototype.id}/match-site`);
+      const second = await call(port, 'POST', `/api/prototypes/${made.json.prototype.id}/match-site`);
+      assert.equal(first.status, 200);
+      assert.equal(second.status, 200);
+      assert.equal(detectCalls.length, 2);
+      const third = await call(port, 'POST', `/api/prototypes/${made.json.prototype.id}/match-site`);
+      assert.equal(third.status, 429);
+      assert.equal(third.json.code, 'match_limited');
+      assert.equal(detectCalls.length, 2);
+
+      const dead = await insertProspect({
+        company: 'TEST: Unreadable Site',
+        industry: 'Plumbing',
+        state: 'UT',
+        website: 'https://nowhere.example/',
+        google_place_id: 'test-place-palette-502',
+      });
+      const deadProto = await call(port, 'POST', '/api/prototypes', { prospect_id: dead.id });
+      const failed = await call(port, 'POST', `/api/prototypes/${deadProto.json.prototype.id}/match-site`);
+      assert.equal(failed.status, 502);
+      assert.equal(failed.json.error, "Couldn't read their site.");
+      assert.equal(failed.json.code, 'fetch_failed');
+      console.log('[prototype-palette] match-site limited at 2; 502 message is one sentence');
+    } finally {
+      _resetMatchLimitForTests();
+    }
   });
 });

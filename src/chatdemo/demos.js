@@ -4,6 +4,7 @@
 // test_tag is the TEST: tag used if a row is written in a test.
 
 const { banner, disclosure, perGoogle } = require('./copy');
+const { brandNameOk } = require('../prototypes/brand-name');
 
 const CHIPS = Object.freeze([
   Object.freeze({ id: 'chip_emergency', label: 'My water heater is leaking all over the garage' }),
@@ -35,6 +36,7 @@ function fact(field, value) {
 }
 
 function build(spec) {
+  if (!brandNameOk(spec.business_name)) throw new Error('demo brand name');
   const facts = spec.facts.map((row) => Object.freeze({
     ...row,
     per_google: perGoogle(row),

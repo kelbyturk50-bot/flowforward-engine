@@ -9,6 +9,8 @@ const { isPestCompanyName } = require('../scoring/industry');
 const { prototypeOnDraft } = require('./flags');
 const tokens = require('./tokens');
 const palette = require('./palette');
+const { allowMatch } = require('./match-limit');
+const { brandNameOk } = require('./brand-name');
 
 const PRIMARY_FALLBACK = '#2f6b57';
 const SECONDARY_FALLBACK = '#1e2a2f';
@@ -106,8 +108,9 @@ async function matchSiteColors(id) {
       WHERE pt.id = $1 AND pt.revoked_at IS NULL`, [id]);
   if (!rows[0]) throw httpError(404, 'Prototype not found');
   if (!rows[0].website) throw httpError(400, 'This lead has no website on file.', 'no_website');
+  if (!allowMatch(id)) throw httpError(429, 'Too many match attempts. Try again later.', 'match_limited');
   const got = await palette.detectBrandColors(rows[0].website);
-  if (got.error) throw httpError(502, `Couldn't read their site: ${got.error}.`, 'fetch_failed');
+  if (got.error) throw httpError(502, "Couldn't read their site.", 'fetch_failed');
   if (!got.primary) throw httpError(422, 'No brand colors found on their site. Enter them by hand.', 'no_colors');
   await saveSiteColors(rows[0].prospect_id, got);
   const row = await setColors(id, { primary: got.primary, secondary: got.secondary || SECONDARY_FALLBACK });
@@ -116,7 +119,8 @@ async function matchSiteColors(id) {
 
 function brandNameOf(prospect) {
   const name = String(prospect.company || '').trim();
-  return name || null;
+  if (!brandNameOk(name)) return null;
+  return name;
 }
 
 const ROW_COLS = `id, prospect_id, agent_type, brand_name, color_primary, color_secondary,
@@ -168,7 +172,7 @@ function linkFor(row) {
 
 async function insertRow(prospect, agent, colors) {
   const name = brandNameOf(prospect);
-  if (!name) throw new Error('prototype brand name missing');
+  if (!name) throw httpError(400, 'The business name is missing or not allowed.', 'invalid_brand_name');
   for (let attempt = 0; attempt < 3; attempt++) {
     const minted = tokens.mintToken();
     if (!minted) throw httpError(503, 'Prototype links need CRM_API_KEY with at least 32 characters.', 'key_missing');
@@ -323,10 +327,16 @@ async function lookupToken(raw, at) {
   const row = rows[0] || null;
   const stored = row && row.token_hash ? Buffer.from(row.token_hash) : null;
   const equal = tokens.hashesEqual(stored, computed);
-  if (!wellFormed || !row || !equal || row.revoked_at || row.archived_at) return { status: 404, row: null };
-  const nonce = row.nonce ? Buffer.from(row.nonce) : Buffer.alloc(0);
+  // One HMAC on every well-formed lookup, including a miss, so an unknown
+  // token costs the same mac as a link minted under a different key.
+  let nonce = tokens.DUMMY_NONCE;
+  if (row && row.nonce) {
+    const buf = Buffer.from(row.nonce);
+    if (buf.length === tokens.NONCE_BYTES) nonce = buf;
+  }
   const ready = crmApiKeyReady();
-  const recomputed = ready ? tokens.tokenFor(nonce) : null;
+  const recomputed = wellFormed && ready ? tokens.tokenFor(nonce) : null;
+  if (!wellFormed || !row || !equal || row.revoked_at || row.archived_at) return { status: 404, row: null };
   if (!ready || !tokens.tokensEqual(recomputed, raw)) return { status: 404, row: null };
   if (row.expired === true) return { status: 410, row };
   return { status: 200, row };
@@ -336,7 +346,7 @@ async function readByToken(raw) {
   const { status, row } = await lookupToken(raw);
   if (status === 404) return { status, body: { error: 'not_found' } };
   if (status === 410) {
-    return { status, body: { error: 'link_expired', expires_at: new Date(row.expires_at).toISOString() } };
+    return { status, body: { error: 'link_expired' } };
   }
   return {
     status: 200,

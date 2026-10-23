@@ -12,6 +12,7 @@ const { createChatEngine } = require('./engine');
 const { tagForCompany } = require('./facts-store');
 const { log, logErr } = require('./log');
 const pool = require('../db/client');
+const { publicBrandName } = require('../prototypes/brand-name');
 
 const NOT_FOUND = Buffer.from('{"error":"not_found"}');
 const TOO_LARGE = Buffer.from('{"error":"payload_too_large"}');
@@ -52,11 +53,8 @@ function send404(res) {
   res.end(NOT_FOUND);
 }
 
-function send410(res, expiresAt) {
-  const body = JSON.stringify({
-    error: 'link_expired',
-    expires_at: new Date(expiresAt).toISOString(),
-  });
+function send410(res) {
+  const body = JSON.stringify({ error: 'link_expired' });
   stamp(res);
   res.status(410);
   res.set('Content-Type', 'application/json; charset=utf-8');
@@ -73,7 +71,7 @@ function send413(res) {
 
 function sendResult(res, result) {
   if (!result || result.status === 404) return send404(res);
-  if (result.status === 410) return send410(res, result.expires_at);
+  if (result.status === 410) return send410(res);
   res.status(result.status).json(result.body);
 }
 
@@ -161,7 +159,7 @@ async function businessFromRow(row) {
   }));
   const by = new Map(facts.map((fact) => [fact.field, fact.value]));
   const company = leadResult.rows[0] ? leadResult.rows[0].company : '';
-  const name = by.get('business_name') || row.brand_name;
+  const name = publicBrandName(by.get('business_name') || row.brand_name);
   const phone = by.get('phone') || '';
   const serviceArea = by.get('service_area') || '';
   return {
@@ -263,14 +261,14 @@ function createRouter(kind) {
     router.post('/session', wrap(async (req, res) => {
       const resolved = await resolvePrototype(req.params.token);
       if (resolved.status === 404) return send404(res);
-      if (resolved.status === 410) return send410(res, resolved.expires_at);
+      if (resolved.status === 410) return send410(res);
       if (resolved.status === 503) return res.status(503).json(pausedBody());
       sendResult(res, await engine().openSession({ business: resolved.business, ip: clientIp(req) }));
     }));
     router.post('/message', wrap(async (req, res) => {
       const resolved = await resolvePrototype(req.params.token);
       if (resolved.status === 404) return send404(res);
-      if (resolved.status === 410) return send410(res, resolved.expires_at);
+      if (resolved.status === 410) return send410(res);
       if (resolved.status === 503) return res.status(503).json(pausedBody());
       sendResult(res, await engine().postMessage({
         business: resolved.business,
@@ -281,7 +279,7 @@ function createRouter(kind) {
     router.post('/cta', wrap(async (req, res) => {
       const resolved = await resolvePrototype(req.params.token);
       if (resolved.status === 404) return send404(res);
-      if (resolved.status === 410) return send410(res, resolved.expires_at);
+      if (resolved.status === 410) return send410(res);
       if (resolved.status === 503) return res.status(503).json(pausedBody());
       sendResult(res, await engine().postCta({
         business: resolved.business,

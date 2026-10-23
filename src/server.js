@@ -31,6 +31,9 @@ chatMount.mountPublicFlags(app);
 const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 app.use(cors(origins.length ? { origin: origins } : undefined));
 const pilotDemo = require('./pilot/demo');
+// Authenticate /api/chat before the body parser. A missing or unready key
+// is 401 or 503, including when the body is not valid JSON.
+app.use('/api/chat', requireApiKey);
 app.use(express.json({ limit: '1mb' }));
 // A malformed JSON body on the chat routes is a JSON 400. The handler does
 // not send the parser's HTML page or the stack.
@@ -112,6 +115,8 @@ app.use('/api/pilot/estimate-recovery', require('./api/pilot-estimates'));
 app.use('/api/campaigns', campaignsApi.router);
 // Facts sheet and spend read. requireApiKey is also applied inside the router.
 app.use('/api/chat', require('./api/chat'));
+// Malformed JSON on every route that uses the parser above. No stack, no HTML.
+app.use(require('./api/json-errors'));
 
 // ─── Scheduled discovery bot ───────────────────────────────────────────────
 const CRON_SCHEDULE = process.env.DISCOVERY_CRON || '0 6 * * *';

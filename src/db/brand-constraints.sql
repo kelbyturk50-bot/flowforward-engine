@@ -60,3 +60,10 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
   RAISE WARNING 'prospect_brands: logo check validation failed: %', SQLERRM;
 END $$;
+
+DO $$
+BEGIN
+  ALTER TABLE prototypes VALIDATE CONSTRAINT prototypes_brand_name_chars;
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'prototypes: brand name check validation failed: %', SQLERRM;
+END $$;

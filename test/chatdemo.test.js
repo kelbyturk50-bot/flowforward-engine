@@ -45,13 +45,14 @@ describe('live chat pure checks', () => {
 
   it('readCeiling accepts only a plain decimal at or under 100000 dollars', () => {
     const { readCeiling, MAX_CEILING_USD, DECIMAL } = require('../src/chatdemo/ceiling');
-    assert.equal(DECIMAL.source, '^\\d+(\\.\\d{1,2})?$');
+    assert.equal(DECIMAL.source, '^(?:0|[1-9]\\d*)(?:\\.\\d{1,2})?$');
     assert.equal(MAX_CEILING_USD, 100000);
     const off = [
       undefined, null, '', ' ', '   ', '\t', ' 5 ', '5 ', ' 5', '5\n',
       'abc', '5abc', '1e', '1e9', ' 1e9 ', '0x10', '0b11', '.5', '.50',
       '$5', '5,00', '+5', '0', '0.00', '0.0', '-1', '-0.01', 'NaN', 'Infinity',
       '0.0000001', '0.000001', '0.043', '100000.01', '100001', '100000.001',
+      '007', '01', '00.50', '007.5',
     ];
     for (const value of off) {
       const env = {};
@@ -443,6 +444,7 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     mountPublicFlags(app);
     const origins = process.env.CORS_ORIGINS.split(',').map((part) => part.trim()).filter(Boolean);
     app.use(cors({ origin: origins }));
+    app.use('/api/chat', require('../src/api/auth'));
     app.use(express.json({ limit: '1mb' }));
     app.use(require('../src/api/chat').invalidJson);
     const flagsApi = require('../src/api/flags');
@@ -563,8 +565,9 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     assert.equal(bodies[0], NOT_FOUND);
     const gone = await request('POST', `/api/public/prototypes/${expired.token}/chat/session`, { body: {} });
     assert.equal(gone.status, 410);
-    assert.deepEqual(Object.keys(gone.json), ['error', 'expires_at']);
+    assert.deepEqual(Object.keys(gone.json), ['error']);
     assert.equal(gone.json.error, 'link_expired');
+    assert.equal(Object.hasOwn(gone.json, 'expires_at'), false);
     assert.equal(gone.text.includes('banner'), false);
     assert.equal(gone.text.includes(WATERMARK_TEXT), false);
     await setFlags(false);
@@ -1278,6 +1281,127 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     assert.equal(firstDay.rows[0].day, '2026-10-24');
   });
 
+  it('daily and global caps reset at the next midnight; lifetime caps do not', async () => {
+    const {
+      prepareMint, prepareMessage, CACHE_MAX,
+      _seedExpressCacheForTests, _expressCacheSizeForTests, _expressCacheHasForTests,
+    } = require('../src/chatdemo/counters');
+    await setFlags(true);
+    const proto = await makeProto();
+    const linkKey = `prototype:${proto.row.id}`;
+    const before = new Date('2026-10-25T05:30:00Z');
+    const after = new Date('2026-10-25T06:30:00Z');
+    await pool.query(
+      `INSERT INTO chat_demo_global_days (day, session_count) VALUES ('2026-10-24', 300)`
+    );
+    await pool.query(
+      `INSERT INTO chat_demo_link_days (link_key, day, message_count) VALUES ($1, '2026-10-24', 40)`,
+      [linkKey]
+    );
+    await pool.query(
+      `INSERT INTO chat_demo_links (link_key, message_count, session_count) VALUES ($1, 100, 0)`,
+      [linkKey]
+    );
+    _resetExpressCacheForTests();
+    const globalBefore = await prepareMint({ linkKey, ipHash: 'h', at: before });
+    assert.equal(globalBefore.ok, false);
+    const globalAfter = await prepareMint({ linkKey: 'prototype:other', ipHash: 'h', at: after });
+    assert.equal(globalAfter.ok, true);
+    await pool.query(
+      `INSERT INTO chat_demo_link_days (link_key, day, message_count) VALUES ('prototype:day-only', '2026-10-24', 40)`
+    );
+    _resetExpressCacheForTests();
+    const cappedDay = await prepareMessage({
+      sessionId: '00000000-0000-4000-8000-000000000001',
+      linkKey: 'prototype:day-only',
+      ipHash: 'h',
+      at: before,
+      zone: 'America/Denver',
+      loadedCount: 0,
+    });
+    assert.equal(cappedDay.ok, false);
+    const nextDay = await prepareMessage({
+      sessionId: '00000000-0000-4000-8000-000000000001',
+      linkKey: 'prototype:day-only',
+      ipHash: 'h',
+      at: after,
+      zone: 'America/Denver',
+      loadedCount: 0,
+    });
+    assert.equal(nextDay.ok, true);
+    const lifetime = await prepareMessage({
+      sessionId: '00000000-0000-4000-8000-000000000002',
+      linkKey,
+      ipHash: 'h',
+      at: after,
+      zone: 'America/Denver',
+      loadedCount: 0,
+    });
+    assert.equal(lifetime.ok, false);
+    await pool.query(`DELETE FROM chat_demo_reservations`);
+    await pool.query(`DELETE FROM chat_demo_spend_days`);
+    const held = await reserve({ day: '2026-10-24', amountMicros: 5000, ceilingMicros: 5000, at: before });
+    assert.ok(held);
+    assert.equal(await reserve({ day: '2026-10-24', amountMicros: 1, ceilingMicros: 5000, at: before }), null);
+    assert.ok(await reserve({ day: '2026-10-25', amountMicros: 1, ceilingMicros: 5000, at: after }));
+    const still = await readSpend('2026-10-24');
+    assert.equal(still.reserved_micros, 5000);
+
+    let at = before;
+    _setEngineForTests(createChatEngine({ clock: () => new Date(at.getTime()), liveGate: async () => false }));
+    _resetExpressCacheForTests();
+    const blocked = await request('POST', `/api/public/prototypes/${proto.token}/chat/session`, { body: {} });
+    assert.equal(blocked.status, 429);
+    at = after;
+    const opened = await request('POST', `/api/public/prototypes/${proto.token}/chat/session`, { body: {} });
+    assert.equal(opened.status, 201, opened.text);
+    const days = await pool.query(
+      `SELECT day::text AS day, session_count FROM chat_demo_global_days ORDER BY day`
+    );
+    assert.deepEqual(days.rows, [
+      { day: '2026-10-24', session_count: 300 },
+      { day: '2026-10-25', session_count: 1 },
+    ]);
+
+    _resetExpressCacheForTests();
+    _seedExpressCacheForTests('global\n2026-10-24', 0);
+    for (let i = 0; i < CACHE_MAX; i += 1) _seedExpressCacheForTests(`pad\n${i}`, 1);
+    assert.equal(_expressCacheSizeForTests(), CACHE_MAX);
+    assert.equal(_expressCacheHasForTests('global\n2026-10-24'), false);
+    const reseeded = await prepareMint({ linkKey: 'prototype:reseed', ipHash: 'h', at: before });
+    assert.equal(reseeded.ok, false);
+    console.log('[chatdemo] daily caps reset at midnight; lifetime link messages do not; express cache stays bounded');
+  });
+
+  it('session tag check is replaced when an older TEST-only constraint is present', async () => {
+    const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
+    const block = schema.split('-- BEGIN chat_demo_sessions_tag_check upgrade')[1]
+      .split('-- END chat_demo_sessions_tag_check upgrade')[0];
+    assert.match(block, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
+    assert.match(block, /demo-/);
+    await pool.query('ALTER TABLE chat_demo_sessions DROP CONSTRAINT chat_demo_sessions_tag_check');
+    await pool.query(`ALTER TABLE chat_demo_sessions ADD CONSTRAINT chat_demo_sessions_tag_check CHECK (
+      char_length(test_tag) <= 80 AND test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+    )`);
+    const insertTag = (tag) => pool.query(
+      `INSERT INTO chat_demo_sessions
+         (id, link_key, session_hash, message_count, test_tag, created_at, expires_at)
+       VALUES ($1, 'prototype:tag', decode('aa','hex'), 0, $2, $3, $4)`,
+      ['00000000-0000-4000-8000-0000000000aa', tag, new Date('2026-10-25T00:00:00Z'), new Date('2026-10-25T01:00:00Z')]
+    );
+    await assert.rejects(() => insertTag('demo-prototype'), (err) => err.code === '23514');
+    try {
+      await pool.query(block);
+      await insertTag('demo-prototype');
+      await pool.query(block);
+      const row = await pool.query(`SELECT test_tag FROM chat_demo_sessions WHERE test_tag = 'demo-prototype'`);
+      assert.equal(row.rows.length, 1);
+    } finally {
+      await pool.query(block);
+    }
+    console.log('[chatdemo] session tag check drop/re-add accepts demo-prototype');
+  });
+
   it('facts writes are TEST-only, spend is read-only, and the model flag is not writable', async () => {
     const plain = await insertProspect({
       google_place_id: `test-chatdemo-${crypto.randomBytes(4).toString('hex')}`,
@@ -1489,8 +1613,9 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     at = new Date(expires.getTime());
     const gone = await request('POST', `/api/public/prototypes/${proto.token}/chat/session`, { body: {} });
     assert.equal(gone.status, 410);
-    assert.deepEqual(Object.keys(gone.json).sort(), ['error', 'expires_at']);
+    assert.deepEqual(Object.keys(gone.json), ['error']);
     assert.equal(gone.json.error, 'link_expired');
+    assert.equal(Object.hasOwn(gone.json, 'expires_at'), false);
     const msg = await request('POST', `/api/public/prototypes/${proto.token}/chat/message`, {
       body: { sessionId: open.json.sessionId, text: 'hello' },
     });
@@ -1830,25 +1955,37 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     const proto = await makeProto();
     const raw = Buffer.from('{"prospect_id":');
     const routes = [
-      ['/api/chat/facts', false],
-      ['/api/chat/facts', true],
-      ['/api/public/chat/demos/wasatch-heating/session', false],
-      ['/api/public/chat/demos/wasatch-heating/message', false],
-      ['/api/public/chat/demos/wasatch-heating/cta', false],
-      [`/api/public/prototypes/${proto.token}/chat/session`, false],
-      [`/api/public/prototypes/${proto.token}/chat/message`, false],
-      [`/api/public/prototypes/${proto.token}/chat/cta`, false],
+      ['/api/chat/facts', false, 401],
+      ['/api/chat/facts', true, 400],
+      ['/api/public/chat/demos/wasatch-heating/session', false, 400],
+      ['/api/public/chat/demos/wasatch-heating/message', false, 400],
+      ['/api/public/chat/demos/wasatch-heating/cta', false, 400],
+      [`/api/public/prototypes/${proto.token}/chat/session`, false, 400],
+      [`/api/public/prototypes/${proto.token}/chat/message`, false, 400],
+      [`/api/public/prototypes/${proto.token}/chat/cta`, false, 400],
     ];
-    for (const [reqPath, key] of routes) {
+    for (const [reqPath, key, status] of routes) {
       const res = await request('POST', reqPath, { raw, key });
-      assert.equal(res.status, 400, reqPath);
-      assert.equal(res.text, '{"error":"invalid_body"}', reqPath);
+      assert.equal(res.status, status, `${reqPath} key=${key}`);
+      if (status === 400) assert.equal(res.text, '{"error":"invalid_body"}', reqPath);
+      else assert.equal(res.json.error, 'Missing or invalid API key', reqPath);
       assert.match(String(res.headers['content-type']), /^application\/json/, reqPath);
       assert.equal(res.text.includes('<html'), false, reqPath);
       assert.equal(res.text.includes('SyntaxError'), false, reqPath);
       assert.equal(res.text.includes('at JSON'), false, reqPath);
       assert.equal(res.text.includes('banner'), false, reqPath);
       assert.equal(res.text.includes(WATERMARK_TEXT), false, reqPath);
+    }
+    const savedKey = process.env.CRM_API_KEY;
+    delete process.env.CRM_API_KEY;
+    try {
+      const closed = await request('POST', '/api/chat/facts', { raw, key: false });
+      assert.equal(closed.status, 503);
+      assert.equal(closed.json.error, 'api_key_not_configured');
+      assert.equal(closed.text.includes('SyntaxError'), false);
+      assert.equal(closed.text.includes('<html'), false);
+    } finally {
+      process.env.CRM_API_KEY = savedKey;
     }
   });
 

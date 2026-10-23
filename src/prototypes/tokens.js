@@ -27,6 +27,7 @@ const HKDF_INFO = 'ff-prototype';
 const LABEL = 'prototype:v1:';
 
 const DUMMY_HASH = crypto.randomBytes(32);
+const DUMMY_NONCE = Buffer.alloc(NONCE_BYTES, 0x5a);
 
 let cachedKey = null;
 let cachedFrom = null;
@@ -98,4 +99,5 @@ module.exports = {
   publicPath,
   tokenWellFormed,
   DUMMY_HASH,
+  DUMMY_NONCE,
 };

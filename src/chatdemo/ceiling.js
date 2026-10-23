@@ -1,13 +1,14 @@
 // Daily live-chat spend ceiling. Env only. No database row and no code default.
 // The value must be a plain decimal string matching DECIMAL: digits, with an
 // optional dot and one or two decimal places. No spaces, sign, exponent, hex,
-// binary, or leading dot. It must be greater than 0 and at most
-// MAX_CEILING_USD (100000, one hundred thousand dollars per America/Denver
-// day). Anything else leaves the live responder off.
+// binary, leading dot, or leading zero (0.01 is allowed; 007 is not). It
+// must be greater than 0 and at most MAX_CEILING_USD (100000, one hundred
+// thousand dollars per America/Denver day). Anything else leaves the live
+// responder off.
 
 const ENV_KEY = 'CHAT_DEMO_DAILY_CEILING_USD';
 const MAX_CEILING_USD = 100000;
-const DECIMAL = /^\d+(\.\d{1,2})?$/;
+const DECIMAL = /^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/;
 
 function usdToMicros(usd) {
   const micros = Math.round(usd * 1e6);
