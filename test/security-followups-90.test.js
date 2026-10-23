@@ -1,0 +1,255 @@
+process.env.CRM_API_KEY = 'test-issue-90-key-32chars-minimum!!';
+process.env.CORS_ORIGINS = '';
+
+require('./preload');
+
+// Issue #90 items 3 and 5, measured on the real server.js mount.
+// Disposable Postgres. No mail, Places, or Anthropic. CORS_ORIGINS is empty,
+// which is the case that used to send Access-Control-Allow-Origin: *.
+
+const { spawn } = require('child_process');
+const http = require('http');
+const path = require('path');
+const { describe, it, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const tokens = require('../src/prototypes/tokens');
+const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
+
+const ROOT = path.join(__dirname, '..');
+const KEY = process.env.CRM_API_KEY;
+const PRODUCTION_ORIGIN = 'https://flowforward-engine-six.vercel.app';
+const EVIL_ORIGIN = 'https://evil.example';
+const MARKER = 'ZZ_PROTO_413_MARKER';
+
+function request(port, method, reqPath, { body, origin, headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const reqHeaders = { ...headers };
+    if (origin) reqHeaders.origin = origin;
+    const payload = body == null ? null : body;
+    if (payload) {
+      reqHeaders['content-type'] = reqHeaders['content-type'] || 'application/json';
+      reqHeaders['content-length'] = String(payload.length);
+    }
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      method,
+      path: reqPath,
+      headers: reqHeaders,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+        resolve({ status: res.statusCode, headers: res.headers, text, json });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.end(payload);
+    else req.end();
+  });
+}
+
+function assertNoStar(res, label) {
+  assert.notEqual(res.headers['access-control-allow-origin'], '*', label);
+  assert.equal(res.headers['access-control-allow-origin'], undefined, label);
+  assert.equal(res.headers['access-control-allow-credentials'], undefined, label);
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = http.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+describe('issue 90 public prototype limits and CORS', { timeout: 120000 }, () => {
+  let child;
+  let port;
+  let output = '';
+  let liveToken;
+  let expiredToken;
+
+  before(async () => {
+    await resetDb();
+    const liveLead = await insertProspect({
+      google_place_id: 'test-place-issue-90-live',
+      company: 'TEST: Issue Ninety Heating',
+      email: 'test+issue90@example.invalid',
+      website: null,
+    });
+    const expiredLead = await insertProspect({
+      google_place_id: 'test-place-issue-90-expired',
+      company: 'TEST: Issue Ninety Expired',
+      email: 'test+issue90expired@example.invalid',
+      website: null,
+    });
+    const live = tokens.mintToken();
+    const expired = tokens.mintToken();
+    assert.ok(live && expired);
+    liveToken = live.token;
+    expiredToken = expired.token;
+    await pool.query(
+      `INSERT INTO prototypes
+         (prospect_id, agent_type, brand_name, color_primary, color_secondary, token_hash, nonce, issued_at, expires_at)
+       VALUES ($1, 'scheduling', 'TEST Heating', '#1F4E79', '#F0C14A', $2, $3, NOW(), NOW() + INTERVAL '336 hours')`,
+      [liveLead.id, live.hash, live.nonce]
+    );
+    await pool.query(
+      `INSERT INTO prototypes
+         (prospect_id, agent_type, brand_name, color_primary, color_secondary, token_hash, nonce, issued_at, expires_at)
+       SELECT $1, 'scheduling', 'TEST Heating', '#1F4E79', '#F0C14A', $2, $3,
+              issued_at, issued_at + INTERVAL '336 hours'
+         FROM (SELECT NOW() - INTERVAL '400 hours' AS issued_at) stamp`,
+      [expiredLead.id, expired.hash, expired.nonce]
+    );
+
+    port = await freePort();
+    const env = {
+      ...process.env,
+      PORT: String(port),
+      NODE_ENV: 'test',
+      DISABLE_CRON: '1',
+      CORS_ORIGINS: '',
+      CRM_API_KEY: KEY,
+      PILOT_DEMO_RATE_MAX: '1000',
+    };
+    child = spawn(process.execPath, [path.join(ROOT, 'src/server.js')], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (buf) => { output += buf.toString('utf8'); });
+    child.stderr.on('data', (buf) => { output += buf.toString('utf8'); });
+    await new Promise((resolve, reject) => {
+      const deadline = Date.now() + 20000;
+      const attempt = () => {
+        if (child.exitCode != null) {
+          reject(new Error(`server exited ${child.exitCode}: ${output.slice(0, 500)}`));
+          return;
+        }
+        const req = http.request({
+          method: 'GET', hostname: '127.0.0.1', port, path: '/health',
+        }, (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode));
+        });
+        req.on('error', () => {
+          if (Date.now() > deadline) reject(new Error(`server did not listen: ${output.slice(0, 500)}`));
+          else setTimeout(attempt, 100);
+        });
+        req.end();
+      };
+      attempt();
+    });
+  });
+
+  after(async () => {
+    if (child && child.exitCode == null) {
+      child.kill('SIGTERM');
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => { child.kill('SIGKILL'); }, 2000);
+        child.once('exit', () => { clearTimeout(timer); resolve(); });
+      });
+    }
+    await closePool();
+  });
+
+  it('a 2 MB JSON body on the public prototype read is a stamped 413', async () => {
+    const token = 'a'.repeat(43);
+    const pathName = `/api/public/prototypes/${token}`;
+    const big = Buffer.alloc(2 * 1024 * 1024, 0x61);
+    Buffer.from(MARKER).copy(big);
+    const over = Buffer.alloc(2049, 0x62);
+    for (const [label, body] of [['2mb', big], ['2049', over]]) {
+      const res = await request(port, 'GET', pathName, { body, origin: PRODUCTION_ORIGIN });
+      assert.equal(res.status, 413, label);
+      assert.deepEqual(res.json, { error: 'Payload too large' });
+      assert.equal(res.headers['cache-control'], 'no-store', label);
+      assert.equal(res.headers['x-robots-tag'], 'noindex, nofollow', label);
+      assert.equal(res.headers['x-content-type-options'], 'nosniff', label);
+      assertNoStar(res, label);
+      assert.equal(res.text.includes('<html'), false, label);
+      assert.equal(res.text.includes('PayloadTooLargeError'), false, label);
+      assert.equal(res.text.includes('entity.too.large'), false, label);
+      assert.equal(res.text.includes(MARKER), false, label);
+    }
+    const small = await request(port, 'GET', pathName, {
+      origin: EVIL_ORIGIN,
+      headers: { 'x-forwarded-for': '203.0.113.90' },
+    });
+    assert.equal(small.status, 404);
+    assert.deepEqual(small.json, { error: 'not_found' });
+    assert.equal(output.includes(MARKER), false);
+    console.log('[issue-90] 2 MB and 2049-byte public prototype bodies are stamped 413; a small GET stays 404');
+  });
+
+  it('public prototype JSON, page, and font responses never send ACAO *', async () => {
+    const cases = [
+      ['GET', `/api/public/prototypes/${liveToken}`, 200],
+      ['GET', `/api/public/prototypes/${expiredToken}`, 410],
+      ['GET', `/api/public/prototypes/${'b'.repeat(43)}`, 404],
+      ['GET', `/demo/prototype/${liveToken}`, 200],
+      ['GET', `/demo/prototype/${expiredToken}`, 410],
+      ['GET', `/demo/prototype/${'c'.repeat(43)}`, 404],
+      ['GET', '/demo/prototype-assets/OFL-LICENSE.txt', 200],
+    ];
+    let n = 100;
+    for (const origin of [EVIL_ORIGIN, PRODUCTION_ORIGIN, undefined]) {
+      for (const [method, reqPath, status] of cases) {
+        n += 1;
+        const res = await request(port, method, reqPath, {
+          origin,
+          headers: { 'x-forwarded-for': `203.0.113.${n % 200}` },
+        });
+        assert.equal(res.status, status, `${origin || 'none'} ${reqPath}`);
+        assertNoStar(res, `${origin || 'none'} ${reqPath}`);
+        if (reqPath.includes('/api/public/prototypes/') && status === 410) {
+          assert.equal(res.json.error, 'link_expired');
+        }
+        if (reqPath.includes('/api/public/prototypes/') && status === 404) {
+          assert.deepEqual(res.json, { error: 'not_found' });
+        }
+        if (reqPath.includes('/api/public/prototypes/') && status === 200) {
+          assert.equal(res.json.brand_name, 'TEST Heating');
+          assert.equal(res.json.watermark, true);
+        }
+      }
+    }
+    console.log('[issue-90] prototype JSON 200/404/410, page, and font responses have no ACAO');
+  });
+
+  it('keeps chat and flag allowlists and global CORS on other routes', async () => {
+    const preflight = await request(port, 'OPTIONS', '/api/public/chat/demos/wasatch-heating/session', {
+      origin: PRODUCTION_ORIGIN,
+      headers: {
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'content-type',
+      },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers['access-control-allow-origin'], PRODUCTION_ORIGIN);
+    assert.notEqual(preflight.headers['access-control-allow-origin'], '*');
+
+    const flags = await request(port, 'GET', '/api/public/flags', { origin: PRODUCTION_ORIGIN });
+    assert.equal(flags.status, 200);
+    assert.equal(flags.headers['access-control-allow-origin'], PRODUCTION_ORIGIN);
+
+    const protoPreflight = await request(port, 'OPTIONS', '/api/public/prototypes/not-a-token/chat/session', {
+      origin: PRODUCTION_ORIGIN,
+      headers: { 'access-control-request-method': 'POST' },
+    });
+    assert.equal(protoPreflight.status, 204);
+    assert.equal(protoPreflight.headers['access-control-allow-origin'], PRODUCTION_ORIGIN);
+
+    const health = await request(port, 'GET', '/health', { origin: EVIL_ORIGIN });
+    assert.equal(health.status, 200);
+    assert.equal(health.headers['access-control-allow-origin'], '*');
+    console.log('[issue-90] chat and flags still echo an allowed origin; /health still uses global CORS');
+  });
+});

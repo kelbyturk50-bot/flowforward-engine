@@ -23,13 +23,32 @@ app.set('trust proxy', 1);
 // These routes do not use cors() below; their allowlist is src/chatdemo/cors.js.
 const chatMount = require('./chatdemo/mount');
 chatMount.mountBeforeCors(app);
+// Public prototype JSON. Before cors() and the 1 MB parser. Its own 2 KB
+// parser stamps a 413. These responses never inherit Access-Control-Allow-Origin.
+app.use('/api/public/prototypes', require('./prototypes/public').router);
 chatMount.mountPublicFlags(app);
+
+// The prototype page, its fonts, and the public JSON read do not use cors().
+// Unset CORS_ORIGINS would otherwise send Access-Control-Allow-Origin: *.
+function publicPrototypeSurface(req) {
+  const raw = String((req && (req.originalUrl || req.url)) || '');
+  const path = raw.split('?')[0];
+  if (path === '/demo/prototype' || path.startsWith('/demo/prototype/')) return true;
+  if (path === '/demo/prototype-assets' || path.startsWith('/demo/prototype-assets/')) return true;
+  if (path === '/api/public/prototypes' || path.startsWith('/api/public/prototypes/')) return true;
+  return false;
+}
 
 // CORS — restrict to your frontend(s) with CORS_ORIGINS="https://your-app.vercel.app,http://localhost:5173".
 // Unset = allow any origin (the API key still guards access).
-// Does not apply to the public chat routers or GET /api/public/flags.
+// Does not apply to the public chat routers, GET /api/public/flags, or the
+// public prototype page, fonts, and JSON read.
 const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-app.use(cors(origins.length ? { origin: origins } : undefined));
+const corsMiddleware = cors(origins.length ? { origin: origins } : undefined);
+app.use((req, res, next) => {
+  if (publicPrototypeSurface(req)) return next();
+  return corsMiddleware(req, res, next);
+});
 const pilotDemo = require('./pilot/demo');
 app.use(express.json({ limit: '1mb' }));
 // A malformed JSON body on the chat routes is a JSON 400. The handler does
@@ -67,10 +86,6 @@ app.use('/p', require('./proposals/onepager').router);
 // 404 unless the master flag is effectively on. No mint route.
 app.use('/demo/estimate-recovery', pilotDemo.router);
 
-// Public prototype read (no API key — the token is the credential).
-// Mounted before the API-key guard. Rate limit uses the prototype bucket,
-// separate from the pilot demo.
-app.use('/api/public/prototypes', require('./prototypes/public').router);
 // The prototype page itself: sample homepage + agent click-throughs.
 // Server-rendered, watermarked, no API key (the token is the credential).
 app.use('/demo/prototype-assets', require('./prototypes/page').assets);

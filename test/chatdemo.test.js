@@ -261,12 +261,14 @@ describe('live chat pure checks', () => {
     }
     walk(path.join(root, 'src'));
     const server = fs.readFileSync(path.join(root, 'src', 'server.js'), 'utf8');
-    const corsAt = server.indexOf('app.use(cors');
+    const corsAt = server.indexOf('const corsMiddleware = cors(');
     const flagsAt = server.indexOf('mountPublicFlags');
     const guardAt = server.indexOf("app.use('/api', requireApiKey)");
     assert.ok(server.indexOf('mountBeforeCors') < flagsAt);
     assert.ok(flagsAt < corsAt);
+    assert.ok(corsAt < guardAt);
     assert.ok(flagsAt < guardAt);
+    assert.ok(server.indexOf('publicPrototypeSurface') < corsAt);
     assert.match(server, /app\.set\('trust proxy',\s*1\)/);
     const { demoRouter } = require('../src/chatdemo/public');
     assert.equal(demoRouter.stack[0].name, 'jsonParser');

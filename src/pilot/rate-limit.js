@@ -9,6 +9,9 @@
 // right-most address is the client the trusted hop saw. A caller can prepend
 // a spoof; the left-most address is not the rate-limit key. With trust proxy
 // off, the header is ignored and the socket address is used.
+// The key folds an IPv4-mapped ::ffff: address to IPv4 and groups IPv6 by /64.
+
+const net = require('net');
 
 const buckets = new Map();
 
@@ -49,18 +52,88 @@ function trustedHops(req) {
   return 0;
 }
 
+function hextet(value) {
+  if (!/^[0-9a-f]{1,4}$/.test(value)) return null;
+  return parseInt(value, 16).toString(16);
+}
+
+function expandIPv6(ip) {
+  const halves = ip.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':').filter((part) => part !== '') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':').filter((part) => part !== '') : [];
+  if (halves.length === 1 && head.length !== 8) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  const parts = halves.length === 1 ? head : [...head, ...Array(missing).fill('0'), ...tail];
+  if (parts.length !== 8) return null;
+  const parsed = parts.map(hextet);
+  if (parsed.some((part) => part == null)) return null;
+  return parsed;
+}
+
+function compress(parts) {
+  let bestStart = -1;
+  let bestLen = 0;
+  let runStart = -1;
+  for (let i = 0; i <= parts.length; i += 1) {
+    if (i < parts.length && parts[i] === '0') {
+      if (runStart < 0) runStart = i;
+    } else if (runStart >= 0) {
+      const len = i - runStart;
+      if (len > bestLen) {
+        bestStart = runStart;
+        bestLen = len;
+      }
+      runStart = -1;
+    }
+  }
+  if (bestLen < 2) return parts.join(':');
+  const head = parts.slice(0, bestStart).join(':');
+  const tail = parts.slice(bestStart + bestLen).join(':');
+  return `${head}::${tail}`;
+}
+
+// Rate-limit key. Fold IPv4-mapped ::ffff: to IPv4. Key IPv6 by /64.
+// A value this function already returned (/64 suffix) comes back unchanged.
+// Chat's bucketIp delegates here so the two layers do not disagree.
+function bucketAddress(ip) {
+  let value = String(ip || '').trim().toLowerCase();
+  if (!value) return 'unknown';
+  if (value.endsWith('/64')) {
+    const base = value.slice(0, -3);
+    if (net.isIP(base) === 6) value = base;
+  }
+  if (value.startsWith('::ffff:')) {
+    const mapped = value.slice('::ffff:'.length);
+    if (net.isIP(mapped) === 4) return mapped;
+  }
+  if (net.isIP(value) === 4) return value;
+  if (net.isIP(value) !== 6) return 'unknown';
+  const parts = expandIPv6(value);
+  if (!parts) return 'unknown';
+  const prefix = parts.slice(0, 4).concat(['0', '0', '0', '0']);
+  return `${compress(prefix)}/64`;
+}
+
 function clientIp(req) {
   const socketIp = cleanIp(req && (req.socket?.remoteAddress || req.connection?.remoteAddress));
   const hops = trustedHops(req);
-  if (!hops) return socketIp || 'unknown';
-  const chain = forwardedChain(req);
-  if (!chain.length) return socketIp || 'unknown';
-  // Trust-all: the original client is the left-most address.
-  if (!Number.isFinite(hops)) return cleanIp(chain[0]) || socketIp || 'unknown';
-  // One trusted hop (Railway): index is the right-most address.
-  const index = chain.length - hops;
-  const chosen = chain[index >= 0 ? index : 0];
-  return cleanIp(chosen) || socketIp || 'unknown';
+  let raw;
+  if (!hops) raw = socketIp || 'unknown';
+  else {
+    const chain = forwardedChain(req);
+    if (!chain.length) raw = socketIp || 'unknown';
+    // Trust-all: the original client is the left-most address.
+    else if (!Number.isFinite(hops)) raw = cleanIp(chain[0]) || socketIp || 'unknown';
+    else {
+      // One trusted hop (Railway): index is the right-most address.
+      const index = chain.length - hops;
+      const chosen = chain[index >= 0 ? index : 0];
+      raw = cleanIp(chosen) || socketIp || 'unknown';
+    }
+  }
+  return bucketAddress(raw);
 }
 
 function consumeFixed(ip, bucket, options) {
@@ -111,4 +184,4 @@ function _resetForTests() {
   buckets.clear();
 }
 
-module.exports = { limits, clientIp, consume, _resetForTests };
+module.exports = { limits, clientIp, bucketAddress, consume, _resetForTests };

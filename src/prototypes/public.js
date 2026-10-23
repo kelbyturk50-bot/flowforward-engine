@@ -15,6 +15,10 @@ function stamp(res) {
   res.set('Cache-Control', 'no-store');
 }
 
+// First. Mounted in server.js before the 1 MB parser, so a large JSON body
+// on this route is a stamped 413 and never reaches that parser.
+router.use(express.json({ limit: '2kb' }));
+
 router.use((req, res, next) => {
   const hit = consume(clientIp(req), 'prototype');
   if (hit.limited) {
@@ -35,6 +39,15 @@ router.get('/:token', async (req, res) => {
     stamp(res);
     res.status(500).json({ error: 'Something went wrong.' });
   }
+});
+
+router.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err && (err.status || err.statusCode);
+  const tooLarge = status === 413 || (err && err.type === 'entity.too.large');
+  if (!tooLarge) return next(err);
+  stamp(res);
+  return res.status(413).json({ error: 'Payload too large' });
 });
 
 module.exports = { router };

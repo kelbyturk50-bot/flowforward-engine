@@ -285,4 +285,178 @@ describe('inbox', () => {
     const back = await inbox.reopen(item.id);
     assert.equal(back.status, 'ready');
   });
+
+  it('rejects loose inbox ids with a generic 404 and does not leak database errors', async () => {
+    const fs = require('fs');
+    const path = require('path');
+    const workerSrc = fs.readFileSync(path.join(__dirname, '../src/proposals/inbox.js'), 'utf8');
+    assert.equal(workerSrc.includes('err.message'), false);
+    const paths = [
+      '/api/inbox/abc',
+      '/api/inbox/99999999999',
+      `/api/inbox/${encodeURIComponent('1 OR 1=1')}`,
+    ];
+    for (const reqPath of paths) {
+      const res = await fetch(`${base}${reqPath}`);
+      const body = await res.json();
+      assert.equal(res.status, 404, reqPath);
+      assert.deepEqual(body, { error: 'Not found' });
+      assert.equal(JSON.stringify(body).includes('invalid input syntax'), false);
+      assert.equal(JSON.stringify(body).includes('out of range'), false);
+      assert.equal(JSON.stringify(body).includes('OR 1=1'), false);
+    }
+    const patched = await fetch(`${base}/api/inbox/${encodeURIComponent('1 OR 1=1')}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reply_subject: 'nope' }),
+    });
+    assert.equal(patched.status, 404);
+    assert.deepEqual(await patched.json(), { error: 'Not found' });
+
+    const leak = 'LEAK_invalid_input_syntax_for_type_integer';
+    const lines = [];
+    const originalError = console.error;
+    const originalQuery = pool.query.bind(pool);
+    console.error = (...args) => { lines.push(args.map((part) => String(part)).join(' ')); };
+    pool.query = async () => {
+      const err = new Error(leak);
+      err.code = '22P02';
+      throw err;
+    };
+    try {
+      const res = await fetch(`${base}/api/inbox/1`);
+      const body = await res.json();
+      assert.equal(res.status, 500);
+      assert.deepEqual(body, { error: 'Something went wrong.' });
+      assert.equal(JSON.stringify(body).includes(leak), false);
+    } finally {
+      console.error = originalError;
+      pool.query = originalQuery;
+    }
+    assert.ok(lines.some((line) => line.includes('22P02')));
+    assert.equal(lines.some((line) => line.includes(leak)), false);
+    console.log('[inbox] abc, overflow, and 1 OR 1=1 are 404; database errors are a generic 500 and err.code only');
+  });
+
+  it('strips CR and LF from reply_subject and keeps a generic send failure', async () => {
+    const lead90 = await insertProspect({
+      google_place_id: 'test-place-inbox-90',
+      company: 'TEST: Inbox Ninety',
+      email: 'test+inbox90@example.invalid',
+      website: null,
+      stage: 'contacted',
+    });
+    const message = await pool.query(
+      `INSERT INTO inbox_messages (prospect_id, direction, dedupe_key, thread_id, from_addr, subject, body)
+       VALUES ($1, 'in', 'inbox-90-dedupe', 'thr-90', 'test+inbox90@example.invalid', 'Hi', 'hello')
+       RETURNING id`,
+      [lead90.id]
+    );
+    const created = await pool.query(
+      `INSERT INTO inbox_items (prospect_id, message_id, status, reply_to, reply_subject, reply_body)
+       VALUES ($1, $2, 'ready', 'test+inbox90@example.invalid', 'Re: Hi', 'Thanks.\n\nKelby')
+       RETURNING id`,
+      [lead90.id, message.rows[0].id]
+    );
+    const id = created.rows[0].id;
+    const subject = 'Hi\r\nBcc: attacker@example.invalid';
+    const patched = await fetch(`${base}/api/inbox/${id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reply_subject: subject }),
+    });
+    const patchedBody = await patched.json();
+    assert.equal(patched.status, 200);
+    assert.equal(patchedBody.reply_subject, 'HiBcc: attacker@example.invalid');
+    assert.equal(patchedBody.reply_subject.includes('\r'), false);
+    assert.equal(patchedBody.reply_subject.includes('\n'), false);
+    const stored = await pool.query('SELECT reply_subject, reply_to FROM inbox_items WHERE id = $1', [id]);
+    assert.equal(stored.rows[0].reply_subject, 'HiBcc: attacker@example.invalid');
+
+    const rejected = await fetch(`${base}/api/inbox/${id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reply_to: 'owner@example.invalid\r\nBcc: attacker@example.invalid' }),
+    });
+    assert.equal(rejected.status, 400);
+    const still = await pool.query('SELECT reply_to FROM inbox_items WHERE id = $1', [id]);
+    assert.equal(still.rows[0].reply_to, 'test+inbox90@example.invalid');
+
+    const lone = await fetch(`${base}/api/inbox/${id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reply_subject: 'Hello\rthere\nfriend' }),
+    });
+    assert.equal(lone.status, 200);
+    assert.equal((await lone.json()).reply_subject, 'Hellotherefriend');
+
+    const leak = 'LEAK_smtp_secret_message';
+    const lines = [];
+    const originalError = console.error;
+    console.error = (...args) => { lines.push(args.map((part) => String(part)).join(' ')); };
+    send._setTransport({
+      async sendMail() {
+        const err = new Error(leak);
+        err.code = 'ECONN';
+        throw err;
+      },
+    });
+    try {
+      const sent = await fetch(`${base}/api/inbox/${id}/send`, { method: 'POST' });
+      const body = await sent.json();
+      assert.equal(sent.status, 500);
+      assert.deepEqual(body, { error: 'Something went wrong.' });
+      assert.equal(JSON.stringify(body).includes(leak), false);
+    } finally {
+      console.error = originalError;
+      send._setTransport({
+        async sendMail(mail) {
+          mails.push(mail);
+          return { id: `gm-${mails.length}`, threadId: mail.threadId || 'thr-new', messageId: `<out-${mails.length}@mail>` };
+        },
+      });
+    }
+    const afterSend = await pool.query('SELECT status, error FROM inbox_items WHERE id = $1', [id]);
+    assert.equal(afterSend.rows[0].status, 'ready');
+    assert.equal(afterSend.rows[0].error, 'Send failed');
+    assert.equal(String(afterSend.rows[0].error).includes(leak), false);
+    assert.ok(lines.some((line) => line.includes('ECONN')));
+    assert.equal(lines.some((line) => line.includes(leak)), false);
+
+    const queuedMsg = await pool.query(
+      `INSERT INTO inbox_messages (prospect_id, direction, dedupe_key, from_addr, subject, body)
+       VALUES ($1, 'in', 'inbox-90-queue', 'test+inbox90@example.invalid', 'Queue', 'please read')
+       RETURNING id`,
+      [lead90.id]
+    );
+    const queued = await pool.query(
+      `INSERT INTO inbox_items (prospect_id, message_id, status) VALUES ($1, $2, 'queued') RETURNING id`,
+      [lead90.id, queuedMsg.rows[0].id]
+    );
+    const triageLeak = 'LEAK_anthropic_triage_secret';
+    const triageLines = [];
+    console.error = (...args) => { triageLines.push(args.map((part) => String(part)).join(' ')); };
+    _setClient({
+      messages: {
+        async create() {
+          const err = new Error(triageLeak);
+          err.code = 'EAI_AGAIN';
+          throw err;
+        },
+      },
+    });
+    try {
+      await inbox.work();
+    } finally {
+      console.error = originalError;
+      _setClient(fakeTriageClaude());
+    }
+    const failed = await pool.query('SELECT status, error FROM inbox_items WHERE id = $1', [queued.rows[0].id]);
+    assert.equal(failed.rows[0].status, 'failed');
+    assert.equal(failed.rows[0].error, 'Something went wrong.');
+    assert.equal(String(failed.rows[0].error).includes(triageLeak), false);
+    assert.ok(triageLines.some((line) => line.includes('EAI_AGAIN')));
+    assert.equal(triageLines.some((line) => line.includes(triageLeak)), false);
+    console.log('[inbox] reply_subject CRLF stripped; send and triage failures log err.code only');
+  });
 });
