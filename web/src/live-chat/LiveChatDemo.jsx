@@ -424,22 +424,23 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND, transport = nu
               {typing ? <p className="live-chat-typing" role="status">Typing…</p> : null}
             </div>
             <div className="live-chat-dock">
-              <div className="live-chat-chips" role="group" aria-label="Suggestions">
-                <div className="live-chat-chip-row">
-                  {unused.map((chip) => (
-                    <button
-                      key={chip.id}
-                      type="button"
-                      className="live-chat-chip"
-                      data-chip={chip.id}
-                      disabled={locked}
-                      onClick={() => pushTurn(chip.label, chip.id)}
-                    >
-                      {chip.label}
-                    </button>
-                  ))}
+              {locked ? null : (
+                <div className="live-chat-chips" role="group" aria-label="Suggestions">
+                  <div className="live-chat-chip-row">
+                    {unused.map((chip) => (
+                      <button
+                        key={chip.id}
+                        type="button"
+                        className="live-chat-chip"
+                        data-chip={chip.id}
+                        onClick={() => pushTurn(chip.label, chip.id)}
+                      >
+                        {chip.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
               <div className="live-chat-compose">
                 <div className="live-chat-compose-head">
                   <label className="live-chat-label" htmlFor="live-chat-input">Text the business</label>

@@ -260,6 +260,7 @@ describe('live chat public API', () => {
     expect(screen.queryByText(PAUSE_MESSAGE)).toBeNull();
     expect(screen.getByLabelText('Text the business')).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(screen.queryByRole('group', { name: 'Suggestions' })).toBeNull();
     paused.unmount();
 
     install(async (path) => {
@@ -274,7 +275,7 @@ describe('live chat public API', () => {
     expect(await screen.findByText(LIMIT_NOTICE)).toBeInTheDocument();
     expect(screen.getByLabelText('Text the business')).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'My water heater is leaking all over the garage' })).toBeDisabled();
+    expect(screen.queryByRole('group', { name: 'Suggestions' })).toBeNull();
   });
 
   it('keeps sample replies going when a turn is paused, and keeps the draft on 400 and 413', async () => {
@@ -311,6 +312,7 @@ describe('live chat public API', () => {
     expect(await screen.findByText('Here is a sample reply while the live model rests.')).toBeInTheDocument();
     expect(screen.getByText(PAUSE_MESSAGE)).toBeInTheDocument();
     expect(screen.getByLabelText('Text the business')).toBeEnabled();
+    expect(screen.getByRole('group', { name: 'Suggestions' })).toBeInTheDocument();
 
     messageStatus = 400;
     await user.type(box, 'keep this draft');
@@ -537,12 +539,15 @@ describe('live chat public API', () => {
     });
     render(<LiveChatGate />);
     const box = await screen.findByLabelText('Text the business');
+    expect(screen.getByRole('group', { name: 'Suggestions' })).toBeInTheDocument();
     await user.type(box, 'Are you open Saturday?');
     await user.click(screen.getByRole('button', { name: 'Send' }));
     expect(await screen.findByText(LIMIT_NOTICE)).toBeInTheDocument();
     expect(document.querySelector('.live-chat-bubble.is-out')).toHaveTextContent('Are you open Saturday?');
     expect(screen.getByLabelText('Text the business')).toHaveValue('');
     expect(screen.getByLabelText('Text the business')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(screen.queryByRole('group', { name: 'Suggestions' })).toBeNull();
   });
 
   it('ignores a saved API address and never sends credentials', async () => {
