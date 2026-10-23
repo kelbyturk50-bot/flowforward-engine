@@ -186,7 +186,8 @@ describe('inbox', () => {
   it('rewrites in the background with instructions', async () => {
     const item = await itemFor(proposal.id);
     const queued = await inbox.rewrite(item.id, 'Shorter please');
-    assert.equal(queued.status, 'rewrite_queued');
+    // kick() can claim the row before this read returns.
+    assert.ok(queued.status === 'rewrite_queued' || queued.status === 'rewriting', queued.status);
     await settle();
     const done = await itemFor(proposal.id);
     assert.equal(done.status, 'ready');
