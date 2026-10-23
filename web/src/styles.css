@@ -910,11 +910,17 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .live-chat-chip, .live-chat-action {
   background: var(--paper); color: var(--ink); border: 1px solid var(--line);
 }
-.live-chat-chip { width: auto; flex: 0 0 auto; max-width: none; white-space: nowrap; }
+.live-chat-chip { width: auto; flex: 0 0 auto; max-width: none; white-space: nowrap; border-color: #3E4C4F; }
 .live-chat-chip:focus-visible, .live-chat-action:focus-visible, .live-chat-send:focus-visible {
   outline: 2px solid var(--ink); outline-offset: 2px;
 }
-.live-chat-compose { display: flex; flex-direction: column; gap: 4px; }
+.live-chat-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* Keeps the 2px Send border and its 2px focus ring inside the frame. */
+  padding-bottom: 6px;
+}
 .live-chat-compose-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-height: 0; }
 .live-chat-label { font-size: .75rem; line-height: 1.2; font-weight: 600; }
 .live-chat-input {

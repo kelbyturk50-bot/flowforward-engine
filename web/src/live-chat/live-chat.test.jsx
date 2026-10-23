@@ -241,11 +241,10 @@ describe('live chat demo', () => {
     expect(lead).not.toHaveTextContent('leaking');
     expect(screen.getByRole('heading', { name: 'Urgency' }).closest('article')).toHaveTextContent('emergency');
     expect(screen.getByRole('heading', { name: 'Mock alert, not sent' }).closest('article')).toHaveTextContent('Nothing left this page.');
-    const earlier = container.querySelector('.live-chat-earlier');
-    expect(earlier).not.toBeNull();
-    expect(earlier.open).toBe(false);
-    expect(earlier.textContent).toContain('My water heater is leaking all over the garage');
+    expect(container.querySelector('.live-chat-earlier')).toBeNull();
+    expect(screen.queryByText('Earlier suggestions')).not.toBeInTheDocument();
     expect(container.querySelector('.live-chat-chip-row > [data-chip="chip_emergency"]')).toBeNull();
+    expect(container.querySelectorAll('.live-chat-chip-row > .live-chat-chip')).toHaveLength(4);
     expect(screen.getByText(DISCLOSURE)).toBeInTheDocument();
     expect(screen.getByText(BANNER)).toBeInTheDocument();
 
@@ -398,6 +397,7 @@ describe('live chat demo', () => {
     expect(threadRule).toContain('min-height: 200px');
     expect(threadRule).toContain('overflow-y: auto');
     expect(threadRule).not.toContain('42dvh');
+    expect(css).toMatch(/\.live-chat-chip \{[^}]*border-color:\s*#3E4C4F/);
     expect(css).toMatch(/\.live-chat-chip-row \{[^}]*flex-wrap:\s*nowrap/);
     expect(css).toMatch(/\.live-chat-chip-row \{[^}]*overflow-x:\s*auto/);
     expect(css).toContain('mask-image: linear-gradient(to right');

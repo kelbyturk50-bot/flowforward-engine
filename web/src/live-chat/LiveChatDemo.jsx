@@ -219,7 +219,6 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
   }
 
   const unused = chips.filter((chip) => !usedChips.has(chip.id));
-  const spent = chips.filter((chip) => usedChips.has(chip.id));
   const limitText = remaining === 0
     ? `Character limit reached. ${MAX_MESSAGE_CHARS} of ${MAX_MESSAGE_CHARS}.`
     : `${remaining} characters left.`;
@@ -300,22 +299,6 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND }) {
                     </button>
                   ))}
                 </div>
-                {spent.length > 0 ? (
-                  <details className="live-chat-earlier">
-                    <summary className="live-chat-expand">Earlier suggestions</summary>
-                    {spent.map((chip) => (
-                      <button
-                        key={chip.id}
-                        type="button"
-                        className="live-chat-chip"
-                        data-chip={chip.id}
-                        onClick={() => pushTurn(chip.label, chip.id)}
-                      >
-                        {chip.label}
-                      </button>
-                    ))}
-                  </details>
-                ) : null}
               </div>
               <div className="live-chat-compose">
                 <div className="live-chat-compose-head">
