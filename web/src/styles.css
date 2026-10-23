@@ -957,7 +957,10 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   border: 1px solid var(--juniper);
   color: var(--juniper-ink);
 }
-.live-chat-send:disabled {
+.live-chat-chip:disabled,
+.live-chat-send:disabled,
+.live-chat-chip:disabled:hover,
+.live-chat-send:disabled:hover {
   opacity: 1;
   cursor: not-allowed;
   background: #E4EBE8;
@@ -1131,6 +1134,10 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
     max-height: none !important;
     overflow: visible !important;
   }
+}
+.live-chat-not-found > .not-found {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .live-chat-expired {
   flex: 1 1 auto;

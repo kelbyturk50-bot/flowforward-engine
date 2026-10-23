@@ -184,8 +184,8 @@ export function PrototypeTile() {
   );
 }
 
-export default function PrototypeWatermark({ text = WATERMARK_TEXT }) {
-  const label = text || WATERMARK_TEXT;
+export default function PrototypeWatermark() {
+  const label = WATERMARK_TEXT;
   const ref = useRibbonColorLock();
   return (
     <p
@@ -238,7 +238,7 @@ function useRibbonColorLock() {
   return ref;
 }
 
-export function PrototypeShell({ brandName, accent, onAccent, darkAccent, darkOnAccent, watermark, children }) {
+export function PrototypeShell({ brandName, accent, onAccent, darkAccent, darkOnAccent, children }) {
   const [message, setMessage] = useState('');
 
   useEffect(() => {
@@ -252,7 +252,7 @@ export function PrototypeShell({ brandName, accent, onAccent, darkAccent, darkOn
       <PrototypeActionContext.Provider value={setMessage}>
         <div className="prototype-root">
           <a className="skip" href="#prototype-main">Skip to content</a>
-          <PrototypeWatermark text={watermark} />
+          <PrototypeWatermark />
           {message ? (
             <p className="prototype-toast" role="status">{message}</p>
           ) : null}

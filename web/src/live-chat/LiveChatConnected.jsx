@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import PrototypeWatermark from '../components/PrototypeWatermark';
-import NotFound from '../NotFound';
+import LiveChatNotFound from './LiveChatNotFound';
 import { normalizeHex } from '../prototypes/brand';
 import LiveChatDemo from './LiveChatDemo';
 import {
@@ -47,7 +47,6 @@ function viewFrom(data, demo) {
   return {
     banner: (data && data.banner) || demo?.banner || '',
     disclosure: (data && data.disclosure) || demo?.disclosure || '',
-    watermark: (data && data.watermark) || '',
     business_name: (data && data.business_name) || demo?.business_name || '',
     colors,
     secondary: normalizeHex(colors.secondary || ''),
@@ -156,7 +155,7 @@ export default function LiveChatConnected({ kind = 'sample', token = '' }) {
   if (view.status === 'loading') {
     return <main className="demo"><p className="demo-loading">Loading sample data…</p></main>;
   }
-  if (view.status === 'closed') return <NotFound />;
+  if (view.status === 'closed') return <LiveChatNotFound />;
   if (view.status === 'expired') return <ExpiredDemo expiresAt={view.expiresAt} />;
   if (view.status === 'error') {
     return <BootError onRetry={() => setAttempt((value) => value + 1)} />;
@@ -184,7 +183,6 @@ export default function LiveChatConnected({ kind = 'sample', token = '' }) {
       transport={{
         banner: model.banner,
         disclosure: model.disclosure,
-        watermark: model.watermark,
         chips: model.chips,
         facts: model.facts,
         secondary: model.secondary,

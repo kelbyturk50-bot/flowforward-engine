@@ -430,6 +430,9 @@ describe('live chat demo', () => {
     expect(outRule).toContain('background: var(--juniper)');
     expect(outRule).not.toContain('proto-accent');
     expect(css).toMatch(/\.live-chat-input:disabled\s*\{[^}]*background:\s*#E4EBE8/);
+    expect(css).toMatch(/\.live-chat-chip:disabled,\s*\.live-chat-send:disabled,\s*\.live-chat-chip:disabled:hover,\s*\.live-chat-send:disabled:hover\s*\{[^}]*cursor:\s*not-allowed/);
+    expect(css).toMatch(/\.live-chat-chip:disabled,\s*\.live-chat-send:disabled,\s*\.live-chat-chip:disabled:hover,\s*\.live-chat-send:disabled:hover\s*\{[^}]*background:\s*#E4EBE8/);
+    expect(css).toMatch(/\.live-chat-chip:disabled,\s*\.live-chat-send:disabled,\s*\.live-chat-chip:disabled:hover,\s*\.live-chat-send:disabled:hover\s*\{[^}]*color:\s*#1E2A2F/);
     expect(threadRule).toContain('overflow-y: auto');
     expect(threadRule).not.toContain('42dvh');
     expect(css).toMatch(/\.live-chat-chip \{[^}]*border-color:\s*#3E4C4F/);

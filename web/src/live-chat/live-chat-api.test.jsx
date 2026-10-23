@@ -15,6 +15,7 @@ import {
   PAUSE_MESSAGE,
   TOO_LONG_ERROR,
 } from './contract.js';
+import { affiliationBanner } from './fixture.js';
 import LiveChatGate from './LiveChatGate';
 import { parsePublicFlags } from './public-flags.js';
 
@@ -209,7 +210,7 @@ describe('live chat public API', () => {
     fetchMock.mockClear();
     at(`/demo/prototype/${'short'}`);
     const malformed = render(<LiveChatGate token="" malformed />);
-    expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
     malformed.unmount();
 
@@ -221,6 +222,7 @@ describe('live chat public API', () => {
     });
     render(<LiveChatGate token={TOKEN} />);
     expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+    expect(screen.getByRole('note', { name: WATERMARK_TEXT })).toBeInTheDocument();
   });
 
   it('shows an expired prototype link with the Denver date and no composer', async () => {
@@ -444,6 +446,68 @@ describe('live chat public API', () => {
     render(<LiveChatGate token={TOKEN} />);
     expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
     expect(paths().some((path) => path.includes('/chat/'))).toBe(false);
+  });
+
+  it('stays not-found when the chat flag is off and there is no preview override', async () => {
+    const chatOff = { FF_PROTOTYPE_GALLERY: true, FF_LIVE_CHAT_DEMO: false };
+    at('/demo/live-chat');
+    install(async (path) => {
+      if (path === '/api/public/flags') return { status: 200, body: chatOff };
+      throw new Error(`unexpected ${path}`);
+    });
+    const sample = render(<LiveChatGate />);
+    expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+    expect(screen.getByRole('note', { name: WATERMARK_TEXT })).toBeInTheDocument();
+    expect(screen.queryByText(/I'm an AI receptionist demo/)).toBeNull();
+    expect(paths()).toEqual(['/api/public/flags']);
+    sample.unmount();
+
+    fetchMock.mockClear();
+    at(`/demo/prototype/${TOKEN}`);
+    install(async (path) => {
+      if (path === '/api/public/flags') return { status: 200, body: chatOff };
+      throw new Error(`unexpected ${path}`);
+    });
+    render(<LiveChatGate token={TOKEN} />);
+    expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+    expect(screen.getByRole('note', { name: WATERMARK_TEXT })).toBeInTheDocument();
+    expect(paths()).toEqual(['/api/public/flags']);
+  });
+
+  it('ignores an API watermark and uses the contract banner when the banner is blank or missing', async () => {
+    const evil = 'EVIL WATERMARK FROM THE API';
+    install(async (path) => {
+      if (path === '/api/public/flags') return { status: 200, body: FLAGS_ON };
+      if (path === '/api/public/chat/demos') {
+        return { status: 200, body: { watermark: evil, demos: [{ ...wasatch(), banner: '' }] } };
+      }
+      if (path.endsWith('/session')) {
+        return { status: 201, body: envelope({ sessionId: SESSION, disclosure: WASATCH_DISCLOSURE, watermark: evil, banner: '   ' }) };
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+    const blank = render(<LiveChatGate />);
+    expect(await screen.findByRole('note', { name: WATERMARK_TEXT })).toBeInTheDocument();
+    expect(screen.queryByText(evil)).toBeNull();
+    expect(screen.getByText(affiliationBanner('Wasatch Heating'))).toBeInTheDocument();
+    blank.unmount();
+
+    const listed = wasatch();
+    delete listed.banner;
+    install(async (path) => {
+      if (path === '/api/public/flags') return { status: 200, body: FLAGS_ON };
+      if (path === '/api/public/chat/demos') {
+        return { status: 200, body: { watermark: evil, demos: [listed] } };
+      }
+      if (path.endsWith('/session')) {
+        return { status: 201, body: envelope({ sessionId: SESSION, disclosure: WASATCH_DISCLOSURE, watermark: evil }) };
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+    render(<LiveChatGate />);
+    expect(await screen.findByRole('note', { name: WATERMARK_TEXT })).toBeInTheDocument();
+    expect(screen.queryByText(evil)).toBeNull();
+    expect(screen.getByText(affiliationBanner('Wasatch Heating'))).toBeInTheDocument();
   });
 
   it('rejects a public flags payload with an extra key', () => {

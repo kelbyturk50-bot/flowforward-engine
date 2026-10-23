@@ -131,7 +131,8 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND, transport = nu
   );
   const chips = transport?.chips?.length ? transport.chips : (transport ? [] : chipsFor(SAMPLE_FACTS));
   const disclosure = transport ? (transport.disclosure || '') : disclosureText(brand.name, SAMPLE_FACTS.phone);
-  const banner = transport ? (transport.banner || '') : affiliationBanner(brand.name);
+  const suppliedBanner = String(transport?.banner || '').trim();
+  const banner = suppliedBanner || affiliationBanner(brand.name);
   const afterHours = transport
     ? afterHoursNotice(transport.facts || { hours: '' }, new Date())
     : afterHoursNotice(SAMPLE_FACTS);
@@ -345,7 +346,7 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND, transport = nu
     : `${remaining} characters left.`;
 
   return (
-    <PrototypeLayout brand={brand} watermark={transport?.watermark || undefined}>
+    <PrototypeLayout brand={brand}>
       <main
         id="prototype-main"
         className="live-chat"

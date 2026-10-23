@@ -1,10 +1,10 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import NotFound from '../NotFound';
 import { FF_LIVE_CHAT_DEMO, FF_PROTOTYPE_GALLERY, previewFlagsOverride } from '../flags';
 import { publicFlagsOpen, readPublicFlags } from './public-flags.js';
 
 const LiveChatDemo = lazy(() => import('./LiveChatDemo.jsx'));
 const LiveChatConnected = lazy(() => import('./LiveChatConnected.jsx'));
+const LiveChatNotFound = lazy(() => import('./LiveChatNotFound.jsx'));
 
 function previewFlagOn(name) {
   const override = previewFlagsOverride();
@@ -37,7 +37,13 @@ export default function LiveChatGate({ token = '', malformed = false }) {
   }, [token, malformed]);
 
   if (phase === 'loading') return <Loading />;
-  if (phase === 'closed') return <NotFound />;
+  if (phase === 'closed') {
+    return (
+      <Suspense fallback={<Loading />}>
+        <LiveChatNotFound />
+      </Suspense>
+    );
+  }
   if (phase === 'fixture') {
     return (
       <Suspense fallback={<Loading />}>
