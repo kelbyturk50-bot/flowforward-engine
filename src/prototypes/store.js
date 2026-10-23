@@ -67,10 +67,10 @@ function siteColors(research) {
   return { primary: c.primary.toLowerCase(), secondary: (c.secondary && HEX.test(c.secondary) ? c.secondary : SECONDARY_FALLBACK).toLowerCase() };
 }
 
-// Hand-entered TEST brand first, then the colors read from the shop's own
-// site during research, then (CRM only) a live read of the site, then the
-// FlowForward fallback.
-async function colorsFor(prospect, { live = false } = {}) {
+// Hand-entered TEST brand first, then colors cached during research, then
+// the FlowForward fallback. Creating a prototype does not fetch. A live
+// read of the shop's site is matchSiteColors only.
+async function colorsFor(prospect) {
   const { rows } = await pool.query(
     `SELECT colors
        FROM prospect_brands
@@ -83,13 +83,6 @@ async function colorsFor(prospect, { live = false } = {}) {
   if (found[0]) return { primary: found[0], secondary: found[1] || SECONDARY_FALLBACK };
   const cached = siteColors(prospect.research);
   if (cached) return cached;
-  if (live && prospect.website) {
-    const got = await palette.detectBrandColors(prospect.website);
-    if (!got.error && got.primary) {
-      await saveSiteColors(prospect.id, got);
-      return { primary: got.primary, secondary: got.secondary || SECONDARY_FALLBACK };
-    }
-  }
   return { primary: PRIMARY_FALLBACK, secondary: SECONDARY_FALLBACK };
 }
 
@@ -257,7 +250,7 @@ async function ensurePrototype(prospectId, { fresh = false } = {}) {
   if (serviceTitanBlocked(prospect, agent, rubric)) agent = DEFAULT_AGENT;
   const colors = existing
     ? { primary: existing.color_primary, secondary: existing.color_secondary }
-    : await colorsFor(prospect, { live: true });
+    : await colorsFor(prospect);
   if (!tokens.keyReady()) throw httpError(503, 'Prototype links need CRM_API_KEY with at least 32 characters.', 'key_missing');
   if (existing) await revoke(existing.id);
   const row = await insertRow(prospect, agent, colors);
