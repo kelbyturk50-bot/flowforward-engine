@@ -406,8 +406,21 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 
   - The 404 body, headers and timing path are identical in all four 404 cases. It reveals nothing about whether the token exists, was revoked, or the feature is off, and a test asserts byte equality across them.
   - Every cap hit returns 429 (§8.2).
-- [ ] **Body limit (2 KB).** `server.js` mounts `express.json({ limit: '1mb' })` globally, before the public routes, so a route-level parser mounted later never applies. The chat routes are therefore mounted **before both `cors()` (`server.js`, which runs before the parser and answers OPTIONS preflights itself) and the global parser**, with their own `express.json({ limit: '2kb' })`. Mounting before the parser alone isn't enough, because `cors()` would still add ACAO and answer preflights. - [ ] **Own 413.** The chat router sits before `app.use(pilotDemo.payloadTooLarge)`, so its 2 KB parser error would otherwise fall through to that later handler. Instead, the chat router has its own error handler for `entity.too.large`. It returns 413 with a chat JSON body (`{ "error": "payload_too_large" }`) and the full chat response headers below (noindex, no-referrer, no-store, nosniff), and never the pilot demo body.
-  - A test sends a 2,049-byte body and asserts: status 413, the chat body (not the pilot demo body), all four chat headers, and 0 responder calls.
+- [ ] **Body limit (2 KB).** `server.js` mounts `express.json({ limit: '1mb' })` globally, before the public routes, so a route-level parser mounted later never applies. The chat routes are therefore mounted **before both `cors()` (`server.js`, which runs before the parser and answers OPTIONS preflights itself) and the global parser**, with their own `express.json({ limit: '2kb' })`. Mounting before the parser alone isn't enough, because `cors()` would still add ACAO and answer preflights.
+- [ ] **Chat router middleware order.** Within the chat router, `express.json({ limit: '2kb' })` is the **first** middleware. It runs before every Express rate-limit counter, the session mint, the token lookup and any DB query or call. An over-limit body never touches a counter or the DB. The full order is:
+  1. `express.json({ limit: '2kb' })` (rejects over-limit bodies with `entity.too.large`);
+  2. the chat response headers (below);
+  3. token lookup, session mint or check, and the Express counters (§8.2);
+  4. the route handler: Tx 1, the responder, Tx 2;
+  5. the router's own error handler, which catches `entity.too.large` and returns 413.
+- [ ] **Own 413.** The chat router sits before `app.use(pilotDemo.payloadTooLarge)`, so its 2 KB parser error would otherwise fall through to that later handler. Instead, the chat router has its own error handler for `entity.too.large`. It returns 413 with a chat JSON body (`{ "error": "payload_too_large" }`) and the full chat response headers below (noindex, no-referrer, no-store, nosniff), and never the pilot demo body.
+  - Because the parser runs before the header middleware, the 413 handler **sets the four chat headers itself**.
+  - The handler logs at most the `payload_too_large` enum (logging allow-list, §6). It never logs the body or any part of it.
+  - **413 test.** It runs under the pinned CORS setup below and sends a 2,049-byte body containing a unique marker string (e.g. `ZZ_413_MARKER_…`). With the counters, the DB pool and the logger spied, it asserts:
+    1. **No counting, no DB:** 0 Express counter increments, 0 DB queries (no session mint, no token lookup), and 0 responder calls.
+    2. **No ACAO:** no `Access-Control-Allow-Origin` header on the 413.
+    3. **Exact body:** status 413, the body is byte-equal to `{"error":"payload_too_large"}` (not the pilot demo body), and all four chat headers are present.
+    4. **No payload in logs:** the captured log output contains no part of the payload, checked by asserting the marker string doesn't appear. At most `payload_too_large` is logged.
 - [ ] **No CORS.** The page is same-origin (`/demo/prototype` is served by `server.js`), so the chat routes send **no** `Access-Control-Allow-Origin`, whatever `CORS_ORIGINS` says, including when it's unset. The test pins its own CORS setup, so it can't false-pass on whatever allow-list the env has (`cors()` is mounted with `origins.length ? { origin: origins } : undefined`).
   - **Setup:** run with the allow-list either unset (`cors()` sends `*`) or set to include the test origin. Either way, `cors()` *would* answer that origin.
   - **Chat routes:** a preflight and a POST from that origin get **no** `Access-Control-Allow-Origin` and **no** `Access-Control-Allow-Methods`.
@@ -467,7 +480,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   - **Logging:** the captured logs contain no IP, `ip_hash`, `sessionId`, user text, model output or Anthropic error text.
   - **Flag and ceiling:** `PUT /api/flags/FF_LIVE_CHAT_MODEL` gives 400 `flag_not_writable`; the env value `"TRUE"` or `"1"` means off; no route writes the ceiling, and `app_settings` is never read or written for it; `CHAT_DEMO_DAILY_CEILING_USD` unset, `""`, `"abc"`, `0`, `-1`, `NaN` and `Infinity` mean off.
   - **Model:** an unpriced `MODEL` fails gate (h) and gives fixtures.
-  - **Body and CORS:** a 2,049-byte body gives 413; the 413 carries the chat body and the four chat headers; under a pinned CORS setup (allow-list unset, or including the test origin), a preflight and a POST to the chat routes get no ACAO and no `Access-Control-Allow-Methods`, while a control request to a normal `/api` route does get ACAO.
+  - **Body and CORS:** a 2,049-byte body gives 413 from the router's own handler, with 0 counter increments, 0 DB queries and 0 responder calls (spies), no ACAO, a body byte-equal to `{"error":"payload_too_large"}`, the four chat headers, and no payload marker in the captured logs; `express.json({ limit: '2kb' })` is the first middleware on the chat router; under a pinned CORS setup (allow-list unset, or including the test origin), a preflight and a POST to the chat routes get no ACAO and no `Access-Control-Allow-Methods`, while a control request to a normal `/api` route does get ACAO.
   - **Trust proxy:** `app.get('trust proxy') === 1`, because `clientIp`'s trust-all branch would fall back to the left-most XFF.
   - **Purge isolation:** a purge that throws still lets the mint succeed, and the mint transaction is never aborted by it.
   - **Alerts:** each alert event shows the CRM card banner and makes 0 outbound requests.
