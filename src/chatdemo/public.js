@@ -2,6 +2,7 @@
 // express.json({ limit: '2kb' }) is the first middleware on each chat router.
 
 const express = require('express');
+const { chatCors } = require('./cors');
 const { clientIp } = require('../pilot/rate-limit');
 const { lookupToken } = require('../prototypes/store');
 const { effective } = require('../flags/resolve');
@@ -219,14 +220,12 @@ function pausedBody() {
 
 function createRouter(kind) {
   const router = express.Router({ mergeParams: true });
+  // The 2 KB parser stays first. An oversized body throws before chatCors,
+  // so the 413 handler does not echo an Origin.
   router.use(express.json({ limit: '2kb' }));
   router.use((req, res, next) => {
     stamp(res);
-    if (req.method === 'OPTIONS') {
-      res.status(204).end();
-      return;
-    }
-    next();
+    chatCors(req, res, next);
   });
 
   if (kind === 'demo') {
