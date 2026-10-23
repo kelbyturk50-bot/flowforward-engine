@@ -1270,8 +1270,11 @@ CREATE TABLE IF NOT EXISTS chat_demo_sessions (
   expires_at     TIMESTAMPTZ NOT NULL,
   CONSTRAINT chat_demo_sessions_message_count_cap CHECK (message_count >= 0 AND message_count <= 20),
   CONSTRAINT chat_demo_sessions_tag_check CHECK (
-    test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
-    AND char_length(test_tag) <= 80
+    char_length(test_tag) <= 80
+    AND (
+      test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+      OR test_tag ~ '^demo-[a-z0-9]+(-[a-z0-9]+)*$'
+    )
   )
 );
 

@@ -3,7 +3,7 @@
 // The ceiling is read from the process env on each reservation.
 
 const crypto = require('crypto');
-const { CHAT_CAPS } = require('./caps');
+const { CHAT_CAPS, CAP_CHECKS } = require('./caps');
 const { readCeiling } = require('./ceiling');
 const {
   CANNED_REPLY,
@@ -34,6 +34,7 @@ const CHIP_IDS = new Set(['chip_emergency', 'chip_booking', 'chip_price', 'chip_
 const TOOL_NAMES = new Set(['offer_sample_slots', 'flag_emergency', 'capture_lead', 'handoff_to_human']);
 const URGENCY = new Set(['low', 'normal', 'urgent', 'emergency']);
 const LEAD_SERVICES = new Set(['water_heater', 'furnace', 'general', 'drain']);
+const CAP_CONSTRAINTS = new Set(CAP_CHECKS.map((row) => row[0]));
 const CORRECTIVE = 'Reply again using only the facts that were provided. If a detail is not listed, say the team will confirm.';
 const CARD_TEXT = Object.freeze({
   offer_sample_slots: 'Sample times, not real availability.',
@@ -138,6 +139,17 @@ function createChatEngine(opts = {}) {
     };
   }
 
+  function serverError(business) {
+    return {
+      status: 500,
+      body: envelope(business, { error: 'server_error' }),
+    };
+  }
+
+  function isCapViolation(err) {
+    return Boolean(err && err.code === '23514' && CAP_CONSTRAINTS.has(err.constraint));
+  }
+
   function invalid(business) {
     return {
       status: 400,
@@ -226,13 +238,13 @@ function createChatEngine(opts = {}) {
     try {
       await countersApi.runMint({ linkKey: business.linkKey, ipHash: hashed, at, session });
     } catch (err) {
-      if (err && err.code === '23514') {
+      if (isCapViolation(err)) {
         countersApi.rememberBumps(prepared.keys);
         await safeEvent({ prototypeId: business.prototypeId, type: 'cap_hit', at });
         return limited(business);
       }
       logErr('cap_store_unavailable', err);
-      return failPaused(business);
+      return serverError(business);
     }
     countersApi.rememberBumps(prepared.keys);
     await safeEvent({
@@ -384,13 +396,13 @@ function createChatEngine(opts = {}) {
         chipId: parsed.chipId,
       });
     } catch (err) {
-      if (err && err.code === '23514') {
+      if (isCapViolation(err)) {
         countersApi.rememberBumps(prepared.keys);
         await safeEvent({ prototypeId: business.prototypeId, sessionId: row.id, type: 'cap_hit', at });
         return limited(business);
       }
       logErr('cap_store_unavailable', err);
-      return failPaused(business);
+      return serverError(business);
     }
     countersApi.rememberBumps(prepared.keys);
     if (parsed.chipId) {
@@ -405,7 +417,11 @@ function createChatEngine(opts = {}) {
 
     let outcome;
     try {
-      outcome = await answer({ business, row, turnId, parsed, at });
+      // Tokenless demo businesses are fixture-only. They never enter the
+      // live gate, the spend reservation, or the model.
+      outcome = business.fixtureOnly
+        ? scriptedReply(business, parsed)
+        : await answer({ business, row, turnId, parsed, at });
     } catch (err) {
       logErr('cap_store_unavailable', err);
       return failPaused(business);
@@ -454,6 +470,20 @@ function createChatEngine(opts = {}) {
       at,
     });
     return { status: 200, body: envelope(business, outcome.body) };
+  }
+
+  function scriptedReply(business, parsed) {
+    if (asksIfAi(parsed.text)) {
+      return present({
+        text: IDENTITY_REPLY,
+        tools: [],
+        source: 'fixture',
+        facts: business.facts,
+        message: parsed.text,
+        chipId: parsed.chipId,
+      });
+    }
+    return fromFixture(business, parsed, { paused: false });
   }
 
   async function answer({ business, row, turnId, parsed, at }) {
@@ -775,7 +805,7 @@ function createChatEngine(opts = {}) {
     };
   }
 
-  return { openSession, postMessage, postCta };
+  return { openSession, postMessage, postCta, clock };
 }
 
 function factValue(facts, field) {

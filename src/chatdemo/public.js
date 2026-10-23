@@ -24,6 +24,12 @@ function engine() {
   return defaultEngine;
 }
 
+function engineClock() {
+  const current = engine();
+  if (current && typeof current.clock === 'function') return current.clock();
+  return new Date();
+}
+
 function _setEngineForTests(next) {
   if (process.env.NODE_ENV !== 'test') throw new Error('test only');
   engineOverride = next || null;
@@ -120,6 +126,7 @@ function businessFromDemo(demo) {
     company: '',
     linkKey: `demo:${demo.slug}`,
     linkExpires: null,
+    fixtureOnly: true,
   };
 }
 
@@ -185,7 +192,7 @@ async function resolveDemo(slug) {
 async function resolvePrototype(token) {
   const [flagResult, lookResult] = await Promise.allSettled([
     flagsOn(),
-    lookupToken(token),
+    lookupToken(token, engineClock()),
   ]);
   const on = flagResult.status === 'fulfilled' && flagResult.value === true;
   if (!on) return { status: 404 };
