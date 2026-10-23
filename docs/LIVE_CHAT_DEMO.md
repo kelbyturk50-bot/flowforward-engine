@@ -50,7 +50,12 @@ New table `prototype_facts`. There is one row per known fact. **Unknown facts ha
 - [ ] Writes are CRM-only (API key) or fixture inserts in tests. The public route never writes facts.
 - [ ] `cached_research` rows come only from `prospects.research` that is already cached. **No HTTP** to build the sheet (the same cache-only rule as the PROTOTYPE_PLAY score path), and no new Places queries.
 - [ ] Pre-prod (the current Railway env is staging, per PLAYBOOK) accepts facts only for prospects whose `company` starts with `TEST:`. The write path refuses anything else (422) and a test proves it.
-- [ ] Hours from Google render as "per Google". Prices render only as "the site lists X; the team will confirm for your job."
+- [ ] **"per Google" rule.** A fact renders as "per Google" only when **both** hold:
+  - `source = 'cached_research'`;
+  - its `source_url` host is `google.com` or a subdomain of it: the parsed `URL.hostname` equals `google.com` or ends with `.google.com` (so `maps.google.com` counts, `google.com.evil.example` doesn't).
+
+  Every other fact never shows "per Google". A unit test covers each case.
+- [ ] Hours from Google follow the rule above. Prices render only as "the site lists X; the team will confirm for your job."
 - [ ] Fixtures live next to `src/brand/fixtures.js`. Names start with `TEST:` (e.g. `TEST: Cedar Lane HVAC`) and phones use 555-01xx.
 
 ## 4. UI (Delta builds, Ochre designs)
@@ -59,7 +64,7 @@ Reuse the prototype shell, tokens, `fixAccent` and the wordmark from `src/protot
 - [ ] **Watermark** `PROTOTYPE, not live. FlowForward can make this real in days.` appears on every screen and state: the chat, the owner panel, "Demo paused", 410 and 429. It is server-rendered and can't be turned off by a flag, a query param or a theme. Reuse `WATERMARK_TEXT`.
 - [ ] **Sticky banner:** "Sample concept built by FlowForward for <Business>. Not affiliated with or operated by <Business>. No real bookings are made."
 - [ ] **AI disclosure:** the first bot message is always the fixed string "Hi! I'm an AI receptionist demo FlowForward built for <Business>. I'm not connected to their team. If you're a real customer, please call <facts.phone, or 'the business directly' if unknown>." The model never generates it. A persistent "AI demo" label sits in the phone header. Asking "are you a bot/AI/human?" always gets "Yes, I'm an AI." This is a deterministic intercept that runs before the responder.
-- [ ] **Phone mockup:** the brand wordmark and accent go on outgoing bubbles only, with neutral surfaces. Input is capped at 500 chars with a live counter.
+- [ ] **Phone mockup:** the brand wordmark and accent go on outgoing bubbles only, with neutral surfaces. Input is capped at 500 chars with a live counter. The counter counts code points after NFKC, the same unit as §8.2.
 - [ ] **Suggestion chips** (fixed ids, used as event enums):
   - `chip_emergency`: "My water heater is leaking all over the garage" → `flag_emergency` plus `handoff_to_human`.
   - `chip_booking`: "Can someone come out Tuesday?" → `offer_sample_slots`.
@@ -118,6 +123,15 @@ Price and number comparisons also drop `,` inside digit groups. Matching is on w
 
 Fixture copy must avoid these words, e.g. no "How can I help today?".
 
+**Known false positives (accepted; not bugs).** The list is deliberately conservative, so it also blocks harmless prose. The live reply then gets the corrective regenerate (or sentence replacement), and fixture copy is written around them. Examples:
+- "I can't confirm that **right now**"
+- "I'll pass this on **immediately**"
+- "**today**'s question" / "what can I help with **today**"
+- "I'm **on the way** to getting you an answer"
+- "I can't promise **same day**" (negation isn't parsed)
+
+A test pins these as blocked so a future loosening is a deliberate change.
+
 - [ ] The phrase lists and the keyword table are exported constants in `validator.js`. Tests import them, so the doc and the code can't drift silently.
 - [ ] **Live replies:** on any hit, regenerate once with a corrective note. If it still hits, the offending sentences are replaced with "I don't want to guess on that; the team will confirm." The prospect never sees an unvalidated live reply, and streaming to the browser is off.
 - [ ] **Fixture replies** go through the same validator. A CI test runs every fixture reply against every fixture facts sheet and expects zero hits.
@@ -159,6 +173,7 @@ Fixture copy must avoid these words, e.g. no "How can I help today?".
     - each part counts its **UTF-8 byte length**: the system text, each tool definition as `JSON.stringify`, the `<business_facts>` block, and each history message and the current message;
     - plus **8 tokens of overhead** per message, block and tool.
     - Byte length works as an upper bound because a byte-level BPE token always covers at least one byte, so the token count can't exceed the byte count. For English it overcounts about 3–4×, which is intended. If the actual `usage` input ever exceeds the bound, settlement still records it as overshoot (§8.3) and logs `input_bound_exceeded`.
+  - **Hidden tool system prompt.** The API adds its own tool-use system prompt (a few hundred tokens) that the bound doesn't count. The 3–4× byte overcount covers it. If it ever doesn't, settlement records overshoot and logs `input_bound_exceeded` (§8.3).
   - **Never trimmed:**
     - the static system prompt with rules 1–6 and the four tool definitions;
     - the pinned facts `business_name`, `phone` and `time_zone`, which the disclosure and banner need;
@@ -201,7 +216,8 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 - **Time zones.**
   - A *business-local day* uses the business's `time_zone` fact (§3), defaulting to `America/Denver` when unknown.
   - Windows that aren't tied to one business (global sessions, per-IP day, spend ceiling) use FlowForward's zone, `America/Denver`.
-  - Both layers compute the bucket key the same way, with `(now() AT TIME ZONE tz)::date` in Postgres and the same zone in Express.
+  - Both layers compute the bucket key the same way from the **same injected timestamp**: `($now AT TIME ZONE tz)::date` in Postgres, where `$now` is a bound parameter taken from the engine's `clock()`, and the same zone in Express.
+- **`$now`, never `now()`.** Every bucket key, `created_at`, reservation, settle, sweep and expiry statement on the chat paths takes the clock's timestamp as a parameter, `$now` (`timestamptz`). None of them call `now()`, `CURRENT_TIMESTAMP` or a column `DEFAULT now()`; the chat tables have no time defaults, so a missing `$now` fails the insert. Hour and minute buckets use `date_trunc('hour'|'minute', $now)`. In production `clock` is `() => new Date()`.
 - **Why 16,000 input tokens.** These are bound tokens, which overcount real tokens about 3–4× for English. The budget:
   - system prompt + rules + 4 tools ≈ 4,000;
   - a typical sourced facts sheet ≈ 3,000 (full worst case ≈ 10,000, which is where trimming takes over);
@@ -214,7 +230,7 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 ### 8.2 Enforcement in each layer
 | Key | Express (before the responder runs; 429 or 413) | Postgres (in the turn/session transaction; 23514 maps to 429) |
 |---|---|---|
-| `maxMessageChars` | rejects `text.length > 500` with 413 | `chat_demo_turns.input_chars` CHECK ≤ 500 |
+| `maxMessageChars` | rejects with 413 when `[...text.normalize('NFKC')].length > 500` (code points after NFKC, **not** UTF-16 `text.length`) | `chat_demo_turns.input_chars` CHECK ≤ 500, where `input_chars` is the same NFKC code-point count; Postgres `char_length()` counts code points, and a test asserts it equals Express's count for emoji, combining marks and full-width input |
 | `maxMessagesPerSession` | in-memory session counter | `chat_demo_sessions.message_count` CHECK ≤ 20 |
 | `maxMessagesPerLinkDay` | in-memory counter keyed `(prototype_id, local day)` | `chat_demo_link_days.message_count` CHECK ≤ 40 |
 | `maxMessagesPerLink` | in-memory counter keyed `prototype_id` | `chat_demo_links.message_count` CHECK ≤ 100 |
@@ -227,46 +243,68 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 | `maxOutputTokens` | `max_tokens: 300` on every live request | `chat_demo_turns.output_tokens` CHECK ≤ 300 |
 
 - [ ] **Express counters are lazily seeded.** On first use after a restart, a counter is seeded by a pre-read of the matching Postgres row. Express is the fast first line, and Postgres can't be bypassed.
-- [ ] `rate-limit.js`'s `consume()` takes `{ max, windowMs }` per bucket from `CHAT_CAPS` and uses the same fixed buckets as Postgres, not windows that start at the first hit. Existing pilot and prototype buckets are unchanged.
+- [ ] **`rate-limit.js` change (S1 scope).**
+  - Today `consume()` uses `Date.now()` and rolling windows. S1 changes it to take `{ max, windowMs }` per bucket from `CHAT_CAPS` and an injectable `clock` (default `Date.now`). The chat buckets become fixed buckets keyed identically to Postgres, not windows that start at the first hit.
+  - Existing pilot and prototype buckets keep their rolling behavior, and their existing tests still pass unchanged.
+- [ ] **Single "character" unit.** Every character cap (message 500, fact value 500, snippet 300) counts code points after NFKC, in Express, in Postgres and in the UI counter.
 - [ ] Every counter increment happens in the same transaction as the turn or session insert. A CHECK violation (SQLSTATE `23514`) maps to a 429 with a friendly "Demo limit reached" card that keeps the watermark.
 - [ ] **IP storage.** The existing limiter never writes IPs. Postgres stores only `ip_hash = HMAC(HKDF(CRM_API_KEY, 'ff-chatdemo-ip'), ip ‖ FlowForward day)`, so no new secret is needed and the hash rotates daily. Rows in the IP and minute tables are purged after 48 h. Warden signs off.
 
 ### 8.3 Spend ceiling, reservations and sweep
 - [ ] **Ceiling value.**
-  - `ceiling_usd` is read on every reservation from `app_settings` key `chat_demo_daily_ceiling_usd`. **Kelby sets the value.** No default ships, and an unset, empty, zero or invalid value means the live path is off.
+  - The ceiling is read on every reservation from `app_settings` key `chat_demo_daily_ceiling_usd`, a dollar value that Kelby enters, and parsed to integer `ceiling_micros`. **Kelby sets the value.** No default ships, and an unset, empty, zero or invalid value means the live path is off.
   - The day resets at midnight `America/Denver`.
 - [ ] **Tables.**
-  - `chat_demo_spend_days (day, spent_usd, reserved_usd, overshoot_usd)`. All columns are CHECK ≥ 0. There is **no** CHECK tying them to the ceiling, so a settle can never fail.
-  - `chat_demo_reservations (id, day, turn_id, amount_usd, created_at, settled_at, expired_at, actual_usd)`.
+  - `chat_demo_spend_days (day, spent_micros, reserved_micros, overshoot_micros)`. All columns are CHECK ≥ 0. There is **no** CHECK tying them to the ceiling, so a settle can never fail.
+  - `chat_demo_reservations (id, day, turn_id, status, amount_micros, created_at, settled_at, expired_at, released_at, actual_micros)`.
 - [ ] **Reserve the fixed worst case, never an estimate.**
   - The reservation is the input cap priced at the highest input rate `costOf` applies (the 1.25× cache-write rate), plus `max_tokens` at the output rate: `reserve = costOf(MODEL, { cacheWrite: CHAT_CAPS.maxInputTokens, output: CHAT_CAPS.maxOutputTokens })`.
   - It is fully deterministic: the same for every turn for a given `MODEL`, and computed locally with no network call. It's exported as `reservationUsd(model)`.
   - Because `buildPrompt` guarantees the prompt is within `maxInputTokens` bound tokens, actual cost can't exceed the reserve unless the bound is beaten or pricing changes mid-call. Either case is recorded as overshoot.
-- [ ] **Reserve atomically.** One statement does it: `UPDATE chat_demo_spend_days SET reserved_usd = reserved_usd + $r WHERE day = $d AND spent_usd + reserved_usd + $r <= $ceiling RETURNING …`, plus the reservation row insert in the same transaction.
-  - New reservations are blocked once `spent_usd + reserved_usd` reaches the ceiling (no row returned).
+- [ ] **Unknown model fails closed.** `reservationUsd(model)` throws `UnpricedModelError` when `model` has no entry in `PRICES`, and it never uses `costOf`'s sonnet fallback. The engine treats that as "live off": the turn uses fixtures and the server logs `model_unpriced`. A pricier `PROPOSAL_MODEL` therefore can't be under-reserved.
+- [ ] **Integer micro-dollars.** All spend arithmetic and comparisons use integer micro-dollars (`Math.round(usd * 1e6)`):
+  - the reserve, actual, ceiling, `spent`, `reserved` and `overshoot` are all stored as `BIGINT` `*_micros` columns, and the ceiling setting is parsed to micros on read;
+  - the per-turn `chat_demo_turns.cost_usd` is kept as `NUMERIC` for the monthly readout, and it's derived from the micros value;
+  - tests compare integers, e.g. a reserve of `43000` micros for `claude-sonnet-5-5`, never with float `===`.
+- [ ] **The reservation is separate from the gate.** The engine calls `reserve(ctx)` **after** the gate returns true and after `buildPrompt` fits. `reserve` is an injectable seam on `createChatEngine({ …, spend })`, where `spend = { reserve, settle, release, sweep }` defaults to the Postgres implementation. A stubbed gate therefore still runs the real reserve, settle and overshoot code against the test DB.
+- [ ] **Unused reservations are released immediately.** If anything after a successful reserve stops the live call (a later check fails, a client error before any request is sent, or a fallback), `release(id, $now)` returns the amount to the budget at once: `reserved -= amount`, and `released_at` is set. An unused reservation doesn't wait for the sweep. A timeout after the request was sent is **not** released, because it may have been billed; it is settled as the full amount or swept.
+- [ ] **Reserve atomically.** One statement does it: `UPDATE chat_demo_spend_days SET reserved_micros = reserved_micros + $r WHERE day = $d AND spent_micros + reserved_micros + $r <= $ceiling RETURNING …`, plus the reservation row insert (`created_at = $now`) in the same transaction.
+  - New reservations are blocked once `spent_micros + reserved_micros` reaches the ceiling (no row returned).
   - A blocked reservation means the turn uses the fixture responder. The chat shows **"Demo paused. The live AI is resting for today; you're seeing sample replies."** for the rest of the FlowForward day, and the server logs `demo_paused`.
+- [ ] **Settle vs. sweep race: exactly one wins.** Each reservation has `status` CHECK in (`reserved`, `settled`, `expired`, `released`). Settle claims the row atomically:
+  `WITH old AS (SELECT id, status FROM chat_demo_reservations WHERE id = $id FOR UPDATE) UPDATE chat_demo_reservations r SET status = 'settled', settled_at = $now, actual_micros = $a FROM old WHERE r.id = old.id AND old.status IN ('reserved','expired') RETURNING old.status`.
+  - `reserved` → apply the full move below.
+  - `expired` → apply only the delta.
+  - No row → the reservation is already settled or released, so it's a no-op and logged.
+  - The sweep updates only `WHERE status = 'reserved' AND created_at < $now - interval '10 minutes'`. Both lock the same row, so whichever commits second sees the other's status, and the amount is never counted twice.
 - [ ] **Settle.** After the call, one transaction does it:
-  - Move the reserved amount out and the actual `costOf(MODEL, usage)` in: `reserved_usd -= amount`, `spent_usd += actual`.
-  - Set `settled_at` and `actual_usd`.
-  - If `actual > amount`, add the difference to `overshoot_usd` and log `spend_overshoot`.
-  - Settling never fails and never clamps, so `spent_usd` is always the true cost. A ceiling that Kelby lowers mid-day only blocks new reservations, and in-flight calls still settle.
+  - Move the reserved amount out and the actual `costOf(MODEL, usage)` in: `reserved_micros -= amount`, `spent_micros += actual`.
+  - Set `settled_at` and `actual_micros`.
+  - If `actual > amount`, add the difference to `overshoot_micros` and log `spend_overshoot`.
+  - Settling never fails and never clamps, so `spent_micros` is always the true cost. A ceiling that Kelby lowers mid-day only blocks new reservations, and in-flight calls still settle.
 - [ ] **Expiry sweep (10 min).** One statement runs every 60 s, from an in-process `setInterval` started with the chat routes. The same statement also runs at the start of every reservation transaction, so a stopped timer can't leave budget locked.
-  - It finds reservations with `settled_at IS NULL AND expired_at IS NULL AND created_at < now() - interval '10 minutes'` (`FOR UPDATE SKIP LOCKED`).
-  - It sets `expired_at`, moves each `amount_usd` from `reserved_usd` into `spent_usd` (conservative: a crashed call may still have been billed), and logs `reservation_expired`.
-  - A late settle for an expired reservation applies only the delta: `spent_usd += actual - amount`, plus `overshoot_usd` if positive.
+  - It finds reservations with `status = 'reserved' AND created_at < $now - interval '10 minutes'` (`FOR UPDATE SKIP LOCKED`), where `$now` is the clock parameter.
+  - It sets `status = 'expired'`, `expired_at = $now`, moves each `amount_micros` from `reserved_micros` into `spent_micros` (conservative: a crashed call may still have been billed), and logs `reservation_expired`.
+  - A late settle for an expired reservation applies only the delta: `spent_micros += actual - amount`, plus `overshoot_micros` if positive.
   - The live call's 15 s timeout is far inside the 10-minute TTL.
 
 ### 8.4 Live gate (stubbable)
-- [ ] The engine is built as `createChatEngine({ liveGate, fixtureResponder, liveResponder, clock })`. `liveGate(ctx) → Promise<boolean>` is injectable, and its default, `defaultLiveGate`, returns true only when **all** of these hold:
+- [ ] The engine is built as `createChatEngine({ liveGate, fixtureResponder, liveResponder, clock, spend })`. `liveGate(ctx) → Promise<boolean>` is injectable.
+- [ ] The default gate is built by a factory with injectable inputs: `makeDefaultLiveGate({ nodeEnv, flags, ceiling, caps, anthropicConfigured })`.
+  - `flags(name)` resolves a flag; `ceiling()` returns the configured ceiling in micros or null; `caps(ctx)` reports whether any cap is hit; `anthropicConfigured()` is a function.
+  - Production wiring is exactly `makeDefaultLiveGate({ nodeEnv: process.env.NODE_ENV, flags: resolveFlag, ceiling: readCeiling, caps: checkCaps, anthropicConfigured: cfg.anthropicConfigured })`, exported from `src/chatdemo/wiring.js` as `defaultLiveGate`.
+  - The gate itself never reserves (see §8.3). It returns true only when **all** of these hold:
   - (a) `FF_PROTOTYPE_GALLERY` is on.
   - (b) `FF_LIVE_CHAT_DEMO` is on.
   - (c) `FF_LIVE_CHAT_MODEL` is on.
   - (d) `NODE_ENV !== 'test'`.
-  - (e) the ceiling is set and the reservation succeeded.
+  - (e) the ceiling is set (non-null, > 0).
   - (f) no cap in §8.1 is hit.
   - (g) `cfg.anthropicConfigured()` is true.
 
   Otherwise the turn uses `FixtureResponder`.
+- [ ] **AC: every gate condition is tested on its own.** For each condition (a)–(g), a test builds `makeDefaultLiveGate` with all six other inputs true and only that one false, and asserts false. An all-true case asserts true, with `nodeEnv: 'production'` passed as a plain value, so `NODE_ENV=test` in the runner doesn't matter.
+- [ ] **AC: production wiring passes the real `NODE_ENV`.** A test spies on `makeDefaultLiveGate`, loads `src/chatdemo/wiring.js` fresh, and asserts the factory received `nodeEnv === process.env.NODE_ENV`, i.e. `'test'` in CI. It also asserts the exported `defaultLiveGate` returns false with all other inputs true. A static test also fails if `wiring.js` passes a literal for `nodeEnv`.
 - [ ] **Tests inject the gate.** Tests pass a stub `liveGate` (and `clock`) to drive the live branch with the recorded fake client set through `_setClient`. `LiveResponder` unit tests may also call it directly. Neither bypasses the default gate in production code, because `_setClient` throws outside `NODE_ENV=test`.
 - [ ] **Shipping order:** caps, ceiling, sweep and validator merge in the same PR as, or before, `LiveResponder`. A PR that adds `LiveResponder` without them fails review.
 
@@ -281,12 +319,24 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 
 - [ ] Both are added to `DB_NAMES`/`NAMES` in `src/flags/registry.js` and seeded in `schema.sql` with `ON CONFLICT DO NOTHING`. They resolve via `src/flags/resolve.js`: env can force them off, never on.
 - [ ] Turning `FF_LIVE_CHAT_MODEL` on in prod is **Kelby's action only**. No PR, test or routine sets it. A schema test asserts the seed is `false`.
-- [ ] With any flag off, the chat routes return the same 404 as an unknown token. The scripted prototype keeps working.
+- [ ] With any flag off, the chat routes return the same 404 as an unknown token (§10), byte-identical. The scripted prototype keeps working.
 
 ## 10. Routes and headers (Warden required)
 - [ ] `POST /api/public/prototypes/:token/chat/session` mints a session (per-IP throttle, session caps).
 - [ ] `POST /api/public/prototypes/:token/chat/message` takes `{ sessionId, chipId? | text }`. It returns the reply, tool cards and `source: 'fixture'|'live'`.
-- [ ] Both are mounted before the API-key guard, like `src/prototypes/public.js`. The token check uses `lookupToken`, and an expired or revoked token gets 404/410.
+- [ ] Both are mounted before the API-key guard, like `src/prototypes/public.js`. The token check uses `lookupToken`.
+- [ ] **Status codes (pinned; one code per case):**
+
+  | Case | Status | Body |
+  |---|---|---|
+  | Unknown or malformed token | **404** | the one generic not-found body |
+  | Any required flag off (§9) | **404** | the same body, byte-identical to unknown |
+  | Revoked token, or archived prospect | **404** | the same body, byte-identical to unknown |
+  | Revoked **and** expired | **404** | the same body, byte-identical to unknown (revoked wins) |
+  | Expired (not revoked) | **410** | the page renders `renderGone(410, row)`; the chat API returns 410 with the same expired copy and the watermark |
+
+  - The 404 body, headers and timing path are identical in all four 404 cases. It reveals nothing about whether the token exists, was revoked, or the feature is off, and a test asserts byte equality across them.
+  - Every cap hit returns 429 (§8.2).
 - [ ] JSON body limit is 2 KB.
 - [ ] Every chat response sends:
   - `X-Robots-Tag: noindex, nofollow`
@@ -322,20 +372,28 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 ## 12. Tests and CI (Gauge verifies)
 - [ ] All tests use fixtures and recorded responses. The live branch is exercised only with a stub `liveGate` plus a recorded fake client injected through `_setClient`, the same as proposals.
 - [ ] **No outbound model call in test:** with the default gate, the network guard (`test/guard.js`, which already lists `ANTHROPIC_API_KEY`) active and the fake client unset, opening a chat and sending each chip makes 0 HTTP requests and 0 calls on the Anthropic client. Even with all flags on and a ceiling set, `defaultLiveGate` returns false because `NODE_ENV=test`.
-- [ ] **Gate stub AC:** a test injects `liveGate: async () => true` and asserts `LiveResponder` and the fake client are used. A second test injects `async () => false` and asserts the fixture responder is used with 0 client calls. A third covers each of the default gate's conditions (a)–(g) independently.
+- [ ] **Gate stub AC:** a test injects `liveGate: async () => true` and asserts `LiveResponder` and the fake client are used, **and** that the real `spend.reserve` and `settle` ran against the test DB. A second test injects `async () => false` and asserts the fixture responder is used with 0 client calls and 0 reservations. Each condition (a)–(g) is tested on its own through `makeDefaultLiveGate`, plus the production-wiring `NODE_ENV` test (§8.4).
+- [ ] **Injected clock reaches Postgres:** every chat statement gets `$now` from the clock. A static test greps `src/chatdemo/**` SQL and `schema.sql` chat tables for `now()`, `CURRENT_TIMESTAMP` and `DEFAULT now` and expects 0 hits. The time-zone and sweep tests drive the time only through the clock, with no row backdating and no `pg_sleep`.
+- [ ] **Status codes:** unknown, malformed, flag-off, revoked, archived and revoked+expired each return 404 with a byte-identical body. Expired returns 410 with `renderGone`'s copy and the watermark.
 - [ ] **Caps parity:** `CHAT_CAPS` equals the CHECK numbers parsed from `pg_constraint` (§8.1).
 - [ ] **Each cap in both layers:** every row of §8.2 has an Express test (429/413 before the responder runs) and a Postgres test (a raw `UPDATE`/`INSERT` past the limit gives 23514). The IP hour and day limits are tested separately.
 - [ ] **Time zones:** with an injected clock, a business with `time_zone = America/Los_Angeles` rolls its per-link day at its own midnight. A business with no `time_zone` and the spend ceiling roll at midnight `America/Denver`.
 - [ ] **Spend:**
   - an unset ceiling uses fixtures;
-  - the reservation equals the fixed formula `costOf(MODEL, { cacheWrite: CHAT_CAPS.maxInputTokens, output: CHAT_CAPS.maxOutputTokens })` for every turn, whatever the prompt size; for `claude-sonnet-5-5` that is exactly $0.043;
+  - the reservation equals the fixed formula `costOf(MODEL, { cacheWrite: CHAT_CAPS.maxInputTokens, output: CHAT_CAPS.maxOutputTokens })` for every turn, whatever the prompt size; for `claude-sonnet-5-5` that is `43000` micro-dollars (integer comparison, never float equality);
   - reserving makes 0 calls on the Anthropic client;
-  - concurrent reservations never let `spent + reserved` pass the ceiling;
+  - **concurrency:** with a ceiling of 2.5 × the reserve (`107500` micros for `claude-sonnet-5-5`) and 10 parallel requests on 10 separate pool connections, exactly 2 reservations succeed, 8 are blocked ("Demo paused"), and `spent + reserved` never passes the ceiling;
+  - the settle-vs-sweep race, run both ways with the clock at TTL + 1 ms:
+    - settle and sweep run concurrently on separate connections, and exactly one of `status = 'settled'` (full move) or `'expired'` then `'settled'` (delta only) results;
+    - the final `spent_micros` equals the actual cost exactly, counted once (full move, or sweep + delta);
+  - release: a reservation followed by a pre-request failure returns `reserved` to its prior value immediately;
+  - an unpriced `MODEL` (`claude-unknown-x`) gives a fixture reply, `model_unpriced`, 0 reservations and 0 client calls;
+  - every money assertion compares integer micro-dollars;
   - a blocked reservation shows "Demo paused" with the watermark;
   - actual < reserved settles to actual;
-  - actual > reserved (forced fake usage) settles without error and records `overshoot_usd`;
+  - actual > reserved (forced fake usage) settles without error and records `overshoot_micros`;
   - a ceiling lowered mid-call lets the in-flight settle succeed and blocks the next reservation;
-  - an unsettled reservation older than 10 min (injected clock) is expired by the sweep and moved to spent, and a late settle applies only the delta.
+  - an unsettled reservation older than 10 min (injected clock passed as `$now`) is expired by the sweep and moved to spent, and a late settle applies only the delta.
 - [ ] **Input cap and trim order** (`buildPrompt` unit tests, fixtures only):
   - **Size measurement:** `boundTokens` is deterministic, giving the same input the same number, and is at least the UTF-8 byte length (multibyte and NFKC cases included).
   - **Trim order:** with oversized fixture history and facts, the oldest exchange is dropped first, one exchange at a time, and the conversation always starts with a user message. Facts are dropped only after all history is gone, strictly in `FACT_TRIM_ORDER`. The system prompt, rules, tools, pinned facts and current message are never dropped.
@@ -343,7 +401,10 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
   - **Pinned overflow:** pinned parts plus the message over the cap give a fixture reply and 0 client calls.
   - **Validator uses the trimmed facts:** the validator blocks a reply that claims a fact that was trimmed out.
   - **Postgres:** a turn row with `input_bound_tokens` > 16000 gives 23514.
-- [ ] Validator unit tests (§5), including NFKC cases, plus every fixture reply × every fixture facts sheet giving zero hits.
+- [ ] **Character unit:** a 500-code-point message with emoji passes in both layers. A 501-code-point message gets 413 in Express and 23514 in Postgres, even when `text.length` (UTF-16) differs.
+- [ ] **"per Google":** `cached_research` + `https://www.google.com/maps/...` renders "per Google". `manual` + a google.com URL doesn't, and neither does `cached_research` + `google.com.evil.example` or a non-Google URL.
+- [ ] **`rate-limit.js`:** chat buckets roll at fixed boundaries under an injected clock, and the existing pilot and prototype limiter tests pass unchanged.
+- [ ] Validator unit tests (§5), including NFKC cases and the known-false-positive list, plus every fixture reply × every fixture facts sheet giving zero hits.
 - [ ] Hostile brand name, `?watermark=0` and flag combinations: the watermark is still present on the chat, the paused state and the cap-hit state.
 - [ ] `chat_demo_leads` has no PII columns (asserted from `information_schema`).
 - [ ] `campaign_touches` gets 0 rows when `FF_CAMPAIGNS` is off. When it's on, the test rows use `TEST:` prospects and `TEST:`-prefixed `external_ref`.
@@ -353,9 +414,9 @@ This table is the source. In code it is one frozen object, `CHAT_CAPS` in `src/c
 ## 13. Owners and sequence
 | Slice | Owner | Depends on |
 |---|---|---|
-| S1 Schema (`prototype_facts`, sessions, counters, spend, events, leads), flags, validator, FixtureResponder, caps, public routes | **Canyon** | merged prototype page (#82) and `prototypes` token code |
+| S1 Schema (`prototype_facts`, sessions, counters, spend in micros with reservation `status`, events, leads), flags, validator, FixtureResponder, caps, public routes and status codes, `makeDefaultLiveGate` + wiring, `$now` clock plumbing, the `rate-limit.js` move to fixed buckets with an injectable clock | **Canyon** | merged prototype page (#82) and `prototypes` token code |
 | S2 Phone mockup, chips, owner panel, tool cards, paused and cap states | **Delta**, with **Ochre** designing | S1 API contract |
-| S3 LiveResponder (PROPOSAL_MODEL, `costOf`, ceiling settle) | **Canyon** | S1 merged (caps and ceiling first) |
+| S3 LiveResponder (PROPOSAL_MODEL, `costOf`, fail-closed `reservationUsd`, the reserve/settle/release seam, settle-vs-sweep race handling) | **Canyon** | S1 merged (caps and ceiling first) |
 | Review: public token routes, caps, ip_hash, capture_lead PII, robots/headers, `schema.sql` | **Warden** (required on S1 and S3) | — |
 | QA on preview plus test DB, against §12 | **Gauge** | each slice |
 | Prod enable (`FF_LIVE_CHAT_DEMO`, `FF_LIVE_CHAT_MODEL`, ceiling value) | **Kelby** | S1–S3 merged |
