@@ -550,6 +550,33 @@ describe('live chat public API', () => {
     expect(screen.queryByRole('group', { name: 'Suggestions' })).toBeNull();
   });
 
+  it('keeps the sent bubble when a later message gets a 503 pause', async () => {
+    const user = userEvent.setup();
+    install(async (path) => {
+      if (path === '/api/public/flags') return { status: 200, body: FLAGS_ON };
+      if (path === '/api/public/chat/demos') return { status: 200, body: { watermark: WATERMARK_TEXT, demos: [wasatch()] } };
+      if (path.endsWith('/session')) {
+        return { status: 201, body: envelope({ sessionId: SESSION, disclosure: WASATCH_DISCLOSURE }) };
+      }
+      if (path.endsWith('/message')) {
+        return { status: 503, body: envelope({ error: 'demo_paused', pause_message: PAUSE_MESSAGE, paused: true }) };
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+    render(<LiveChatGate />);
+    const box = await screen.findByLabelText('Text the business');
+    expect(screen.getByRole('group', { name: 'Suggestions' })).toBeInTheDocument();
+    await user.type(box, 'Are you open Saturday?');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText(PAUSE_LOCKED_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(PAUSE_MESSAGE)).toBeNull();
+    expect(document.querySelector('.live-chat-bubble.is-out')).toHaveTextContent('Are you open Saturday?');
+    expect(screen.getByLabelText('Text the business')).toHaveValue('');
+    expect(screen.getByLabelText('Text the business')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(screen.queryByRole('group', { name: 'Suggestions' })).toBeNull();
+  });
+
   it('ignores a saved API address and never sends credentials', async () => {
     localStorage.setItem('ff.apiUrl', 'https://evil.example');
     const seen = [];
