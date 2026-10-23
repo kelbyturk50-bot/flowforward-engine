@@ -383,25 +383,27 @@ describe('prototype on draft', () => {
     const id = (await prototypeRows(lead.id))[0].id;
     assert.equal(Buffer.from(token, 'base64url').length, 32);
 
-    async function shift(issuedSql) {
+    async function shift(expiresAt) {
       const { rows } = await pool.query(
         `UPDATE prototypes
-            SET issued_at = ${issuedSql},
-                expires_at = (${issuedSql}) + INTERVAL '14 days'
+            SET issued_at = $2::timestamptz - INTERVAL '14 days',
+                expires_at = $2::timestamptz
           WHERE id = $1
           RETURNING expires_at`,
-        [id]
+        [id, expiresAt]
       );
       return { token, expires_at: new Date(rows[0].expires_at).toISOString() };
     }
 
-    const early = await shift("NOW() - INTERVAL '14 days' + INTERVAL '1 second'");
+    // Millisecond clocks: SQL NOW() carries microseconds, so a same-millisecond
+    // read can land before that instant. Anchor both sides to a JS date.
+    const early = await shift(new Date(Date.now() + 1000));
     const earlyRes = await request(port, 'GET', `/api/public/prototypes/${early.token}`, { key: '' });
     assert.equal(earlyRes.status, 200);
     assert.equal(earlyRes.json.expires_at, early.expires_at);
     assert.equal(earlyRes.headers['x-content-type-options'], 'nosniff');
 
-    const due = await shift("NOW() - INTERVAL '14 days'");
+    const due = await shift(new Date());
     const dueRes = await request(port, 'GET', `/api/public/prototypes/${due.token}`, { key: '' });
     assert.equal(dueRes.status, 410);
     assert.deepEqual(dueRes.json, { error: 'link_expired', expires_at: due.expires_at });
