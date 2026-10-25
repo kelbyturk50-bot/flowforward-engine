@@ -969,13 +969,84 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
   it('commits schema.sql and boots when a 51c459d brand row breaks the tighter checks', async () => {
     const schema = fs.readFileSync(path.join(ROOT, 'src/db/schema.sql'), 'utf8');
     const repair = fs.readFileSync(path.join(ROOT, 'src/db/brand-constraints.sql'), 'utf8');
-    const schemaWithoutTagUpgrade = schema.replace(
-      /-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/,
-      ''
-    );
-    assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
-    assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutTagUpgrade), false);
-    assert.equal(/DROP\s+CONSTRAINT/i.test(repair), false);
+    // Comments are stripped first. Each statement below is exact and may
+    // appear once. The first two are this change. The rest are the idempotent
+    // trigger and column drops already in schema.sql. Any other DROP of a
+    // constraint, column, trigger, table, or index fails.
+    const allowedDrops = [
+      'ALTER TABLE prospects DROP CONSTRAINT IF EXISTS prospects_do_not_contact_source_check;',
+      'ALTER TABLE chat_demo_sessions DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check;',
+      'DROP TRIGGER IF EXISTS prospects_updated_at ON prospects;',
+      'DROP TRIGGER IF EXISTS projects_updated_at ON projects;',
+      'DROP TRIGGER IF EXISTS proposals_updated_at ON proposals;',
+      'ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS token;',
+      'DROP TRIGGER IF EXISTS prospect_brands_updated_at ON prospect_brands;',
+      'DROP TRIGGER IF EXISTS pilot_customers_updated_at ON pilot_customers;',
+      'DROP TRIGGER IF EXISTS pilot_open_estimates_updated_at ON pilot_open_estimates;',
+      'DROP TRIGGER IF EXISTS inbox_items_updated_at ON inbox_items;',
+      'DROP TRIGGER IF EXISTS campaign_touches_default_channel ON campaign_touches;',
+    ];
+    const dropKind = /\bDROP\s+(?:CONSTRAINT|COLUMN|TRIGGER|TABLE|INDEX)\b/i;
+    // One left-to-right pass: a string literal is kept, a block or line
+    // comment is blanked. Two passes let `-- x /*` swallow real SQL up to a
+    // later `*/`, and let '--' inside a string hide the rest of that line.
+    // Dollar quotes ($tag$...$tag$ and $$...$$), E'...' escapes, standard
+    // strings, and double-quoted identifiers are kept. Comments are blanked.
+    // One pass, so a "--" or quote inside a literal cannot start a comment.
+    // Dollar tags follow Postgres: a letter, "_" or any non-ASCII, then
+    // letters, digits, "_" or non-ASCII. A digit is not a tag. The body is
+    // non-greedy and the closer must repeat the opener. An E-string is only
+    // [Ee]' at a word boundary, so xE' stays an ordinary string.
+    const stripSqlComments = (sql) =>
+      sql.replace(
+        /\$\$[\s\S]*?\$\$|\$([A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*)\$[\s\S]*?\$\1\$|\b[Ee]'(?:\\.|''|[^'\\])*'|"(?:[^"]|"")*"|'(?:[^']|'')*'|\/\*[\s\S]*?\*\/|--[^\n]*/gu,
+        (m) => (/^['"$Ee]/.test(m) ? m : ' ')
+      );
+    const hasDrop = (sql) => dropKind.test(stripSqlComments(sql));
+    assert.equal(hasDrop('-- ALTER TABLE x DROP COLUMN y;\n'), false);
+    assert.equal(hasDrop('/* DROP TABLE x; */ SELECT 1;'), false);
+    assert.equal(hasDrop('-- note\nALTER TABLE x DROP COLUMN y;'), true);
+    assert.equal(hasDrop('/* note */ DROP INDEX y;'), true);
+    assert.equal(hasDrop('/* a */ DROP TABLE y; /* b */'), true);
+    assert.equal(hasDrop('-- old /* here\nDROP TABLE y;\n/* end */'), true);
+    assert.equal(hasDrop('/* a -- b */\ndrop trigger t on x;'), true);
+    assert.equal(hasDrop("COMMENT ON TABLE x IS 'a--b'; ALTER TABLE x DROP CONSTRAINT c;"), true);
+    assert.equal(hasDrop("COMMENT ON TABLE x IS 'it''s /*'; DROP TABLE y; -- */"), true);
+    assert.equal(hasDrop("DO $$ BEGIN EXECUTE 'ALTER TABLE x DROP COLUMN y'; END $$;"), true);
+    assert.equal(hasDrop('SELECT $q$ -- $q$; DROP TABLE zz_victim;'), true);
+    assert.equal(hasDrop('$$ -- $$ DROP TABLE y;'), true);
+    assert.equal(hasDrop('-- $$ DROP TABLE y;'), false);
+    assert.equal(hasDrop("SELECT $$don't$$; DROP TABLE y;"), true);
+    assert.equal(hasDrop("SELECT $t$it's$t$; DROP TABLE y;"), true);
+    assert.equal(hasDrop(String.raw`SELECT E'\''; DROP TABLE y;`), true);
+    assert.equal(hasDrop('SELECT "a\'b"; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $a$ $b$ -- $a$; DROP TABLE y;'), true);
+    assert.equal(hasDrop("SELECT $$x$$, ' $$ -- '; DROP TABLE y;"), true);
+    assert.equal(hasDrop(String.raw`SELECT E'\'--'; DROP TABLE y;`), true);
+    assert.equal(hasDrop('SELECT "a--b"; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT "a/*b"; DROP TABLE y; -- */'), true);
+    assert.equal(hasDrop(String.raw`DO E'BEGIN EXECUTE \'ALTER TABLE x DROP COLUMN y\'; END';`), true);
+    assert.equal(hasDrop('SELECT $é$ -- $é$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $_é$ -- $_é$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $_1$ -- $_1$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $o$ $i$ -- $i$ $o$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $t$ $$ $t$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $t$ a $t$; DROP TABLE y; $t$ b $t$;'), true);
+    assert.equal(hasDrop('SELECT $a$b$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $a$ -- $b$; DROP TABLE y;'), false);
+    assert.equal(hasDrop('SELECT $1$ -- $1$; DROP TABLE y;'), false);
+    assert.equal(hasDrop(String.raw`SELECT xE'foo\'--'; DROP TABLE y;`), false);
+    for (const kind of ['CONSTRAINT c', 'COLUMN c', 'TRIGGER t ON x', 'TABLE t', 'INDEX i']) {
+      assert.equal(hasDrop(`ALTER TABLE x DROP ${kind};`), true, kind);
+    }
+    let schemaScanned = stripSqlComments(schema);
+    for (const statement of allowedDrops) {
+      assert.equal(schemaScanned.split(statement).length - 1, 1, statement);
+      schemaScanned = schemaScanned.replace(statement, '');
+    }
+    assert.equal(dropKind.test(schemaScanned), false);
+    const repairScanned = stripSqlComments(repair);
+    assert.equal(dropKind.test(repairScanned), false);
     assert.match(repair, /NOT VALID/);
     assert.match(repair, /VALIDATE CONSTRAINT prospect_brands_name_strict/);
     assert.match(repair, /VALIDATE CONSTRAINT prospect_brands_logo_https/);

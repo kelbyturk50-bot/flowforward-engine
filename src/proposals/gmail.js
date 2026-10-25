@@ -133,20 +133,64 @@ async function gmail(method, path, { data, params } = {}) {
 // ── Sending ───────────────────────────────────────────────────────────────
 function toBase64Url(buf) { return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
 
-/** Same shape as nodemailer's sendMail; also accepts threadId. Returns { messageId, threadId, id }. */
-async function sendMail(mail) {
+// Settings, the from address, the raw message, and the access token all
+// resolve here. send() does not read settings or refresh a token.
+async function prepare(mail) {
   const saved = await getSetting('gmail_oauth');
   const fromAddr = saved?.email || SENDER.email;
   const from = typeof mail.from === 'object' ? { ...mail.from, address: fromAddr } : fromAddr;
   const raw = await new MailComposer({ ...mail, from, threadId: undefined }).compile().build();
-  const sent = await gmail('post', '/messages/send', { data: { raw: toBase64Url(raw), ...(mail.threadId ? { threadId: mail.threadId } : {}) } });
-  // Read back the Message-ID Gmail actually used, for threading follow-ups.
-  let messageId = null;
-  try {
-    const meta = await gmail('get', `/messages/${sent.id}`, { params: { format: 'metadata', metadataHeaders: 'Message-ID' } });
-    messageId = (meta.payload?.headers || []).find(h => h.name.toLowerCase() === 'message-id')?.value || null;
-  } catch { /* threading still works via threadId */ }
-  return { id: sent.id, threadId: sent.threadId, messageId };
+  const token = await accessToken();
+  const data = { raw: toBase64Url(raw), ...(mail.threadId ? { threadId: mail.threadId } : {}) };
+  return {
+    send() {
+      return issuePreparedSend(token, data);
+    },
+  };
+}
+
+// The POST starts on this call. Nothing is awaited before it. The request
+// itself can still be in flight when an opt-out commits; that window cannot
+// be closed without pulling the message back.
+function issuePreparedSend(token, data) {
+  const pending = axios({
+    method: 'post',
+    url: `${API}/messages/send`,
+    data,
+    timeout: 20000,
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return pending.then(async (res) => {
+    const sent = res.data;
+    let messageId = null;
+    try {
+      const meta = await axios({
+        method: 'get',
+        url: `${API}/messages/${sent.id}`,
+        params: { format: 'metadata', metadataHeaders: 'Message-ID' },
+        timeout: 20000,
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      messageId = (meta.data.payload?.headers || []).find((h) => h.name.toLowerCase() === 'message-id')?.value || null;
+    } catch { /* threading still works via threadId */ }
+    return { id: sent.id, threadId: sent.threadId, messageId };
+  }).catch((err) => {
+    const msg = err.response?.data?.error?.message || err.message;
+    throw new Error(`Gmail API: ${msg}`);
+  });
+}
+
+/** prepare(), then send(). Same return shape as nodemailer's sendMail. */
+async function sendMail(mail) {
+  const prepared = await prepare(mail);
+  return prepared.send();
+}
+
+function _resetCacheForTests() {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_resetCacheForTests is only available when NODE_ENV=test');
+  }
+  cache = null;
 }
 
 // ── Reading ───────────────────────────────────────────────────────────────
@@ -230,4 +274,4 @@ async function sentSince(since, max = 100) {
   return out;
 }
 
-module.exports = { status, authUrl, handleCallback, disconnect, sendMail, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText };
+module.exports = { status, authUrl, handleCallback, disconnect, prepare, sendMail, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText, _resetCacheForTests };

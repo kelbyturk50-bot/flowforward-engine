@@ -127,6 +127,40 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 -- ═══════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS do_not_contact BOOLEAN NOT NULL DEFAULT FALSE; -- opted out / bounced
+-- Source written only when the flag is raised: manual or opt_out, or NULL.
+-- A flagged row whose source is still NULL is automatic and cannot be cleared.
+-- This file does not backfill. The v2 check replaces the earlier name so a
+-- database that booted that definition ends on manual, opt_out, or NULL.
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS do_not_contact_source TEXT;
+-- Replaces the earlier prospects_do_not_contact_source_check name.
+ALTER TABLE prospects DROP CONSTRAINT IF EXISTS prospects_do_not_contact_source_check;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE c.conname = 'prospects_dnc_source_v2_chk'
+       AND t.relname = 'prospects'
+       AND n.nspname = 'public'
+  ) THEN
+    -- The earlier check allowed an extra source value. NULL stays NULL:
+    -- NOT IN is not true for NULL. manual and opt_out are left as they are.
+    -- This sets the source only. do_not_contact is not changed, so a flagged
+    -- row stays flagged. This runs before the v2 check is added, in this
+    -- same block, so the new check can commit.
+    UPDATE prospects
+       SET do_not_contact_source = NULL
+     WHERE do_not_contact_source NOT IN ('manual', 'opt_out');
+    ALTER TABLE prospects
+      ADD CONSTRAINT prospects_dnc_source_v2_chk
+      CHECK (
+        do_not_contact_source IS NULL
+        OR do_not_contact_source IN ('manual', 'opt_out')
+      );
+  END IF;
+END $$;
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS researched_at  TIMESTAMPTZ;
 -- Archive flag. NULL archived_at means the lead is still in the working set.
 -- archive_run_id is the apply that set the flag. Undo restores that run only.

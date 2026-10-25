@@ -13,8 +13,16 @@ const { fsmDetectedFromResearch } = require('./servicetitan');
 const { rescore } = require('../scoring/fit');
 const { systemPrompt, userPrompt, SUBMIT_TOOL } = require('./prompt');
 const { attachPrototype } = require('../prototypes/store');
+const { lockLeadForUpdate, isDeadlock, DEADLOCK_ATTEMPTS } = require('./lead-lock');
 
 let client = null;
+let draftTxGate = null;
+function _setDraftTxGate(fn) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_setDraftTxGate is only available when NODE_ENV=test');
+  }
+  draftTxGate = fn || null;
+}
 function claude() {
   if (!client) {
     if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set in Railway Variables.');
@@ -195,7 +203,10 @@ async function draftProposal(prospectId, opts = {}) {
   const prev = await pool.query(
     'SELECT id, version, research, status FROM proposals WHERE prospect_id = $1 ORDER BY version DESC LIMIT 1', [lead.id]);
   const last = prev.rows[0];
-  if (last && ['sent'].includes(last.status)) {
+  if (lead.do_not_contact) {
+    throw Object.assign(new Error(`${lead.company} is marked do-not-contact.`), { status: 409 });
+  }
+  if (last && ['sent', 'sending'].includes(last.status)) {
     throw Object.assign(new Error('A proposal is already out for this lead. Stop that sequence before drafting a new one.'), { status: 409 });
   }
 
@@ -205,9 +216,34 @@ async function draftProposal(prospectId, opts = {}) {
   const { analysis, onepager, email, toEmail } = cleanOutput(output, research, lead);
   const disqualify = analysis.fit_verdict === 'disqualify';
 
+  let saved = null;
+  for (let attempt = 1; attempt <= DEADLOCK_ATTEMPTS; attempt++) {
   const db = await pool.connect();
+  let opened = false;
   try {
     await db.query('BEGIN');
+    opened = true;
+    // All of this lead's proposals, then the prospect. The draft UPDATE below
+    // already holds those proposal locks. The flag and the open-sequence
+    // check run on those locked rows, after the model call, so a retry does
+    // not call the model again.
+    await lockLeadForUpdate(db, lead.id);
+    if (draftTxGate) await draftTxGate(db, lead.id);
+    const fresh = await db.query('SELECT do_not_contact FROM prospects WHERE id = $1', [lead.id]);
+    if (fresh.rows[0] && fresh.rows[0].do_not_contact) {
+      await db.query('ROLLBACK');
+      opened = false;
+      throw Object.assign(new Error(`${lead.company} is marked do-not-contact.`), { status: 409 });
+    }
+    const open = await db.query(
+      `SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending') LIMIT 1`,
+      [lead.id]
+    );
+    if (open.rows.length) {
+      await db.query('ROLLBACK');
+      opened = false;
+      throw Object.assign(new Error('A proposal is already out for this lead. Stop that sequence before drafting a new one.'), { status: 409 });
+    }
     await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [lead.id]);
     const version = (last?.version || 0) + 1;
     const ins = await db.query(
@@ -243,22 +279,27 @@ async function draftProposal(prospectId, opts = {}) {
         [lead.id, `${lead.stage} → disqualified (proposal bot)`]);
     }
     await db.query('COMMIT');
-    // Score from the cache just written. rescore does not fetch.
-    await rescore([lead.id]);
-    // After the draft is committed. A prototype failure must not fail the draft.
-    // Flag off returns before any prototype write. No fetch, send, or job enqueue.
-    try {
-      await attachPrototype({ prospectId: lead.id, research });
-    } catch (err) {
-      console.error('[prototype] hook failed:', err && err.code);
-    }
-    return ins.rows[0];
+    opened = false;
+    saved = ins.rows[0];
+    break;
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
+    if (opened) await db.query('ROLLBACK').catch(() => {});
+    if (!err.status && isDeadlock(err) && attempt < DEADLOCK_ATTEMPTS) continue;
     throw err;
   } finally {
     db.release();
   }
+  }
+  // Score from the cache just written. rescore does not fetch.
+  await rescore([lead.id]);
+  // After the draft is committed. A prototype failure must not fail the draft.
+  // Flag off returns before any prototype write. No fetch, send, or job enqueue.
+  try {
+    await attachPrototype({ prospectId: lead.id, research });
+  } catch (err) {
+    console.error('[prototype] hook failed:', err && err.code);
+  }
+  return saved;
 }
 
 // ─── Nightly batch ────────────────────────────────────────────────────────
@@ -350,4 +391,4 @@ async function rebuildOnepager(proposalId) {
   return upd[0];
 }
 
-module.exports = { rebuildOnepager, normalizeSubmission, submissionProblem, draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, getClient, isRunning: () => running };
+module.exports = { rebuildOnepager, normalizeSubmission, submissionProblem, draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, _setDraftTxGate, getClient, isRunning: () => running };
