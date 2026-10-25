@@ -106,7 +106,7 @@ One primary button, **"Talk to Kelby"**, which is a plain link (`<a href>`, e.g.
 - [ ] `onAccent` picks the higher-contrast option of white or slate.
 - [ ] Wordmark is the only brand mark: no logo input, fixture, upload or manual-logo option; no remote fetch of any kind (asserted in the test).
 - [ ] Wordmark plate uses `accent`/`onAccent`, never the raw brand color.
-- [ ] Prototype links expire 14 days after sharing; CTA and footer state the expiry.
+- [ ] Prototype links expire 14 days after sharing; the public page CTA and footer state the expiry.
 - [ ] **Required test:** a business name containing `<style>.ribbon{display:none}</style>` or `</div><script>` is escaped (appears as literal text), and the ribbon, tile and footer remain present and visible.
 - [ ] Estimate follow-up demo is email-only (3–4 touches, stops on reply, call shown only as an owner reminder).
 - [ ] Fixture names use the `TEST:` prefix; no real vendor, brand, company or person names; Sample tags on all fake data rows.
