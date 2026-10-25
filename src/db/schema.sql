@@ -145,6 +145,13 @@ BEGIN
        AND t.relname = 'prospects'
        AND n.nspname = 'public'
   ) THEN
+    -- The earlier check allowed an extra source value. That value never raised
+    -- the flag. NULL stays NULL: NOT IN is not true for NULL. manual and
+    -- opt_out are left as they are. This runs before the v2 check is added,
+    -- in this same block, so the new check can commit.
+    UPDATE prospects
+       SET do_not_contact_source = NULL
+     WHERE do_not_contact_source NOT IN ('manual', 'opt_out');
     ALTER TABLE prospects
       ADD CONSTRAINT prospects_dnc_source_v2_chk
       CHECK (

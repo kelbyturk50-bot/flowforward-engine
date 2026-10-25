@@ -40,6 +40,16 @@ function readFlagValue(body) {
   if (typeof body.value !== 'boolean') return undefined;
   return body.value;
 }
+
+// Test hook. Runs after the prospect row is locked and before the flag write,
+// while that transaction is still open. Production leaves it unset.
+let flagWriteGate = null;
+function _setFlagWriteGate(fn) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_setFlagWriteGate is only available when NODE_ENV=test');
+  }
+  flagWriteGate = fn || null;
+}
 const { buildProspectListQuery, ProspectQueryError } = require('./prospect-query');
 
 // GET /api/prospects
@@ -228,21 +238,31 @@ router.post('/:id/do-not-contact', async (req, res) => {
       return res.status(404).json({ error: 'Not found' });
     }
     let row = found.rows[0];
+    if (flagWriteGate) await flagWriteGate(client, row);
 
     if (value === true) {
       if (!row.do_not_contact) {
+        // COALESCE keeps an existing source. AND NOT do_not_contact refuses
+        // a row that was flagged, including opt_out, after this read.
         const updated = await client.query(
           `UPDATE prospects
-              SET do_not_contact = TRUE, do_not_contact_source = 'manual'
+              SET do_not_contact = TRUE,
+                  do_not_contact_source = COALESCE(do_not_contact_source, 'manual')
             WHERE id = $1
+              AND NOT do_not_contact
             RETURNING *`,
           [id]
         );
-        await client.query(
-          `INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'note', $2)`,
-          [id, MARKED_DNC]
-        );
-        row = updated.rows[0];
+        if (updated.rows.length) {
+          await client.query(
+            `INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'note', $2)`,
+            [id, MARKED_DNC]
+          );
+          row = updated.rows[0];
+        } else {
+          const again = await client.query('SELECT * FROM prospects WHERE id = $1', [id]);
+          row = again.rows[0];
+        }
       }
       // Same transaction as the flag. A failure rolls the flag back, so a
       // retry is not a no-op against a still-running sequence.
@@ -255,20 +275,23 @@ router.post('/:id/do-not-contact', async (req, res) => {
       await client.query('ROLLBACK');
       return res.json(row);
     }
-    if (row.do_not_contact_source !== 'manual') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        error: 'do_not_contact_locked',
-        source: row.do_not_contact_source,
-      });
-    }
     const updated = await client.query(
       `UPDATE prospects
           SET do_not_contact = FALSE, do_not_contact_source = NULL
-        WHERE id = $1
+        WHERE id = $1 AND do_not_contact_source = 'manual'
         RETURNING *`,
       [id]
     );
+    if (!updated.rows.length) {
+      const again = await client.query('SELECT * FROM prospects WHERE id = $1', [id]);
+      await client.query('ROLLBACK');
+      const current = again.rows[0];
+      if (!current || !current.do_not_contact) return res.json(current);
+      return res.status(409).json({
+        error: 'do_not_contact_locked',
+        source: current.do_not_contact_source,
+      });
+    }
     await client.query(
       `INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'note', $2)`,
       [id, CLEARED_DNC]
@@ -356,3 +379,4 @@ router.delete('/:id', async (req, res) => {
 module.exports = router;
 module.exports.STAGES = STAGES;
 module.exports.CLOSED = CLOSED;
+module.exports._setFlagWriteGate = _setFlagWriteGate;

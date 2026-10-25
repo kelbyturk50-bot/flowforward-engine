@@ -275,7 +275,13 @@ async function approveAndSend(proposalId) {
       headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
     });
   } catch (err) {
-    await pool.query(`UPDATE proposals SET status = 'draft', approved_at = NULL, error = $2 WHERE id = $1`, [p.id, `Send failed: ${err.message}`]);
+    // A stop during the send leaves the row stopped. This revert matches
+    // 'sending' only, so it cannot put a stopped proposal back to draft.
+    await pool.query(
+      `UPDATE proposals SET status = 'draft', approved_at = NULL, error = $2
+        WHERE id = $1 AND status = 'sending'`,
+      [p.id, `Send failed: ${err.message}`]
+    );
     throw Object.assign(new Error(`The email didn't send: ${err.message}`), { status: 502 });
   }
 
@@ -284,8 +290,15 @@ async function approveAndSend(proposalId) {
     `UPDATE proposals SET status = 'sent', sent_at = NOW(), message_id = $2, thread_id = $5, error = NULL,
             followup1_due_at = CASE WHEN COALESCE(followup1, '') <> '' THEN NOW() + make_interval(days => $3) END,
             followup2_due_at = CASE WHEN COALESCE(followup2, '') <> '' THEN NOW() + make_interval(days => $4) END
-      WHERE id = $1 RETURNING *`,
+      WHERE id = $1 AND status = 'sending' RETURNING *`,
     [p.id, info.messageId || null, d1 ?? 3, d2 ?? 10, info.threadId || null]);
+  if (!updated.length) {
+    const current = await pool.query('SELECT status FROM proposals WHERE id = $1', [p.id]);
+    if (current.rows[0] && current.rows[0].status === 'stopped') {
+      throw Object.assign(new Error(`${p.company} is marked do-not-contact.`), { status: 409 });
+    }
+    return current.rows[0] || null;
+  }
 
   await pool.query(
     `UPDATE prospects SET last_contacted_at = NOW(), email = COALESCE(NULLIF(email, ''), $2),
@@ -337,6 +350,37 @@ function _setLeadStop(fn) {
     throw new Error('_setLeadStop is only available when NODE_ENV=test');
   }
   leadStop = fn || null;
+}
+
+// Opt-out raises the flag in its own transaction and locks the prospect row
+// first, so a manual clear or set cannot pass the row while this is open.
+let optOutGate = null;
+async function markOptOut(prospectId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [prospectId]);
+    if (optOutGate) await optOutGate(client, prospectId);
+    await client.query(
+      `UPDATE prospects
+          SET do_not_contact = TRUE, do_not_contact_source = 'opt_out', stage = 'lost'
+        WHERE id = $1`,
+      [prospectId]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+function _setOptOutGate(fn) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_setOptOutGate is only available when NODE_ENV=test');
+  }
+  optOutGate = fn || null;
 }
 
 /** Send any follow-ups that are due. Called every 15 minutes. */
@@ -490,7 +534,7 @@ async function applyOutcomeEffects(p, outcome, msg) {
   }
   if (kind === 'opted_out') {
     await stopSequence(p.id, 'Asked not to be contacted', 'opted_out');
-    await pool.query(`UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'opt_out', stage = 'lost' WHERE id = $1`, [p.prospect_id]);
+    await markOptOut(p.prospect_id);
     await logActivity(p.prospect_id, 'email', `Replied asking not to be contacted${snippet ? `: "${snippet}"` : ''}. Marked do-not-contact.`);
     return;
   }
@@ -570,7 +614,7 @@ async function applyFollowOn(p, outcome, msg) {
   const inbox = require('./inbox');
   if (await inbox.alreadyRecorded(msg)) return false;
   if (outcome.kind === 'opted_out') {
-    await pool.query(`UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'opt_out', stage = 'lost' WHERE id = $1`, [p.prospect_id]);
+    await markOptOut(p.prospect_id);
     await logActivity(p.prospect_id, 'email', 'Asked not to be contacted. Marked do-not-contact.');
   } else if (outcome.kind === 'replied' || outcome.kind === 'booked') {
     await pool.query(`UPDATE prospects SET next_action = $2, next_action_at = CURRENT_DATE WHERE id = $1`,
@@ -669,6 +713,6 @@ async function senderTick() {
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, stopLeadSequences, _setLeadStop, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, stopLeadSequences, _setLeadStop, _setOptOutGate, classifyMessage, applyOutcome,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };
