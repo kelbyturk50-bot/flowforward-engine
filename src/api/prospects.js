@@ -219,9 +219,11 @@ router.patch('/:id', async (req, res) => {
 });
 
 // POST /api/prospects/:id/do-not-contact — body is exactly {value: boolean}
-// true sets the flag with source manual and stops sent, draft, and sending
-// sequences in that same transaction. An opt_out or NULL source on a flagged
-// row is left as it is. false clears the flag only when the source is manual.
+// true sets the flag with source manual when the row is not already flagged.
+// An opt_out or NULL source on a flagged row is left as it is. Setting the
+// flag on an already opt_out row still stops sent, draft, and sending
+// sequences in that same transaction. false clears the flag only when the
+// source is manual.
 // A source is written only when this route or an opt-out raises the flag.
 router.post('/:id/do-not-contact', async (req, res) => {
   const id = parseProspectId(req.params.id);
@@ -241,28 +243,38 @@ router.post('/:id/do-not-contact', async (req, res) => {
     if (flagWriteGate) await flagWriteGate(client, row);
 
     if (value === true) {
-      if (!row.do_not_contact) {
-        // COALESCE keeps an existing source. AND NOT do_not_contact refuses
-        // a row that was flagged, including opt_out, after this read.
-        const updated = await client.query(
-          `UPDATE prospects
-              SET do_not_contact = TRUE,
-                  do_not_contact_source = COALESCE(do_not_contact_source, 'manual')
+      // COALESCE keeps an existing source, including opt_out. A flagged NULL
+      // source stays NULL. The write runs for an already flagged opt_out row
+      // so that expression is what preserves the source. Activity is inserted
+      // only when this statement raises the flag. The sequence stop below
+      // still runs when the row was already opt_out.
+      const updated = await client.query(
+        `WITH prev AS (
+           SELECT id, do_not_contact AS was_flagged
+             FROM prospects
             WHERE id = $1
-              AND NOT do_not_contact
-            RETURNING *`,
-          [id]
-        );
-        if (updated.rows.length) {
+         )
+         UPDATE prospects AS p
+            SET do_not_contact = TRUE,
+                do_not_contact_source = CASE
+                  WHEN p.do_not_contact AND p.do_not_contact_source IS NULL
+                    THEN p.do_not_contact_source
+                  ELSE COALESCE(p.do_not_contact_source, 'manual')
+                END
+           FROM prev
+          WHERE p.id = prev.id
+        RETURNING p.*, prev.was_flagged`,
+        [id]
+      );
+      if (updated.rows.length) {
+        row = updated.rows[0];
+        if (row.was_flagged === false) {
           await client.query(
             `INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'note', $2)`,
             [id, MARKED_DNC]
           );
-          row = updated.rows[0];
-        } else {
-          const again = await client.query('SELECT * FROM prospects WHERE id = $1', [id]);
-          row = again.rows[0];
         }
+        delete row.was_flagged;
       }
       // Same transaction as the flag. A failure rolls the flag back, so a
       // retry is not a no-op against a still-running sequence.

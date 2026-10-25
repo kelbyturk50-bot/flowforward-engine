@@ -295,7 +295,26 @@ async function approveAndSend(proposalId) {
   if (!updated.length) {
     const current = await pool.query('SELECT status FROM proposals WHERE id = $1', [p.id]);
     if (current.rows[0] && current.rows[0].status === 'stopped') {
-      throw Object.assign(new Error(`${p.company} is marked do-not-contact.`), { status: 409 });
+      // The message went out. Keep stopped: no sent status and no follow-up
+      // dates. Record the ids, the contact time, and the activity.
+      const { rows: tracked } = await pool.query(
+        `UPDATE proposals
+            SET message_id = $2, thread_id = $3, error = NULL
+          WHERE id = $1 AND status = 'stopped'
+          RETURNING *`,
+        [p.id, info.messageId || null, info.threadId || null]
+      );
+      await pool.query(
+        `UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`,
+        [p.prospect_id]
+      );
+      await logActivity(
+        p.prospect_id,
+        'email',
+        `Sent proposal v${p.version} to ${p.to_email}. The message went out and the sequence stayed stopped.`
+      );
+      console.log('[send] delivered after the proposal was stopped');
+      return tracked[0] || current.rows[0];
     }
     return current.rows[0] || null;
   }
@@ -355,6 +374,9 @@ function _setLeadStop(fn) {
 // Opt-out raises the flag in its own transaction and locks the prospect row
 // first, so a manual clear or set cannot pass the row while this is open.
 let optOutGate = null;
+// Runs after a follow-up claim commits and before the do-not-contact recheck.
+// Tests use it to call the real flag route or the inbox opt-out.
+let followupClaimGate = null;
 async function markOptOut(prospectId) {
   const client = await pool.connect();
   try {
@@ -381,6 +403,13 @@ function _setOptOutGate(fn) {
     throw new Error('_setOptOutGate is only available when NODE_ENV=test');
   }
   optOutGate = fn || null;
+}
+
+function _setFollowupClaimGate(fn) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_setFollowupClaimGate is only available when NODE_ENV=test');
+  }
+  followupClaimGate = fn || null;
 }
 
 /** Send any follow-ups that are due. Called every 15 minutes. */
@@ -427,11 +456,23 @@ async function sendDueFollowups() {
       [p.id]
     );
     if (!claim.rows.length) continue;
+    if (followupClaimGate) await followupClaimGate(p, which);
     await attachPrototypeUrl(p);
     const beforeSend = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [p.prospect_id]);
     if (beforeSend.rows[0] && beforeSend.rows[0].do_not_contact) {
+      // The claim timestamp is cleared for this proposal whatever its status.
+      // The manual route and an opt-out move the row off 'sent' before this
+      // abort runs. Status and stop_reason change only while it is still
+      // sent, so a stopped or opted_out row keeps that status. No other row
+      // is updated.
       await pool.query(
-        `UPDATE proposals SET status = 'stopped', stop_reason = $2, ${which}_sent_at = NULL WHERE id = $1 AND status = 'sent'`,
+        `UPDATE proposals SET ${which}_sent_at = NULL WHERE id = $1`,
+        [p.id]
+      );
+      await pool.query(
+        `UPDATE proposals
+            SET status = 'stopped', stop_reason = $2
+          WHERE id = $1 AND status = 'sent'`,
         [p.id, 'Lead is do-not-contact']
       );
       continue;
@@ -713,6 +754,6 @@ async function senderTick() {
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, stopLeadSequences, _setLeadStop, _setOptOutGate, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, stopLeadSequences, _setLeadStop, _setOptOutGate, _setFollowupClaimGate, classifyMessage, applyOutcome,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

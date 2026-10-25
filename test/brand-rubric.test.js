@@ -969,15 +969,16 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
   it('commits schema.sql and boots when a 51c459d brand row breaks the tighter checks', async () => {
     const schema = fs.readFileSync(path.join(ROOT, 'src/db/schema.sql'), 'utf8');
     const repair = fs.readFileSync(path.join(ROOT, 'src/db/brand-constraints.sql'), 'utf8');
-    const allowedDrop = 'DROP CONSTRAINT IF EXISTS prospects_do_not_contact_source_check;';
-    const schemaWithoutTagUpgrade = schema.replace(
-      /-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/,
-      ''
-    );
-    assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
-    assert.equal(schemaWithoutTagUpgrade.split(allowedDrop).length - 1, 1);
-    const schemaWithoutAllowedDrop = schemaWithoutTagUpgrade.replace(allowedDrop, '');
-    assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutAllowedDrop), false);
+    const allowedDrops = [
+      'ALTER TABLE prospects DROP CONSTRAINT IF EXISTS prospects_do_not_contact_source_check;',
+      'ALTER TABLE chat_demo_sessions DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check;',
+    ];
+    let schemaWithoutAllowedDrops = schema;
+    for (const statement of allowedDrops) {
+      assert.equal(schemaWithoutAllowedDrops.split(statement).length - 1, 1, statement);
+      schemaWithoutAllowedDrops = schemaWithoutAllowedDrops.replace(statement, '');
+    }
+    assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutAllowedDrops), false);
     assert.equal(/DROP\s+CONSTRAINT/i.test(repair), false);
     assert.match(repair, /NOT VALID/);
     assert.match(repair, /VALIDATE CONSTRAINT prospect_brands_name_strict/);
