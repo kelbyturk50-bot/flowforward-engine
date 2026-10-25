@@ -132,20 +132,10 @@ ALTER TABLE prospects ADD COLUMN IF NOT EXISTS do_not_contact BOOLEAN NOT NULL D
 -- This file does not backfill. The v2 check replaces the earlier name so a
 -- database that booted that definition ends on manual, opt_out, or NULL.
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS do_not_contact_source TEXT;
+-- Replaces the earlier prospects_do_not_contact_source_check name.
+ALTER TABLE prospects DROP CONSTRAINT IF EXISTS prospects_do_not_contact_source_check;
 DO $$
 BEGIN
-  IF EXISTS (
-    SELECT 1
-      FROM pg_constraint c
-      JOIN pg_class t ON t.oid = c.conrelid
-      JOIN pg_namespace n ON n.oid = t.relnamespace
-     WHERE c.conname = 'prospects_do_not_contact_source_check'
-       AND t.relname = 'prospects'
-       AND n.nspname = 'public'
-  ) THEN
-    ALTER TABLE prospects DROP CONSTRAINT prospects_do_not_contact_source_check;
-  END IF;
-
   IF NOT EXISTS (
     SELECT 1
       FROM pg_constraint c

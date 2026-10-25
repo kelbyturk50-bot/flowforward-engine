@@ -921,16 +921,15 @@ describe('pilot csv estimate intake', () => {
     const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
     const repairSql = fs.readFileSync(path.join(__dirname, '../src/db/estimate-constraints.sql'), 'utf8');
     const migrate = fs.readFileSync(path.join(__dirname, '../src/db/migrate.js'), 'utf8');
+    const allowedDrop = 'DROP CONSTRAINT IF EXISTS prospects_do_not_contact_source_check;';
     const schemaWithoutTagUpgrade = schema.replace(
       /-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/,
       ''
-    ).replace(
-      /ALTER TABLE prospects DROP CONSTRAINT prospects_do_not_contact_source_check;/,
-      ''
     );
     assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
-    assert.match(schema, /DROP CONSTRAINT prospects_do_not_contact_source_check/);
-    assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutTagUpgrade), false);
+    assert.equal(schemaWithoutTagUpgrade.split(allowedDrop).length - 1, 1);
+    const schemaWithoutAllowedDrop = schemaWithoutTagUpgrade.replace(allowedDrop, '');
+    assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutAllowedDrop), false);
     assert.equal(/VALIDATE CONSTRAINT/.test(schema), false);
     assert.match(
       schema,

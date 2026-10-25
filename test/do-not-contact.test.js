@@ -483,7 +483,7 @@ describe('manual do-not-contact', () => {
     const end = schema.indexOf('ALTER TABLE prospects ADD COLUMN IF NOT EXISTS researched_at');
     assert.ok(start > 0 && end > start);
     const block = schema.slice(start, end);
-    assert.match(block, /DROP CONSTRAINT prospects_do_not_contact_source_check/);
+    assert.match(block, /DROP CONSTRAINT IF EXISTS prospects_do_not_contact_source_check;/);
     assert.match(block, /conname = 'prospects_dnc_source_v2_chk'/);
     assert.match(block, /t\.relname = 'prospects'/);
     assert.match(block, /do_not_contact_source IN \('manual', 'opt_out'\)/);
