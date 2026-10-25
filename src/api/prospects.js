@@ -4,7 +4,7 @@ const router  = express.Router();
 const pool    = require('../db/client');
 const { rescore } = require('../scoring/fit');
 const { normalizeIndustry } = require('../scoring/industry');
-const { stopLeadSequences } = require('../proposals/send');
+const { stopLeadSequences, lockLeadForUpdate } = require('../proposals/send');
 
 // Public writes must already be text. Do not coerce objects, arrays, or numbers.
 // Length is checked after trim. Control characters, including bidi marks, are rejected.
@@ -234,6 +234,8 @@ router.post('/:id/do-not-contact', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Proposals first, then the prospect. Same order as draft and mark-sent.
+    await lockLeadForUpdate(client, id, { between: true });
     const found = await client.query('SELECT * FROM prospects WHERE id = $1 FOR UPDATE', [id]);
     if (!found.rows.length) {
       await client.query('ROLLBACK');

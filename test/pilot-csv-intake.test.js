@@ -942,8 +942,14 @@ describe('pilot csv estimate intake', () => {
     // One left-to-right pass: a string literal is kept, a block or line
     // comment is blanked. Two passes let `-- x /*` swallow real SQL up to a
     // later `*/`, and let '--' inside a string hide the rest of that line.
+    // Dollar quotes ($tag$...$tag$ and $$...$$), E'...' escapes, standard
+    // strings, and double-quoted identifiers are kept. Comments are blanked.
+    // One pass, so a "--" or quote inside a literal cannot start a comment.
     const stripSqlComments = (sql) =>
-      sql.replace(/'(?:[^']|'')*'|\/\*[\s\S]*?\*\/|--[^\n]*/g, (m) => (m[0] === "'" ? m : ' '));
+      sql.replace(
+        /\$([A-Za-z0-9_]*)\$[\s\S]*?\$\1\$|[Ee]'(?:\\.|''|[^'\\])*'|"(?:[^"]|"")*"|'(?:[^']|'')*'|\/\*[\s\S]*?\*\/|--[^\n]*/g,
+        (m) => (/^['"$Ee]/.test(m) ? m : ' ')
+      );
     const hasDrop = (sql) => dropKind.test(stripSqlComments(sql));
     assert.equal(hasDrop('-- ALTER TABLE x DROP COLUMN y;\n'), false);
     assert.equal(hasDrop('/* DROP TABLE x; */ SELECT 1;'), false);
@@ -955,6 +961,13 @@ describe('pilot csv estimate intake', () => {
     assert.equal(hasDrop("COMMENT ON TABLE x IS 'a--b'; ALTER TABLE x DROP CONSTRAINT c;"), true);
     assert.equal(hasDrop("COMMENT ON TABLE x IS 'it''s /*'; DROP TABLE y; -- */"), true);
     assert.equal(hasDrop("DO $$ BEGIN EXECUTE 'ALTER TABLE x DROP COLUMN y'; END $$;"), true);
+    assert.equal(hasDrop('SELECT $q$ -- $q$; DROP TABLE zz_victim;'), true);
+    assert.equal(hasDrop('$$ -- $$ DROP TABLE y;'), true);
+    assert.equal(hasDrop('-- $$ DROP TABLE y;'), false);
+    assert.equal(hasDrop("SELECT $$don't$$; DROP TABLE y;"), true);
+    assert.equal(hasDrop("SELECT $t$it's$t$; DROP TABLE y;"), true);
+    assert.equal(hasDrop(String.raw`SELECT E'\''; DROP TABLE y;`), true);
+    assert.equal(hasDrop('SELECT "a\'b"; DROP TABLE y;'), true);
     for (const kind of ['CONSTRAINT c', 'COLUMN c', 'TRIGGER t ON x', 'TABLE t', 'INDEX i']) {
       assert.equal(hasDrop(`ALTER TABLE x DROP ${kind};`), true, kind);
     }

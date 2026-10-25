@@ -13,6 +13,7 @@ const { fsmDetectedFromResearch } = require('./servicetitan');
 const { rescore } = require('../scoring/fit');
 const { systemPrompt, userPrompt, SUBMIT_TOOL } = require('./prompt');
 const { attachPrototype } = require('../prototypes/store');
+const { lockLeadForUpdate } = require('./lead-lock');
 
 let client = null;
 function claude() {
@@ -208,6 +209,9 @@ async function draftProposal(prospectId, opts = {}) {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
+    // All of this lead's proposals, then the prospect. The draft UPDATE below
+    // already holds those proposal locks.
+    await lockLeadForUpdate(db, lead.id);
     await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [lead.id]);
     const version = (last?.version || 0) + 1;
     const ins = await db.query(

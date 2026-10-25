@@ -7,6 +7,7 @@ const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('.
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 const { draftProposal, runProposalBatch, getSetting, isRunning, rebuildOnepager } = require('../proposals/draft');
 const send    = require('../proposals/send');
+const { lockLeadForUpdate } = require('../proposals/lead-lock');
 const jobs    = require('../proposals/jobs');
 const pilotFlags = require('../pilot/flags');
 const pilotTokens = require('../pilot/tokens');
@@ -344,12 +345,16 @@ router.post('/:id/mark-sent', async (req, res) => {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
+    const peek = await db.query('SELECT prospect_id FROM proposals WHERE id = $1', [req.params.id]);
+    if (!peek.rows.length) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+    // Every proposal for the lead, id order, then the prospect. A join
+    // FOR UPDATE would lock both tables in one statement.
+    await lockLeadForUpdate(db, peek.rows[0].prospect_id);
     const { rows } = await db.query(
       `SELECT pr.*, p.company, p.stage, p.archived_at
          FROM proposals pr
          JOIN prospects p ON p.id = pr.prospect_id
-        WHERE pr.id = $1
-        FOR UPDATE`,
+        WHERE pr.id = $1`,
       [req.params.id]
     );
     const p = rows[0];
