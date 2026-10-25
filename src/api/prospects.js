@@ -4,6 +4,7 @@ const router  = express.Router();
 const pool    = require('../db/client');
 const { rescore } = require('../scoring/fit');
 const { normalizeIndustry } = require('../scoring/industry');
+const { stopSequence } = require('../proposals/send');
 
 // Public writes must already be text. Do not coerce objects, arrays, or numbers.
 // Length is checked after trim. Control characters, including bidi marks, are rejected.
@@ -19,6 +20,16 @@ function industryIsValid(value) {
 
 const STAGES = ['found', 'contacted', 'responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const CLOSED = ['won', 'lost', 'disqualified'];
+const MARKED_DNC = 'Marked do-not-contact (manual)';
+const CLEARED_DNC = 'Cleared do-not-contact';
+
+// Prospect ids are serial integers. Anything else is a 400, not a lookup.
+function parseProspectId(raw) {
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n > 2147483647) return null;
+  return n;
+}
 const { buildProspectListQuery, ProspectQueryError } = require('./prospect-query');
 
 // GET /api/prospects
@@ -136,6 +147,12 @@ const RESCORE_FIELDS = ['fit_boost', 'industry', 'city', 'phone', 'website'];
 
 router.patch('/:id', async (req, res) => {
   const body = { ...req.body };
+  // The flag and its source are only written by POST /:id/do-not-contact
+  // and by the opt-out / bounce updates in send.js.
+  if (Object.prototype.hasOwnProperty.call(body, 'do_not_contact')
+      || Object.prototype.hasOwnProperty.call(body, 'do_not_contact_source')) {
+    return res.status(400).json({ error: 'field_not_editable' });
+  }
   if (Object.prototype.hasOwnProperty.call(body, 'industry')) {
     if (!industryIsValid(body.industry)) return res.status(400).json({ error: 'invalid industry' });
     body.industry = normalizeIndustry(body.industry);
@@ -178,6 +195,95 @@ router.patch('/:id', async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// POST /api/prospects/:id/do-not-contact — {value: boolean}
+// true sets the flag with source manual and stops active sequences.
+// An opt-out, bounce, or NULL source on a flagged row is left as it is.
+// false clears the flag only when the source is manual.
+router.post('/:id/do-not-contact', async (req, res) => {
+  const id = parseProspectId(req.params.id);
+  if (id == null) return res.status(400).json({ error: 'invalid_id' });
+  if (typeof req.body?.value !== 'boolean') return res.status(400).json({ error: 'invalid_body' });
+
+  const value = req.body.value;
+  const client = await pool.connect();
+  let row;
+  let marked = false;
+  try {
+    await client.query('BEGIN');
+    const found = await client.query('SELECT * FROM prospects WHERE id = $1 FOR UPDATE', [id]);
+    if (!found.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Not found' });
+    }
+    row = found.rows[0];
+
+    if (value === true) {
+      if (row.do_not_contact) {
+        await client.query('ROLLBACK');
+        return res.json(row);
+      }
+      const updated = await client.query(
+        `UPDATE prospects
+            SET do_not_contact = TRUE, do_not_contact_source = 'manual'
+          WHERE id = $1
+          RETURNING *`,
+        [id]
+      );
+      await client.query(
+        `INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'note', $2)`,
+        [id, MARKED_DNC]
+      );
+      row = updated.rows[0];
+      marked = true;
+    } else if (!row.do_not_contact) {
+      await client.query('ROLLBACK');
+      return res.json(row);
+    } else if (row.do_not_contact_source !== 'manual') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'do_not_contact_locked',
+        source: row.do_not_contact_source,
+      });
+    } else {
+      const updated = await client.query(
+        `UPDATE prospects
+            SET do_not_contact = FALSE, do_not_contact_source = NULL
+          WHERE id = $1
+          RETURNING *`,
+        [id]
+      );
+      await client.query(
+        `INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'note', $2)`,
+        [id, CLEARED_DNC]
+      );
+      row = updated.rows[0];
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[prospects] do-not-contact failed:', err.code || 'error');
+    return res.status(500).json({ error: 'server_error' });
+  } finally {
+    client.release();
+  }
+
+  if (marked) {
+    try {
+      const { rows: active } = await pool.query(
+        `SELECT id FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'draft')`,
+        [id]
+      );
+      for (const proposal of active) {
+        await stopSequence(proposal.id, MARKED_DNC);
+      }
+    } catch (err) {
+      console.error('[prospects] do-not-contact stop failed:', err.code || 'error');
+      return res.status(500).json({ error: 'server_error' });
+    }
+  }
+  return res.json(row);
 });
 
 // POST /api/prospects/:id/activities — log a call, email, meeting or note

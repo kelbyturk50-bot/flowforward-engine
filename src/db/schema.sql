@@ -127,6 +127,29 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 -- ═══════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS do_not_contact BOOLEAN NOT NULL DEFAULT FALSE; -- opted out / bounced
+-- Who set do_not_contact. manual | opt_out | bounce, or NULL.
+-- A flagged row whose source is still NULL is an older automatic flag.
+-- This file does not backfill those rows, so they stay locked.
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS do_not_contact_source TEXT;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE c.conname = 'prospects_do_not_contact_source_check'
+       AND t.relname = 'prospects'
+       AND n.nspname = 'public'
+  ) THEN
+    ALTER TABLE prospects
+      ADD CONSTRAINT prospects_do_not_contact_source_check
+      CHECK (
+        do_not_contact_source IS NULL
+        OR do_not_contact_source IN ('manual', 'opt_out', 'bounce')
+      );
+  END IF;
+END $$;
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS researched_at  TIMESTAMPTZ;
 -- Archive flag. NULL archived_at means the lead is still in the working set.
 -- archive_run_id is the apply that set the flag. Undo restores that run only.

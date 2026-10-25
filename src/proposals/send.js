@@ -419,13 +419,13 @@ async function applyOutcomeEffects(p, outcome, msg) {
   }
   if (kind === 'bounced') {
     await stopSequence(p.id, `Bounced: ${p.to_email} did not accept the message`, 'bounced');
-    await pool.query(`UPDATE prospects SET email = NULL WHERE id = $1 AND email = $2`, [p.prospect_id, p.to_email]);
+    await pool.query(`UPDATE prospects SET email = NULL, do_not_contact_source = 'bounce' WHERE id = $1 AND email = $2`, [p.prospect_id, p.to_email]);
     await logActivity(p.prospect_id, 'note', `Proposal email to ${p.to_email} bounced. Follow-ups stopped; find another address or call.`);
     return;
   }
   if (kind === 'opted_out') {
     await stopSequence(p.id, 'Asked not to be contacted', 'opted_out');
-    await pool.query(`UPDATE prospects SET do_not_contact = TRUE, stage = 'lost' WHERE id = $1`, [p.prospect_id]);
+    await pool.query(`UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'opt_out', stage = 'lost' WHERE id = $1`, [p.prospect_id]);
     await logActivity(p.prospect_id, 'email', `Replied asking not to be contacted${snippet ? `: "${snippet}"` : ''}. Marked do-not-contact.`);
     return;
   }
@@ -505,7 +505,7 @@ async function applyFollowOn(p, outcome, msg) {
   const inbox = require('./inbox');
   if (await inbox.alreadyRecorded(msg)) return false;
   if (outcome.kind === 'opted_out') {
-    await pool.query(`UPDATE prospects SET do_not_contact = TRUE, stage = 'lost' WHERE id = $1`, [p.prospect_id]);
+    await pool.query(`UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'opt_out', stage = 'lost' WHERE id = $1`, [p.prospect_id]);
     await logActivity(p.prospect_id, 'email', 'Asked not to be contacted. Marked do-not-contact.');
   } else if (outcome.kind === 'replied' || outcome.kind === 'booked') {
     await pool.query(`UPDATE prospects SET next_action = $2, next_action_at = CURRENT_DATE WHERE id = $1`,
