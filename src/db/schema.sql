@@ -1464,3 +1464,84 @@ CREATE TABLE IF NOT EXISTS chat_demo_leads (
 );
 
 -- END chat demo (F-007).
+
+-- Offer tracking (#109). Additive and idempotent. Applied on every boot.
+-- A lead is a prospects row: prospect_id references prospects(id).
+-- Records the offer only. No mail columns. Package values are keys.
+-- CREATE TABLE IF NOT EXISTS does not add a missing check later, so the
+-- checks and the foreign key are also added below when the name is absent.
+CREATE TABLE IF NOT EXISTS lead_offers (
+  id                SERIAL PRIMARY KEY,
+  prospect_id       INTEGER NOT NULL,
+  offer_type        TEXT NOT NULL,
+  package           TEXT NOT NULL,
+  offered_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  channel           TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'offered',
+  status_changed_at TIMESTAMPTZ,
+  notes             TEXT,
+  is_test           BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT lead_offers_prospect_id_fkey
+    FOREIGN KEY (prospect_id) REFERENCES prospects(id) ON DELETE CASCADE,
+  CONSTRAINT lead_offers_offer_type_check CHECK (
+    offer_type IN ('founding', 'annual_prepay')
+  ),
+  CONSTRAINT lead_offers_package_check CHECK (
+    package IN ('starter', 'receptionist', 'front_office', 'consulting')
+  ),
+  CONSTRAINT lead_offers_channel_check CHECK (
+    channel IN ('email', 'phone', 'text', 'in_person', 'other')
+  ),
+  CONSTRAINT lead_offers_status_check CHECK (
+    status IN ('offered', 'accepted', 'declined', 'expired')
+  )
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'lead_offers_prospect_id_fkey'
+  ) THEN
+    ALTER TABLE lead_offers
+      ADD CONSTRAINT lead_offers_prospect_id_fkey
+      FOREIGN KEY (prospect_id) REFERENCES prospects(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'lead_offers_offer_type_check'
+  ) THEN
+    ALTER TABLE lead_offers
+      ADD CONSTRAINT lead_offers_offer_type_check CHECK (
+        offer_type IN ('founding', 'annual_prepay')
+      );
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'lead_offers_package_check'
+  ) THEN
+    ALTER TABLE lead_offers
+      ADD CONSTRAINT lead_offers_package_check CHECK (
+        package IN ('starter', 'receptionist', 'front_office', 'consulting')
+      );
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'lead_offers_channel_check'
+  ) THEN
+    ALTER TABLE lead_offers
+      ADD CONSTRAINT lead_offers_channel_check CHECK (
+        channel IN ('email', 'phone', 'text', 'in_person', 'other')
+      );
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'lead_offers_status_check'
+  ) THEN
+    ALTER TABLE lead_offers
+      ADD CONSTRAINT lead_offers_status_check CHECK (
+        status IN ('offered', 'accepted', 'declined', 'expired')
+      );
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_lead_offers_prospect_id ON lead_offers (prospect_id);
+CREATE INDEX IF NOT EXISTS idx_lead_offers_founding_status
+  ON lead_offers (status)
+  WHERE offer_type = 'founding';

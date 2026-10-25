@@ -57,6 +57,7 @@ async function resetDb() {
       campaign_leads,
       campaign_variants,
       campaigns,
+      lead_offers,
       prospects,
       app_settings
     RESTART IDENTITY CASCADE
