@@ -81,7 +81,7 @@ Reuse the prototype shell, tokens, `fixAccent` and the wordmark from `src/protot
   - `capture_lead`: demo-only (§6).
   - `handoff_to_human`: "In the live version this would ring the on-call tech." Nothing dials.
   - No card makes a network send. Action buttons show the existing "In the live version this would …" toast.
-- [ ] Footer and CTA reuse prototype-system §4–5 (14-day expiry, "Talk to Kelby" as a plain `<a>`, conditional price anchors only). No ROI or close-rate promises.
+- [ ] Footer and CTA reuse prototype-system §4–5 (14-day expiry, "Talk to Kelby" as a plain `<a>`, no FlowForward prices). No ROI or close-rate promises.
 - [ ] Layout is verified at 390 and 1280. Axe reports no contrast violations. Brand strings are escaped (the hostile-name test from prototype-system §6 also covers the chat).
 
 ## 5. Claims validator (deterministic; Canyon)

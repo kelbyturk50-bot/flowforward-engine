@@ -90,17 +90,11 @@ Rendered by `PrototypeWatermark` from the prototype shell, **outside theme/brand
 2. We configure and test it with you.
 3. Go live, with hosting and maintenance.
 
-**Price anchors** (Kelby's numbers; always phrased conditionally, as typical starting ranges, never guarantees):
-- Prototype: **$0**.
-- MVP build: typically **$1.5–3.5K**.
-- Hosting and maintenance: typically **$150–400/mo**.
-- Consulting: typically **$125–200/hr**.
-
-Show them with the qualifier "Typical starting ranges; final scope after a call."
+**Pricing.** The CTA and public pages show no prices. The packages are Free branded prototype, MVP build, Hosting and maintenance plan, and Consulting. Pricing is shared after initial outreach.
 
 **Case-study discount:** the first build may be discounted in exchange for a case study. State this without a number (no discount percentage or amount).
 
-Apart from the four anchors above and this unnumbered discount note, add no other prices or figures. No ROI, savings, revenue-recovered or close-rate promises.
+Add no prices or figures. No ROI, savings, revenue-recovered or close-rate promises.
 
 **Link expiry:** prototype links expire **14 days** after they're shared. The CTA panel and footer both say so, e.g. "This preview link expires 14 days after it was shared."
 One primary button, **"Talk to Kelby"**, which is a plain link (`<a href>`, e.g. a booking page or `mailto:`). It never sends email automatically or submits a form.
@@ -121,7 +115,7 @@ One primary button, **"Talk to Kelby"**, which is a plain link (`<a href>`, e.g.
 - [ ] Watermark ribbon + tile + footer present; tests cover hostile colors, `?watermark=0`, flags, and theme overrides.
 - [ ] Ribbon has `role="note"` and no close control.
 - [ ] Every action button shows a toast; no outbound requests (asserted in the test).
-- [ ] CTA shows the four conditional price anchors (prototype $0, MVP $1.5–3.5K, hosting $150–400/mo, consulting $125–200/hr) with the "typical starting ranges, final scope after a call" qualifier and no guarantees, plus the unnumbered first-build case-study discount note; "Talk to Kelby" is an `<a>`.
+- [ ] CTA shows no prices. Pricing is shared after initial outreach. The unnumbered first-build case-study discount note stays, with no number. "Talk to Kelby" is an `<a>`.
 - [ ] Layout verified at 390 and 1280; axe shows no contrast violations.
 
 **Screenshot proof list:** each of the 4 agents at 390 and 1280; yellow (#F5E050) and navy (#14213D) themes; the no-brand-color (juniper) state; a toast visible; the CTA panel; `?watermark=0` still showing the watermark.
