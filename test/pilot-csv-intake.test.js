@@ -921,16 +921,32 @@ describe('pilot csv estimate intake', () => {
     const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
     const repairSql = fs.readFileSync(path.join(__dirname, '../src/db/estimate-constraints.sql'), 'utf8');
     const migrate = fs.readFileSync(path.join(__dirname, '../src/db/migrate.js'), 'utf8');
+    // Comments are stripped first. Each statement below is exact and may
+    // appear once. The first two are this change. The rest are the idempotent
+    // trigger and column drops already in schema.sql. Any other DROP of a
+    // constraint, column, trigger, table, or index fails.
     const allowedDrops = [
       'ALTER TABLE prospects DROP CONSTRAINT IF EXISTS prospects_do_not_contact_source_check;',
       'ALTER TABLE chat_demo_sessions DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check;',
+      'DROP TRIGGER IF EXISTS prospects_updated_at ON prospects;',
+      'DROP TRIGGER IF EXISTS projects_updated_at ON projects;',
+      'DROP TRIGGER IF EXISTS proposals_updated_at ON proposals;',
+      'ALTER TABLE pilot_tokens DROP COLUMN IF EXISTS token;',
+      'DROP TRIGGER IF EXISTS prospect_brands_updated_at ON prospect_brands;',
+      'DROP TRIGGER IF EXISTS pilot_customers_updated_at ON pilot_customers;',
+      'DROP TRIGGER IF EXISTS pilot_open_estimates_updated_at ON pilot_open_estimates;',
+      'DROP TRIGGER IF EXISTS inbox_items_updated_at ON inbox_items;',
+      'DROP TRIGGER IF EXISTS campaign_touches_default_channel ON campaign_touches;',
     ];
-    let schemaWithoutAllowedDrops = schema;
+    const dropKind = /\bDROP\s+(?:CONSTRAINT|COLUMN|TRIGGER|TABLE|INDEX)\b/i;
+    let schemaScanned = schema
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/--[^\n]*/g, ' ');
     for (const statement of allowedDrops) {
-      assert.equal(schemaWithoutAllowedDrops.split(statement).length - 1, 1, statement);
-      schemaWithoutAllowedDrops = schemaWithoutAllowedDrops.replace(statement, '');
+      assert.equal(schemaScanned.split(statement).length - 1, 1, statement);
+      schemaScanned = schemaScanned.replace(statement, '');
     }
-    assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutAllowedDrops), false);
+    assert.equal(dropKind.test(schemaScanned), false);
     assert.equal(/VALIDATE CONSTRAINT/.test(schema), false);
     assert.match(
       schema,

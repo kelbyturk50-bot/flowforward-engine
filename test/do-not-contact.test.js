@@ -404,6 +404,8 @@ describe('manual do-not-contact', () => {
     assert.equal(sourceRes.status, 200);
     assert.equal(sourceRes.json.do_not_contact, true);
     assert.equal(sourceRes.json.do_not_contact_source, 'opt_out');
+    assert.equal(Object.hasOwn(sourceRes.json, 'was_flagged'), false);
+    assert.equal(Object.hasOwn(optRes.json, 'was_flagged'), false);
     assert.equal((await flagRow(sourceKeep.id)).do_not_contact_source, 'opt_out');
     assert.equal((await activityBodies(sourceKeep.id)).length, 0);
     const sourceStatus = await pool.query(
@@ -963,15 +965,18 @@ describe('manual do-not-contact', () => {
       const row = await lead('Follow Manual Writer', 'contacted');
       const due = await dueFollowup(row.id, `dnc-follow-manual-${row.id}`);
       const other = await lead('Follow Manual Other', 'contacted');
+      const countedWithoutParked = await send.sentToday();
       const parked = await parkedFollowup(other.id, `dnc-follow-manual-other-${other.id}`);
       const before = sentMails.length;
       const countedBefore = await send.sentToday();
+      assert.equal(countedBefore, countedWithoutParked);
       send._setFollowupClaimGate(async (proposal) => {
         if (proposal.id !== due.id) return;
         send._setFollowupClaimGate(null);
         const flagged = await postFlag(row.id, { value: true });
         assert.equal(flagged.status, 200);
         assert.equal(flagged.json.do_not_contact_source, 'manual');
+        assert.equal(await send.sentToday(), countedBefore + 1);
       });
       const result = await send.sendDueFollowups();
       assert.equal(result.sent, 0);
@@ -1006,9 +1011,11 @@ describe('manual do-not-contact', () => {
       const slug = `dnc-follow-opt-${row.id}`;
       const due = await dueFollowup(row.id, slug);
       const other = await lead('Follow Opt Other', 'contacted');
+      const countedWithoutParked = await send.sentToday();
       const parked = await parkedFollowup(other.id, `dnc-follow-opt-other-${other.id}`);
       const before = sentMails.length;
       const countedBefore = await send.sentToday();
+      assert.equal(countedBefore, countedWithoutParked);
       send._setFollowupClaimGate(async (proposal) => {
         if (proposal.id !== due.id) return;
         send._setFollowupClaimGate(null);
@@ -1020,6 +1027,7 @@ describe('manual do-not-contact', () => {
           inReplyTo: `<${slug}@localhost>`,
         }]);
         assert.equal(opt.matched, 1);
+        assert.equal(await send.sentToday(), countedBefore + 1);
       });
       const result = await send.sendDueFollowups();
       assert.equal(result.sent, 0);
@@ -1047,6 +1055,60 @@ describe('manual do-not-contact', () => {
     }
   });
 
+  it('clears only the claimed follow-up 2 when the manual route stops the sequence', async () => {
+    const restore = widenSendWindow();
+    try {
+      const row = await lead('Follow2 Manual', 'contacted');
+      const due = await proposal(row.id, 'sent', `dnc-follow2-${row.id}`);
+      await pool.query(
+        `UPDATE proposals
+            SET followup1 = 'Checking in',
+                followup2 = 'Last note',
+                followup1_sent_at = NOW() - INTERVAL '3 days',
+                followup2_due_at = NOW() - INTERVAL '1 hour',
+                followup2_sent_at = NULL
+          WHERE id = $1`,
+        [due.id]
+      );
+      const beforeStamp = (await pool.query(
+        'SELECT followup1_sent_at FROM proposals WHERE id = $1',
+        [due.id]
+      )).rows[0].followup1_sent_at;
+      const countedBefore = await send.sentToday();
+      const before = sentMails.length;
+      let seenWhich = null;
+      send._setFollowupClaimGate(async (proposal, which) => {
+        if (proposal.id !== due.id) return;
+        send._setFollowupClaimGate(null);
+        seenWhich = which;
+        const flagged = await postFlag(row.id, { value: true });
+        assert.equal(flagged.status, 200);
+        assert.equal(await send.sentToday(), countedBefore + 1);
+      });
+      const result = await send.sendDueFollowups();
+      assert.equal(seenWhich, 'followup2');
+      assert.equal(result.sent, 0);
+      const stored = await pool.query(
+        `SELECT status, stop_reason, followup1_sent_at, followup2_sent_at
+           FROM proposals WHERE id = $1`,
+        [due.id]
+      );
+      assert.equal(stored.rows[0].status, 'stopped');
+      assert.equal(stored.rows[0].stop_reason, MARKED);
+      assert.equal(stored.rows[0].followup2_sent_at, null);
+      assert.equal(
+        new Date(stored.rows[0].followup1_sent_at).getTime(),
+        new Date(beforeStamp).getTime()
+      );
+      assert.equal(sentMails.length, before);
+      assert.equal(await send.sentToday(), countedBefore);
+      console.log('[dnc] manual flag during follow-up 2 clears only that timestamp');
+    } finally {
+      send._setFollowupClaimGate(null);
+      restore();
+    }
+  });
+
   it('leaves a proposal stopped when the send finishes or fails after the stop', async () => {
     const row = await lead('Mid Send', 'qualified');
     const stageBefore = row.stage;
@@ -1057,6 +1119,10 @@ describe('manual do-not-contact', () => {
         await pool.query(
           `UPDATE proposals SET status = 'stopped', stop_reason = 'Lead is do-not-contact' WHERE id = $1`,
           [draft.id]
+        );
+        await pool.query(
+          `UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'manual' WHERE id = $1`,
+          [row.id]
         );
         return { messageId: '<dnc-mid@localhost>', threadId: 'thr-mid' };
       },
@@ -1069,11 +1135,12 @@ describe('manual do-not-contact', () => {
           WHERE id = $1`,
         [draft.id]
       );
+      const countedBefore = await send.sentToday();
       const sentRow = await send.approveAndSend(draft.id);
       assert.equal(sentRow.status, 'stopped');
       assert.equal(sentRow.message_id, '<dnc-mid@localhost>');
       assert.equal(sentRow.thread_id, 'thr-mid');
-      assert.equal(sentRow.sent_at, null);
+      assert.ok(sentRow.sent_at);
       assert.equal(sentRow.followup1_due_at, null);
       assert.equal(sentRow.followup2_due_at, null);
       const stored = await pool.query(
@@ -1082,16 +1149,37 @@ describe('manual do-not-contact', () => {
         [draft.id]
       );
       assert.equal(stored.rows[0].status, 'stopped');
-      assert.equal(stored.rows[0].sent_at, null);
+      assert.ok(stored.rows[0].sent_at);
       assert.equal(stored.rows[0].message_id, '<dnc-mid@localhost>');
       assert.equal(stored.rows[0].thread_id, 'thr-mid');
       assert.equal(stored.rows[0].followup1_due_at, null);
       assert.equal(stored.rows[0].followup2_due_at, null);
+      assert.equal(await send.sentToday(), countedBefore + 1);
+      const flagged = await flagRow(row.id);
+      assert.equal(flagged.do_not_contact, true);
+      assert.equal(flagged.do_not_contact_source, 'manual');
       const contacted = await pool.query(
         'SELECT last_contacted_at FROM prospects WHERE id = $1',
         [row.id]
       );
       assert.ok(contacted.rows[0].last_contacted_at);
+      const noteCount = (await activityBodies(row.id)).length;
+      await assert.rejects(
+        () => send.approveAndSend(draft.id),
+        (err) => err.status === 409
+      );
+      assert.equal(await send.sentToday(), countedBefore + 1);
+      const second = await pool.query(
+        'SELECT status, sent_at, message_id FROM proposals WHERE id = $1',
+        [draft.id]
+      );
+      assert.equal(second.rows[0].status, 'stopped');
+      assert.equal(second.rows[0].message_id, '<dnc-mid@localhost>');
+      assert.equal(
+        new Date(second.rows[0].sent_at).getTime(),
+        new Date(stored.rows[0].sent_at).getTime()
+      );
+      assert.equal((await activityBodies(row.id)).length, noteCount);
       const notes = await activityBodies(row.id);
       assert.equal(
         notes.some((n) => n.body === `Sent proposal v1 to ${draft.to_email}. The message went out and the sequence stayed stopped.`),
@@ -1102,6 +1190,10 @@ describe('manual do-not-contact', () => {
       send._setTransport(recordingTransport());
     }
 
+    await pool.query(
+      `UPDATE prospects SET do_not_contact = FALSE, do_not_contact_source = NULL WHERE id = $1`,
+      [row.id]
+    );
     const failed = await proposal(row.id, 'draft', `dnc-mid-fail-${row.id}`, 2);
     await pool.query(`UPDATE proposals SET sent_at = NULL WHERE id = $1`, [failed.id]);
     send._setTransport({
@@ -1119,16 +1211,224 @@ describe('manual do-not-contact', () => {
         (err) => err.status === 502
       );
       const stored = await pool.query(
-        'SELECT status, message_id, thread_id FROM proposals WHERE id = $1',
+        'SELECT status, message_id, thread_id, sent_at FROM proposals WHERE id = $1',
         [failed.id]
       );
       assert.equal(stored.rows[0].status, 'stopped');
       assert.equal(stored.rows[0].message_id, `<dnc-mid-fail-${row.id}@localhost>`);
       assert.equal(stored.rows[0].thread_id, null);
+      assert.equal(stored.rows[0].sent_at, null);
     } finally {
       send._setTransport(recordingTransport());
     }
     console.log('[dnc] a stop during send is not reverted to sent or draft');
+  });
+
+  it('does not rewrite a proposal that is no longer stopped when the mail is recorded', async () => {
+    const row = await lead('Record Guard', 'qualified');
+    const draft = await proposal(row.id, 'draft', `dnc-record-guard-${row.id}`);
+    await pool.query(
+      `UPDATE proposals SET sent_at = NULL, followup1 = 'Soon', followup2 = 'Later' WHERE id = $1`,
+      [draft.id]
+    );
+    await pool.query(
+      `UPDATE prospects SET do_not_contact = FALSE, last_contacted_at = NULL WHERE id = $1`,
+      [row.id]
+    );
+    const countedBefore = await send.sentToday();
+    send._setTransport({
+      async sendMail() {
+        await pool.query(
+          `UPDATE proposals SET status = 'stopped', stop_reason = 'Lead is do-not-contact' WHERE id = $1`,
+          [draft.id]
+        );
+        await pool.query(
+          `UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'manual' WHERE id = $1`,
+          [row.id]
+        );
+        return { messageId: '<dnc-guard@localhost>', threadId: 'thr-guard' };
+      },
+    });
+    let flipped = false;
+    try {
+      await withPoolQuery(async (text, params, original) => {
+        const result = await original(text, params);
+        if (!flipped
+            && text === 'SELECT status FROM proposals WHERE id = $1'
+            && params && params[0] === draft.id
+            && result.rows[0] && result.rows[0].status === 'stopped') {
+          flipped = true;
+          await original(
+            `UPDATE proposals
+                SET status = 'sent', message_id = '<leave-me>', thread_id = 'thr-leave',
+                    sent_at = NOW() - INTERVAL '3 days',
+                    followup1_due_at = NULL, followup2_due_at = NULL
+              WHERE id = $1`,
+            [draft.id]
+          );
+        }
+        return result;
+      }, () => send.approveAndSend(draft.id));
+      assert.equal(flipped, true);
+      const stored = await pool.query(
+        `SELECT status, message_id, thread_id, sent_at, followup1_due_at, followup2_due_at
+           FROM proposals WHERE id = $1`,
+        [draft.id]
+      );
+      assert.equal(stored.rows[0].status, 'sent');
+      assert.equal(stored.rows[0].message_id, '<leave-me>');
+      assert.equal(stored.rows[0].thread_id, 'thr-leave');
+      assert.equal(stored.rows[0].followup1_due_at, null);
+      assert.equal(stored.rows[0].followup2_due_at, null);
+      assert.ok(stored.rows[0].sent_at);
+      const ageMs = Date.now() - new Date(stored.rows[0].sent_at).getTime();
+      assert.ok(ageMs > 24 * 60 * 60 * 1000);
+      assert.equal(await send.sentToday(), countedBefore);
+      const flagged = await flagRow(row.id);
+      assert.equal(flagged.do_not_contact, true);
+      const contacted = await pool.query(
+        'SELECT last_contacted_at FROM prospects WHERE id = $1',
+        [row.id]
+      );
+      assert.equal(contacted.rows[0].last_contacted_at, null);
+      console.log('[dnc] recording leaves a proposal that is not stopped');
+    } finally {
+      send._setTransport(recordingTransport());
+    }
+  });
+
+  it('stops an in-flight sibling when the lead opts out during the send', async () => {
+    const row = await lead('Sibling Opt', 'qualified');
+    const replied = await proposal(row.id, 'sent', `dnc-sibling-replied-${row.id}`);
+    const draft = await proposal(row.id, 'draft', `dnc-sibling-draft-${row.id}`, 2);
+    await pool.query(
+      `UPDATE proposals
+          SET sent_at = NULL, followup1 = 'Soon', followup2 = 'Later',
+              followup1_due_at = NULL, followup2_due_at = NULL
+        WHERE id = $1`,
+      [draft.id]
+    );
+    const countedBefore = await send.sentToday();
+    send._setTransport({
+      async sendMail() {
+        const opt = await send.applyInboxMessages([{
+          from: row.email,
+          subject: 'Re: Hi',
+          text: 'Please unsubscribe me.',
+          date: new Date(),
+          inReplyTo: `<dnc-sibling-replied-${row.id}@localhost>`,
+        }]);
+        assert.equal(opt.matched, 1);
+        return { messageId: '<dnc-sibling@localhost>', threadId: 'thr-sibling' };
+      },
+    });
+    try {
+      const sentRow = await send.approveAndSend(draft.id);
+      assert.equal(sentRow.status, 'stopped');
+      assert.ok(sentRow.sent_at);
+      assert.equal(sentRow.message_id, '<dnc-sibling@localhost>');
+      assert.equal(sentRow.thread_id, 'thr-sibling');
+      assert.equal(sentRow.followup1_due_at, null);
+      assert.equal(sentRow.followup2_due_at, null);
+      const stored = await pool.query(
+        `SELECT status, stop_reason, sent_at, message_id, thread_id, followup1_due_at, followup2_due_at
+           FROM proposals WHERE id = $1`,
+        [draft.id]
+      );
+      assert.equal(stored.rows[0].status, 'stopped');
+      assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted');
+      assert.ok(stored.rows[0].sent_at);
+      assert.equal(stored.rows[0].message_id, '<dnc-sibling@localhost>');
+      assert.equal(stored.rows[0].thread_id, 'thr-sibling');
+      assert.equal(stored.rows[0].followup1_due_at, null);
+      assert.equal(stored.rows[0].followup2_due_at, null);
+      const repliedRow = await pool.query(
+        'SELECT status, stop_reason FROM proposals WHERE id = $1',
+        [replied.id]
+      );
+      assert.equal(repliedRow.rows[0].status, 'opted_out');
+      assert.equal(repliedRow.rows[0].stop_reason, 'Asked not to be contacted');
+      const flagged = await flagRow(row.id);
+      assert.equal(flagged.do_not_contact, true);
+      assert.equal(flagged.do_not_contact_source, 'opt_out');
+      assert.equal(await send.sentToday(), countedBefore + 1);
+      const contacted = await pool.query(
+        'SELECT last_contacted_at FROM prospects WHERE id = $1',
+        [row.id]
+      );
+      assert.ok(contacted.rows[0].last_contacted_at);
+      console.log('[dnc] opt-out during send stops the sibling and records the mail');
+    } finally {
+      send._setTransport(recordingTransport());
+      await drainInbox();
+    }
+  });
+
+  it('stops an in-flight sibling when a later message on a replied thread opts out', async () => {
+    const row = await lead('Sibling Follow', 'qualified');
+    const replied = await proposal(row.id, 'replied', `dnc-followon-replied-${row.id}`);
+    const draft = await proposal(row.id, 'draft', `dnc-followon-draft-${row.id}`, 2);
+    await pool.query(
+      `UPDATE proposals
+          SET sent_at = NULL, followup1 = 'Soon', followup2 = 'Later',
+              followup1_due_at = NULL, followup2_due_at = NULL
+        WHERE id = $1`,
+      [draft.id]
+    );
+    const countedBefore = await send.sentToday();
+    send._setTransport({
+      async sendMail() {
+        const opt = await send.applyInboxMessages([{
+          from: row.email,
+          subject: 'Re: Hi',
+          text: 'Please unsubscribe me.',
+          date: new Date(),
+          inReplyTo: `<dnc-followon-replied-${row.id}@localhost>`,
+        }]);
+        assert.equal(opt.matched, 0);
+        assert.equal(opt.follow_ons, 1);
+        return { messageId: '<dnc-followon@localhost>', threadId: 'thr-followon' };
+      },
+    });
+    try {
+      const sentRow = await send.approveAndSend(draft.id);
+      assert.equal(sentRow.status, 'stopped');
+      assert.ok(sentRow.sent_at);
+      assert.equal(sentRow.message_id, '<dnc-followon@localhost>');
+      assert.equal(sentRow.thread_id, 'thr-followon');
+      assert.equal(sentRow.followup1_due_at, null);
+      assert.equal(sentRow.followup2_due_at, null);
+      const stored = await pool.query(
+        `SELECT status, stop_reason, sent_at, message_id, thread_id, followup1_due_at, followup2_due_at
+           FROM proposals WHERE id = $1`,
+        [draft.id]
+      );
+      assert.equal(stored.rows[0].status, 'stopped');
+      assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted');
+      assert.ok(stored.rows[0].sent_at);
+      assert.equal(stored.rows[0].message_id, '<dnc-followon@localhost>');
+      assert.equal(stored.rows[0].thread_id, 'thr-followon');
+      assert.equal(stored.rows[0].followup1_due_at, null);
+      assert.equal(stored.rows[0].followup2_due_at, null);
+      const repliedRow = await pool.query(
+        'SELECT status FROM proposals WHERE id = $1',
+        [replied.id]
+      );
+      assert.equal(repliedRow.rows[0].status, 'replied');
+      const flagged = await flagRow(row.id);
+      assert.equal(flagged.do_not_contact, true);
+      assert.equal(flagged.do_not_contact_source, 'opt_out');
+      assert.equal(await send.sentToday(), countedBefore + 1);
+      const contacted = await pool.query(
+        'SELECT last_contacted_at FROM prospects WHERE id = $1',
+        [row.id]
+      );
+      assert.ok(contacted.rows[0].last_contacted_at);
+      console.log('[dnc] later opt-out stops the sibling and records the mail');
+    } finally {
+      send._setTransport(recordingTransport());
+      await drainInbox();
+    }
   });
 
   it('does not clear or downgrade opt_out when a manual clear or set races it', async () => {

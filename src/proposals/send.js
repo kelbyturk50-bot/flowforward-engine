@@ -296,14 +296,16 @@ async function approveAndSend(proposalId) {
     const current = await pool.query('SELECT status FROM proposals WHERE id = $1', [p.id]);
     if (current.rows[0] && current.rows[0].status === 'stopped') {
       // The message went out. Keep stopped: no sent status and no follow-up
-      // dates. Record the ids, the contact time, and the activity.
+      // dates. sent_at counts toward the daily cap. A row that is no longer
+      // stopped is left alone, including its sent_at and message ids.
       const { rows: tracked } = await pool.query(
         `UPDATE proposals
-            SET message_id = $2, thread_id = $3, error = NULL
+            SET sent_at = NOW(), message_id = $2, thread_id = $3, error = NULL
           WHERE id = $1 AND status = 'stopped'
           RETURNING *`,
         [p.id, info.messageId || null, info.threadId || null]
       );
+      if (!tracked.length) return current.rows[0];
       await pool.query(
         `UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`,
         [p.prospect_id]
@@ -314,7 +316,7 @@ async function approveAndSend(proposalId) {
         `Sent proposal v${p.version} to ${p.to_email}. The message went out and the sequence stayed stopped.`
       );
       console.log('[send] delivered after the proposal was stopped');
-      return tracked[0] || current.rows[0];
+      return tracked[0];
     }
     return current.rows[0] || null;
   }
@@ -460,19 +462,15 @@ async function sendDueFollowups() {
     await attachPrototypeUrl(p);
     const beforeSend = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [p.prospect_id]);
     if (beforeSend.rows[0] && beforeSend.rows[0].do_not_contact) {
-      // The claim timestamp is cleared for this proposal whatever its status.
-      // The manual route and an opt-out move the row off 'sent' before this
-      // abort runs. Status and stop_reason change only while it is still
-      // sent, so a stopped or opted_out row keeps that status. No other row
-      // is updated.
-      await pool.query(
-        `UPDATE proposals SET ${which}_sent_at = NULL WHERE id = $1`,
-        [p.id]
-      );
+      // One row. The claim timestamp is always cleared. Status and
+      // stop_reason change only while the row is still sent, so a stopped
+      // or opted_out row keeps that status. SET reads the old status.
       await pool.query(
         `UPDATE proposals
-            SET status = 'stopped', stop_reason = $2
-          WHERE id = $1 AND status = 'sent'`,
+            SET ${which}_sent_at = NULL,
+                status = CASE WHEN status = 'sent' THEN 'stopped' ELSE status END,
+                stop_reason = CASE WHEN status = 'sent' THEN $2 ELSE stop_reason END
+          WHERE id = $1`,
         [p.id, 'Lead is do-not-contact']
       );
       continue;
@@ -575,6 +573,7 @@ async function applyOutcomeEffects(p, outcome, msg) {
   }
   if (kind === 'opted_out') {
     await stopSequence(p.id, 'Asked not to be contacted', 'opted_out');
+    await stopLeadSequences(pool, p.prospect_id, 'Asked not to be contacted');
     await markOptOut(p.prospect_id);
     await logActivity(p.prospect_id, 'email', `Replied asking not to be contacted${snippet ? `: "${snippet}"` : ''}. Marked do-not-contact.`);
     return;
@@ -655,6 +654,7 @@ async function applyFollowOn(p, outcome, msg) {
   const inbox = require('./inbox');
   if (await inbox.alreadyRecorded(msg)) return false;
   if (outcome.kind === 'opted_out') {
+    await stopLeadSequences(pool, p.prospect_id, 'Asked not to be contacted');
     await markOptOut(p.prospect_id);
     await logActivity(p.prospect_id, 'email', 'Asked not to be contacted. Marked do-not-contact.');
   } else if (outcome.kind === 'replied' || outcome.kind === 'booked') {
