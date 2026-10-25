@@ -86,7 +86,7 @@ These numbered rules are authoritative and apply in order. `tieRank` is only the
 1. **HVAC beachhead bias.** HVAC beats plumbing, and plumbing beats the rest. This sorts prospects (queue and gallery priority) and is not a fit-score change (Summit: no plumbing score tweak).
 2. **Estimate follow-up wins ties.** It is Pilot #1 and the only rung with an `estimate_recovered` proof path.
 3. **Cheapest to make real:** email-only beats needing an FSM integration, which beats needing telephony (#12 is blocked).
-4. **Own-it fit:** prefer agents the FSM does not already include cheaply (e.g. Jobber Receptionist at $29/mo makes receptionist a weak own-it pitch for Jobber shops).
+4. **Own-it fit:** prefer agents the FSM does not already include cheaply (e.g. a low-cost Jobber add-on makes receptionist a weak own-it pitch for Jobber shops).
 
 ### Disqualifiers and caps
 - **Pest control:** no prototype (out of GTM).
@@ -152,7 +152,7 @@ These numbered rules are authoritative and apply in order. `tieRank` is only the
 ### Narrative (Kelby, own name)
 > "I built what your follow-up would look like if it ran itself, in your brand, on fake data. It's a prototype, it says so on every screen. If you like it, we make it real in a couple of weeks, on your email and your accounts. You own it. Walk away anytime and take everything with you."
 
-The lead is the **outcome**, not the AI. Utah replacement installs average about $18.5K (wedge memo §2), so if even one stalled estimate is recovered, it could cover the build. Never promise that it will.
+The lead is the **outcome**, not the AI. A Utah replacement install is a big-ticket job (wedge memo §2), so if even one stalled estimate is recovered, it could cover the build. Never promise that it will.
 
 ### Offer ladder
 1. **Free branded prototype.** Private link, synthetic data, watermark. Shown live by Kelby.
@@ -160,24 +160,19 @@ The lead is the **outcome**, not the AI. Utah replacement installs average about
 3. **Hosting and maintenance plan.** Monitoring, fixes, small changes. Monthly, cancel anytime, export included.
 4. **Consulting.** Hourly or a small block, for the next workflow or an audit.
 
-### Pricing anchors: **DECIDED (Kelby, Oct 16)**
-Prototype $0 · MVP build $1.5–3.5K · hosting/maintenance $150–400/mo · consulting $125–200/hr. The first build may be discounted in exchange for a case study.
+### Pricing
+The four packages are Free branded prototype, MVP build, Hosting and maintenance plan, and Consulting. Pricing is shared after initial outreach. The first build may be discounted in exchange for a case study.
 
-| Rung | Decided anchor (Kelby, Oct 16) | Market evidence (public, mostly vendor or agency blogs, so treat as directional) |
-|---|---|---|
-| Prototype | $0 | Free audit/plan as the entry point is common ([Iternal](https://iternal.ai/ai-consulting-for-small-business), [Agents Chef](https://www.agentschef.com/pricing)) |
-| MVP build (1 agent) | **$1,500–$3,500 one-time** | Single-workflow setup $1,500–$5,000 ([Taskip](https://taskip.net/ai-automation-agency-pricing/)); agent "starts at $2,500" ([Ascend Intuition](https://ascend-intuition.com/blog/ai-agent-cost-small-business)); fixed one-workflow project $2,000–$20,000 ([Working Theory](https://workingtheoryai.com/insights/what-a-small-business-automation-consultant-does/)) |
-| Hosting/maintenance | **$150–$400/mo** | $250/mo hosting+monitoring ([Ascend](https://ascend-intuition.com/blog/ai-agent-cost-small-business)); $300/mo maintenance tier ([Agents Chef](https://www.agentschef.com/pricing)); SMB retainers $500–$1,500/mo ([Taskip](https://taskip.net/ai-automation-agency-pricing/)). Ceiling: Hatch is reportedly ~$600–1,500/location/mo ([ServiceAgent](https://serviceagent.ai/blogs/hatch-pricing/), third-party). Floor: Jobber Receptionist at $29/mo ([Jobber](https://help.getjobber.com/en/articles/receptionistpowered-by-jobber-ai/)) |
-| Consulting | **$125–$200/hr** | Advisory $100–$300/hr ([Iternal](https://iternal.ai/ai-consulting-for-small-business)); mid-level AI automation $120–$180/hr ([Milicevic](https://lazar-milicevic.com/blog/hiring-an-ai-automation-consultant-for-your-small-business)); $250/hr advisory ([Ascend](https://ascend-intuition.com/blog/ai-agent-cost-small-business)); Upwork $35–$60/hr ([Jahanzaib](https://www.jahanzaib.ai/blog/ai-automation-consultant-hourly-rate)) |
+Market research (qualitative only; public vendor and agency pages, so treat as directional, and this doc quotes no figures from them): [Iternal](https://iternal.ai/ai-consulting-for-small-business), [Agents Chef](https://www.agentschef.com/pricing), [Taskip](https://taskip.net/ai-automation-agency-pricing/), [Ascend Intuition](https://ascend-intuition.com/blog/ai-agent-cost-small-business), [Working Theory](https://workingtheoryai.com/insights/what-a-small-business-automation-consultant-does/), [ServiceAgent](https://serviceagent.ai/blogs/hatch-pricing/), [Jobber](https://help.getjobber.com/en/articles/receptionistpowered-by-jobber-ai/), [Milicevic](https://lazar-milicevic.com/blog/hiring-an-ai-automation-consultant-for-your-small-business), [Jahanzaib](https://www.jahanzaib.ai/blog/ai-automation-consultant-hourly-rate).
 
-Why this sits at the low end of the market: it is a beachhead for 2–15-truck owners, and the proof gate (1 paid build) matters more than margin right now. Kelby approved a first-build discount in exchange for a case study.
+Pricing approach: this is a beachhead for 2–15-truck owners, and the proof gate (1 paid build) matters more than margin right now. Kelby approved a first-build discount in exchange for a case study.
 
 ### Objection handling
 1. **"Is this real or a mockup?"** It's a prototype on fake data, and it says so on every screen. The real version uses your inbox and your estimates. That's the paid build.
 2. **"Jobber/HCP already sends quote reminders."** Jobber sends up to two automatic reminders, and custom sequences need Grow. This runs 3–4 touches from your own mailbox, stops when they reply, and tells you which estimates came back.
 3. **"I don't want AI talking to my customers."** It drafts in your voice, from your email, on a schedule you approve. You can turn it off with one switch. Nothing goes out by SMS unless you set that up later.
 4. **"What if I stop paying?"** You own the accounts and data. Export anytime, no termination fee.
-5. **"Too expensive."** A Utah replacement install averages ~$18.5K. Many shops have some open estimates that never got a follow-up, and if even one came back, it could cover the cost. No promises. The audit shows your real numbers first.
+5. **"Too expensive."** A Utah replacement install is a big-ticket job. Many shops have some open estimates that never got a follow-up, and if even one came back, it could cover the cost. No promises. The audit shows your real numbers first.
 6. **"I'm too busy to set it up."** Setup is a CSV or forwarding your estimate emails. About an hour of your time.
 7. **"Will it spam people or hurt my reviews?"** Max 3–4 touches, stops on reply, and every message comes from you.
 8. **"Where did this branding come from?"** It's just your company name and colors, entered by hand. Nothing was pulled from your site, and it's a private link only you have. We take it down the moment you ask.
@@ -202,18 +197,18 @@ Why this sits at the low end of the market: it is a beachhead for 2–15-truck o
 
 ## (c) Build-first order
 
-1. **Estimate follow-up.** It's Pilot #1, has the biggest dollars per event, works email-only with $0 Twilio, the demo is visceral, and it's the only path to `estimate_recovered`.
+1. **Estimate follow-up.** It's Pilot #1, has the biggest dollars per event, works email-only with no Twilio cost, the demo is visceral, and it's the only path to `estimate_recovered`.
 2. **Speed-to-lead / web lead response.** The runner-up wedge. Web-form-first is buildable now, and the contact-form-only signal is common and observable.
-3. **Call answering / receptionist.** The pain is strong and shows up in reviews (missed calls), but the space is crowded ($29 Jobber native) and the real version needs telephony (#12 blocked). Build it as a prototype first.
+3. **Call answering / receptionist.** The pain is strong and shows up in reviews (missed calls), but the space is crowded (a low-cost Jobber add-on) and the real version needs telephony (#12 blocked). Build it as a prototype first.
 4. **Scheduling.** A clear "no booking widget" signal, but FSMs bundle online booking cheaply (HCP Basic), so own-it is weak. Good as a visual demo.
-5. **Review requests.** Cheap to build and easy to spot, but it's a low price anchor ($75/mo NiceJob) and FSMs include it. Good as an add-on, not a lead.
+5. **Review requests.** Cheap to build and easy to spot, but a low-cost review add-on (NiceJob) covers the same job and FSMs include it. Good as an add-on, not a lead.
 6. **Maintenance-plan renewal.** High value when `maint_plan` exists, but it needs agreement data from the FSM, so it's a second-build upsell.
 7. **Dispatch.** The pain belongs to bigger shops and the money already goes to the FSM. It's hard to demo honestly on synthetic data.
 8. **Bookkeeping: LOW.** High trust and accuracy risk (money, taxes, the CPA relationship), no observable public signal, needs access to sensitive financial accounts, and it's off-wedge. Offer it only when asked.
 
 ## Decisions and pending items
 - **Decided (Scout):** franchises get no prototype in v1. Hard floor at minScore 40, no override.
-- **Decided (Kelby, Oct 16):** price anchors as above; first-build case-study discount allowed; links expire after 14 days.
+- **Decided (Kelby, Oct 16):** pricing is shared after initial outreach, not in public docs; first-build case-study discount allowed; links expire after 14 days.
 - **Decided (Kelby, Oct 16):** no real prospect logos (no fetch, no upload); name and colors only.
 
 **Open items:**
