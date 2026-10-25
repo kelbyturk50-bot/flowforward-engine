@@ -987,17 +987,32 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
       'DROP TRIGGER IF EXISTS campaign_touches_default_channel ON campaign_touches;',
     ];
     const dropKind = /\bDROP\s+(?:CONSTRAINT|COLUMN|TRIGGER|TABLE|INDEX)\b/i;
-    let schemaScanned = schema
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .replace(/--[^\n]*/g, ' ');
+    // One left-to-right pass: a string literal is kept, a block or line
+    // comment is blanked. Two passes let `-- x /*` swallow real SQL up to a
+    // later `*/`, and let '--' inside a string hide the rest of that line.
+    const stripSqlComments = (sql) =>
+      sql.replace(/'(?:[^']|'')*'|\/\*[\s\S]*?\*\/|--[^\n]*/g, (m) => (m[0] === "'" ? m : ' '));
+    const hasDrop = (sql) => dropKind.test(stripSqlComments(sql));
+    assert.equal(hasDrop('-- ALTER TABLE x DROP COLUMN y;\n'), false);
+    assert.equal(hasDrop('/* DROP TABLE x; */ SELECT 1;'), false);
+    assert.equal(hasDrop('-- note\nALTER TABLE x DROP COLUMN y;'), true);
+    assert.equal(hasDrop('/* note */ DROP INDEX y;'), true);
+    assert.equal(hasDrop('/* a */ DROP TABLE y; /* b */'), true);
+    assert.equal(hasDrop('-- old /* here\nDROP TABLE y;\n/* end */'), true);
+    assert.equal(hasDrop('/* a -- b */\ndrop trigger t on x;'), true);
+    assert.equal(hasDrop("COMMENT ON TABLE x IS 'a--b'; ALTER TABLE x DROP CONSTRAINT c;"), true);
+    assert.equal(hasDrop("COMMENT ON TABLE x IS 'it''s /*'; DROP TABLE y; -- */"), true);
+    assert.equal(hasDrop("DO $$ BEGIN EXECUTE 'ALTER TABLE x DROP COLUMN y'; END $$;"), true);
+    for (const kind of ['CONSTRAINT c', 'COLUMN c', 'TRIGGER t ON x', 'TABLE t', 'INDEX i']) {
+      assert.equal(hasDrop(`ALTER TABLE x DROP ${kind};`), true, kind);
+    }
+    let schemaScanned = stripSqlComments(schema);
     for (const statement of allowedDrops) {
       assert.equal(schemaScanned.split(statement).length - 1, 1, statement);
       schemaScanned = schemaScanned.replace(statement, '');
     }
     assert.equal(dropKind.test(schemaScanned), false);
-    const repairScanned = repair
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .replace(/--[^\n]*/g, ' ');
+    const repairScanned = stripSqlComments(repair);
     assert.equal(dropKind.test(repairScanned), false);
     assert.match(repair, /NOT VALID/);
     assert.match(repair, /VALIDATE CONSTRAINT prospect_brands_name_strict/);

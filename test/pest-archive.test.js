@@ -112,6 +112,19 @@ it('does not treat 555 inside the archive run id as a phone number', () => {
     'database flowforward_test\nlocal\narchived 4\nrun 504555ca-c649-4cf4-9001-b516253835f5\n'
   );
   assert.throws(() => assertNoContactLeak('database flowforward_test\nlocal\narchived 4\n555-0100\n'));
+  // The strip must only ever remove the exact run line, never a leak beside it.
+  const runId = '504555ca-c649-4cf4-9001-b516253835f5';
+  for (const leak of [
+    `run ${runId} 555-0100`,
+    `555-0100 run ${runId}`,
+    'run 555-0100',
+    'run 555-0100-0000-0000-000000000000',
+    `lead ${runId} 555-0100`,
+    `run ${runId}\nphone 555-0100`,
+    `phone 555-0100\nrun ${runId}`,
+  ]) {
+    assert.throws(() => assertNoContactLeak(`database flowforward_test\nlocal\narchived 4\n${leak}\n`), leak);
+  }
 });
 
 function assertRefused(result) {

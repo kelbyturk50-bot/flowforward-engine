@@ -375,11 +375,14 @@ function _setLeadStop(fn) {
 
 // Opt-out raises the flag in its own transaction and locks the prospect row
 // first, so a manual clear or set cannot pass the row while this is open.
+// Sequence stops run on this client after the flag write. A failure rolls
+// the flag back. proposalId, when set, is the replied proposal and becomes
+// opted_out before siblings are stopped, so it is not rewritten to stopped.
 let optOutGate = null;
 // Runs after a follow-up claim commits and before the do-not-contact recheck.
 // Tests use it to call the real flag route or the inbox opt-out.
 let followupClaimGate = null;
-async function markOptOut(prospectId) {
+async function markOptOut(prospectId, proposalId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -391,6 +394,10 @@ async function markOptOut(prospectId) {
         WHERE id = $1`,
       [prospectId]
     );
+    if (proposalId != null) {
+      await stopSequence(proposalId, 'Asked not to be contacted', 'opted_out', client);
+    }
+    await stopLeadSequences(client, prospectId, 'Asked not to be contacted');
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
@@ -572,9 +579,7 @@ async function applyOutcomeEffects(p, outcome, msg) {
     return;
   }
   if (kind === 'opted_out') {
-    await stopSequence(p.id, 'Asked not to be contacted', 'opted_out');
-    await stopLeadSequences(pool, p.prospect_id, 'Asked not to be contacted');
-    await markOptOut(p.prospect_id);
+    await markOptOut(p.prospect_id, p.id);
     await logActivity(p.prospect_id, 'email', `Replied asking not to be contacted${snippet ? `: "${snippet}"` : ''}. Marked do-not-contact.`);
     return;
   }
@@ -654,7 +659,6 @@ async function applyFollowOn(p, outcome, msg) {
   const inbox = require('./inbox');
   if (await inbox.alreadyRecorded(msg)) return false;
   if (outcome.kind === 'opted_out') {
-    await stopLeadSequences(pool, p.prospect_id, 'Asked not to be contacted');
     await markOptOut(p.prospect_id);
     await logActivity(p.prospect_id, 'email', 'Asked not to be contacted. Marked do-not-contact.');
   } else if (outcome.kind === 'replied' || outcome.kind === 'booked') {

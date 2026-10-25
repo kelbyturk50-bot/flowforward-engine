@@ -1224,6 +1224,37 @@ describe('manual do-not-contact', () => {
     console.log('[dnc] a stop during send is not reverted to sent or draft');
   });
 
+  it('keeps a legacy or opt-out flag when a stopped send is recorded', async () => {
+    for (const source of [null, 'opt_out']) {
+      const row = await lead(`Mid Send Keep ${source || 'legacy'}`, 'qualified');
+      const draft = await proposal(row.id, 'draft', `dnc-mid-keep-${source || 'legacy'}-${row.id}`);
+      await pool.query(`UPDATE proposals SET sent_at = NULL WHERE id = $1`, [draft.id]);
+      send._setTransport({
+        async sendMail() {
+          await pool.query(
+            `UPDATE proposals SET status = 'stopped', stop_reason = 'Lead is do-not-contact' WHERE id = $1`,
+            [draft.id]
+          );
+          await pool.query(
+            `UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = $2 WHERE id = $1`,
+            [row.id, source]
+          );
+          return { messageId: `<dnc-mid-keep-${row.id}@localhost>`, threadId: `thr-keep-${row.id}` };
+        },
+      });
+      try {
+        const sentRow = await send.approveAndSend(draft.id);
+        assert.equal(sentRow.status, 'stopped');
+        assert.ok(sentRow.sent_at);
+        const flagged = await flagRow(row.id);
+        assert.equal(flagged.do_not_contact, true, String(source));
+        assert.equal(flagged.do_not_contact_source, source, String(source));
+      } finally {
+        send._setTransport(recordingTransport());
+      }
+    }
+  });
+
   it('does not rewrite a proposal that is no longer stopped when the mail is recorded', async () => {
     const row = await lead('Record Guard', 'qualified');
     const draft = await proposal(row.id, 'draft', `dnc-record-guard-${row.id}`);
@@ -1427,6 +1458,195 @@ describe('manual do-not-contact', () => {
       console.log('[dnc] later opt-out stops the sibling and records the mail');
     } finally {
       send._setTransport(recordingTransport());
+      await drainInbox();
+    }
+  });
+
+  it('rolls back the opt-out when stopping sequences fails', async () => {
+    send._setLeadStop(async () => {
+      throw Object.assign(new Error('stop failed'), { code: 'XX000' });
+    });
+    try {
+      const row = await lead('Opt Stop Fail', 'contacted');
+      const before = await flagRow(row.id);
+      const sent = await proposal(row.id, 'sent', `dnc-opt-rollback-${row.id}`);
+      const sibling = await proposal(row.id, 'draft', `dnc-opt-rollback-sib-${row.id}`, 2);
+      await assert.rejects(
+        () => send.applyInboxMessages([{
+          from: row.email,
+          subject: 'Re: Hi',
+          text: 'Please unsubscribe me.',
+          date: new Date(),
+          inReplyTo: `<dnc-opt-rollback-${row.id}@localhost>`,
+        }]),
+        (err) => err.code === 'XX000'
+      );
+      const flagged = await flagRow(row.id);
+      assert.equal(flagged.do_not_contact, false);
+      assert.equal(flagged.do_not_contact_source, null);
+      assert.equal(flagged.stage, before.stage);
+      const sentRow = await pool.query(
+        'SELECT status, stop_reason FROM proposals WHERE id = $1',
+        [sent.id]
+      );
+      assert.equal(sentRow.rows[0].status, 'sent');
+      assert.equal(sentRow.rows[0].stop_reason, null);
+      const siblingRow = await pool.query(
+        'SELECT status, stop_reason FROM proposals WHERE id = $1',
+        [sibling.id]
+      );
+      assert.equal(siblingRow.rows[0].status, 'draft');
+      assert.equal(siblingRow.rows[0].stop_reason, null);
+      assert.equal((await activityBodies(row.id)).length, 0);
+      const inboxCount = await pool.query(
+        'SELECT COUNT(*)::int AS n FROM inbox_items WHERE prospect_id = $1',
+        [row.id]
+      );
+      assert.equal(inboxCount.rows[0].n, 0);
+
+      const follow = await lead('Opt Stop Fail Follow', 'responded');
+      const followBefore = await flagRow(follow.id);
+      const replied = await proposal(follow.id, 'replied', `dnc-opt-rollback-re-${follow.id}`);
+      const followDraft = await proposal(follow.id, 'draft', `dnc-opt-rollback-fd-${follow.id}`, 2);
+      await assert.rejects(
+        () => send.applyInboxMessages([{
+          from: follow.email,
+          subject: 'Re: Hi',
+          text: 'Please unsubscribe me.',
+          date: new Date(),
+          inReplyTo: `<dnc-opt-rollback-re-${follow.id}@localhost>`,
+        }]),
+        (err) => err.code === 'XX000'
+      );
+      const followFlag = await flagRow(follow.id);
+      assert.equal(followFlag.do_not_contact, false);
+      assert.equal(followFlag.do_not_contact_source, null);
+      assert.equal(followFlag.stage, followBefore.stage);
+      const repliedRow = await pool.query(
+        'SELECT status, stop_reason FROM proposals WHERE id = $1',
+        [replied.id]
+      );
+      assert.equal(repliedRow.rows[0].status, 'replied');
+      assert.equal(repliedRow.rows[0].stop_reason, null);
+      const followDraftRow = await pool.query(
+        'SELECT status, stop_reason FROM proposals WHERE id = $1',
+        [followDraft.id]
+      );
+      assert.equal(followDraftRow.rows[0].status, 'draft');
+      assert.equal(followDraftRow.rows[0].stop_reason, null);
+      console.log('[dnc] a failed sequence stop rolls the opt-out back');
+    } finally {
+      send._setLeadStop(null);
+    }
+  });
+
+  it('does not send a draft claimed after the opt-out commits', async () => {
+    const row = await lead('Opt Then Claim', 'qualified');
+    const sent = await proposal(row.id, 'sent', `dnc-opt-claim-${row.id}`);
+    const earlier = await proposal(row.id, 'draft', `dnc-opt-claim-early-${row.id}`, 2);
+    const before = sentMails.length;
+    const opt = await send.applyInboxMessages([{
+      from: row.email,
+      subject: 'Re: Hi',
+      text: 'Please unsubscribe me.',
+      date: new Date(),
+      inReplyTo: `<dnc-opt-claim-${row.id}@localhost>`,
+    }]);
+    assert.equal(opt.matched, 1);
+    await drainInbox();
+    const flagged = await flagRow(row.id);
+    assert.equal(flagged.do_not_contact, true);
+    assert.equal(flagged.do_not_contact_source, 'opt_out');
+    assert.equal(flagged.stage, 'lost');
+    const sentRow = await pool.query(
+      'SELECT status, stop_reason FROM proposals WHERE id = $1',
+      [sent.id]
+    );
+    assert.equal(sentRow.rows[0].status, 'opted_out');
+    assert.equal(sentRow.rows[0].stop_reason, 'Asked not to be contacted');
+    const earlierRow = await pool.query(
+      'SELECT status, stop_reason FROM proposals WHERE id = $1',
+      [earlier.id]
+    );
+    assert.equal(earlierRow.rows[0].status, 'stopped');
+    assert.equal(earlierRow.rows[0].stop_reason, 'Asked not to be contacted');
+    const item = await pool.query(
+      'SELECT status, kind FROM inbox_items WHERE prospect_id = $1',
+      [row.id]
+    );
+    assert.equal(item.rows.length, 1);
+    assert.equal(item.rows[0].status, 'fyi');
+    assert.equal(item.rows[0].kind, 'opt_out');
+
+    const draft = await proposal(row.id, 'draft', `dnc-opt-claim-later-${row.id}`, 3);
+    await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
+    await assert.rejects(
+      () => send.approveAndSend(draft.id),
+      (err) => err.status === 409 && /do-not-contact/.test(err.message)
+    );
+    const stored = await pool.query(
+      'SELECT status, sent_at, message_id FROM proposals WHERE id = $1',
+      [draft.id]
+    );
+    assert.equal(stored.rows[0].status, 'draft');
+    assert.equal(stored.rows[0].sent_at, null);
+    assert.equal(stored.rows[0].message_id, `<dnc-opt-claim-later-${row.id}@localhost>`);
+    assert.equal(sentMails.length, before);
+    console.log('[dnc] a draft claimed after opt-out commits is not sent');
+  });
+
+  it('stops lead sequences inside the opt-out transaction after the flag is set', async () => {
+    async function seenInside(db, prospectId) {
+      assert.notEqual(db, pool);
+      const inside = await db.query(
+        'SELECT do_not_contact, do_not_contact_source FROM prospects WHERE id = $1',
+        [prospectId]
+      );
+      assert.equal(inside.rows[0].do_not_contact, true);
+      assert.equal(inside.rows[0].do_not_contact_source, 'opt_out');
+      const outside = await pool.query(
+        'SELECT do_not_contact FROM prospects WHERE id = $1',
+        [prospectId]
+      );
+      assert.equal(outside.rows[0].do_not_contact, false);
+    }
+    const row = await lead('Opt Inside', 'contacted');
+    const sent = await proposal(row.id, 'sent', `dnc-opt-inside-${row.id}`);
+    send._setLeadStop((db, prospectId) => seenInside(db, prospectId));
+    try {
+      const opt = await send.applyInboxMessages([{
+        from: row.email,
+        subject: 'Re: Hi',
+        text: 'Please unsubscribe me.',
+        date: new Date(),
+        inReplyTo: `<dnc-opt-inside-${row.id}@localhost>`,
+      }]);
+      assert.equal(opt.matched, 1);
+      await drainInbox();
+      const flagged = await flagRow(row.id);
+      assert.equal(flagged.do_not_contact, true);
+      assert.equal(flagged.do_not_contact_source, 'opt_out');
+      const sentRow = await pool.query('SELECT status FROM proposals WHERE id = $1', [sent.id]);
+      assert.equal(sentRow.rows[0].status, 'opted_out');
+
+      const follow = await lead('Opt Inside Follow', 'responded');
+      await proposal(follow.id, 'replied', `dnc-opt-inside-re-${follow.id}`);
+      const followOpt = await send.applyInboxMessages([{
+        from: follow.email,
+        subject: 'Re: Hi',
+        text: 'Please unsubscribe me.',
+        date: new Date(),
+        inReplyTo: `<dnc-opt-inside-re-${follow.id}@localhost>`,
+      }]);
+      assert.equal(followOpt.matched, 0);
+      assert.equal(followOpt.follow_ons, 1);
+      await drainInbox();
+      const followFlag = await flagRow(follow.id);
+      assert.equal(followFlag.do_not_contact, true);
+      assert.equal(followFlag.do_not_contact_source, 'opt_out');
+      console.log('[dnc] opt-out stops sequences on its own transaction after the flag');
+    } finally {
+      send._setLeadStop(null);
       await drainInbox();
     }
   });
