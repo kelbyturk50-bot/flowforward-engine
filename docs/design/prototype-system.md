@@ -92,7 +92,7 @@ Rendered by `PrototypeWatermark` from the prototype shell, **outside theme/brand
 
 **Pricing.** The CTA and public pages show no prices. The packages are Free branded prototype, MVP build, Hosting and maintenance plan, and Consulting. Pricing is shared after initial outreach.
 
-**Case-study discount:** the first build may be discounted in exchange for a case study. State this without a number (no discount percentage or amount).
+**Case-study discount:** the first build may be discounted in exchange for a case study. This is discussed after initial outreach, not shown on the CTA or public pages.
 
 Add no prices or figures. No ROI, savings, revenue-recovered or close-rate promises.
 
@@ -115,7 +115,7 @@ One primary button, **"Talk to Kelby"**, which is a plain link (`<a href>`, e.g.
 - [ ] Watermark ribbon + tile + footer present; tests cover hostile colors, `?watermark=0`, flags, and theme overrides.
 - [ ] Ribbon has `role="note"` and no close control.
 - [ ] Every action button shows a toast; no outbound requests (asserted in the test).
-- [ ] CTA shows no prices. Pricing is shared after initial outreach. The unnumbered first-build case-study discount note stays, with no number. "Talk to Kelby" is an `<a>`.
+- [ ] CTA shows no prices and no discount note. Pricing is shared after initial outreach. "Talk to Kelby" is an `<a>`.
 - [ ] Layout verified at 390 and 1280; axe shows no contrast violations.
 
 **Screenshot proof list:** each of the 4 agents at 390 and 1280; yellow (#F5E050) and navy (#14213D) themes; the no-brand-color (juniper) state; a toast visible; the CTA panel; `?watermark=0` still showing the watermark.

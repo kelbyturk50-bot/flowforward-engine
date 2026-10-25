@@ -165,7 +165,7 @@ The four packages are Free branded prototype, MVP build, Hosting and maintenance
 
 Market research (qualitative only; public vendor and agency pages, so treat as directional, and this doc quotes no figures from them): [Iternal](https://iternal.ai/ai-consulting-for-small-business), [Agents Chef](https://www.agentschef.com/pricing), [Taskip](https://taskip.net/ai-automation-agency-pricing/), [Ascend Intuition](https://ascend-intuition.com/blog/ai-agent-cost-small-business), [Working Theory](https://workingtheoryai.com/insights/what-a-small-business-automation-consultant-does/), [ServiceAgent](https://serviceagent.ai/blogs/hatch-pricing/), [Jobber](https://help.getjobber.com/en/articles/receptionistpowered-by-jobber-ai/), [Milicevic](https://lazar-milicevic.com/blog/hiring-an-ai-automation-consultant-for-your-small-business), [Jahanzaib](https://www.jahanzaib.ai/blog/ai-automation-consultant-hourly-rate).
 
-Why this sits at the low end of the market: it is a beachhead for 2–15-truck owners, and the proof gate (1 paid build) matters more than margin right now. Kelby approved a first-build discount in exchange for a case study.
+Pricing approach: this is a beachhead for 2–15-truck owners, and the proof gate (1 paid build) matters more than margin right now. Kelby approved a first-build discount in exchange for a case study.
 
 ### Objection handling
 1. **"Is this real or a mockup?"** It's a prototype on fake data, and it says so on every screen. The real version uses your inbox and your estimates. That's the paid build.
