@@ -108,8 +108,15 @@ const flagsApi = require('./api/flags');
 app.use('/api/flags', flagsApi.requireFlagApiKey);
 const campaignsApi = require('./api/campaigns');
 app.use('/api/campaigns', campaignsApi.flagGate);
+// Offer routes. Closed unless FF_OFFER_TRACKING is exactly "true".
+// Closed paths match an unknown route. requireApiKey runs once they are open.
+const offersApi = require('./api/offers');
+app.use('/api/offers', offersApi.flagGate);
+app.use('/api/leads', offersApi.flagGate);
 app.use('/api', requireApiKey);
 app.use('/api/prospects', require('./api/prospects'));
+app.use('/api/offers',    offersApi.router);
+app.use('/api/leads',     offersApi.leadsRouter);
 app.use('/api/projects',  projects);
 app.use('/api/tasks',     tasks);
 app.use('/api/focus',     require('./api/focus'));
