@@ -12,7 +12,7 @@ const FOUNDING_CAP = 3;
 const FOUNDING_CAP_LOCK = 89089109;
 
 const COLUMNS = `
-  id, lead_id, offer_type, package, offered_at, channel, status,
+  id, prospect_id, offer_type, package, offered_at, channel, status,
   status_changed_at, notes, is_test, created_at
 `;
 
@@ -34,7 +34,7 @@ function stamp(value) {
 function present(row) {
   return {
     id: row.id,
-    lead_id: row.lead_id,
+    prospect_id: row.prospect_id,
     offer_type: row.offer_type,
     package: row.package,
     offered_at: stamp(row.offered_at),
@@ -118,7 +118,7 @@ async function listForLead(leadId) {
   const found = await pool.query('SELECT id FROM prospects WHERE id = $1', [leadId]);
   if (!found.rows[0]) return null;
   const { rows } = await pool.query(
-    `SELECT ${COLUMNS} FROM lead_offers WHERE lead_id = $1 ORDER BY id ASC`,
+    `SELECT ${COLUMNS} FROM lead_offers WHERE prospect_id = $1 ORDER BY id ASC`,
     [leadId]
   );
   return rows.map(present);
@@ -127,7 +127,7 @@ async function listForLead(leadId) {
 async function createOffer(input) {
   const founding = input.offer_type === 'founding';
   return withClient(founding, async (client) => {
-    if (!(await leadExists(client, input.lead_id))) {
+    if (!(await leadExists(client, input.prospect_id))) {
       return { rollback: true, code: 'invalid_lead' };
     }
     if (founding && capBlocked(await foundingSlots(client), input.confirm_over_cap)) {
@@ -135,14 +135,14 @@ async function createOffer(input) {
     }
     const inserted = await client.query(
       `INSERT INTO lead_offers (
-         lead_id, offer_type, package, offered_at, channel, status,
+         prospect_id, offer_type, package, offered_at, channel, status,
          status_changed_at, notes, is_test
        ) VALUES (
          $1, $2, $3, COALESCE($4::timestamptz, NOW()), $5, $6, NOW(), $7, $8
        )
        RETURNING ${COLUMNS}`,
       [
-        input.lead_id,
+        input.prospect_id,
         input.offer_type,
         input.package,
         input.offered_at,

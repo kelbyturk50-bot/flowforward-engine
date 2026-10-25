@@ -12,7 +12,7 @@ const store = require('../offers/store');
 
 const NOTES_MAX = 2000;
 const CREATE_FIELDS = new Set([
-  'lead_id',
+  'prospect_id',
   'offer_type',
   'package',
   'channel',
@@ -96,8 +96,8 @@ function readCreate(body) {
   if (!raw) return { ok: false, field: 'body' };
   const extra = unknownField(raw, CREATE_FIELDS);
   if (extra) return { ok: false, field: extra };
-  const leadId = bodyId(raw.lead_id);
-  if (leadId == null) return { ok: false, field: 'lead_id' };
+  const leadId = bodyId(raw.prospect_id);
+  if (leadId == null) return { ok: false, field: 'prospect_id' };
   if (!oneOf(raw.offer_type, store.OFFER_TYPES)) return { ok: false, field: 'offer_type' };
   if (!oneOf(raw.package, store.PACKAGES)) return { ok: false, field: 'package' };
   if (!oneOf(raw.channel, store.CHANNELS)) return { ok: false, field: 'channel' };
@@ -130,7 +130,7 @@ function readCreate(body) {
   return {
     ok: true,
     value: {
-      lead_id: leadId,
+      prospect_id: leadId,
       offer_type: raw.offer_type,
       package: raw.package,
       channel: raw.channel,
@@ -181,7 +181,7 @@ router.post('/', async (req, res) => {
   if (!parsed.ok) return invalid(res, parsed.field);
   try {
     const result = await store.createOffer(parsed.value);
-    if (result.code === 'invalid_lead') return invalid(res, 'lead_id');
+    if (result.code === 'invalid_lead') return invalid(res, 'prospect_id');
     if (result.code === 'founding_cap') {
       console.log('[offers] founding_cap create');
       return res.status(409).json(capBody(result.founding_slots));
@@ -190,7 +190,7 @@ router.post('/', async (req, res) => {
     res.status(201).json({ offer: result.offer });
   } catch (err) {
     logCode(err);
-    if (err && (err.code === '23503' || err.code === '23514')) return invalid(res, 'lead_id');
+    if (err && (err.code === '23503' || err.code === '23514')) return invalid(res, 'prospect_id');
     res.status(500).json({ error: 'Something went wrong.' });
   }
 });

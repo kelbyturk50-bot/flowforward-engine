@@ -57,7 +57,7 @@ function normalize404(text) {
 
 function offerBody(leadId, extra = {}) {
   return {
-    lead_id: leadId,
+    prospect_id: leadId,
     offer_type: 'annual_prepay',
     package: 'starter',
     channel: 'phone',
@@ -73,7 +73,7 @@ async function clearOffers() {
 async function insertOffer({ leadId, offerType = 'founding', status = 'accepted', packageName = 'starter' }) {
   const { rows } = await pool.query(
     `INSERT INTO lead_offers (
-       lead_id, offer_type, package, channel, status, status_changed_at, is_test
+       prospect_id, offer_type, package, channel, status, status_changed_at, is_test
      ) VALUES ($1, $2, $3, 'phone', $4, NOW(), true)
      RETURNING id`,
     [leadId, offerType, packageName, status]
@@ -303,19 +303,19 @@ describe('offers', serial, () => {
     console.log('[offers] flag on: missing or bad key 401, unready key 503');
   });
 
-  it('offers: validation rejects bad enums, lead_id, and patch bodies', async () => {
+  it('offers: validation rejects bad enums, prospect_id, and patch bodies', async () => {
     process.env.FF_OFFER_TRACKING = 'true';
     const cases = [
-      [{}, 'lead_id'],
+      [{}, 'prospect_id'],
       [offerBody(alpha.id, { offer_type: 'monthly' }), 'offer_type'],
       [offerBody(alpha.id, { package: 'nope' }), 'package'],
       [offerBody(alpha.id, { channel: 'fax' }), 'channel'],
       [offerBody(alpha.id, { status: 'won' }), 'status'],
-      [offerBody(alpha.id, { lead_id: '1' }), 'lead_id'],
-      [offerBody(alpha.id, { lead_id: 0 }), 'lead_id'],
-      [offerBody(alpha.id, { lead_id: -3 }), 'lead_id'],
-      [offerBody(alpha.id, { lead_id: 1.5 }), 'lead_id'],
-      [offerBody(alpha.id, { lead_id: 999999 }), 'lead_id'],
+      [offerBody(alpha.id, { prospect_id: '1' }), 'prospect_id'],
+      [offerBody(alpha.id, { prospect_id: 0 }), 'prospect_id'],
+      [offerBody(alpha.id, { prospect_id: -3 }), 'prospect_id'],
+      [offerBody(alpha.id, { prospect_id: 1.5 }), 'prospect_id'],
+      [offerBody(alpha.id, { prospect_id: 999999 }), 'prospect_id'],
       [offerBody(alpha.id, { offered_at: 'yesterday' }), 'offered_at'],
       [offerBody(alpha.id, { is_test: 'yes' }), 'is_test'],
       [offerBody(alpha.id, { confirm_over_cap: 'true' }), 'confirm_over_cap'],
@@ -386,7 +386,7 @@ describe('offers', serial, () => {
     const alphaList = await request('GET', `/api/leads/${alpha.id}/offers`, { headers: authHeaders() });
     assert.equal(alphaList.status, 200);
     assert.equal(alphaList.json.offers.length, 3);
-    assert.equal(alphaList.json.offers.every((row) => row.lead_id === alpha.id), true);
+    assert.equal(alphaList.json.offers.every((row) => row.prospect_id === alpha.id), true);
 
     const betaList = await request('GET', `/api/leads/${beta.id}/offers`, { headers: authHeaders() });
     assert.equal(betaList.json.offers.length, 3);
@@ -546,7 +546,7 @@ describe('offers', serial, () => {
     const names = constraints.rows.map((row) => row.conname);
     for (const name of [
       'lead_offers_channel_check',
-      'lead_offers_lead_id_fkey',
+      'lead_offers_prospect_id_fkey',
       'lead_offers_offer_type_check',
       'lead_offers_package_check',
       'lead_offers_pkey',
@@ -558,7 +558,7 @@ describe('offers', serial, () => {
       `SELECT indexname FROM pg_indexes WHERE tablename = 'lead_offers' ORDER BY indexname`
     );
     const indexNames = indexes.rows.map((row) => row.indexname);
-    assert.ok(indexNames.includes('idx_lead_offers_lead_id'));
+    assert.ok(indexNames.includes('idx_lead_offers_prospect_id'));
     assert.ok(indexNames.includes('idx_lead_offers_founding_status'));
 
     const again = await insertOffer({ leadId: alpha.id, status: 'declined' });
@@ -566,7 +566,7 @@ describe('offers', serial, () => {
     let rejected = null;
     try {
       await pool.query(
-        `INSERT INTO lead_offers (lead_id, offer_type, package, channel, status, is_test)
+        `INSERT INTO lead_offers (prospect_id, offer_type, package, channel, status, is_test)
          VALUES ($1, 'nope', 'starter', 'phone', 'offered', true)`,
         [alpha.id]
       );
