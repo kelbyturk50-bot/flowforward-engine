@@ -96,7 +96,7 @@ Rendered by `PrototypeWatermark` from the prototype shell, **outside theme/brand
 
 Add no prices or figures. No ROI, savings, revenue-recovered or close-rate promises.
 
-**Link expiry:** prototype links expire **14 days** after they're shared. The CTA panel and footer both say so, e.g. "This preview link expires 14 days after it was shared."
+**Link expiry:** prototype links expire **14 days** after they're shared. The public page (`src/prototypes/page.js`) says so in its CTA panel and footer, e.g. "This preview link expires 14 days after it was shared." The in-CRM `CtaPanel` preview does not show the expiry.
 One primary button, **"Talk to Kelby"**, which is a plain link (`<a href>`, e.g. a booking page or `mailto:`). It never sends email automatically or submits a form.
 
 ## 6. Acceptance checklist (Delta's PR)
@@ -125,6 +125,6 @@ One primary button, **"Talk to Kelby"**, which is a plain link (`<a href>`, e.g.
 | | |
 |---|---|
 | ![Shell, yellow](prototype/shell-yellow.png) | ![Shell, navy](prototype/shell-navy.png) |
-| ![CTA](prototype/cta-panel.png) | ![Scheduling](prototype/agent-scheduling.png) |
+| ![Scheduling](prototype/agent-scheduling.png) | |
 | ![Call](prototype/agent-call.png) | ![Bookkeeping](prototype/agent-bookkeeping.png) |
 | ![Estimate](prototype/agent-estimate.png) | |
