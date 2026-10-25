@@ -22,4 +22,18 @@ async function lockLeadForUpdate(db, prospectId, { between = false } = {}) {
   await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [prospectId]);
 }
 
-module.exports = { lockLeadForUpdate, _setLockGate };
+// Deadlock (40P01) and serialization failure (40001) only. Three tries total.
+const DEADLOCK_ATTEMPTS = 3;
+const DEADLOCK_CODES = new Set(['40P01', '40001']);
+
+function isDeadlock(err) {
+  return !!(err && DEADLOCK_CODES.has(err.code));
+}
+
+module.exports = {
+  lockLeadForUpdate,
+  _setLockGate,
+  isDeadlock,
+  DEADLOCK_ATTEMPTS,
+  DEADLOCK_CODES,
+};

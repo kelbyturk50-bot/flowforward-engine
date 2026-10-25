@@ -945,9 +945,13 @@ describe('pilot csv estimate intake', () => {
     // Dollar quotes ($tag$...$tag$ and $$...$$), E'...' escapes, standard
     // strings, and double-quoted identifiers are kept. Comments are blanked.
     // One pass, so a "--" or quote inside a literal cannot start a comment.
+    // Dollar tags follow Postgres: a letter, "_" or any non-ASCII, then
+    // letters, digits, "_" or non-ASCII. A digit is not a tag. The body is
+    // non-greedy and the closer must repeat the opener. An E-string is only
+    // [Ee]' at a word boundary, so xE' stays an ordinary string.
     const stripSqlComments = (sql) =>
       sql.replace(
-        /\$([A-Za-z0-9_]*)\$[\s\S]*?\$\1\$|[Ee]'(?:\\.|''|[^'\\])*'|"(?:[^"]|"")*"|'(?:[^']|'')*'|\/\*[\s\S]*?\*\/|--[^\n]*/g,
+        /\$\$[\s\S]*?\$\$|\$([A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*)\$[\s\S]*?\$\1\$|\b[Ee]'(?:\\.|''|[^'\\])*'|"(?:[^"]|"")*"|'(?:[^']|'')*'|\/\*[\s\S]*?\*\/|--[^\n]*/gu,
         (m) => (/^['"$Ee]/.test(m) ? m : ' ')
       );
     const hasDrop = (sql) => dropKind.test(stripSqlComments(sql));
@@ -968,6 +972,22 @@ describe('pilot csv estimate intake', () => {
     assert.equal(hasDrop("SELECT $t$it's$t$; DROP TABLE y;"), true);
     assert.equal(hasDrop(String.raw`SELECT E'\''; DROP TABLE y;`), true);
     assert.equal(hasDrop('SELECT "a\'b"; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $a$ $b$ -- $a$; DROP TABLE y;'), true);
+    assert.equal(hasDrop("SELECT $$x$$, ' $$ -- '; DROP TABLE y;"), true);
+    assert.equal(hasDrop(String.raw`SELECT E'\'--'; DROP TABLE y;`), true);
+    assert.equal(hasDrop('SELECT "a--b"; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT "a/*b"; DROP TABLE y; -- */'), true);
+    assert.equal(hasDrop(String.raw`DO E'BEGIN EXECUTE \'ALTER TABLE x DROP COLUMN y\'; END';`), true);
+    assert.equal(hasDrop('SELECT $é$ -- $é$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $_é$ -- $_é$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $_1$ -- $_1$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $o$ $i$ -- $i$ $o$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $t$ $$ $t$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $t$ a $t$; DROP TABLE y; $t$ b $t$;'), true);
+    assert.equal(hasDrop('SELECT $a$b$; DROP TABLE y;'), true);
+    assert.equal(hasDrop('SELECT $a$ -- $b$; DROP TABLE y;'), false);
+    assert.equal(hasDrop('SELECT $1$ -- $1$; DROP TABLE y;'), false);
+    assert.equal(hasDrop(String.raw`SELECT xE'foo\'--'; DROP TABLE y;`), false);
     for (const kind of ['CONSTRAINT c', 'COLUMN c', 'TRIGGER t ON x', 'TABLE t', 'INDEX i']) {
       assert.equal(hasDrop(`ALTER TABLE x DROP ${kind};`), true, kind);
     }

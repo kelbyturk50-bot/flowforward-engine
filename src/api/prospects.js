@@ -5,6 +5,7 @@ const pool    = require('../db/client');
 const { rescore } = require('../scoring/fit');
 const { normalizeIndustry } = require('../scoring/industry');
 const { stopLeadSequences, lockLeadForUpdate } = require('../proposals/send');
+const { isDeadlock, DEADLOCK_ATTEMPTS } = require('../proposals/lead-lock');
 
 // Public writes must already be text. Do not coerce objects, arrays, or numbers.
 // Length is checked after trim. Control characters, including bidi marks, are rejected.
@@ -231,6 +232,7 @@ router.post('/:id/do-not-contact', async (req, res) => {
   const value = readFlagValue(req.body);
   if (typeof value !== 'boolean') return res.status(400).json({ error: 'invalid_body' });
 
+  for (let attempt = 1; attempt <= DEADLOCK_ATTEMPTS; attempt++) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -314,10 +316,16 @@ router.post('/:id/do-not-contact', async (req, res) => {
     return res.json(updated.rows[0]);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
+    if (isDeadlock(err) && attempt < DEADLOCK_ATTEMPTS) continue;
+    if (isDeadlock(err)) {
+      console.error(`[dnc] retries exhausted prospect ${id} sqlstate ${err.code}`);
+      return res.status(503).json({ error: 'deadlock_retry_exhausted' });
+    }
     console.error('[prospects] do-not-contact failed:', err.code || 'error');
     return res.status(500).json({ error: 'server_error' });
   } finally {
     client.release();
+  }
   }
 });
 

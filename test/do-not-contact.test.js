@@ -7,15 +7,19 @@ require('./preload');
 
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const { spawn } = require('child_process');
+const { EventEmitter } = require('events');
+const { Readable } = require('stream');
 const express = require('express');
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const send = require('../src/proposals/send');
+const gmail = require('../src/proposals/gmail');
 const inbox = require('../src/proposals/inbox');
 const prospectsApi = require('../src/api/prospects');
-const { draftProposal, _setClient } = require('../src/proposals/draft');
+const { draftProposal, _setClient, _setDraftTxGate } = require('../src/proposals/draft');
 const { fakeClaude } = require('./fixtures');
 const cfg = require('../src/proposals/config');
 const { applyMainSchema } = require('../src/db/migrate');
@@ -271,6 +275,18 @@ async function waitForLockWait(timeoutMs = 4000) {
   return false;
 }
 
+async function waitForLockWaiters(count, timeoutMs = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const { rows } = await pool.query(
+      `SELECT COUNT(DISTINCT pid)::int AS n FROM pg_locks WHERE granted = false`
+    );
+    if (rows[0].n >= count) return true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return false;
+}
+
 function sqlstateError(code) {
   const err = new Error('injected');
   err.code = code;
@@ -279,6 +295,165 @@ function sqlstateError(code) {
 
 function postMarkSent(id) {
   return request('POST', `/api/proposals/${id}/mark-sent`, { key: API_KEY, body: {} });
+}
+
+function postRestore(id) {
+  return request('POST', `/api/proposals/${id}/restore`, { key: API_KEY, body: {} });
+}
+
+function inStack(name) {
+  // A method call is "at Object.prepare", a direct call is "at accessToken".
+  return new RegExp(`\\bat (?:async )?(?:Object\\.)?${name}\\b`).test(new Error().stack || '');
+}
+
+function gmailHttpResult(ctx) {
+  const host = String(ctx.host || '');
+  const reqPath = String(ctx.path || '');
+  if (host.includes('oauth2.googleapis.com')) {
+    return {
+      status: 200,
+      body: JSON.stringify({ access_token: 'test-access-token', expires_in: 3600, token_type: 'Bearer' }),
+    };
+  }
+  if (reqPath.includes('/messages/send')) {
+    return { status: 200, body: JSON.stringify({ id: 'gmail-test-id', threadId: 'gmail-test-thread' }) };
+  }
+  return {
+    status: 200,
+    body: JSON.stringify({ payload: { headers: [{ name: 'Message-ID', value: '<gmail-test@localhost>' }] } }),
+  };
+}
+
+function stubHttpsRequest(handler) {
+  return function request(options, callback) {
+    const req = new EventEmitter();
+    req.destroyed = false;
+    req.setTimeout = () => req;
+    req.destroy = () => { req.destroyed = true; return req; };
+    req.write = () => req;
+    req.end = () => {
+      const host = options.hostname || options.host;
+      const reqPath = options.path || '/';
+      Promise.resolve()
+        .then(() => handler({ host, path: reqPath, method: options.method }))
+        .then((result) => {
+          if (req.destroyed || result == null) return;
+          const res = new Readable({ read() {} });
+          res.statusCode = result.status == null ? 200 : result.status;
+          res.headers = result.headers || {};
+          process.nextTick(() => {
+            if (req.destroyed) return;
+            if (typeof callback === 'function') callback(res);
+            if (result.body != null) {
+              const body = Buffer.isBuffer(result.body) ? result.body : Buffer.from(String(result.body));
+              res.push(body);
+            }
+            if (!res.destroyed) res.push(null);
+          });
+        })
+        .catch((err) => {
+          if (!req.destroyed) req.emit('error', err);
+        });
+    };
+    return req;
+  };
+}
+
+async function withGmailHttps(handler, run) {
+  const prevId = process.env.GOOGLE_CLIENT_ID;
+  const prevSecret = process.env.GOOGLE_CLIENT_SECRET;
+  process.env.GOOGLE_CLIENT_ID = 'test-gmail-client';
+  process.env.GOOGLE_CLIENT_SECRET = 'test-gmail-secret';
+  await pool.query(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES ('gmail_oauth', $1::jsonb, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [JSON.stringify({ refresh_token: 'test-refresh-token', email: 'test+sender@example.com' })]
+  );
+  gmail._resetCacheForTests();
+  send._setTransport(null);
+  const saved = https.request;
+  const sends = [];
+  https.request = stubHttpsRequest(async (ctx) => {
+    if (String(ctx.path).includes('/messages/send')) sends.push(ctx.path);
+    return handler(ctx, sends);
+  });
+  try {
+    await run(sends);
+  } finally {
+    https.request = saved;
+    send._setTransport(recordingTransport());
+    gmail._resetCacheForTests();
+    process.env.GOOGLE_CLIENT_ID = prevId == null ? '' : prevId;
+    process.env.GOOGLE_CLIENT_SECRET = prevSecret == null ? '' : prevSecret;
+    await pool.query(`DELETE FROM app_settings WHERE key = 'gmail_oauth'`).catch(() => {});
+  }
+}
+
+async function duringPrepareSettings(optOut, run) {
+  const original = pool.query.bind(pool);
+  let armed = true;
+  pool.query = function (sql, params) {
+    const text = typeof sql === 'string' ? sql : '';
+    if (
+      armed
+      && text.includes('app_settings')
+      && inStack('prepare')
+      && !inStack('accessToken')
+      && !inStack('status')
+      && !inStack('issuePreparedSend')
+    ) {
+      armed = false;
+      return original(sql, params).then(async (result) => {
+        await optOut();
+        return result;
+      });
+    }
+    return original(sql, params);
+  };
+  try {
+    await run();
+  } finally {
+    pool.query = original;
+  }
+}
+
+async function duringCompile(optOut, run) {
+  const MimeNode = require('nodemailer/lib/mime-node');
+  const orig = MimeNode.prototype.build;
+  let armed = true;
+  MimeNode.prototype.build = function build(callback) {
+    const result = orig.call(this, callback);
+    if (!armed) return result;
+    armed = false;
+    return Promise.resolve(result).then(async (buf) => {
+      await optOut();
+      return buf;
+    });
+  };
+  try {
+    await run();
+  } finally {
+    MimeNode.prototype.build = orig;
+  }
+}
+
+async function readyReply(row, proposalId) {
+  const msg = await pool.query(
+    `INSERT INTO inbox_messages (
+       prospect_id, proposal_id, direction, dedupe_key, from_addr, subject, body
+     ) VALUES ($1, $2, 'in', $3, $4, 'Re: Hi', 'Sounds good')
+     RETURNING id`,
+    [row.id, proposalId, `test-dnc-ready-${row.id}-${proposalId}`, row.email]
+  );
+  const item = await pool.query(
+    `INSERT INTO inbox_items (
+       prospect_id, proposal_id, message_id, status, kind, reply_to, reply_subject, reply_body
+     ) VALUES ($1, $2, $3, 'ready', 'interested', $4, 'Re: Hi', 'Thanks for the note.')
+     RETURNING id`,
+    [row.id, proposalId, msg.rows[0].id, row.email]
+  );
+  return item.rows[0];
 }
 
 const inboxMessage = (row, slug) => ({
@@ -310,6 +485,7 @@ describe('manual do-not-contact', () => {
     send._setMailerGate(null);
     send._setLockGate(null);
     _setClient(null);
+    _setDraftTxGate(null);
     prospectsApi._setFlagWriteGate(null);
     send._setTransport(null);
     await drainInbox();
@@ -1661,10 +1837,6 @@ describe('manual do-not-contact', () => {
         async query(sql, params) {
           const result = await db.query(sql, params);
           if (!claim && /SELECT id, status FROM proposals/.test(sql)) {
-            // The opt-out already holds these rows from the proposals-first
-            // lock. This SELECT still has to lock them: a caller that reaches
-            // the stop without that earlier lock must block a claim here.
-            assert.match(sql, /\bFOR UPDATE\b/);
             claim = send.approveAndSend(draft.id).then(
               () => ({ ok: true }),
               (err) => ({ ok: false, err })
@@ -1722,7 +1894,9 @@ describe('manual do-not-contact', () => {
               () => ({ ok: true }),
               (err) => ({ ok: false, status: err.status })
             );
-            await Promise.race([claim, new Promise((resolve) => setTimeout(resolve, 300))]);
+            // This client does not already hold the row. The claim waits
+            // only when this SELECT took FOR UPDATE.
+            assert.equal(await waitForLockWait(), true);
           }
           return result;
         },
@@ -2053,8 +2227,10 @@ describe('manual do-not-contact', () => {
   async function assertLockOrderThenRace(start, prospectId, draftId) {
     _setClient(fakeClaude());
     let pending = Promise.resolve([]);
+    let fired = false;
     send._setLockGate(async (db) => {
       send._setLockGate(null);
+      fired = true;
       const prospects = await holdsRowShare(db, 'prospects');
       const proposals = await holdsRowShare(db, 'proposals');
       assert.equal(prospects, false);
@@ -2070,7 +2246,8 @@ describe('manual do-not-contact', () => {
           status: res.status,
         })),
       ]);
-      assert.equal(await waitForLockWait(), true);
+      // Draft and mark-sent both wait on the proposal locks.
+      assert.equal(await waitForLockWaiters(2), true);
     });
     try {
       return await start();
@@ -2078,10 +2255,17 @@ describe('manual do-not-contact', () => {
       send._setLockGate(null);
       const results = await pending;
       _setClient(null);
+      // The caller must reach the lead lock; a skipped lock never fires the gate.
+      assert.equal(fired, true);
       for (const result of results) {
         assert.notEqual(result.code, '40P01');
         assert.notEqual(result.code, '40001');
       }
+      // mark-sent waited for the stop, so it refuses the stopped draft.
+      const markSent = results.find((result) => result.name === 'mark-sent');
+      assert.equal(markSent.status, 409);
+      const stored = await pool.query('SELECT status FROM proposals WHERE id = $1', [draftId]);
+      assert.notEqual(stored.rows[0].status, 'sent');
     }
   }
 
@@ -2226,5 +2410,527 @@ describe('manual do-not-contact', () => {
     const opted = await pool.query('SELECT status FROM proposals WHERE id = $1', [sent.id]);
     assert.equal(opted.rows[0].status, 'opted_out');
     console.log('[dnc] exhausted retries leave the inbox message pending and the next sweep commits');
+  });
+
+  it('keeps a proposal stopped when transport resolution fails after an opt-out', async () => {
+    const row = await lead('Mailer Fail Stop', 'qualified');
+    const draft = await proposal(row.id, 'draft', `dnc-mailer-fail-${row.id}`);
+    await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
+    const before = sentMails.length;
+    send._setMailerGate(async () => {
+      await send.markOptOut(row.id, draft.id);
+      throw new Error('transport unavailable');
+    });
+    try {
+      await assert.rejects(() => send.approveAndSend(draft.id), (err) => err.status === 502);
+    } finally {
+      send._setMailerGate(null);
+    }
+    const stored = await pool.query('SELECT status, stop_reason FROM proposals WHERE id = $1', [draft.id]);
+    assert.equal(stored.rows[0].status, 'stopped');
+    assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted');
+    assert.equal(sentMails.length, before);
+    console.log('[dnc] a mailer failure does not revert a stopped proposal to draft');
+  });
+
+  it('leaves a follow-on opt-out unprocessed when retries are exhausted', async () => {
+    const row = await lead('Retry Exhausted Follow', 'responded');
+    const slug = `dnc-exhausted-fo-${row.id}`;
+    const replied = await proposal(row.id, 'replied', slug);
+    let tries = 0;
+    send._setOptOutGate(() => {
+      tries += 1;
+      throw sqlstateError('40P01');
+    });
+    const original = console.error;
+    console.error = () => {};
+    const message = inboxMessage(row, slug);
+    try {
+      const first = await send.applyInboxMessages([message]);
+      assert.equal(first.matched, 0);
+      assert.equal(first.follow_ons, 0);
+    } finally {
+      console.error = original;
+      send._setOptOutGate(null);
+    }
+    await drainInbox();
+    assert.equal(tries, 3);
+    const flag = await flagRow(row.id);
+    assert.equal(flag.do_not_contact, false);
+    const recorded = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM inbox_messages WHERE proposal_id = $1',
+      [replied.id]
+    );
+    assert.equal(recorded.rows[0].n, 0);
+    const notes = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM prospect_activities WHERE prospect_id = $1 AND body LIKE 'Asked not to be contacted%'`,
+      [row.id]
+    );
+    assert.equal(notes.rows[0].n, 0);
+    const second = await send.applyInboxMessages([message]);
+    assert.equal(second.follow_ons, 1);
+    await drainInbox();
+    const after = await flagRow(row.id);
+    assert.equal(after.do_not_contact, true);
+    assert.equal(after.do_not_contact_source, 'opt_out');
+    console.log('[dnc] exhausted follow-on opt-out stays pending and the next sweep commits');
+  });
+
+  it('retries one deadlock on the manual route and commits', async () => {
+    const row = await lead('Manual Retry', 'contacted');
+    const sent = await proposal(row.id, 'sent', `dnc-manual-retry-${row.id}`);
+    let tries = 0;
+    prospectsApi._setFlagWriteGate(() => {
+      tries += 1;
+      if (tries === 1) throw sqlstateError('40P01');
+    });
+    try {
+      const res = await postFlag(row.id, { value: true });
+      assert.equal(res.status, 200);
+      assert.equal(res.json.do_not_contact, true);
+    } finally {
+      prospectsApi._setFlagWriteGate(null);
+    }
+    assert.equal(tries, 2);
+    const stored = await pool.query('SELECT status FROM proposals WHERE id = $1', [sent.id]);
+    assert.equal(stored.rows[0].status, 'stopped');
+    console.log('[dnc] one 40P01 on the manual route is retried');
+  });
+
+  it('rolls the manual route back when retries are exhausted and a later try is idempotent', async () => {
+    const row = await lead('Manual Exhausted', 'contacted');
+    const sent = await proposal(row.id, 'sent', `dnc-manual-ex-${row.id}`);
+    let tries = 0;
+    prospectsApi._setFlagWriteGate(() => {
+      tries += 1;
+      throw sqlstateError('40P01');
+    });
+    const original = console.error;
+    console.error = () => {};
+    let res;
+    try {
+      res = await postFlag(row.id, { value: true });
+    } finally {
+      console.error = original;
+      prospectsApi._setFlagWriteGate(null);
+    }
+    assert.equal(tries, 3);
+    assert.equal(res.status, 503);
+    assert.equal(res.json.error, 'deadlock_retry_exhausted');
+    const flag = await flagRow(row.id);
+    assert.equal(flag.do_not_contact, false);
+    const during = await pool.query('SELECT status FROM proposals WHERE id = $1', [sent.id]);
+    assert.equal(during.rows[0].status, 'sent');
+    assert.equal((await activityBodies(row.id)).length, 0);
+    const again = await postFlag(row.id, { value: true });
+    assert.equal(again.status, 200);
+    assert.equal(again.json.do_not_contact, true);
+    assert.equal(again.json.do_not_contact_source, 'manual');
+    const stopped = await pool.query('SELECT status, stop_reason FROM proposals WHERE id = $1', [sent.id]);
+    assert.equal(stopped.rows[0].status, 'stopped');
+    assert.equal(stopped.rows[0].stop_reason, 'Marked do-not-contact (manual)');
+    const repeat = await postFlag(row.id, { value: true });
+    assert.equal(repeat.status, 200);
+    assert.deepEqual((await activityBodies(row.id)).map((n) => n.body), [MARKED]);
+    console.log('[dnc] exhausted manual retries roll back and a retry is idempotent');
+  });
+
+  it('refuses mark-sent inside the transaction when the lead is flagged', async () => {
+    const row = await lead('Mark Sent Flag', 'qualified');
+    const draft = await proposal(row.id, 'draft', `dnc-mark-flag-${row.id}`);
+    await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
+    let fired = false;
+    send._setLockGate(async (db) => {
+      send._setLockGate(null);
+      fired = true;
+      await db.query(
+        `UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'manual' WHERE id = $1`,
+        [row.id]
+      );
+    });
+    let res;
+    try {
+      res = await postMarkSent(draft.id);
+    } finally {
+      send._setLockGate(null);
+    }
+    assert.equal(fired, true);
+    assert.equal(res.status, 409);
+    assert.match(res.json.error, /do-not-contact/);
+    const stored = await pool.query('SELECT status FROM proposals WHERE id = $1', [draft.id]);
+    assert.equal(stored.rows[0].status, 'draft');
+    console.log('[dnc] mark-sent reads the flag on the locked row and does not send');
+  });
+
+  it('retries a draft deadlock once and does not call the model again', async () => {
+    const row = await lead('Draft Retry', 'found');
+    const claude = fakeClaude();
+    let creates = 0;
+    const orig = claude.messages.create.bind(claude.messages);
+    claude.messages.create = async (...args) => {
+      creates += 1;
+      return orig(...args);
+    };
+    _setClient(claude);
+    let tries = 0;
+    _setDraftTxGate(() => {
+      tries += 1;
+      if (tries === 1) throw sqlstateError('40P01');
+    });
+    try {
+      const saved = await draftProposal(row.id);
+      assert.ok(saved && saved.id);
+      assert.equal(creates, 1);
+      assert.equal(tries, 2);
+    } finally {
+      _setDraftTxGate(null);
+      _setClient(null);
+    }
+    console.log('[dnc] a draft deadlock retries the transaction and calls the model once');
+  });
+
+  it('refuses a draft when the flag is raised inside the locked transaction', async () => {
+    const row = await lead('Draft Inside Flag', 'found');
+    _setClient(fakeClaude());
+    _setDraftTxGate(async (db) => {
+      await db.query(
+        `UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'opt_out' WHERE id = $1`,
+        [row.id]
+      );
+    });
+    try {
+      await assert.rejects(
+        () => draftProposal(row.id),
+        (err) => err.status === 409 && /do-not-contact/.test(err.message)
+      );
+    } finally {
+      _setDraftTxGate(null);
+      _setClient(null);
+    }
+    const n = await pool.query('SELECT COUNT(*)::int AS n FROM proposals WHERE prospect_id = $1', [row.id]);
+    assert.equal(n.rows[0].n, 0);
+    console.log('[dnc] draft reads the flag inside the locked transaction');
+  });
+
+  it('restores a discarded proposal while an opt-out runs, with no deadlock', async () => {
+    const row = await lead('Restore Race', 'contacted');
+    const sent = await proposal(row.id, 'sent', `dnc-restore-sent-${row.id}`);
+    const discarded = await proposal(row.id, 'discarded', `dnc-restore-disc-${row.id}`, 2);
+    await pool.query(`UPDATE proposals SET status = 'discarded' WHERE id = $1`, [discarded.id]);
+    let fired = false;
+    let optOut = null;
+    send._setLockGate(async () => {
+      send._setLockGate(null);
+      fired = true;
+      optOut = send.markOptOut(row.id, sent.id).then(
+        () => ({ code: null }),
+        (err) => ({ code: err && err.code })
+      );
+      assert.equal(await waitForLockWait(), true);
+    });
+    let response;
+    try {
+      response = await postRestore(discarded.id);
+    } finally {
+      send._setLockGate(null);
+    }
+    assert.equal(fired, true);
+    const opt = await optOut;
+    assert.notEqual(opt.code, '40P01');
+    assert.notEqual(opt.code, '40001');
+    assert.equal(/40P01|40001|deadlock detected/i.test(response.text || ''), false);
+    assert.ok(response.status === 200 || response.status === 409);
+    const flag = await flagRow(row.id);
+    assert.equal(flag.do_not_contact, true);
+
+    for (let i = 0; i < 8; i += 1) {
+      const race = await lead(`Restore Ungated ${i}`, 'contacted');
+      const live = await proposal(race.id, 'sent', `dnc-restore-live-${race.id}`);
+      const old = await proposal(race.id, 'discarded', `dnc-restore-old-${race.id}`, 2);
+      await pool.query(`UPDATE proposals SET status = 'discarded' WHERE id = $1`, [old.id]);
+      const optResult = send.markOptOut(race.id, live.id).then(
+        () => ({ code: null }),
+        (err) => ({ code: err && err.code, message: err.message })
+      );
+      const restored = await postRestore(old.id);
+      const optDone = await optResult;
+      assert.equal(optDone.code, null);
+      assert.equal(/40P01|40001|deadlock detected/i.test(restored.text || ''), false);
+      assert.ok(restored.status === 200 || restored.status === 409);
+      assert.notEqual(restored.status, 503);
+    }
+    console.log('[dnc] restore and opt-out overlap with no 40P01');
+  });
+
+  it('does not read settings inside prepared send, on the first send or a follow-up', async () => {
+    async function countSendReads(run) {
+      const original = pool.query.bind(pool);
+      let readsInSend = 0;
+      pool.query = function (sql, params) {
+        const text = typeof sql === 'string' ? sql : '';
+        if (text.includes('app_settings') && inStack('issuePreparedSend')) readsInSend += 1;
+        return original(sql, params);
+      };
+      try {
+        await run();
+      } finally {
+        pool.query = original;
+      }
+      return readsInSend;
+    }
+
+    const row = await lead('Gmail Split Send', 'qualified');
+    const draft = await proposal(row.id, 'draft', `dnc-gmail-split-${row.id}`);
+    await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
+    let firstSends = [];
+    const firstReads = await countSendReads(() => withGmailHttps(
+      (ctx) => gmailHttpResult(ctx),
+      async (sends) => {
+        firstSends = sends;
+        const sent = await send.approveAndSend(draft.id);
+        assert.equal(sent.status, 'sent');
+      }
+    ));
+    assert.equal(firstReads, 0);
+    assert.equal(firstSends.length, 1);
+
+    const restore = widenSendWindow();
+    try {
+      const follow = await lead('Gmail Split Follow', 'contacted');
+      await dueFollowup(follow.id, `dnc-gmail-split-fu-${follow.id}`);
+      let followSends = [];
+      const followReads = await countSendReads(() => withGmailHttps(
+        (ctx) => gmailHttpResult(ctx),
+        async (sends) => {
+          followSends = sends;
+          const result = await send.sendDueFollowups();
+          assert.ok(result.sent >= 1);
+        }
+      ));
+      assert.equal(followReads, 0);
+      assert.ok(followSends.length >= 1);
+    } finally {
+      restore();
+    }
+    console.log('[dnc] prepared send does not read settings before the POST');
+  });
+
+  it('does not send when an opt-out commits during Gmail prepare', async () => {
+    const restore = widenSendWindow();
+    try {
+      for (const hook of ['settings', 'token', 'compile']) {
+        const row = await lead(`Gmail Opt ${hook}`, 'qualified');
+        const draft = await proposal(row.id, 'draft', `dnc-gmail-opt-${hook}-${row.id}`);
+        await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
+        const optOut = () => send.markOptOut(row.id, draft.id);
+        const handler = async (ctx) => {
+          if (hook === 'token' && String(ctx.host).includes('oauth2.googleapis.com')) await optOut();
+          return gmailHttpResult(ctx);
+        };
+        const run = async (sends) => {
+          await assert.rejects(
+            () => send.approveAndSend(draft.id),
+            (err) => err.status === 409 && /do-not-contact/.test(err.message)
+          );
+          assert.equal(sends.length, 0, hook);
+        };
+        if (hook === 'settings') {
+          await duringPrepareSettings(optOut, () => withGmailHttps(handler, run));
+        } else if (hook === 'compile') {
+          await duringCompile(optOut, () => withGmailHttps(handler, run));
+        } else {
+          await withGmailHttps(handler, run);
+        }
+        const stored = await pool.query(
+          'SELECT status, stop_reason, sent_at FROM proposals WHERE id = $1',
+          [draft.id]
+        );
+        assert.equal(stored.rows[0].status, 'stopped', hook);
+        assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted', hook);
+        assert.equal(stored.rows[0].sent_at, null, hook);
+
+        const follow = await lead(`Gmail Opt Follow ${hook}`, 'contacted');
+        const due = await dueFollowup(follow.id, `dnc-gmail-opt-fu-${hook}-${follow.id}`);
+        const followOpt = () => send.markOptOut(follow.id, due.id);
+        const followHandler = async (ctx) => {
+          if (hook === 'token' && String(ctx.host).includes('oauth2.googleapis.com')) await followOpt();
+          return gmailHttpResult(ctx);
+        };
+        const followRun = async (sends) => {
+          const result = await send.sendDueFollowups();
+          assert.equal(result.sent, 0, hook);
+          assert.equal(sends.length, 0, hook);
+        };
+        if (hook === 'settings') {
+          await duringPrepareSettings(followOpt, () => withGmailHttps(followHandler, followRun));
+        } else if (hook === 'compile') {
+          await duringCompile(followOpt, () => withGmailHttps(followHandler, followRun));
+        } else {
+          await withGmailHttps(followHandler, followRun);
+        }
+        const followStored = await pool.query(
+          'SELECT status, followup1_sent_at FROM proposals WHERE id = $1',
+          [due.id]
+        );
+        assert.equal(followStored.rows[0].status, 'opted_out', hook);
+        assert.equal(followStored.rows[0].followup1_sent_at, null, hook);
+      }
+    } finally {
+      restore();
+    }
+    console.log('[dnc] an opt-out during Gmail prepare does not POST /messages/send');
+  });
+
+  it('reverts a send when the Gmail token request fails', async () => {
+    const restore = widenSendWindow();
+    const failToken = (ctx) => {
+      if (String(ctx.host).includes('oauth2.googleapis.com')) {
+        return { status: 400, body: JSON.stringify({ error: 'server_error' }) };
+      }
+      return gmailHttpResult(ctx);
+    };
+    try {
+      const row = await lead('Gmail Token Fail', 'qualified');
+      const draft = await proposal(row.id, 'draft', `dnc-gmail-token-${row.id}`);
+      await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
+      await withGmailHttps(failToken, async (sends) => {
+        await assert.rejects(() => send.approveAndSend(draft.id), (err) => err.status === 502);
+        assert.equal(sends.length, 0);
+      });
+      const stored = await pool.query(
+        'SELECT status, sent_at FROM proposals WHERE id = $1',
+        [draft.id]
+      );
+      assert.equal(stored.rows[0].status, 'draft');
+      assert.equal(stored.rows[0].sent_at, null);
+
+      const follow = await lead('Gmail Token Follow', 'contacted');
+      const due = await dueFollowup(follow.id, `dnc-gmail-token-fu-${follow.id}`);
+      const original = console.error;
+      console.error = () => {};
+      try {
+        await withGmailHttps(failToken, async (sends) => {
+          const result = await send.sendDueFollowups();
+          assert.equal(result.sent, 0);
+          assert.equal(sends.length, 0);
+        });
+      } finally {
+        console.error = original;
+      }
+      const followStored = await pool.query(
+        'SELECT status, followup1_sent_at FROM proposals WHERE id = $1',
+        [due.id]
+      );
+      assert.equal(followStored.rows[0].status, 'sent');
+      assert.equal(followStored.rows[0].followup1_sent_at, null);
+    } finally {
+      restore();
+    }
+    console.log('[dnc] a failed token refresh does not send and does not stick a row in sending');
+  });
+
+  it('does not send a reply when an opt-out commits during Gmail prepare', async () => {
+    const row = await lead('Gmail Reply', 'contacted');
+    const sent = await proposal(row.id, 'sent', `dnc-gmail-reply-${row.id}`);
+    const item = await readyReply(row, sent.id);
+    let opted = false;
+    await withGmailHttps(async (ctx) => {
+      if (!opted && String(ctx.host).includes('oauth2.googleapis.com')) {
+        opted = true;
+        await send.markOptOut(row.id, sent.id);
+      }
+      return gmailHttpResult(ctx);
+    }, async (sends) => {
+      await assert.rejects(
+        () => inbox.sendReply(item.id),
+        (err) => err.status === 409 && /not to be contacted/.test(err.message)
+      );
+      assert.equal(sends.length, 0);
+    });
+    const stored = await pool.query('SELECT status FROM inbox_items WHERE id = $1', [item.id]);
+    assert.equal(stored.rows[0].status, 'ready');
+    console.log('[dnc] a reply prepared after an opt-out is not sent');
+  });
+
+  it('overlaps an opt-out with a reply, a draft, and mark-sent', { timeout: 180000 }, async () => {
+    for (let i = 0; i < 20; i += 1) {
+      const row = await lead(`Stress ${i}`, 'contacted');
+      const sent = await proposal(row.id, 'sent', `dnc-stress-${row.id}`);
+      const draft = await proposal(row.id, 'draft', `dnc-stress-d-${row.id}`, 2);
+      await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
+      const item = await readyReply(row, sent.id);
+      const before = sentMails.length;
+      _setClient(fakeClaude());
+      send._setTransport({
+        prepare() {
+          return send.markOptOut(row.id, sent.id).then(() => ({
+            send() {
+              sentMails.push({ stress: row.id });
+              return { messageId: '<stress@localhost>', threadId: 'thr-stress' };
+            },
+          }));
+        },
+      });
+      let racers = null;
+      send._setLockGate(async () => {
+        send._setLockGate(null);
+        racers = Promise.all([
+          postFlag(row.id, { value: true }).then((res) => ({
+            name: 'flag',
+            status: res.status,
+            code: /40P01|40001|deadlock detected/i.test(res.text || '') ? '40P01' : null,
+          })),
+          postMarkSent(draft.id).then((res) => ({
+            name: 'mark-sent',
+            status: res.status,
+            code: /40P01|40001|deadlock detected/i.test(res.text || '') ? '40P01' : null,
+          })),
+          draftProposal(row.id).then(
+            () => ({ name: 'draft', code: null, status: 200 }),
+            (err) => ({ name: 'draft', code: err && err.code, status: err && err.status })
+          ),
+          inbox.sendReply(item.id).then(
+            () => ({ name: 'reply', code: null, status: 200 }),
+            (err) => ({ name: 'reply', code: err && err.code, status: err && err.status })
+          ),
+        ]);
+        assert.equal(await waitForLockWaiters(2), true);
+      });
+      let sweep = null;
+      let sweepErr = null;
+      try {
+        sweep = await send.applyInboxMessages([inboxMessage(row, `dnc-stress-${row.id}`)]);
+      } catch (err) {
+        sweepErr = err;
+      } finally {
+        send._setLockGate(null);
+        send._setTransport(recordingTransport());
+        _setClient(null);
+      }
+      const results = racers ? await racers : [];
+      if (sweepErr) throw sweepErr;
+      assert.equal(sweep.matched, 1);
+      for (const result of results) {
+        assert.notEqual(result.code, '40P01');
+        assert.notEqual(result.code, '40001');
+      }
+      await drainInbox();
+      const recorded = await pool.query(
+        'SELECT COUNT(*)::int AS n FROM inbox_messages WHERE proposal_id = $1 AND direction = $2',
+        [sent.id, 'in']
+      );
+      assert.ok(recorded.rows[0].n >= 1);
+      const stuck = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM inbox_items WHERE prospect_id = $1 AND status = 'sending'`,
+        [row.id]
+      );
+      assert.equal(stuck.rows[0].n, 0);
+      assert.equal(sentMails.length, before);
+      const reply = results.find((result) => result.name === 'reply');
+      assert.equal(reply.status, 409);
+      const marked = await pool.query('SELECT status FROM proposals WHERE id = $1', [draft.id]);
+      assert.notEqual(marked.rows[0].status, 'sent');
+    }
+    console.log('[dnc] twenty overlapped opt-out rounds lost no inbound row and sent nothing after the flag');
   });
 });

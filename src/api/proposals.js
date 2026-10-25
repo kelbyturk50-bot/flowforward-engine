@@ -7,7 +7,7 @@ const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('.
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 const { draftProposal, runProposalBatch, getSetting, isRunning, rebuildOnepager } = require('../proposals/draft');
 const send    = require('../proposals/send');
-const { lockLeadForUpdate } = require('../proposals/lead-lock');
+const { lockLeadForUpdate, isDeadlock, DEADLOCK_ATTEMPTS } = require('../proposals/lead-lock');
 const jobs    = require('../proposals/jobs');
 const pilotFlags = require('../pilot/flags');
 const pilotTokens = require('../pilot/tokens');
@@ -342,6 +342,7 @@ router.post('/:id/replied', async (req, res) => {
 
 // POST /api/proposals/:id/mark-sent — record a manual outreach as sent
 router.post('/:id/mark-sent', async (req, res) => {
+  for (let attempt = 1; attempt <= DEADLOCK_ATTEMPTS; attempt++) {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
@@ -349,9 +350,9 @@ router.post('/:id/mark-sent', async (req, res) => {
     if (!peek.rows.length) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
     // Every proposal for the lead, id order, then the prospect. A join
     // FOR UPDATE would lock both tables in one statement.
-    await lockLeadForUpdate(db, peek.rows[0].prospect_id);
+    await lockLeadForUpdate(db, peek.rows[0].prospect_id, { between: true });
     const { rows } = await db.query(
-      `SELECT pr.*, p.company, p.stage, p.archived_at
+      `SELECT pr.*, p.company, p.stage, p.archived_at, p.do_not_contact
          FROM proposals pr
          JOIN prospects p ON p.id = pr.prospect_id
         WHERE pr.id = $1`,
@@ -360,7 +361,11 @@ router.post('/:id/mark-sent', async (req, res) => {
     const p = rows[0];
     if (!p) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
     // Same refusal as send. Roll back before any status change, prospect
-    // update, or follow-up scheduling.
+    // update, or follow-up scheduling. The flag is read on the locked row.
+    if (p.do_not_contact) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: `${p.company} is marked do-not-contact.` });
+    }
     if (isPestCompanyName(p.company)) {
       await db.query('ROLLBACK');
       return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
@@ -394,11 +399,14 @@ router.post('/:id/mark-sent', async (req, res) => {
     );
     await db.query('COMMIT');
     const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
-    res.json(withUrl(fresh.rows[0]));
+    return res.json(withUrl(fresh.rows[0]));
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
-    fail(res, err);
+    if (isDeadlock(err) && attempt < DEADLOCK_ATTEMPTS) continue;
+    if (isDeadlock(err)) return res.status(503).json({ error: 'deadlock_retry_exhausted' });
+    return fail(res, err);
   } finally { db.release(); }
+  }
 });
 
 // Skip demo columns and token rows that this boot has not created yet.
@@ -463,15 +471,20 @@ router.post('/:id/discard', async (req, res) => {
 
 // POST /api/proposals/:id/restore — bring a discarded/flagged version back to review
 router.post('/:id/restore', async (req, res) => {
+  for (let attempt = 1; attempt <= DEADLOCK_ATTEMPTS; attempt++) {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
+    const peek = await db.query('SELECT prospect_id FROM proposals WHERE id = $1', [req.params.id]);
+    if (!peek.rows.length) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+    // Every proposal for the lead, then the prospect. Locking only this row
+    // and then updating the other drafts deadlocks with that order.
+    await lockLeadForUpdate(db, peek.rows[0].prospect_id, { between: true });
     const { rows } = await db.query(
       `SELECT pr.*, p.company, p.archived_at
          FROM proposals pr
          JOIN prospects p ON p.id = pr.prospect_id
-        WHERE pr.id = $1
-        FOR UPDATE OF pr`,
+        WHERE pr.id = $1`,
       [req.params.id]
     );
     const p = rows[0];
@@ -497,11 +510,14 @@ router.post('/:id/restore', async (req, res) => {
     }
     await db.query('COMMIT');
     const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
-    res.json(withUrl(fresh.rows[0]));
+    return res.json(withUrl(fresh.rows[0]));
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
-    fail(res, err);
+    if (isDeadlock(err) && attempt < DEADLOCK_ATTEMPTS) continue;
+    if (isDeadlock(err)) return res.status(503).json({ error: 'deadlock_retry_exhausted' });
+    return fail(res, err);
   } finally { db.release(); }
+  }
 });
 
 module.exports = router;

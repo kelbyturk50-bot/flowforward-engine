@@ -41,7 +41,7 @@ async function mailer() {
     mailerGate = null;
     await gate();
   }
-  if (mode === 'test') return testTransport;
+  if (mode === 'test') return withPrepare(testTransport);
   if (mode === 'gmail_api') return gmail;
   if (mode === 'smtp') {
     if (!transport) {
@@ -51,9 +51,27 @@ async function mailer() {
         connectionTimeout: 20000,
       });
     }
-    return transport;
+    return withPrepare(transport);
   }
   throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
+}
+
+// A legacy transport only has sendMail. prepare() returns an object whose
+// send() calls it immediately, with no await before that call.
+function withPrepare(transport) {
+  if (!transport || typeof transport.prepare === 'function') return transport;
+  return {
+    prepare(mail) {
+      return Promise.resolve({
+        send() {
+          return transport.sendMail(mail);
+        },
+      });
+    },
+    sendMail(mail) {
+      return transport.sendMail(mail);
+    },
+  };
 }
 // Tests swap in a fake transport. Refuses to run outside the test process.
 function _setTransport(t) {
@@ -272,12 +290,23 @@ async function approveAndSend(proposalId) {
   try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }
   await attachPrototypeUrl(p);
 
-  // Transport resolution yields. It finishes before the recheck so an opt-out
-  // that commits during mailer() is visible below. The recheck is the last
-  // await before sendMail.
+  // mailer() and prepare() both yield. They finish before the recheck, so an
+  // opt-out that commits during either one is visible below. The recheck is
+  // the last await before prepared.send(). A failure while the row is still
+  // 'sending' returns it to draft. A stop that already landed is left alone.
+  const firstMail = {
+    from: { name: SENDER.name, address: SENDER.email },
+    to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
+    subject: p.subject.trim(),
+    text: renderMessage(p, 'first'),
+    html: renderMessageHtml(p, 'first'),
+    headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
+  };
   let transport;
+  let prepared;
   try {
     transport = await mailer();
+    prepared = await transport.prepare(firstMail);
   } catch (err) {
     await pool.query(
       `UPDATE proposals SET status = 'draft', approved_at = NULL, error = $2
@@ -298,14 +327,9 @@ async function approveAndSend(proposalId) {
 
   let info;
   try {
-    info = await transport.sendMail({
-      from: { name: SENDER.name, address: SENDER.email },
-      to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
-      subject: p.subject.trim(),
-      text: renderMessage(p, 'first'),
-      html: renderMessageHtml(p, 'first'),
-      headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
-    });
+    // The only window left is this request. prepared.send() starts it with
+    // no await before the POST or the SMTP write.
+    info = await prepared.send();
   } catch (err) {
     // A stop during the send leaves the row stopped. This revert matches
     // 'sending' only, so it cannot put a stopped proposal back to draft.
@@ -420,7 +444,7 @@ let optOutGate = null;
 // Runs after a follow-up claim commits and before the do-not-contact recheck.
 // Tests use it to call the real flag route or the inbox opt-out.
 let followupClaimGate = null;
-async function markOptOut(prospectId, proposalId) {
+async function markOptOut(prospectId, proposalId, inbound = null) {
   for (let attempt = 1; attempt <= OPT_OUT_ATTEMPTS; attempt++) {
     const client = await pool.connect();
     try {
@@ -437,6 +461,16 @@ async function markOptOut(prospectId, proposalId) {
         await stopSequence(proposalId, 'Asked not to be contacted', 'opted_out', client);
       }
       await stopLeadSequences(client, prospectId, 'Asked not to be contacted');
+      // Same transaction and the same lock order. The inbox row is not a
+      // second transaction that locks the prospect before the proposal.
+      if (inbound && inbound.msg) {
+        await require('./inbox').insertInbound(client, {
+          prospect_id: prospectId,
+          id: proposalId,
+          company: inbound.company,
+          archived_at: inbound.archived_at,
+        }, inbound.kind || 'opted_out', inbound.msg);
+      }
       await client.query('COMMIT');
       return;
     } catch (err) {
@@ -515,15 +549,27 @@ async function sendDueFollowups() {
     if (!claim.rows.length) continue;
     if (followupClaimGate) await followupClaimGate(p, which);
     await attachPrototypeUrl(p);
-    // Same order as the first send: resolve the transport, then recheck.
-    // The recheck SELECT is the last await before sendMail. A do-not-contact
-    // hit runs the abort that clears the claimed timestamp.
+    // Same order as the first send: mailer(), then prepare(), then the
+    // recheck. The recheck is the last await before prepared.send().
+    const followMail = {
+      threadId: p.thread_id || undefined,
+      from: { name: SENDER.name, address: SENDER.email },
+      to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
+      subject: /^re:/i.test(p.subject) ? p.subject : `Re: ${p.subject}`,
+      text: renderMessage(p, which),
+      html: renderMessageHtml(p, which),
+      inReplyTo: p.message_id || undefined,
+      references: p.message_id ? [p.message_id] : undefined,
+      headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
+    };
     let transport;
+    let prepared;
     try {
       transport = await mailer();
+      prepared = await transport.prepare(followMail);
     } catch (err) {
       await pool.query(`UPDATE proposals SET ${which}_sent_at = NULL, error = $2 WHERE id = $1`, [p.id, `Follow-up failed: ${err.message}`]);
-      console.error(`[send] ✗ follow-up for #${p.id}: ${err.message}`);
+      console.error(`[send] ✗ follow-up for #${p.id}: ${err.code || 'error'}`);
       continue;
     }
     const beforeSend = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [p.prospect_id]);
@@ -542,17 +588,8 @@ async function sendDueFollowups() {
       continue;
     }
     try {
-      await transport.sendMail({
-        threadId: p.thread_id || undefined,
-        from: { name: SENDER.name, address: SENDER.email },
-        to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
-        subject: /^re:/i.test(p.subject) ? p.subject : `Re: ${p.subject}`,
-        text: renderMessage(p, which),
-        html: renderMessageHtml(p, which),
-        inReplyTo: p.message_id || undefined,
-        references: p.message_id ? [p.message_id] : undefined,
-        headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
-      });
+      // prepared.send() starts the request with no await before it.
+      await prepared.send();
       sent++;
       await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
       await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${p.to_email}.`);
@@ -625,10 +662,15 @@ async function applyOutcome(p, outcome, msg) {
     throw err;
   }
   // Keep the whole message and open an inbox item (Claude reads it and drafts a reply).
+  if (outcome.kind === 'opted_out') return;
   try {
     await require('./inbox').recordInbound(p, outcome.kind, { ...msg, auto: msg.auto || outcome.kind === 'auto' });
   } catch (err) {
-    console.error('[inbox] could not record message:', err.message);
+    if (err && err.inboundExhausted) {
+      console.error(`[inbox] record retries exhausted prospect ${p.prospect_id} proposal ${p.id} sqlstate ${err.code}`);
+      return;
+    }
+    console.error('[inbox] could not record message:', err.code || 'error');
   }
 }
 
@@ -645,7 +687,9 @@ async function applyOutcomeEffects(p, outcome, msg) {
     return;
   }
   if (kind === 'opted_out') {
-    await markOptOut(p.prospect_id, p.id);
+    await markOptOut(p.prospect_id, p.id, {
+      kind, msg, company: p.company, archived_at: p.archived_at,
+    });
     await logActivity(p.prospect_id, 'email', `Replied asking not to be contacted${snippet ? `: "${snippet}"` : ''}. Marked do-not-contact.`);
     return;
   }
@@ -726,12 +770,15 @@ async function applyFollowOn(p, outcome, msg) {
   if (await inbox.alreadyRecorded(msg)) return false;
   if (outcome.kind === 'opted_out') {
     try {
-      await markOptOut(p.prospect_id, p.id);
+      await markOptOut(p.prospect_id, p.id, {
+        kind: 'opted_out', msg, company: p.company, archived_at: p.archived_at,
+      });
     } catch (err) {
       if (err && err.optOutExhausted) return false;
       throw err;
     }
     await logActivity(p.prospect_id, 'email', 'Asked not to be contacted. Marked do-not-contact.');
+    return true;
   } else if (outcome.kind === 'replied' || outcome.kind === 'booked') {
     await pool.query(`UPDATE prospects SET next_action = $2, next_action_at = CURRENT_DATE WHERE id = $1`,
       [p.prospect_id, outcome.kind === 'booked' ? 'Prep for the consultation call' : 'Reply to their email']);
