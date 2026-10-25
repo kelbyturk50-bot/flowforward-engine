@@ -13,6 +13,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const send = require('../src/proposals/send');
 const inbox = require('../src/proposals/inbox');
+const cfg = require('../src/proposals/config');
 const { applyMainSchema } = require('../src/db/migrate');
 const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
 
@@ -121,6 +122,45 @@ async function setSource(id, source, flagged = true) {
   );
 }
 
+async function dueFollowup(prospectId, slug) {
+  const row = await proposal(prospectId, 'sent', slug);
+  await pool.query(
+    `UPDATE proposals
+        SET followup1 = 'Checking in',
+            followup1_due_at = NOW() - INTERVAL '1 hour',
+            followup1_sent_at = NULL,
+            followup2_sent_at = NULL
+      WHERE id = $1`,
+    [row.id]
+  );
+  return row;
+}
+
+function widenSendWindow() {
+  const days = cfg.SEND_DAYS.slice();
+  const hours = cfg.SEND_HOURS.slice();
+  cfg.SEND_DAYS = [0, 1, 2, 3, 4, 5, 6];
+  cfg.SEND_HOURS = [0, 24];
+  return () => {
+    cfg.SEND_DAYS = days;
+    cfg.SEND_HOURS = hours;
+  };
+}
+
+// Swap pool.query for one test. original is the real method.
+async function withPoolQuery(fn, run) {
+  const original = pool.query.bind(pool);
+  pool.query = function (sql, params) {
+    const text = typeof sql === 'string' ? sql : '';
+    return fn(text, params, original);
+  };
+  try {
+    return await run();
+  } finally {
+    pool.query = original;
+  }
+}
+
 async function drainInbox() {
   await new Promise((resolve) => setImmediate(resolve));
   for (let i = 0; i < 50 && inbox.isWorking(); i += 1) {
@@ -147,6 +187,7 @@ describe('manual do-not-contact', () => {
   });
 
   after(async () => {
+    send._setLeadStop(null);
     send._setTransport(null);
     await drainInbox();
     await pool.query(`DELETE FROM prospects WHERE google_place_id LIKE 'test-dnc-%'`).catch(() => {});
@@ -190,7 +231,7 @@ describe('manual do-not-contact', () => {
   });
 
   it('returns 400 for a non-numeric id and 404 for an unknown prospect', async () => {
-    for (const id of ['abc', '1.5', '12abc']) {
+    for (const id of ['abc', '1.5', '12abc', '0', '01', '00']) {
       const res = await postFlag(id, { value: true });
       assert.equal(res.status, 400, id);
       assert.equal(res.json.error, 'invalid_id', id);
@@ -200,7 +241,20 @@ describe('manual do-not-contact', () => {
     assert.equal(missing.status, 404);
     assert.equal(missing.json.error, 'Not found');
     assert.match(missing.headers['content-type'], /application\/json/);
-    console.log('[dnc] 400 non-numeric id; 404 unknown prospect');
+    console.log('[dnc] 400 for non-numeric, 0, and leading zeros; 404 unknown prospect');
+  });
+
+  it('returns 400 when the body has any field besides value', async () => {
+    const row = await lead('Extra Field');
+    const res = await postFlag(row.id, { value: true, extra: 1 });
+    assert.equal(res.status, 400);
+    assert.equal(res.json.error, 'invalid_body');
+    assert.match(res.headers['content-type'], /application\/json/);
+    const after = await flagRow(row.id);
+    assert.equal(after.do_not_contact, false);
+    assert.equal(after.do_not_contact_source, null);
+    assert.equal((await activityBodies(row.id)).length, 0);
+    console.log('[dnc] 400 for an unknown body field');
   });
 
   it('sets the flag, stops an active sequence, leaves the stage, and writes one activity', async () => {
@@ -239,7 +293,7 @@ describe('manual do-not-contact', () => {
     console.log('[dnc] manual set stops sent and draft, stage unchanged, activity written');
   });
 
-  it('keeps an opt-out or bounce source when value is true and writes nothing', async () => {
+  it('keeps an opt-out or NULL source when value is true and writes no activity', async () => {
     const opted = await lead('Keep Opt Out', 'contacted');
     await setSource(opted.id, 'opt_out', true);
     const stillSent = await proposal(opted.id, 'sent', `dnc-keep-opt-${opted.id}`);
@@ -251,15 +305,12 @@ describe('manual do-not-contact', () => {
     const optStored = await flagRow(opted.id);
     assert.equal(optStored.do_not_contact_source, 'opt_out');
     assert.equal((await activityBodies(opted.id)).length, 0);
-    const optProposal = await pool.query('SELECT status FROM proposals WHERE id = $1', [stillSent.id]);
-    assert.equal(optProposal.rows[0].status, 'sent');
-
-    const bounced = await lead('Keep Bounce', 'contacted');
-    await setSource(bounced.id, 'bounce', true);
-    const bounceRes = await postFlag(bounced.id, { value: true });
-    assert.equal(bounceRes.status, 200);
-    assert.equal(bounceRes.json.do_not_contact_source, 'bounce');
-    assert.equal((await activityBodies(bounced.id)).length, 0);
+    const optProposal = await pool.query(
+      'SELECT status, stop_reason FROM proposals WHERE id = $1',
+      [stillSent.id]
+    );
+    assert.equal(optProposal.rows[0].status, 'stopped');
+    assert.equal(optProposal.rows[0].stop_reason, MARKED);
 
     const automatic = await lead('Keep Null', 'found');
     await setSource(automatic.id, null, true);
@@ -268,7 +319,7 @@ describe('manual do-not-contact', () => {
     assert.equal(nullRes.json.do_not_contact, true);
     assert.equal(nullRes.json.do_not_contact_source, null);
     assert.equal((await activityBodies(automatic.id)).length, 0);
-    console.log('[dnc] true on opt_out, bounce, and NULL keeps the source');
+    console.log('[dnc] true on opt_out and NULL keeps the source and writes no activity');
   });
 
   it('clears a manual flag and writes one activity', async () => {
@@ -290,10 +341,9 @@ describe('manual do-not-contact', () => {
     console.log('[dnc] clear manual succeeds');
   });
 
-  it('returns 409 when clearing opt_out, bounce, or a NULL source', async () => {
+  it('returns 409 when clearing opt_out or a NULL source', async () => {
     const cases = [
       ['opt_out', 'opt_out'],
-      ['bounce', 'bounce'],
       ['null source', null],
     ];
     for (const [label, source] of cases) {
@@ -308,7 +358,7 @@ describe('manual do-not-contact', () => {
       assert.equal(stored.do_not_contact_source, source, label);
       assert.equal((await activityBodies(row.id)).length, 0, label);
     }
-    console.log('[dnc] 409 on opt_out, bounce, and NULL source');
+    console.log('[dnc] 409 on opt_out and NULL source');
   });
 
   it('writes nothing when the call does not change the flag', async () => {
@@ -333,7 +383,7 @@ describe('manual do-not-contact', () => {
     console.log('[dnc] no-ops write no activity');
   });
 
-  it('records opt_out on both opt-out writes and bounce on the bounce write', async () => {
+  it('records opt_out on both opt-out writes and leaves a bounce with no source', async () => {
     assert.equal(sentMails.length, 0);
 
     const opted = await lead('Inbox Opt', 'contacted');
@@ -382,14 +432,14 @@ describe('manual do-not-contact', () => {
     assert.equal(bounceResult.matched, 1);
     await drainInbox();
     const bounceRow = await flagRow(bounced.id);
-    assert.equal(bounceRow.do_not_contact_source, 'bounce');
+    assert.equal(bounceRow.do_not_contact_source, null);
     assert.equal(bounceRow.email, null);
     assert.equal(bounceRow.stage, beforeStage);
     assert.equal(bounceRow.do_not_contact, false);
     const bounceStatus = await pool.query('SELECT status FROM proposals WHERE id = $1', [bounceProposal.id]);
     assert.equal(bounceStatus.rows[0].status, 'bounced');
     assert.equal(sentMails.length, 0);
-    console.log('[dnc] opt-out source opt_out; follow-on opt_out; bounce source bounce');
+    console.log('[dnc] opt-out source opt_out; follow-on opt_out; bounce leaves source NULL');
   });
 
   it('rejects do_not_contact and do_not_contact_source on PATCH', async () => {
@@ -433,9 +483,11 @@ describe('manual do-not-contact', () => {
     const end = schema.indexOf('ALTER TABLE prospects ADD COLUMN IF NOT EXISTS researched_at');
     assert.ok(start > 0 && end > start);
     const block = schema.slice(start, end);
-    assert.match(block, /conname = 'prospects_do_not_contact_source_check'/);
+    assert.match(block, /DROP CONSTRAINT prospects_do_not_contact_source_check/);
+    assert.match(block, /conname = 'prospects_dnc_source_v2_chk'/);
     assert.match(block, /t\.relname = 'prospects'/);
-    assert.match(block, /do_not_contact_source IN \('manual', 'opt_out', 'bounce'\)/);
+    assert.match(block, /do_not_contact_source IN \('manual', 'opt_out'\)/);
+    assert.equal(block.includes("'bounce'"), false);
     assert.equal(block.includes('UPDATE'), false);
 
     const serverSrc = fs.readFileSync(path.join(__dirname, '../src/server.js'), 'utf8');
@@ -463,29 +515,277 @@ describe('manual do-not-contact', () => {
     assert.equal(column.rows[0].is_nullable, 'YES');
     assert.equal(column.rows[0].column_default, null);
 
-    const constraint = await pool.query(
-      `SELECT c.conname
-         FROM pg_constraint c
-         JOIN pg_class t ON t.oid = c.conrelid
-         JOIN pg_namespace n ON n.oid = t.relnamespace
-        WHERE c.conname = 'prospects_do_not_contact_source_check'
-          AND t.relname = 'prospects'
-          AND n.nspname = 'public'`
-    );
-    assert.equal(constraint.rows.length, 1);
+    async function sourceConstraints() {
+      const { rows } = await pool.query(
+        `SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+           FROM pg_constraint c
+           JOIN pg_class t ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE t.relname = 'prospects'
+            AND n.nspname = 'public'
+            AND c.contype = 'c'
+            AND c.conname IN (
+              'prospects_dnc_source_v2_chk',
+              'prospects_do_not_contact_source_check'
+            )
+          ORDER BY c.conname`
+      );
+      return rows;
+    }
 
-    for (const source of ['manual', 'opt_out', 'bounce', null]) {
+    let constraints = await sourceConstraints();
+    assert.deepEqual(constraints.map((c) => c.conname), ['prospects_dnc_source_v2_chk']);
+    assert.equal(constraints[0].def.includes('bounce'), false);
+
+    await pool.query('ALTER TABLE prospects DROP CONSTRAINT prospects_dnc_source_v2_chk');
+    await pool.query(
+      `ALTER TABLE prospects
+         ADD CONSTRAINT prospects_do_not_contact_source_check
+         CHECK (
+           do_not_contact_source IS NULL
+           OR do_not_contact_source IN ('manual', 'opt_out', 'bounce')
+         )`
+    );
+    await applyMainSchema();
+    await applyMainSchema();
+
+    constraints = await sourceConstraints();
+    assert.deepEqual(constraints.map((c) => c.conname), ['prospects_dnc_source_v2_chk']);
+    assert.match(constraints[0].def, /manual/);
+    assert.match(constraints[0].def, /opt_out/);
+    assert.equal(constraints[0].def.includes('bounce'), false);
+
+    for (const source of ['manual', 'opt_out', null]) {
       await pool.query(
         `UPDATE prospects SET do_not_contact_source = $2 WHERE id = $1`,
         [row.id, source]
       );
     }
     await assert.rejects(
+      pool.query(`UPDATE prospects SET do_not_contact_source = 'bounce' WHERE id = $1`, [row.id]),
+      (err) => err.code === '23514'
+    );
+    await assert.rejects(
       pool.query(`UPDATE prospects SET do_not_contact_source = 'other' WHERE id = $1`, [row.id]),
       (err) => err.code === '23514'
     );
     const still = await flagRow(row.id);
     assert.equal(still.do_not_contact_source, null);
-    console.log('[dnc] schema.sql applied twice; NULL source not backfilled');
+    console.log('[dnc] schema.sql twice, and over the old check, leaves one v2 constraint');
+  });
+
+  it('stops a sending proposal in the same transaction as the flag', async () => {
+    const row = await lead('Sending', 'qualified');
+    const sending = await proposal(row.id, 'sending', `dnc-sending-${row.id}`);
+    const res = await postFlag(row.id, { value: true });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.do_not_contact, true);
+    assert.equal(res.json.do_not_contact_source, 'manual');
+    const stored = await pool.query(
+      'SELECT status, stop_reason FROM proposals WHERE id = $1',
+      [sending.id]
+    );
+    assert.equal(stored.rows[0].status, 'stopped');
+    assert.equal(stored.rows[0].stop_reason, MARKED);
+    assert.deepEqual((await activityBodies(row.id)).map((n) => n.body), [MARKED]);
+    console.log('[dnc] flag update stops a sending proposal');
+  });
+
+  it('rolls the flag back when the stop fails, and a retry stops the sequence', async () => {
+    const row = await lead('Stop Fails', 'contacted');
+    const sent = await proposal(row.id, 'sent', `dnc-stop-fail-${row.id}`);
+    send._setLeadStop(async () => {
+      throw Object.assign(new Error('boom'), { code: 'XX000' });
+    });
+    try {
+      const failed = await postFlag(row.id, { value: true });
+      assert.equal(failed.status, 500);
+      assert.equal(failed.json.error, 'server_error');
+      const mid = await flagRow(row.id);
+      assert.equal(mid.do_not_contact, false);
+      assert.equal(mid.do_not_contact_source, null);
+      const midProposal = await pool.query('SELECT status FROM proposals WHERE id = $1', [sent.id]);
+      assert.equal(midProposal.rows[0].status, 'sent');
+      assert.equal((await activityBodies(row.id)).length, 0);
+    } finally {
+      send._setLeadStop(null);
+    }
+    const retry = await postFlag(row.id, { value: true });
+    assert.equal(retry.status, 200);
+    assert.equal(retry.json.do_not_contact, true);
+    assert.equal(retry.json.do_not_contact_source, 'manual');
+    const done = await pool.query(
+      'SELECT status, stop_reason FROM proposals WHERE id = $1',
+      [sent.id]
+    );
+    assert.equal(done.rows[0].status, 'stopped');
+    assert.equal(done.rows[0].stop_reason, MARKED);
+    assert.deepEqual((await activityBodies(row.id)).map((n) => n.body), [MARKED]);
+    console.log('[dnc] stop failure rolls back; retry stops the sequence');
+  });
+
+  it('does not claim or send a draft when the lead is already flagged', async () => {
+    const row = await lead('Flagged Draft', 'qualified');
+    await setSource(row.id, 'manual', true);
+    const draft = await proposal(row.id, 'draft', `dnc-flagged-draft-${row.id}`);
+    const before = sentMails.length;
+    await assert.rejects(
+      () => send.approveAndSend(draft.id),
+      (err) => err.status === 409 && /do-not-contact/.test(err.message)
+    );
+    const stored = await pool.query(
+      'SELECT status, approved_at FROM proposals WHERE id = $1',
+      [draft.id]
+    );
+    assert.equal(stored.rows[0].status, 'draft');
+    assert.equal(stored.rows[0].approved_at, null);
+    assert.equal(sentMails.length, before);
+    console.log('[dnc] flagged draft is not claimed or sent');
+  });
+
+  it('does not claim a draft when the lead is flagged between the check and the claim', async () => {
+    const row = await lead('Claim Race', 'qualified');
+    const draft = await proposal(row.id, 'draft', `dnc-claim-race-${row.id}`);
+    const before = sentMails.length;
+    let claims = 0;
+    await withPoolQuery(async (text, params, original) => {
+      if (text.includes("UPDATE proposals SET status = 'sending'") && text.includes('NOT (SELECT do_not_contact')) {
+        claims += 1;
+        await original('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [row.id]);
+      }
+      return original(text, params);
+    }, () => assert.rejects(
+      () => send.approveAndSend(draft.id),
+      (err) => err.status === 409
+    ));
+    assert.equal(claims, 1);
+    const stored = await pool.query('SELECT status, approved_at FROM proposals WHERE id = $1', [draft.id]);
+    assert.equal(stored.rows[0].status, 'draft');
+    assert.equal(stored.rows[0].approved_at, null);
+    assert.equal(sentMails.length, before);
+    console.log('[dnc] claim UPDATE skips a flagged lead');
+  });
+
+  it('stops a claimed draft and does not send when the lead is flagged before the mailer', async () => {
+    const row = await lead('Recheck First', 'qualified');
+    const draft = await proposal(row.id, 'draft', `dnc-recheck-first-${row.id}`);
+    const before = sentMails.length;
+    let claimed = false;
+    let flipped = 0;
+    await withPoolQuery(async (text, params, original) => {
+      if (claimed && text === 'SELECT do_not_contact FROM prospects WHERE id = $1') {
+        flipped += 1;
+        claimed = false;
+        await original('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [row.id]);
+      }
+      const result = await original(text, params);
+      if (text.includes("UPDATE proposals SET status = 'sending'") && result.rows.length) claimed = true;
+      return result;
+    }, () => assert.rejects(
+      () => send.approveAndSend(draft.id),
+      (err) => err.status === 409 && /do-not-contact/.test(err.message)
+    ));
+    assert.equal(flipped, 1);
+    const stored = await pool.query(
+      'SELECT status, stop_reason FROM proposals WHERE id = $1',
+      [draft.id]
+    );
+    assert.equal(stored.rows[0].status, 'stopped');
+    assert.equal(stored.rows[0].stop_reason, 'Lead is do-not-contact');
+    assert.equal(sentMails.length, before);
+    console.log('[dnc] pre-mailer recheck stops the first send');
+  });
+
+  it('does not claim or send a follow-up when the lead is flagged', async () => {
+    const restore = widenSendWindow();
+    try {
+      assert.equal(send.inSendWindow(), true);
+      const row = await lead('Flagged Follow', 'contacted');
+      await setSource(row.id, 'manual', true);
+      const due = await dueFollowup(row.id, `dnc-flagged-follow-${row.id}`);
+      const before = sentMails.length;
+      const result = await send.sendDueFollowups();
+      assert.equal(result.sent, 0);
+      const stored = await pool.query(
+        'SELECT status, stop_reason, followup1_sent_at FROM proposals WHERE id = $1',
+        [due.id]
+      );
+      assert.equal(stored.rows[0].status, 'stopped');
+      assert.equal(stored.rows[0].stop_reason, 'Lead is do-not-contact');
+      assert.equal(stored.rows[0].followup1_sent_at, null);
+      assert.equal(sentMails.length, before);
+      console.log('[dnc] flagged follow-up is not claimed or sent');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not claim a follow-up when the lead is flagged between the check and the claim', async () => {
+    const restore = widenSendWindow();
+    try {
+      const row = await lead('Follow Claim', 'contacted');
+      const due = await dueFollowup(row.id, `dnc-follow-claim-${row.id}`);
+      const before = sentMails.length;
+      let claims = 0;
+      await withPoolQuery(async (text, params, original) => {
+        if (text.includes('UPDATE proposals SET followup1_sent_at = NOW()')
+            && text.includes('NOT (SELECT do_not_contact')
+            && params && params[0] === due.id) {
+          claims += 1;
+          await original('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [row.id]);
+        }
+        return original(text, params);
+      }, () => send.sendDueFollowups());
+      assert.equal(claims, 1);
+      const stored = await pool.query(
+        'SELECT status, followup1_sent_at FROM proposals WHERE id = $1',
+        [due.id]
+      );
+      assert.equal(stored.rows[0].status, 'sent');
+      assert.equal(stored.rows[0].followup1_sent_at, null);
+      assert.equal(sentMails.length, before);
+      console.log('[dnc] follow-up claim UPDATE skips a flagged lead');
+    } finally {
+      restore();
+    }
+  });
+
+  it('stops a claimed follow-up and does not send when the lead is flagged before the mailer', async () => {
+    const restore = widenSendWindow();
+    try {
+      const row = await lead('Follow Recheck', 'contacted');
+      const due = await dueFollowup(row.id, `dnc-follow-recheck-${row.id}`);
+      const before = sentMails.length;
+      let claimedId = null;
+      let flipped = 0;
+      await withPoolQuery(async (text, params, original) => {
+        if (claimedId === due.id
+            && text === 'SELECT do_not_contact FROM prospects WHERE id = $1'
+            && params && params[0] === row.id) {
+          flipped += 1;
+          claimedId = null;
+          await original('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [row.id]);
+        }
+        const result = await original(text, params);
+        if (text.includes('UPDATE proposals SET followup1_sent_at = NOW()')
+            && text.includes('NOT (SELECT do_not_contact')
+            && result.rows.length) {
+          claimedId = params[0];
+        }
+        return result;
+      }, () => send.sendDueFollowups());
+      assert.equal(flipped, 1);
+      const stored = await pool.query(
+        'SELECT status, stop_reason, followup1_sent_at FROM proposals WHERE id = $1',
+        [due.id]
+      );
+      assert.equal(stored.rows[0].status, 'stopped');
+      assert.equal(stored.rows[0].stop_reason, 'Lead is do-not-contact');
+      assert.equal(stored.rows[0].followup1_sent_at, null);
+      assert.equal(sentMails.length, before);
+      console.log('[dnc] pre-mailer recheck stops the follow-up');
+    } finally {
+      restore();
+    }
   });
 });

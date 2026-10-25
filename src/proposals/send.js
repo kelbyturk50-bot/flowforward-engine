@@ -235,12 +235,34 @@ async function approveAndSend(proposalId) {
   }
 
   // Claim the row first so a double-click can't send twice.
-  const claim = await pool.query(`UPDATE proposals SET status = 'sending', approved_at = NOW() WHERE id = $1 AND status = 'draft' RETURNING id`, [p.id]);
-  if (!claim.rows.length) throw Object.assign(new Error('Already sending.'), { status: 409 });
+  // A flagged lead is not claimable, even if the earlier read was stale.
+  const claim = await pool.query(
+    `UPDATE proposals SET status = 'sending', approved_at = NOW()
+      WHERE id = $1 AND status = 'draft'
+        AND NOT (SELECT do_not_contact FROM prospects WHERE id = proposals.prospect_id)
+      RETURNING id`,
+    [p.id]
+  );
+  if (!claim.rows.length) {
+    const blocked = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [p.prospect_id]);
+    if (blocked.rows[0] && blocked.rows[0].do_not_contact) {
+      throw Object.assign(new Error(`${p.company} is marked do-not-contact.`), { status: 409 });
+    }
+    throw Object.assign(new Error('Already sending.'), { status: 409 });
+  }
 
   // The prototype link's 14 days start when it is first shared.
   try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }
   await attachPrototypeUrl(p);
+
+  const beforeSend = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [p.prospect_id]);
+  if (beforeSend.rows[0] && beforeSend.rows[0].do_not_contact) {
+    await pool.query(
+      `UPDATE proposals SET status = 'stopped', stop_reason = $2 WHERE id = $1 AND status = 'sending'`,
+      [p.id, 'Lead is do-not-contact']
+    );
+    throw Object.assign(new Error(`${p.company} is marked do-not-contact.`), { status: 409 });
+  }
 
   let info;
   try {
@@ -280,11 +302,41 @@ async function logActivity(prospectId, type, body) {
   await pool.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, $2, $3)`, [prospectId, type, body]);
 }
 
-async function stopSequence(proposalId, reason, status = 'stopped') {
-  const { rows } = await pool.query(
+async function stopSequence(proposalId, reason, status = 'stopped', db = pool) {
+  const { rows } = await db.query(
     `UPDATE proposals SET status = $2, stop_reason = $3 WHERE id = $1 AND status IN ('sent', 'draft') RETURNING *`,
     [proposalId, status, reason]);
   return rows[0] || null;
+}
+
+// Same status and stop_reason write as stopSequence, and also 'sending'.
+// db is the caller's client so the route can keep this inside its transaction.
+let leadStop = null;
+async function stopLeadSequences(db, prospectId, reason) {
+  if (leadStop) return leadStop(db, prospectId, reason);
+  const { rows } = await db.query(
+    `SELECT id, status FROM proposals
+      WHERE prospect_id = $1 AND status IN ('sent', 'draft', 'sending')
+      FOR UPDATE`,
+    [prospectId]
+  );
+  for (const proposal of rows) {
+    if (proposal.status === 'sending') {
+      await db.query(
+        `UPDATE proposals SET status = 'stopped', stop_reason = $2 WHERE id = $1 AND status = 'sending'`,
+        [proposal.id, reason]
+      );
+    } else {
+      await stopSequence(proposal.id, reason, 'stopped', db);
+    }
+  }
+}
+
+function _setLeadStop(fn) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('_setLeadStop is only available when NODE_ENV=test');
+  }
+  leadStop = fn || null;
 }
 
 /** Send any follow-ups that are due. Called every 15 minutes. */
@@ -324,9 +376,22 @@ async function sendDueFollowups() {
     if (await sentToday() >= cfg.SEND_DAILY_LIMIT) break;
     const which = p.followup1_sent_at ? 'followup2' : 'followup1';
     const claim = await pool.query(
-      `UPDATE proposals SET ${which}_sent_at = NOW() WHERE id = $1 AND ${which}_sent_at IS NULL AND status = 'sent' RETURNING id`, [p.id]);
+      `UPDATE proposals SET ${which}_sent_at = NOW()
+        WHERE id = $1 AND ${which}_sent_at IS NULL AND status = 'sent'
+          AND NOT (SELECT do_not_contact FROM prospects WHERE id = proposals.prospect_id)
+        RETURNING id`,
+      [p.id]
+    );
     if (!claim.rows.length) continue;
     await attachPrototypeUrl(p);
+    const beforeSend = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [p.prospect_id]);
+    if (beforeSend.rows[0] && beforeSend.rows[0].do_not_contact) {
+      await pool.query(
+        `UPDATE proposals SET status = 'stopped', stop_reason = $2, ${which}_sent_at = NULL WHERE id = $1 AND status = 'sent'`,
+        [p.id, 'Lead is do-not-contact']
+      );
+      continue;
+    }
     try {
       await (await mailer()).sendMail({
         threadId: p.thread_id || undefined,
@@ -419,7 +484,7 @@ async function applyOutcomeEffects(p, outcome, msg) {
   }
   if (kind === 'bounced') {
     await stopSequence(p.id, `Bounced: ${p.to_email} did not accept the message`, 'bounced');
-    await pool.query(`UPDATE prospects SET email = NULL, do_not_contact_source = 'bounce' WHERE id = $1 AND email = $2`, [p.prospect_id, p.to_email]);
+    await pool.query(`UPDATE prospects SET email = NULL WHERE id = $1 AND email = $2`, [p.prospect_id, p.to_email]);
     await logActivity(p.prospect_id, 'note', `Proposal email to ${p.to_email} bounced. Follow-ups stopped; find another address or call.`);
     return;
   }
@@ -604,6 +669,6 @@ async function senderTick() {
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, stopLeadSequences, _setLeadStop, classifyMessage, applyOutcome,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };
