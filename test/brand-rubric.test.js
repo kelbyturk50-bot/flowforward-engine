@@ -972,8 +972,12 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     const schemaWithoutTagUpgrade = schema.replace(
       /-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/,
       ''
+    ).replace(
+      /ALTER TABLE prospects DROP CONSTRAINT prospects_do_not_contact_source_check;/,
+      ''
     );
     assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
+    assert.match(schema, /DROP CONSTRAINT prospects_do_not_contact_source_check/);
     assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutTagUpgrade), false);
     assert.equal(/DROP\s+CONSTRAINT/i.test(repair), false);
     assert.match(repair, /NOT VALID/);
