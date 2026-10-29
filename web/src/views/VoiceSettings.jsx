@@ -36,11 +36,24 @@ export default function VoiceSettings({ version }) {
             <summary>Set up in Retell</summary>
             <ol className="small">
               <li>In Retell, create a Single Prompt agent with the voice you like, and paste the prompt below.</li>
+              <li>Paste the welcome message below as the agent&apos;s begin message.</li>
+              {v.agent_settings ? (
+                <li>
+                  On the agent, set max call duration to {v.agent_settings.max_call_duration},
+                  end call after silence to {v.agent_settings.end_call_after_silence},
+                  and data storage to {v.agent_settings.data_storage}.
+                </li>
+              ) : null}
               <li>Set the agent&apos;s webhook URL to the webhook above, with the call_ended event.</li>
+              <li>Turn auto-recharge off in Retell billing.</li>
               <li>In Railway, add RETELL_API_KEY, the agent&apos;s RETELL_AGENT_ID, and VOICE_DEMO_DAILY_MINUTES (for example 30).</li>
+              <li>Make one test call yourself from a prototype chat link before you send any.</li>
             </ol>
             <div className="link-row">
               <button type="button" className="btn btn-quiet" onClick={() => copy(v.prompt, 'Prompt')}>Copy prompt</button>
+              {v.begin_message ? (
+                <button type="button" className="btn btn-quiet" onClick={() => copy(v.begin_message, 'Welcome message')}>Copy welcome message</button>
+              ) : null}
               <button type="button" className="btn btn-quiet" onClick={() => copy(v.webhook_url, 'Webhook URL')}>Copy webhook URL</button>
             </div>
             <pre className="voice-prompt">{v.prompt}</pre>

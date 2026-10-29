@@ -42,10 +42,12 @@ function startMaintenance() {
   const { purge } = require('./counters');
   const { sweep } = require('./spend');
   const { logErr } = require('./log');
+  const { sweepOverdue } = require('../voicedemo/public');
   const tick = () => {
     const at = new Date();
     purge(at).catch((err) => logErr('ip_purge_failed', err));
     sweep(at).catch((err) => logErr('reservation_expired', err));
+    sweepOverdue(at).catch((err) => console.error(`[voice] sweep_failed ${err && err.code ? err.code : 'error'}`));
   };
   tick();
   const timer = setInterval(tick, 60 * 1000);

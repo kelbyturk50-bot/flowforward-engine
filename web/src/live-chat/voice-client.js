@@ -58,7 +58,20 @@ export function proxyFetch(token, onRefused) {
   };
 }
 
-export async function startVoiceCall({ token, hooks, onRefused, loadSdk = () => import('retell-client-js-sdk') }) {
+// One import for the page. The panel starts it on mount, so pressing Call
+// does not wait on the download (and the call is not created late).
+let sdkPromise = null;
+export function preloadVoiceSdk() {
+  if (!sdkPromise) {
+    sdkPromise = import('retell-client-js-sdk').catch((err) => {
+      sdkPromise = null;
+      throw err;
+    });
+  }
+  return sdkPromise;
+}
+
+export async function startVoiceCall({ token, hooks, onRefused, loadSdk = preloadVoiceSdk }) {
   const { RetellClient } = await loadSdk();
   const client = new RetellClient({ key: 'proxied', fetch: proxyFetch(token, onRefused) });
   // agent_id is required by the SDK's type; the server ignores the body and

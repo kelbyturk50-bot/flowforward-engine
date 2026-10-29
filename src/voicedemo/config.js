@@ -5,7 +5,7 @@
 // All three env vars must be set and valid, or the voice demo is off:
 //   RETELL_API_KEY            the Retell secret key (never sent to a browser)
 //   RETELL_AGENT_ID           the Retell agent that answers (agent_...)
-//   VOICE_DEMO_DAILY_MINUTES  whole minutes per America/Denver day, 1-600
+//   VOICE_DEMO_DAILY_MINUTES  whole minutes per America/Denver day, 3-600
 // There is no default for any of them. NODE_ENV=test is always off unless a
 // test injects a config.
 
@@ -26,18 +26,23 @@ const VOICE_CAPS = Object.freeze({
   reservationTtlMs: 15 * 60 * 1000,
   // Retell create-web-call timeout.
   retellTimeoutMs: 10000,
+  // A call still unsettled this long after its maximum gets a server-side
+  // stop-call (backstop in case Retell ignored the per-call maximum).
+  stopGraceSeconds: 45,
 });
 
 const MINUTES = /^[1-9]\d{0,2}$/;
 const AGENT_ID = /^agent_[A-Za-z0-9]{8,64}$/;
 const API_KEY = /^[A-Za-z0-9_-]{16,200}$/;
 const MAX_DAILY_MINUTES = 600;
+// One call reserves 3 minutes, so a smaller budget could never start a call.
+const MIN_DAILY_MINUTES = 3;
 
 function readDailyMinutes(env) {
   const raw = env && env.VOICE_DEMO_DAILY_MINUTES;
   if (typeof raw !== 'string' || !MINUTES.test(raw)) return null;
   const minutes = Number(raw);
-  return minutes >= 1 && minutes <= MAX_DAILY_MINUTES ? minutes : null;
+  return minutes >= MIN_DAILY_MINUTES && minutes <= MAX_DAILY_MINUTES ? minutes : null;
 }
 
 // Null unless every value is present and well formed. Values are not trimmed:
@@ -71,6 +76,7 @@ function _setVoiceConfigForTests(config) {
 module.exports = {
   VOICE_CAPS,
   MAX_DAILY_MINUTES,
+  MIN_DAILY_MINUTES,
   readVoiceConfig,
   readDailyMinutes,
   voiceConfig,

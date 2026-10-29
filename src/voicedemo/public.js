@@ -11,7 +11,8 @@
 //
 // Order for a session, cheapest refusal first:
 //   415 unless Content-Type is application/json
-//   429 voice_rate when the IP minted too many calls this hour (in memory)
+//   429 voice_rate when the IP minted too many calls this hour (in memory,
+//       bounded map, cleared every clock hour)
 //   404 when the chat surface flags are off, or the token is unknown/revoked
 //   410 when the link expired
 //   503 voice_unavailable when the env config is incomplete (calls are off)
@@ -23,10 +24,11 @@ const express = require('express');
 const { chatCors } = require('../chatdemo/cors');
 const { effective } = require('../flags/resolve');
 const { lookupToken } = require('../prototypes/store');
-const { clientIp, consume } = require('../pilot/rate-limit');
+const { clientIp } = require('../pilot/rate-limit');
 const { publicBrandName } = require('../prototypes/brand-name');
 const pool = require('../db/client');
 const { VOICE_CAPS, voiceConfig } = require('./config');
+const { AGENT_SETTINGS } = require('./agent-prompt');
 const { voiceVariables, beginMessage } = require('./variables');
 const retell = require('./retell');
 const store = require('./store');
@@ -83,6 +85,38 @@ async function resolveLink(token) {
   return { status: 200, row: looked.row };
 }
 
+// Per-IP counts for the current clock hour only. The map is replaced when the
+// hour changes and never holds more than IP_MAP_MAX keys: a new IP past that
+// is refused, so a flood of addresses cannot grow memory or start calls.
+const IP_MAP_MAX = 5000;
+const READS_PER_IP_HOUR = 120;
+let ipHour = '';
+let ipCounts = new Map();
+
+function overIpLimit(req, kind, now) {
+  const hour = hourBucket(now);
+  if (hour !== ipHour) {
+    ipHour = hour;
+    ipCounts = new Map();
+  }
+  const key = `${kind}\n${clientIp(req)}`;
+  const seen = ipCounts.get(key);
+  if (seen === undefined && ipCounts.size >= IP_MAP_MAX) return true;
+  const count = (seen || 0) + 1;
+  ipCounts.set(key, count);
+  return count > (kind === 'mint' ? VOICE_CAPS.mintsPerIpHour : READS_PER_IP_HOUR);
+}
+
+function _resetIpLimitForTests() {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_resetIpLimitForTests is test-only');
+  ipHour = '';
+  ipCounts = new Map();
+}
+
+function _ipLimitSizeForTests() {
+  return ipCounts.size;
+}
+
 async function approvedFacts(prospectId) {
   const { rows } = await pool.query(
     `SELECT field, value FROM prototype_facts
@@ -107,9 +141,14 @@ function _setClockForTests(fn) {
 // ---- /api/public/prototypes/:token/voice -----------------------------------
 
 const prototypeVoiceRouter = express.Router({ mergeParams: true });
+// Chat's order: stamp and parse before CORS, so a 400 or 413 from the parser
+// never carries Access-Control-Allow-Origin, and OPTIONS is stamped too.
+prototypeVoiceRouter.use((req, res, next) => { stamp(res); next(); });
+prototypeVoiceRouter.use(express.json({ limit: '2kb' }));
 prototypeVoiceRouter.use(chatCors);
 
 prototypeVoiceRouter.get('/', async (req, res) => {
+  if (overIpLimit(req, 'read', clock())) return send(res, 429, { error: 'voice_rate' });
   const link = await resolveLink(req.params.token);
   if (link.status === 404) return send(res, 404, NOT_FOUND);
   if (link.status === 410) return send(res, 410, { error: 'link_expired' });
@@ -130,16 +169,10 @@ prototypeVoiceRouter.get('/', async (req, res) => {
   }
 });
 
-prototypeVoiceRouter.post('/session', express.json({ limit: '2kb' }), async (req, res) => {
+prototypeVoiceRouter.post('/session', async (req, res) => {
   if (!jsonType(req.headers['content-type'])) return send(res, 415, { error: 'unsupported_media_type' });
   const now = clock();
-  const limited = consume(clientIp(req), 'voice', {
-    fixed: true,
-    max: VOICE_CAPS.mintsPerIpHour,
-    bucketKey: hourBucket(now),
-    clock: () => now.getTime(),
-  });
-  if (limited.limited) return send(res, 429, { error: 'voice_rate' });
+  if (overIpLimit(req, 'mint', now)) return send(res, 429, { error: 'voice_rate' });
   const link = await resolveLink(req.params.token);
   if (link.status === 404) return send(res, 404, NOT_FOUND);
   if (link.status === 410) return send(res, 410, { error: 'link_expired' });
@@ -161,8 +194,10 @@ prototypeVoiceRouter.post('/session', express.json({ limit: '2kb' }), async (req
 
   let call;
   try {
-    const name = publicBrandName(link.row.brand_name);
     const facts = await approvedFacts(link.row.prospect_id);
+    // The same name the chat and the page heading use.
+    const named = facts.find((fact) => fact.field === 'business_name');
+    const name = publicBrandName((named && named.value) || link.row.brand_name);
     call = await retell.createWebCall({
       config,
       variables: voiceVariables({ businessName: name, facts }),
@@ -188,7 +223,35 @@ prototypeVoiceRouter.post('/session', express.json({ limit: '2kb' }), async (req
 
 prototypeVoiceRouter.use((req, res) => send(res, 404, NOT_FOUND));
 
+// Parser and other errors: stamped JSON, no stack, no CORS header.
+function voiceErrors(err, req, res, next) {
+  if (res.headersSent) return next(err);
+  res.removeHeader('Access-Control-Allow-Origin');
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) return send(res, 413, { error: 'payload_too_large' });
+  if (err && (err.type === 'entity.parse.failed' || err.status === 400)) return send(res, 400, { error: 'invalid_body' });
+  log('error', err && err.code ? err.code : 'error');
+  return send(res, 500, { error: 'server_error' });
+}
+prototypeVoiceRouter.use(voiceErrors);
+
 // ---- /api/public/voice/retell-webhook -----------------------------------------
+
+// Retell's reasons for a web call nobody joined. Only these settle to zero.
+const NOT_JOINED = new Set(['error_user_not_joined', 'registered_call_timeout']);
+
+// The real length, the larger of the two sources when both are present.
+// null when neither is readable: the row then keeps its full reservation.
+function callSeconds(call) {
+  const lengths = [];
+  if (Number.isFinite(call.duration_ms) && call.duration_ms >= 0) lengths.push(call.duration_ms);
+  if (Number.isFinite(call.start_timestamp) && Number.isFinite(call.end_timestamp)
+    && call.end_timestamp >= call.start_timestamp) {
+    lengths.push(call.end_timestamp - call.start_timestamp);
+  }
+  if (lengths.length) return Math.min(7200, Math.ceil(Math.max(...lengths) / 1000));
+  if (NOT_JOINED.has(call.disconnection_reason)) return 0;
+  return null;
+}
 
 const webhookRouter = express.Router();
 
@@ -215,15 +278,16 @@ webhookRouter.post('/', express.raw({ type: () => true, limit: '1mb' }), async (
   if (typeof call.call_id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(call.call_id)) {
     return send(res, 400, { error: 'invalid_body' });
   }
-  let ms = Number.isFinite(call.duration_ms) ? call.duration_ms : null;
-  if (ms == null && Number.isFinite(call.start_timestamp) && Number.isFinite(call.end_timestamp)) {
-    ms = call.end_timestamp - call.start_timestamp;
+  // An account-level webhook also reports Kelby's other agents. Not ours.
+  if (typeof call.agent_id === 'string' && call.agent_id !== config.agentId) {
+    stamp(res);
+    return res.status(204).end();
   }
-  if (ms == null) ms = 0;
-  const seconds = Math.min(7200, Math.max(0, Math.ceil(ms / 1000)));
+  const seconds = callSeconds(call);
+  if (seconds != null && seconds > VOICE_CAPS.maxCallSeconds + 30) log('over_max', `seconds=${seconds}`);
   try {
     const settled = await store.settleCall(call.call_id, seconds, clock());
-    log('call_ended', `seconds=${seconds} settled=${settled}`);
+    log('call_ended', `seconds=${seconds == null ? 'unknown' : seconds} settled=${settled}`);
   } catch (err) {
     log('settle_failed', err && err.code ? err.code : 'error');
     return send(res, 500, { error: 'server_error' });
@@ -233,5 +297,36 @@ webhookRouter.post('/', express.raw({ type: () => true, limit: '1mb' }), async (
 });
 
 webhookRouter.use((req, res) => send(res, 404, NOT_FOUND));
+webhookRouter.use(voiceErrors);
 
-module.exports = { prototypeVoiceRouter, webhookRouter, _setClockForTests, jsonType };
+// ---- sweeper ------------------------------------------------------------------
+
+// Backstop for a call that outlived its maximum (Retell ignored the override,
+// or the webhook never came). Runs every minute from src/chatdemo/mount.js.
+async function sweepOverdue(now = new Date()) {
+  const config = voiceConfig();
+  if (!config) return 0;
+  const rows = await store.overdueCalls(now);
+  for (const row of rows) {
+    await store.markStopRequested(row.id, now);
+    try {
+      await retell.stopCall({ config, callId: row.call_id, timeoutMs: VOICE_CAPS.retellTimeoutMs });
+      log('stop_requested');
+    } catch (err) {
+      log('stop_failed', `${err && err.code ? err.code : 'error'}${err && err.status ? ` ${err.status}` : ''}`);
+    }
+  }
+  return rows.length;
+}
+
+module.exports = {
+  prototypeVoiceRouter,
+  webhookRouter,
+  sweepOverdue,
+  callSeconds,
+  jsonType,
+  WEBHOOK_PATH: AGENT_SETTINGS.webhook_path,
+  _setClockForTests,
+  _resetIpLimitForTests,
+  _ipLimitSizeForTests,
+};

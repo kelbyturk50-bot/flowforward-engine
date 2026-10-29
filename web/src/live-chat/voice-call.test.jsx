@@ -75,13 +75,14 @@ describe('VoiceCallPanel', () => {
     let hooks;
     const call = fakeCall();
     const startCall = vi.fn(async (opts) => { hooks = opts.hooks; return call; });
-    render(<VoiceCallPanel token={TOKEN} businessName="Sample Ridge Heating" readStatus={async () => AVAILABLE} startCall={startCall} />);
+    render(<VoiceCallPanel token={TOKEN} businessName="Sample Ridge Heating" readStatus={async () => AVAILABLE} startCall={startCall} preload={async () => ({})} />);
     const button = await screen.findByRole('button', { name: 'Call the receptionist' });
     expect(screen.getByText(/Sample Ridge Heating's AI receptionist/)).toBeInTheDocument();
     expect(screen.getByText(/No phone number is dialed and nothing is booked/)).toBeInTheDocument();
     await userEvent.click(button);
     expect(startCall).toHaveBeenCalledWith(expect.objectContaining({ token: TOKEN }));
-    expect(screen.getByRole('button', { name: 'Connecting…' })).toBeDisabled();
+    expect(screen.getByText('Connecting…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
     act(() => hooks.onStatus('live'));
     expect(screen.getByText('Live · 3:00 left')).toBeInTheDocument();
     expect(screen.getByText('Try saying')).toBeInTheDocument();
@@ -100,7 +101,7 @@ describe('VoiceCallPanel', () => {
       opts.onRefused(429, { error: 'voice_limit', reason: 'link' });
       throw new Error('refused');
     });
-    render(<VoiceCallPanel token={TOKEN} readStatus={async () => AVAILABLE} startCall={startCall} />);
+    render(<VoiceCallPanel token={TOKEN} readStatus={async () => AVAILABLE} startCall={startCall} preload={async () => ({})} />);
     await userEvent.click(await screen.findByRole('button', { name: 'Call the receptionist' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('This link has used its sample calls.');
     expect(screen.getByRole('button', { name: 'Call the receptionist' })).toBeDisabled();
@@ -109,10 +110,61 @@ describe('VoiceCallPanel', () => {
   it('asks for the microphone when the browser blocks it', async () => {
     let hooks;
     const startCall = vi.fn(async (opts) => { hooks = opts.hooks; return fakeCall(); });
-    render(<VoiceCallPanel token={TOKEN} readStatus={async () => AVAILABLE} startCall={startCall} />);
+    render(<VoiceCallPanel token={TOKEN} readStatus={async () => AVAILABLE} startCall={startCall} preload={async () => ({})} />);
     await userEvent.click(await screen.findByRole('button', { name: 'Call the receptionist' }));
     act(() => hooks.onError(Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' })));
     expect(screen.getByRole('alert')).toHaveTextContent('Allow the microphone');
+  });
+
+  it('ends a call that finishes starting after the panel is gone', async () => {
+    const call = fakeCall();
+    let resolve;
+    const startCall = vi.fn(() => new Promise((r) => { resolve = r; }));
+    const { unmount } = render(<VoiceCallPanel token={TOKEN} readStatus={async () => AVAILABLE} startCall={startCall} preload={async () => ({})} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Call the receptionist' }));
+    unmount();
+    await act(async () => { resolve(call); });
+    expect(call.end).toHaveBeenCalled();
+  });
+
+  it('Cancel while connecting ends the call once it exists', async () => {
+    const call = fakeCall();
+    let resolve;
+    const startCall = vi.fn(() => new Promise((r) => { resolve = r; }));
+    render(<VoiceCallPanel token={TOKEN} readStatus={async () => AVAILABLE} startCall={startCall} preload={async () => ({})} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Call the receptionist' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await act(async () => { resolve(call); });
+    expect(call.end).toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Call again' })).toBeEnabled();
+  });
+
+  it('keeps End and Mute when a non-fatal error arrives during a live call', async () => {
+    let hooks;
+    const call = { ...fakeCall(), status: 'live' };
+    const startCall = vi.fn(async (opts) => { hooks = opts.hooks; return call; });
+    render(<VoiceCallPanel token={TOKEN} readStatus={async () => AVAILABLE} startCall={startCall} preload={async () => ({})} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Call the receptionist' }));
+    act(() => hooks.onStatus('live'));
+    act(() => hooks.onError(new Error('transient')));
+    expect(screen.getByRole('button', { name: 'End call' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('connection hiccuped');
+  });
+
+  it('a refused call does not use up one of the link\'s calls', async () => {
+    let hooks;
+    const startCall = vi.fn(async (opts) => {
+      hooks = opts.hooks;
+      opts.onRefused(429, { error: 'voice_limit', reason: 'busy' });
+      return fakeCall();
+    });
+    const preload = vi.fn(async () => ({}));
+    render(<VoiceCallPanel token={TOKEN} readStatus={async () => ({ ...AVAILABLE, callsLeft: 1 })} startCall={startCall} preload={preload} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Call the receptionist' }));
+    expect(preload).toHaveBeenCalled();
+    act(() => hooks.onEnd({}));
+    expect(screen.getByRole('alert')).toHaveTextContent('The demo line is busy');
+    expect(screen.getByRole('button', { name: 'Call again' })).toBeEnabled();
   });
 
   it('says when a link has used its calls', async () => {

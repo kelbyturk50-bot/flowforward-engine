@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { readVoiceStatus, refusalText, startVoiceCall } from './voice-client.js';
+import { preloadVoiceSdk, readVoiceStatus, refusalText, startVoiceCall } from './voice-client.js';
 
 // "Call the receptionist": a browser call to an AI receptionist that answers
 // in this shop's name, from the approved facts. Nothing is booked, nothing
 // dials a phone. The panel is absent when voice is off for this link.
+//
+// A call must never outlive the panel: unmounting, Cancel, or End always
+// reaches call.end(), including a call that was still being created.
 
 const TRY_SAYING = Object.freeze([
   'Are you open Saturday?',
@@ -25,11 +28,19 @@ function micText(err) {
   return 'The call didn\'t connect. Try again in a minute.';
 }
 
+function endQuietly(call) {
+  try {
+    const ending = call?.end?.();
+    if (ending && typeof ending.catch === 'function') ending.catch(() => {});
+  } catch { /* already over */ }
+}
+
 export default function VoiceCallPanel({
   token,
   businessName = 'this business',
   readStatus = readVoiceStatus,
   startCall = startVoiceCall,
+  preload = preloadVoiceSdk,
 }) {
   const [status, setStatus] = useState(null);
   const [phase, setPhase] = useState('idle');
@@ -37,17 +48,27 @@ export default function VoiceCallPanel({
   const [left, setLeft] = useState(0);
   const [muted, setMuted] = useState(false);
   const callRef = useRef(null);
+  const mountedRef = useRef(true);
+  const cancelledRef = useRef(false);
   const refusedRef = useRef(false);
+  const liveRef = useRef(false);
 
   useEffect(() => {
+    mountedRef.current = true;
     let cancelled = false;
-    readStatus(token).then((next) => { if (!cancelled) setStatus(next); });
+    readStatus(token).then((next) => {
+      if (cancelled) return;
+      setStatus(next);
+      if (next?.available) preload().catch(() => {});
+    });
     return () => {
       cancelled = true;
-      const ending = callRef.current?.end?.();
-      if (ending && typeof ending.catch === 'function') ending.catch(() => {});
+      mountedRef.current = false;
+      cancelledRef.current = true;
+      endQuietly(callRef.current);
+      callRef.current = null;
     };
-  }, [token, readStatus]);
+  }, [token, readStatus, preload]);
 
   useEffect(() => {
     if (phase !== 'live') return undefined;
@@ -63,6 +84,8 @@ export default function VoiceCallPanel({
     setMessage('');
     setMuted(false);
     refusedRef.current = false;
+    cancelledRef.current = false;
+    liveRef.current = false;
     setPhase('connecting');
     setLeft(status.maxSeconds || 180);
     try {
@@ -70,38 +93,60 @@ export default function VoiceCallPanel({
         token,
         onRefused: (code, data) => {
           refusedRef.current = true;
+          if (!mountedRef.current) return;
           setMessage(refusalText(code, data));
           if (code === 429 && data?.reason === 'link') setStatus({ available: false, reason: 'limit' });
         },
         hooks: {
           onStatus: (next) => {
-            if (next === 'live') setPhase('live');
+            if (next !== 'live' || !mountedRef.current) return;
+            liveRef.current = true;
+            setPhase('live');
           },
           onEnd: () => {
             callRef.current = null;
+            if (!mountedRef.current) return;
+            const used = liveRef.current;
             setPhase((current) => (current === 'error' ? current : 'ended'));
-            setStatus((current) => (current && current.available
-              ? { ...current, callsLeft: Math.max(0, current.callsLeft - 1) }
-              : current));
+            if (used) {
+              setStatus((current) => (current && current.available
+                ? { ...current, callsLeft: Math.max(0, current.callsLeft - 1) }
+                : current));
+            }
           },
           onError: (err) => {
+            if (!mountedRef.current) return;
+            // A non-fatal error during a live call leaves the call running:
+            // keep End and Mute on screen.
+            const session = callRef.current;
+            if (session && session.status && session.status !== 'ended' && liveRef.current) {
+              setMessage('The connection hiccuped. If you can\'t hear the receptionist, end the call and try again.');
+              return;
+            }
             if (!refusedRef.current) setMessage(micText(err));
             setPhase('error');
           },
         },
       });
+      // Unmounted or cancelled while the call was being created: end it now.
+      if (!mountedRef.current || cancelledRef.current) {
+        endQuietly(call);
+        return;
+      }
       callRef.current = call;
     } catch (err) {
+      if (!mountedRef.current) return;
       if (!refusedRef.current) setMessage(micText(err));
       setPhase('error');
     }
   }
 
-  async function hangUp() {
+  function hangUp() {
+    cancelledRef.current = true;
     const call = callRef.current;
     callRef.current = null;
     setPhase('ended');
-    try { await call?.end?.(); } catch { /* the call is over either way */ }
+    endQuietly(call);
   }
 
   function toggleMute() {
@@ -132,9 +177,14 @@ export default function VoiceCallPanel({
             </button>
             <button type="button" className="live-chat-send voice-call-btn" onClick={hangUp}>End call</button>
           </div>
+        ) : phase === 'connecting' ? (
+          <div className="voice-call-controls">
+            <span className="voice-call-live" role="status">Connecting…</span>
+            <button type="button" className="live-chat-action voice-call-btn" onClick={hangUp}>Cancel</button>
+          </div>
         ) : (
           <button type="button" className="live-chat-send voice-call-btn" disabled={!canCall} onClick={begin}>
-            {phase === 'connecting' ? 'Connecting…' : phase === 'ended' ? 'Call again' : 'Call the receptionist'}
+            {phase === 'ended' ? 'Call again' : 'Call the receptionist'}
           </button>
         )}
       </div>

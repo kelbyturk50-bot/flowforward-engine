@@ -89,6 +89,25 @@ async function createWebCall({ config, variables, beginMessage, metadata, maxCal
   return pickCall(data);
 }
 
+// Server-side hang-up. Used by the sweeper when a call outlives its maximum.
+async function stopCall({ config, callId, timeoutMs }) {
+  if (typeof callId !== 'string' || !CALL_ID.test(callId)) throw retellError('retell_bad_call');
+  const doFetch = fetchOverride || fetch;
+  let res;
+  try {
+    res = await doFetch(`${RETELL_API}/v2/stop-call/${encodeURIComponent(callId)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${config.apiKey}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    throw retellError(err && err.name === 'TimeoutError' ? 'retell_timeout' : 'retell_unreachable');
+  }
+  if (!res || typeof res.status !== 'number' || res.status < 200 || res.status > 299) {
+    throw retellError('retell_rejected', res && res.status);
+  }
+}
+
 // x-retell-signature is "v=<ms>,d=<hex>", where hex is HMAC-SHA256 keyed by
 // the Retell API key over the raw body followed by the timestamp. A
 // signature older or newer than five minutes is refused (replay).
@@ -117,6 +136,7 @@ function signBody(rawBody, apiKey, stamp = Date.now()) {
 module.exports = {
   RETELL_API,
   createWebCall,
+  stopCall,
   verifySignature,
   signBody,
   pickCall,

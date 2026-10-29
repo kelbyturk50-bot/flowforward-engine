@@ -27,7 +27,9 @@ async function reserve({ prototypeId, dailySeconds, now = new Date() }) {
   const staleBefore = new Date(now.getTime() - caps.reservationTtlMs);
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    // READ COMMITTED pinned: each check must see the mints committed before
+    // this one took the lock.
+    await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
     await client.query('SELECT pg_advisory_xact_lock($1)', [LOCK_ID]);
     await client.query(
       `UPDATE voice_demo_calls SET status = 'expired'
@@ -101,14 +103,40 @@ async function failCall(id) {
 }
 
 // From the call_ended webhook. Idempotent: a retry finds the row settled.
+// seconds null means the length is unknown: the full reservation stays
+// counted, so an odd payload can only make the caps stricter.
 async function settleCall(callId, seconds, endedAt = new Date()) {
   const result = await pool.query(
     `UPDATE voice_demo_calls
-        SET status = 'ended', actual_seconds = $2, ended_at = $3
+        SET status = 'ended', actual_seconds = COALESCE($2::int, reserved_seconds), ended_at = $3
       WHERE call_id = $1 AND status IN ('reserved', 'expired')`,
     [callId, seconds, endedAt]
   );
   return result.rowCount;
+}
+
+// Calls with no end event well past their maximum. The sweeper asks Retell
+// to stop each one once (stop_requested_at), whatever Retell answers.
+async function overdueCalls(now = new Date(), limit = 10) {
+  const before = new Date(now.getTime() - (VOICE_CAPS.maxCallSeconds + VOICE_CAPS.stopGraceSeconds) * 1000);
+  const { rows } = await pool.query(
+    `SELECT id, call_id FROM voice_demo_calls
+      WHERE status IN ('reserved', 'expired')
+        AND call_id IS NOT NULL
+        AND stop_requested_at IS NULL
+        AND created_at < $1
+      ORDER BY created_at
+      LIMIT $2`,
+    [before, limit]
+  );
+  return rows;
+}
+
+async function markStopRequested(id, at = new Date()) {
+  await pool.query(
+    `UPDATE voice_demo_calls SET stop_requested_at = $2 WHERE id = $1 AND stop_requested_at IS NULL`,
+    [id, at]
+  );
 }
 
 // What one link has left, for the public availability read.
@@ -141,4 +169,6 @@ async function dayUsage(now = new Date()) {
   return { day, ...rows[0] };
 }
 
-module.exports = { reserve, attachCall, failCall, settleCall, linkUsage, dayUsage, LOCK_ID };
+module.exports = {
+  reserve, attachCall, failCall, settleCall, overdueCalls, markStopRequested, linkUsage, dayUsage, LOCK_ID,
+};

@@ -8,7 +8,7 @@ const { zoneDay, FLOWFORWARD_ZONE } = require('../chatdemo/copy');
 const { listFacts, writeFact, buildFacts, approveFacts, deleteFact } = require('../chatdemo/facts-store');
 const { readSpend } = require('../chatdemo/spend');
 const { VOICE_CAPS, voiceConfig } = require('../voicedemo/config');
-const { AGENT_PROMPT, AGENT_SETTINGS } = require('../voicedemo/agent-prompt');
+const { AGENT_PROMPT, AGENT_BEGIN_MESSAGE, AGENT_SETTINGS } = require('../voicedemo/agent-prompt');
 const voiceStore = require('../voicedemo/store');
 const proposalConfig = require('../proposals/config');
 
@@ -139,6 +139,12 @@ router.get('/voice', async (req, res) => {
       today,
       webhook_url: `${String(proposalConfig.PUBLIC_BASE_URL || '').replace(/\/+$/, '')}${AGENT_SETTINGS.webhook_path}`,
       prompt: AGENT_PROMPT,
+      begin_message: AGENT_BEGIN_MESSAGE,
+      agent_settings: {
+        max_call_duration: AGENT_SETTINGS.max_call_duration,
+        end_call_after_silence: AGENT_SETTINGS.end_call_after_silence,
+        data_storage: AGENT_SETTINGS.data_storage,
+      },
     });
   } catch (err) {
     console.error(`[chat] voice read failed (${err && err.code ? err.code : 'error'})`);
