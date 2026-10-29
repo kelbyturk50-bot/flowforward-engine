@@ -1236,6 +1236,7 @@ CREATE TABLE IF NOT EXISTS prototype_facts (
   snippet      TEXT,
   captured_at  TIMESTAMPTZ NOT NULL,
   test_tag     TEXT NOT NULL,
+  review_status TEXT NOT NULL DEFAULT 'approved',
   CONSTRAINT prototype_facts_field_check CHECK (
     field IN (
       'business_name', 'services', 'service_area', 'phone', 'address', 'hours',
@@ -1268,13 +1269,39 @@ CREATE TABLE IF NOT EXISTS prototype_facts (
   CONSTRAINT prototype_facts_snippet_len CHECK (snippet IS NULL OR char_length(snippet) BETWEEN 1 AND 300),
   CONSTRAINT prototype_facts_research_snippet CHECK (source <> 'cached_research' OR snippet IS NOT NULL),
   CONSTRAINT prototype_facts_tag_check CHECK (
-    test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
-    AND char_length(test_tag) <= 80
-  )
+    char_length(test_tag) <= 80
+    AND (
+      test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+      OR test_tag ~ '^demo-[a-z0-9]+(-[a-z0-9]+)*$'
+    )
+  ),
+  CONSTRAINT prototype_facts_review_status_check CHECK (review_status IN ('proposed', 'approved'))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_prototype_facts_prospect_field
   ON prototype_facts (prospect_id, field);
+
+-- Facts sheets for real leads (Kelby, Oct 29). Facts read from research
+-- insert as 'proposed'; the public chat reads 'approved' only. ADD COLUMN
+-- with DEFAULT 'approved' keeps every existing row (TEST: and hand-typed)
+-- approved without an UPDATE, and its inline check needs no DROP.
+ALTER TABLE prototype_facts ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'approved'
+  CONSTRAINT prototype_facts_review_status_check CHECK (review_status IN ('proposed', 'approved'));
+
+-- BEGIN prototype_facts_tag_check upgrade
+-- CREATE TABLE IF NOT EXISTS keeps an older TEST-only check. Drop and re-add
+-- so a database that booted an earlier head accepts demo-prototype for real
+-- leads too. The new check only widens the old one, so no stored row can
+-- fail it, and the table is small.
+ALTER TABLE prototype_facts DROP CONSTRAINT IF EXISTS prototype_facts_tag_check;
+ALTER TABLE prototype_facts ADD CONSTRAINT prototype_facts_tag_check CHECK (
+  char_length(test_tag) <= 80
+  AND (
+    test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+    OR test_tag ~ '^demo-[a-z0-9]+(-[a-z0-9]+)*$'
+  )
+);
+-- END prototype_facts_tag_check upgrade
 
 CREATE TABLE IF NOT EXISTS chat_demo_sessions (
   id             UUID PRIMARY KEY,

@@ -921,11 +921,17 @@ describe('pilot csv estimate intake', () => {
     const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
     const repairSql = fs.readFileSync(path.join(__dirname, '../src/db/estimate-constraints.sql'), 'utf8');
     const migrate = fs.readFileSync(path.join(__dirname, '../src/db/migrate.js'), 'utf8');
-    const schemaWithoutTagUpgrade = schema.replace(
-      /-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/,
-      ''
-    );
+    const schemaWithoutTagUpgrade = schema
+      .replace(/-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/, '')
+      .replace(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/, '');
     assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
+    // The facts tag upgrade drops and re-adds that one check and nothing else.
+    const factsUpgrade = schema.match(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/);
+    assert.ok(factsUpgrade);
+    assert.deepEqual(
+      [...factsUpgrade[0].matchAll(/DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+(\w+)/gi)].map((m) => m[1]),
+      ['prototype_facts_tag_check']
+    );
     assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutTagUpgrade), false);
     assert.equal(/VALIDATE CONSTRAINT/.test(schema), false);
     assert.match(

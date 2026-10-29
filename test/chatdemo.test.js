@@ -1610,18 +1610,19 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     console.log('[chatdemo] session tag check drop/re-add accepts demo-prototype');
   });
 
-  it('facts writes are TEST-only, spend is read-only, and the model flag is not writable', async () => {
+  it('facts writes cover real leads, spend is read-only, and the model flag is not writable', async () => {
     const plain = await insertProspect({
       google_place_id: `test-chatdemo-${crypto.randomBytes(4).toString('hex')}`,
       company: 'Wasatch Heating',
       email: 'test+chatdemo@example.com',
     });
-    const denied = await request('POST', '/api/chat/facts', {
+    const real = await request('POST', '/api/chat/facts', {
       key: true,
       body: { prospect_id: plain.id, field: 'hours', value: '9 to 5', source: 'manual' },
     });
-    assert.equal(denied.status, 422);
-    assert.deepEqual(denied.json, { error: 'test_only' });
+    assert.equal(real.status, 201, real.text);
+    assert.equal(real.json.fact.test_tag, 'demo-prototype');
+    assert.equal(real.json.fact.review_status, 'approved');
     const tagged = await insertProspect({
       google_place_id: `test-chatdemo-${crypto.randomBytes(4).toString('hex')}`,
       company: 'TEST: Canyon Plumbing',
@@ -1697,6 +1698,179 @@ describe('live chat http and postgres', { concurrency: 1 }, () => {
     assert.equal(chatSrc.includes('process.env.CHAT_DEMO_DAILY_CEILING_USD'), false);
   });
 
+
+  // Research the proposal bot already saved, for a real (non-TEST) lead.
+  function savedResearch(overrides = {}) {
+    return {
+      business: { company: 'Lone Peak Heating', phone: '(801) 555-0177', address: '100 N Main St, Lehi, UT 84043' },
+      google: {
+        maps_url: 'https://maps.google.com/?cid=4242',
+        hours: [
+          'Monday: 8:00 AM – 5:00 PM', 'Tuesday: 8:00 AM – 5:00 PM', 'Wednesday: 8:00 AM – 5:00 PM',
+          'Thursday: 8:00 AM – 5:00 PM', 'Friday: 8:00 AM – 5:00 PM', 'Saturday: Closed', 'Sunday: Closed',
+        ],
+        reviews: [{ rating: 5, text: 'They came out 24/7 and gave a free estimate.' }],
+      },
+      site: {
+        pages: [{
+          url: 'https://lonepeak.example/',
+          text: 'Lone Peak Heating serves Lehi, Highland and American Fork. Furnace Repair, AC Repair and Water Heaters. Free estimates on new systems.',
+        }],
+      },
+      ...overrides,
+    };
+  }
+
+  async function realLeadWithResearch(research = savedResearch()) {
+    const lead = await insertProspect({
+      google_place_id: `test-chatdemo-${crypto.randomBytes(4).toString('hex')}`,
+      company: 'Lone Peak Heating',
+      email: 'test+lonepeak@example.com',
+    });
+    await pool.query(
+      `INSERT INTO proposals (prospect_id, version, status, slug, research)
+       VALUES ($1, 1, 'draft', $2, $3::jsonb)`,
+      [lead.id, `test-chatdemo-facts-${lead.id}`, JSON.stringify(research)]
+    );
+    return lead;
+  }
+
+  it('reads facts from saved research for a real lead as proposed, and approves them', async () => {
+    const bare = await insertProspect({
+      google_place_id: `test-chatdemo-${crypto.randomBytes(4).toString('hex')}`,
+      company: 'No Research Plumbing',
+      email: 'test+noresearch@example.com',
+    });
+    const none = await request('POST', '/api/chat/facts/build', { key: true, body: { prospect_id: bare.id } });
+    assert.equal(none.status, 409);
+    assert.deepEqual(none.json, { error: 'no_research' });
+
+    const lead = await realLeadWithResearch();
+    const built = await request('POST', '/api/chat/facts/build', { key: true, body: { prospect_id: lead.id } });
+    assert.equal(built.status, 200, built.text);
+    const byField = Object.fromEntries(built.json.facts.map((fact) => [fact.field, fact]));
+    assert.deepEqual(Object.keys(byField).sort(), ['address', 'free_estimate', 'hours', 'phone', 'service_area', 'services']);
+    assert.equal(built.json.proposed, 6);
+    for (const fact of built.json.facts) {
+      assert.equal(fact.review_status, 'proposed', fact.field);
+      assert.equal(fact.source, 'cached_research', fact.field);
+      assert.equal(fact.test_tag, 'demo-prototype', fact.field);
+      assert.ok(fact.snippet && fact.source_url.startsWith('https://'), fact.field);
+    }
+    assert.equal(byField.hours.value, 'Monday–Friday: 8:00 AM – 5:00 PM; Saturday–Sunday: Closed');
+    assert.equal(byField.hours.per_google, true);
+    assert.equal(byField.services.value, 'Furnace Repair, AC Repair, Water Heaters');
+    assert.equal(byField.services.per_google, false);
+    assert.equal(byField.service_area.value, 'Lehi, Highland, American Fork');
+    // A review that says 24/7 is never read.
+    assert.equal(byField.emergency_247, undefined);
+
+    const bad = await request('POST', '/api/chat/facts/approve', {
+      key: true, body: { prospect_id: lead.id, fields: ['hours', 'rating'] },
+    });
+    assert.equal(bad.status, 400);
+    const one = await request('POST', '/api/chat/facts/approve', {
+      key: true, body: { prospect_id: lead.id, fields: ['hours'] },
+    });
+    assert.equal(one.status, 200);
+    assert.equal(one.json.approved, 1);
+    const status = Object.fromEntries(one.json.facts.map((fact) => [fact.field, fact.review_status]));
+    assert.equal(status.hours, 'approved');
+    assert.equal(status.services, 'proposed');
+    const all = await request('POST', '/api/chat/facts/approve', { key: true, body: { prospect_id: lead.id } });
+    assert.equal(all.json.approved, 5);
+    assert.ok(all.json.facts.every((fact) => fact.review_status === 'approved'));
+    console.log('[chatdemo] real lead facts proposed from saved research, then approved');
+  });
+
+  it('a rebuild keeps approved and typed facts and drops proposed facts the research no longer shows', async () => {
+    const lead = await realLeadWithResearch();
+    await request('POST', '/api/chat/facts/build', { key: true, body: { prospect_id: lead.id } });
+    await request('POST', '/api/chat/facts/approve', { key: true, body: { prospect_id: lead.id, fields: ['hours'] } });
+    const typed = await request('POST', '/api/chat/facts', {
+      key: true, body: { prospect_id: lead.id, field: 'phone', value: '(801) 555-0100', source: 'manual' },
+    });
+    assert.equal(typed.status, 201);
+    const newer = savedResearch({
+      google: { maps_url: 'https://maps.google.com/?cid=4242', hours: ['Monday: Open 24 hours'] },
+      site: { pages: [{ url: 'https://lonepeak.example/', text: 'Furnace Repair only.' }] },
+    });
+    await pool.query(
+      `INSERT INTO proposals (prospect_id, version, status, slug, research)
+       VALUES ($1, 2, 'draft', $2, $3::jsonb)`,
+      [lead.id, `test-chatdemo-facts-v2-${lead.id}`, JSON.stringify(newer)]
+    );
+    const rebuilt = await request('POST', '/api/chat/facts/build', { key: true, body: { prospect_id: lead.id } });
+    assert.equal(rebuilt.status, 200);
+    const byField = Object.fromEntries(rebuilt.json.facts.map((fact) => [fact.field, fact]));
+    assert.equal(byField.hours.value, 'Monday–Friday: 8:00 AM – 5:00 PM; Saturday–Sunday: Closed', 'approved hours unchanged');
+    assert.equal(byField.phone.value, '(801) 555-0100', 'typed phone unchanged');
+    assert.equal(byField.phone.source, 'manual');
+    assert.equal(byField.services.value, 'Furnace Repair');
+    assert.equal(byField.free_estimate, undefined, 'stale proposed fact removed');
+    assert.equal(byField.service_area, undefined, 'stale proposed fact removed');
+
+    const removed = await request('DELETE', `/api/chat/facts?prospect_id=${lead.id}&field=services`, { key: true });
+    assert.equal(removed.status, 200);
+    assert.equal(removed.json.facts.some((fact) => fact.field === 'services'), false);
+    const again = await request('DELETE', `/api/chat/facts?prospect_id=${lead.id}&field=services`, { key: true });
+    assert.equal(again.status, 404);
+    const junk = await request('DELETE', `/api/chat/facts?prospect_id=${lead.id}&field=rating`, { key: true });
+    assert.equal(junk.status, 400);
+    const noKey = await request('POST', '/api/chat/facts/build', { body: { prospect_id: lead.id } });
+    assert.equal(noKey.status, 401);
+
+    await pool.query(`UPDATE prospects SET archived_at = NOW() WHERE id = $1`, [lead.id]);
+    const archived = await request('POST', '/api/chat/facts/build', { key: true, body: { prospect_id: lead.id } });
+    assert.equal(archived.status, 409);
+    assert.deepEqual(archived.json, { error: 'archived' });
+    console.log('[chatdemo] rebuild keeps approved and typed facts; remove and archived checks hold');
+  });
+
+  it('the public chat answers only from approved facts', async () => {
+    await setFlags(true);
+    _setEngineForTests(createChatEngine({ liveGate: async () => false }));
+    const proto = await makeProto({ company: 'Lone Peak Heating', brand: 'Lone Peak Heating' });
+    await pool.query(
+      `INSERT INTO proposals (prospect_id, version, status, slug, research)
+       VALUES ($1, 1, 'draft', $2, $3::jsonb)`,
+      [proto.lead.id, `test-chatdemo-facts-chat-${proto.lead.id}`, JSON.stringify(savedResearch())]
+    );
+    await request('POST', '/api/chat/facts/build', { key: true, body: { prospect_id: proto.lead.id } });
+    const ask = async () => {
+      const opened = await request('POST', `/api/public/prototypes/${proto.token}/chat/session`, { body: {} });
+      assert.equal(opened.status, 201, opened.text);
+      return request('POST', `/api/public/prototypes/${proto.token}/chat/message`, {
+        body: { sessionId: opened.json.sessionId, chipId: 'chip_hours' },
+      });
+    };
+    const before = await ask();
+    assert.equal(before.status, 200, before.text);
+    assert.equal(before.json.text, 'The team will confirm.', 'proposed hours are not used');
+    await request('POST', '/api/chat/facts/approve', { key: true, body: { prospect_id: proto.lead.id, fields: ['hours'] } });
+    const after = await ask();
+    assert.equal(after.json.text, 'Hours on file are Monday–Friday: 8:00 AM – 5:00 PM; Saturday–Sunday: Closed. The team will confirm anything outside those hours.');
+    console.log('[chatdemo] public chat reads approved facts only');
+  });
+
+  it('the facts tag and review checks accept demo-prototype and reject anything else', async () => {
+    const lead = await insertProspect({
+      google_place_id: `test-chatdemo-${crypto.randomBytes(4).toString('hex')}`,
+      company: 'Check Plumbing',
+      email: 'test+check@example.com',
+    });
+    const insert = (tag, status) => pool.query(
+      `INSERT INTO prototype_facts (prospect_id, field, value, source, captured_at, test_tag, review_status)
+       VALUES ($1, 'hours', 'Monday', 'manual', NOW(), $2, $3)`,
+      [lead.id, tag, status]
+    );
+    await assert.rejects(() => insert('demo-', 'approved'), (err) => err.code === '23514');
+    await assert.rejects(() => insert('prod', 'approved'), (err) => err.code === '23514');
+    await assert.rejects(() => insert('demo-prototype', 'pending'), (err) => err.code === '23514');
+    await insert('demo-prototype', 'proposed');
+    const { rows } = await pool.query(`SELECT review_status FROM prototype_facts WHERE prospect_id = $1`, [lead.id]);
+    assert.equal(rows[0].review_status, 'proposed');
+  });
   it('logs omit the IP, session id, user text, and model text', async () => {
     await setFlags(true);
     const marker = 'ZZ_USER_TEXT_marker';
