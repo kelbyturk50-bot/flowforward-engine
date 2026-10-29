@@ -313,4 +313,66 @@ describe('prototype brand colors', () => {
       _resetMatchLimitForTests();
     }
   });
+
+  it('reads hsl, oklch and oklab colors and space-separated rgb', () => {
+    const { parseColor } = palette;
+    assert.equal(parseColor('rgb(64 93 114)'), '#405d72');
+    assert.equal(parseColor('hsl(210 50% 40%)'), '#336699');
+    assert.equal(parseColor('hsla(0, 100%, 50%, 1)'), '#ff0000');
+    // H&M Plumbing's orange and Parley's navy, as their sites write them.
+    assert.equal(parseColor('oklab(0.69603 0.0983737 0.124461)'), '#e87c2f');
+    assert.equal(parseColor('oklch(0.24 0.11 267)'), '#091652');
+    assert.equal(parseColor('rgb(64 93 114 / 0.5)'), null);
+    assert.equal(parseColor('oklch(0.5 0.1 120 / 30%)'), null);
+    const fromOklch = extractPalette('<style>.site-header{background:oklch(0.24 0.11 267)}.btn-primary{background:oklch(0.24 0.11 267)}</style>');
+    assert.equal(fromOklch.primary, '#091652');
+    console.log('[prototype-palette] modern color syntax parsed');
+  });
+
+  it("discounts stock theme colors so the shop's own color wins", () => {
+    // Valley Home Services: Bootstrap and form-plugin colors everywhere,
+    // brand slate and gold on the header and buttons.
+    const stock = '.alert-danger{background:#d9534f}.btn-success{background:#5cb85c}.btn-info{background:#5bc0de}.gform_button{background:#cc3366}';
+    const both = extractPalette(`<style>${stock}${stock}${stock}.site-header{background:#405d72}.top-bar{background:#405d72}.btn-call{background:#405d72}.btn-primary{background:#e0af62}</style>`);
+    assert.equal(both.primary, '#405d72');
+    assert.equal(both.secondary, '#e0af62');
+    assert.equal(both.confident, true);
+    // Stock colors alone are reported, but never as confident.
+    const only = extractPalette(`<style>${stock}</style>`);
+    assert.ok(palette.FRAMEWORK_DEFAULTS.has(only.primary));
+    assert.equal(only.confident, false);
+    assert.ok(only.swatches[0].why.includes('theme default'));
+    // A theme-color meta tag is the owner's choice and counts in full.
+    const meta = extractPalette('<meta name="theme-color" content="#6ec1e4"><style>.x{color:#123456}</style>');
+    assert.equal(meta.primary, '#6ec1e4');
+    assert.equal(meta.confident, true);
+    console.log('[prototype-palette] stock theme colors discounted');
+  });
+
+  it("create uses a confident draft's colors, and skips stock or unsure ones", async () => {
+    const make = async (tag, colors) => {
+      const p = await insertProspect({
+        company: `TEST: Draft Colors ${tag}`,
+        industry: 'Plumbing',
+        state: 'UT',
+        google_place_id: `test-place-palette-draft-${tag}`,
+      });
+      await pool.query(
+        `INSERT INTO proposals (prospect_id, version, status, slug, research, subject, body)
+         VALUES ($1, 1, 'draft', $2, $3::jsonb, 'TEST: subject', 'TEST: body')`,
+        [p.id, `test-draft-colors-${tag}`, JSON.stringify({ site: { brand_colors: colors } })]
+      );
+      const made = await call(port, 'POST', '/api/prototypes', { prospect_id: p.id });
+      assert.equal(made.status, 200);
+      return made.json.prototype.colors;
+    };
+    const good = await make('good', { primary: '#405d72', secondary: '#e0af62', confident: true });
+    assert.equal(good.primary, '#405d72');
+    assert.equal(good.secondary, '#e0af62');
+    const unsure = await make('unsure', { primary: '#405d72', secondary: '#e0af62', confident: false });
+    assert.equal(unsure.primary, FALLBACK_PRIMARY);
+    const stockDraft = await make('stock', { primary: '#d9534f', secondary: '#5cb85c', confident: true });
+    assert.equal(stockDraft.primary, FALLBACK_PRIMARY);
+    console.log('[prototype-palette] CRM create reads confident colors from the latest draft');
+  });
 });
