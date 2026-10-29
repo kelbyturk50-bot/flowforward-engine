@@ -206,6 +206,19 @@ async function loadProspect(prospectId, research) {
   return prospect;
 }
 
+// A new link proposes chat facts from the research the proposal bot already
+// cached. No fetch, no model call. Kelby approves them in the CRM before the
+// chat uses them. A failure here never fails the prototype.
+async function proposeChatFacts(prospectId) {
+  try {
+    const { buildFacts } = require('../chatdemo/facts-store');
+    const result = await buildFacts(prospectId);
+    if (result && result.proposed) console.log(`[prototype] prospect ${prospectId} proposed ${result.proposed} chat facts`);
+  } catch (err) {
+    console.error('[prototype] chat facts failed:', err && err.code);
+  }
+}
+
 // Draft hook. Uses the rubric; no pick means no prototype.
 async function attachPrototype({ prospectId, research }) {
   if (!(await prototypeOnDraft())) return null;
@@ -228,6 +241,7 @@ async function attachPrototype({ prospectId, research }) {
     const colors = await colorsFor(prospect);
     const row = await insertRow(prospect, pick.agent, colors);
     console.log(`[prototype] prospect ${prospect.id} agent ${row.agent_type} prototype ${row.id}`);
+    await proposeChatFacts(prospect.id);
     return row;
   } catch (err) {
     console.error('[prototype] hook failed:', err && err.code);
@@ -260,6 +274,7 @@ async function ensurePrototype(prospectId, { fresh = false } = {}) {
   if (existing) await revoke(existing.id);
   const row = await insertRow(prospect, agent, colors);
   console.log(`[prototype] prospect ${prospect.id} agent ${row.agent_type} prototype ${row.id} (from CRM)`);
+  await proposeChatFacts(prospect.id);
   return row;
 }
 

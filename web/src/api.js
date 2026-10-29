@@ -134,6 +134,11 @@ export const api = {
   updatePrototype:   (id, b)        => request('PATCH', `/api/prototypes/${id}`, b),
   revokePrototype:   (id)           => request('POST', `/api/prototypes/${id}/revoke`),
   matchPrototypeColors: (id)        => request('POST', `/api/prototypes/${id}/match-site`),
+  // Live chat facts sheet: what the chat may say about this shop
+  chatFacts:         (prospectId)   => request('GET', `/api/chat/facts${qs({ prospect_id: prospectId })}`),
+  buildChatFacts:    (prospectId)   => request('POST', '/api/chat/facts/build', { prospect_id: prospectId }),
+  approveChatFacts:  (prospectId, fields = null) => request('POST', '/api/chat/facts/approve', { prospect_id: prospectId, fields }),
+  removeChatFact:    (prospectId, field) => request('DELETE', `/api/chat/facts${qs({ prospect_id: prospectId, field })}`),
   markSentProposal:  (id, note)     => request('POST', `/api/proposals/${id}/mark-sent`, { note }),
   stopProposal:      (id, reason)   => request('POST', `/api/proposals/${id}/stop`, { reason }),
   repliedProposal:   (id, note)     => request('POST', `/api/proposals/${id}/replied`, { note }),

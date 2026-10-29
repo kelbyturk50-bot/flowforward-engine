@@ -53,4 +53,5 @@ export function installApiDefaults() {
   api.updateTask.mockResolvedValue({});
   api.createLead.mockResolvedValue(foundLead);
   api.createProject.mockResolvedValue(project);
+  api.chatFacts.mockResolvedValue({ facts: [] });
 }

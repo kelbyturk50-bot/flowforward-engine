@@ -145,6 +145,7 @@ async function businessFromRow(row) {
       `SELECT field, value, source, source_url, snippet
          FROM prototype_facts
         WHERE prospect_id = $1
+          AND review_status = 'approved'
         ORDER BY field`,
       [row.prospect_id]
     ),

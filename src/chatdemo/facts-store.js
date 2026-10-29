@@ -1,7 +1,14 @@
-// CRM facts sheet. Writes are TEST: prospects only. cached_research reads the
-// prospect row that is already stored. This module does not fetch.
+// CRM facts sheet. This module does not fetch.
+//
+// Real leads and TEST: leads both get a facts sheet (Kelby, Oct 29). A fact
+// is either typed in the CRM (source manual, approved on write) or read from
+// research the proposal bot already cached (source cached_research). Facts
+// built from research start as review_status 'proposed'; the public chat
+// reads only 'approved' rows, so nothing reaches a prospect before Kelby
+// approves it. A rebuild never overwrites an approved or hand-typed fact.
 
 const { codePointLength, perGoogle } = require('./copy');
+const { extractFacts } = require('./facts-extract');
 const pool = require('../db/client');
 
 const FIELDS = new Set([
@@ -17,6 +24,7 @@ const YES_FIELDS = new Set([
 ]);
 
 const SOURCES = new Set(['manual', 'cached_research', 'fixture']);
+const REAL_LEAD_TAG = 'demo-prototype';
 const HOSTILE = /[\u0000-\u001F\u007F<>\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
 
 function fail(error) {
@@ -28,6 +36,29 @@ function tagForCompany(company) {
   const tag = `TEST:${rest}`;
   if (!/^TEST:[a-z0-9]+(-[a-z0-9]+)*$/.test(tag) || tag.length > 80) return null;
   return tag;
+}
+
+// TEST: leads keep their TEST: tag. Every other lead uses the same
+// demo-prototype tag its chat sessions store.
+function factTag(company) {
+  if (String(company || '').startsWith('TEST:')) return tagForCompany(company);
+  return REAL_LEAD_TAG;
+}
+
+// The research the proposal bot already stored: the newest proposal version
+// that has research, else prospects.research. Never fetched here.
+async function cachedResearch(prospectId, db = pool) {
+  const { rows } = await db.query(
+    `SELECT research FROM proposals
+      WHERE prospect_id = $1 AND research IS NOT NULL
+      ORDER BY version DESC, id DESC
+      LIMIT 1`,
+    [prospectId]
+  );
+  if (rows[0] && rows[0].research && typeof rows[0].research === 'object') return rows[0].research;
+  const lead = await db.query(`SELECT research FROM prospects WHERE id = $1`, [prospectId]);
+  const research = lead.rows[0] ? lead.rows[0].research : null;
+  return research && typeof research === 'object' ? research : null;
 }
 
 function cleanText(value, max) {
@@ -68,12 +99,11 @@ async function writeFact({ prospectId, field, value, source, sourceUrl, snippet,
   if (!Number.isInteger(id) || id < 1) return fail('invalid_body');
   if (!FIELDS.has(field) || !SOURCES.has(source)) return fail('invalid_body');
   const { rows } = await pool.query(
-    `SELECT company, research FROM prospects WHERE id = $1`,
+    `SELECT company FROM prospects WHERE id = $1`,
     [id]
   );
   if (!rows[0]) return fail('not_found');
-  if (!String(rows[0].company || '').startsWith('TEST:')) return fail('test_only');
-  const tag = tagForCompany(rows[0].company);
+  const tag = factTag(rows[0].company);
   if (!tag) return fail('invalid_body');
   const stored = cleanText(value, 500);
   if (!stored) return fail('invalid_body');
@@ -87,51 +117,172 @@ async function writeFact({ prospectId, field, value, source, sourceUrl, snippet,
     if (!snippetText) return fail('invalid_body');
   }
   if (source === 'cached_research') {
-    if (rows[0].research == null) return fail('invalid_body');
     if (!url.value || !snippetText) return fail('invalid_body');
+    if ((await cachedResearch(id)) == null) return fail('invalid_body');
   }
   const captured = at instanceof Date ? at : new Date();
   const { rows: saved } = await pool.query(
     `INSERT INTO prototype_facts
-       (prospect_id, field, value, source, source_url, snippet, captured_at, test_tag)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (prospect_id, field, value, source, source_url, snippet, captured_at, test_tag, review_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'approved')
      ON CONFLICT (prospect_id, field) DO UPDATE
        SET value = EXCLUDED.value,
            source = EXCLUDED.source,
            source_url = EXCLUDED.source_url,
            snippet = EXCLUDED.snippet,
            captured_at = EXCLUDED.captured_at,
-           test_tag = EXCLUDED.test_tag
-     RETURNING field, value, source, source_url, snippet, captured_at, test_tag`,
+           test_tag = EXCLUDED.test_tag,
+           review_status = 'approved'
+     RETURNING field, value, source, source_url, snippet, captured_at, test_tag, review_status`,
     [id, field, stored, source, url.value, snippetText, captured, tag]
   );
   return { fact: saved[0] };
 }
 
-async function listFacts(prospectId) {
-  const id = Number(prospectId);
-  if (!Number.isInteger(id) || id < 1) return fail('invalid_body');
-  const { rows: leads } = await pool.query(`SELECT id FROM prospects WHERE id = $1`, [id]);
-  if (!leads[0]) return fail('not_found');
-  const { rows } = await pool.query(
-    `SELECT field, value, source, source_url, snippet, captured_at, test_tag
+function prospectIdOf(value) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 && id <= 2147483647 ? id : null;
+}
+
+function shape(row) {
+  return {
+    field: row.field,
+    value: row.value,
+    source: row.source,
+    source_url: row.source_url,
+    snippet: row.snippet,
+    captured_at: row.captured_at,
+    test_tag: row.test_tag,
+    review_status: row.review_status,
+    per_google: perGoogle(row),
+  };
+}
+
+async function readFacts(id, db = pool) {
+  const { rows } = await db.query(
+    `SELECT field, value, source, source_url, snippet, captured_at, test_tag, review_status
        FROM prototype_facts
       WHERE prospect_id = $1
       ORDER BY field`,
     [id]
   );
-  return {
-    facts: rows.map((row) => ({
-      field: row.field,
-      value: row.value,
-      source: row.source,
-      source_url: row.source_url,
-      snippet: row.snippet,
-      captured_at: row.captured_at,
-      test_tag: row.test_tag,
-      per_google: perGoogle(row),
-    })),
-  };
+  return rows.map(shape);
 }
 
-module.exports = { writeFact, listFacts, tagForCompany, FIELDS };
+async function listFacts(prospectId) {
+  const id = prospectIdOf(prospectId);
+  if (!id) return fail('invalid_body');
+  const { rows: leads } = await pool.query(`SELECT id FROM prospects WHERE id = $1`, [id]);
+  if (!leads[0]) return fail('not_found');
+  return { facts: await readFacts(id) };
+}
+
+// Read cached research and propose facts. No fetch, no model call.
+// Approved and hand-typed facts are left alone. A proposed research fact the
+// new read no longer supports is removed, so the list matches the research.
+async function buildFacts(prospectId, { at = new Date() } = {}) {
+  const id = prospectIdOf(prospectId);
+  if (!id) return fail('invalid_body');
+  const { rows } = await pool.query(
+    `SELECT company, archived_at FROM prospects WHERE id = $1`,
+    [id]
+  );
+  if (!rows[0]) return fail('not_found');
+  if (rows[0].archived_at) return fail('archived');
+  const tag = factTag(rows[0].company);
+  if (!tag) return fail('invalid_body');
+  const research = await cachedResearch(id);
+  if (!research) return fail('no_research');
+  const candidates = [];
+  for (const fact of extractFacts(research, { company: rows[0].company })) {
+    if (!FIELDS.has(fact.field)) continue;
+    const value = cleanText(fact.value, 500);
+    const snippet = cleanText(fact.snippet, 300);
+    const url = validUrl(fact.source_url);
+    if (!value || !snippet || !url.ok || !url.value) continue;
+    if (YES_FIELDS.has(fact.field) && value !== 'yes') continue;
+    candidates.push({ field: fact.field, value, snippet, sourceUrl: url.value });
+  }
+  const client = await pool.connect();
+  let written = 0;
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `DELETE FROM prototype_facts
+        WHERE prospect_id = $1
+          AND source = 'cached_research'
+          AND review_status = 'proposed'
+          AND NOT (field = ANY($2::text[]))`,
+      [id, candidates.map((fact) => fact.field)]
+    );
+    for (const fact of candidates) {
+      const result = await client.query(
+        `INSERT INTO prototype_facts
+           (prospect_id, field, value, source, source_url, snippet, captured_at, test_tag, review_status)
+         VALUES ($1, $2, $3, 'cached_research', $4, $5, $6, $7, 'proposed')
+         ON CONFLICT (prospect_id, field) DO UPDATE
+           SET value = EXCLUDED.value,
+               source_url = EXCLUDED.source_url,
+               snippet = EXCLUDED.snippet,
+               captured_at = EXCLUDED.captured_at,
+               test_tag = EXCLUDED.test_tag
+         WHERE prototype_facts.source = 'cached_research'
+           AND prototype_facts.review_status = 'proposed'`,
+        [id, fact.field, fact.value, fact.sourceUrl, fact.snippet, at, tag]
+      );
+      written += result.rowCount;
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  return { facts: await readFacts(id), proposed: written };
+}
+
+// Approve proposed facts. fields null approves every proposed fact.
+async function approveFacts(prospectId, fields = null) {
+  const id = prospectIdOf(prospectId);
+  if (!id) return fail('invalid_body');
+  if (fields != null) {
+    if (!Array.isArray(fields) || fields.length === 0 || fields.length > FIELDS.size) return fail('invalid_body');
+    if (!fields.every((field) => typeof field === 'string' && FIELDS.has(field))) return fail('invalid_body');
+  }
+  const { rows: leads } = await pool.query(`SELECT id FROM prospects WHERE id = $1`, [id]);
+  if (!leads[0]) return fail('not_found');
+  const result = await pool.query(
+    `UPDATE prototype_facts
+        SET review_status = 'approved'
+      WHERE prospect_id = $1
+        AND review_status = 'proposed'
+        AND ($2::text[] IS NULL OR field = ANY($2::text[]))`,
+    [id, fields]
+  );
+  return { facts: await readFacts(id), approved: result.rowCount };
+}
+
+async function deleteFact(prospectId, field) {
+  const id = prospectIdOf(prospectId);
+  if (!id || typeof field !== 'string' || !FIELDS.has(field)) return fail('invalid_body');
+  const result = await pool.query(
+    `DELETE FROM prototype_facts WHERE prospect_id = $1 AND field = $2`,
+    [id, field]
+  );
+  if (result.rowCount === 0) return fail('not_found');
+  return { facts: await readFacts(id) };
+}
+
+module.exports = {
+  writeFact,
+  listFacts,
+  buildFacts,
+  approveFacts,
+  deleteFact,
+  cachedResearch,
+  tagForCompany,
+  factTag,
+  FIELDS,
+  REAL_LEAD_TAG,
+};
