@@ -27,6 +27,36 @@ function clamp(n, lo, hi) { return Math.min(hi, Math.max(lo, n)); }
 function toHex(r, g, b) {
   return '#' + [r, g, b].map(v => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0')).join('');
 }
+function alphaOk(raw) {
+  if (raw == null || raw === '') return true;
+  const a = String(raw).endsWith('%') ? parseFloat(raw) / 100 : parseFloat(raw);
+  return !(a < 0.8);
+}
+function channel(raw, scale) {
+  const v = String(raw);
+  return v.endsWith('%') ? parseFloat(v) / 100 * scale : parseFloat(v);
+}
+function hslToHex(h, s, l) {
+  s = clamp(s, 0, 1); l = clamp(l, 0, 1); h = ((h % 360) + 360) % 360;
+  const k = n => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return toHex(f(0) * 255, f(8) * 255, f(4) * 255);
+}
+function gamma(c) { return c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055; }
+function oklabToHex(L, A, B) {
+  const l = (L + 0.3963377774 * A + 0.2158037573 * B) ** 3;
+  const m = (L - 0.1055613458 * A - 0.0638541728 * B) ** 3;
+  const s = (L - 0.0894841775 * A - 1.2914855480 * B) ** 3;
+  const r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+  const g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+  const b = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+  return toHex(gamma(clamp(r, 0, 1)) * 255, gamma(clamp(g, 0, 1)) * 255, gamma(clamp(b, 0, 1)) * 255);
+}
+const NUM = '(-?[\\d.]+%?)';
+const FUNC_RE = new RegExp(`^(rgba?|hsla?|oklch|oklab)\\(\\s*${NUM}(?:deg)?[\\s,]+${NUM}[\\s,]+${NUM}(?:deg)?(?:\\s*[,/]\\s*([\\d.]+%?))?\\s*\\)$`);
+// Hex, rgb(), hsl(), oklch() and oklab(), in comma or space syntax.
+// Mostly transparent colors (alpha under 0.8) are skipped.
 function parseColor(raw) {
   const s = String(raw).trim().toLowerCase();
   let m = s.match(/^#([0-9a-f]{3,8})$/);
@@ -37,15 +67,16 @@ function parseColor(raw) {
     if (h.length !== 6) return null;
     return `#${h}`;
   }
-  m = s.match(/^rgba?\(\s*(\d{1,3})[\s,]+(\d{1,3})[\s,]+(\d{1,3})(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/);
-  if (m) {
-    if (m[4] != null) {
-      const a = m[4].endsWith('%') ? parseFloat(m[4]) / 100 : parseFloat(m[4]);
-      if (a < 0.8) return null;
-    }
-    return toHex(+m[1], +m[2], +m[3]);
-  }
-  return null;
+  m = s.match(FUNC_RE);
+  if (!m || !alphaOk(m[5])) return null;
+  const [fn, x, y, z] = [m[1], m[2], m[3], m[4]];
+  if ([x, y, z].some(v => !Number.isFinite(parseFloat(v)))) return null;
+  if (fn.startsWith('rgb')) return toHex(channel(x, 255), channel(y, 255), channel(z, 255));
+  if (fn.startsWith('hsl')) return hslToHex(parseFloat(x), channel(y, 100) / 100, channel(z, 100) / 100);
+  const L = String(x).endsWith('%') ? parseFloat(x) / 100 : parseFloat(x);
+  if (fn === 'oklab') return oklabToHex(L, channel(y, 0.4), channel(z, 0.4));
+  const C = channel(y, 0.4); const H = parseFloat(z) * Math.PI / 180;
+  return oklabToHex(L, C * Math.cos(H), C * Math.sin(H));
 }
 function lin(c) { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; }
 function oklab(hex) {
@@ -75,15 +106,34 @@ const VENDOR = new Set(['#0073aa', '#0085ba', '#135e96', '#2271b1', '#3b5998', '
   '#dc3232', '#46b450', '#ffb900', '#00a0d2', '#007bff', '#0d6efd', '#6c757d', '#28a745', '#198754', '#dc3545', '#ffc107', '#17a2b8',
   '#0dcaf0', '#e1306c', '#ff0000', '#00ff00', '#0000ff', '#25d366', '#34a853', '#ea4335', '#fbbc05']);
 
+// Stock palettes that themes, page builders and form plugins ship with. A
+// shop that never picked its own colors still has these in its CSS, so on
+// their own they say nothing about the brand. They still count, at a small
+// fraction, because a few shops really do use the stock color (Big West
+// Roofing's light blue is Elementor's default). A theme-color meta tag
+// counts in full. Seen on real Utah shop sites on Oct 29.
+const FRAMEWORK_DEFAULTS = new Set([
+  // Bootstrap 3 and Gravity Forms / contact-form plugins
+  '#d9534f', '#5cb85c', '#5bc0de', '#337ab7', '#f0ad4e', '#286090', '#cc3366',
+  // WordPress core, Gutenberg block palette, Astra
+  '#007cba', '#005a87', '#006ba1', '#0274be', '#cf2e2e', '#ff6900', '#fcb900', '#7bdcb5', '#00d084', '#8ed1fc',
+  '#0693e3', '#abb8c3', '#9b51e0', '#f78da7', '#34e2e4',
+  // Elementor global colors, Webflow, Wix, browser link colors
+  '#6ec1e4', '#54595f', '#7a7a7a', '#61ce70', '#3898ec', '#116dff', '#0000ee', '#551a8b',
+]);
+const FRAMEWORK_WEIGHT = 0.12;
+
 // ── extraction ──────────────────────────────────────────────────────────────
-const COLOR_TOKEN = /#[0-9a-f]{3,8}\b|rgba?\([^)]{5,40}\)/gi;
+const COLOR_TOKEN = /#[0-9a-f]{3,8}\b|(?:rgba?|hsla?|oklch|oklab)\([^)]{5,60}\)/gi;
 const BRAND_VAR = /--[\w-]*(primary|brand|accent|main|secondary|theme|global-color-(?:primary|secondary|accent)|color[-_]?[12]\b|color_1[1-9])[\w-]*\s*:\s*([^;}{]+)/gi;
 const STRONG_SEL = /(btn|button|cta|header|nav|menu|hero|banner|primary|brand|accent|call|phone|quote|book|top-?bar|footer)/i;
 
 function addScore(map, hex, pts, why) {
   if (!hex || isNeutral(hex) || VENDOR.has(hex)) return;
   const row = map.get(hex) || { hex, score: 0, why: new Set() };
-  row.score += pts;
+  const stock = FRAMEWORK_DEFAULTS.has(hex) && why !== 'theme-color';
+  if (stock) row.why.add('theme default');
+  row.score += stock ? pts * FRAMEWORK_WEIGHT : pts;
   if (why) row.why.add(why);
   map.set(hex, row);
 }
@@ -146,7 +196,8 @@ function extractPalette(html, cssTexts = []) {
     const dh = Math.min(Math.abs(a.H - b.H), 360 - Math.abs(a.H - b.H));
     return s.score >= primary.score * 0.08 && (dh > 35 || Math.abs(a.L - b.L) > 0.25);
   }) : null;
-  const confident = !!primary && (primary.score >= 12 || primary.why.includes('theme-color') || primary.why.includes('css variable'));
+  const stockOnly = !!primary && primary.why.includes('theme default') && !primary.why.includes('theme-color');
+  const confident = !!primary && !stockOnly && (primary.score >= 12 || primary.why.includes('theme-color') || primary.why.includes('css variable'));
   return {
     primary: primary ? primary.hex : null,
     secondary: secondary ? secondary.hex : null,
@@ -244,4 +295,5 @@ module.exports = {
   parseColor,
   isNeutral,
   normalizeSiteUrl,
+  FRAMEWORK_DEFAULTS,
 };
