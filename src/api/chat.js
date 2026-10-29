@@ -7,6 +7,10 @@ const { readCeiling } = require('../chatdemo/ceiling');
 const { zoneDay, FLOWFORWARD_ZONE } = require('../chatdemo/copy');
 const { listFacts, writeFact, buildFacts, approveFacts, deleteFact } = require('../chatdemo/facts-store');
 const { readSpend } = require('../chatdemo/spend');
+const { VOICE_CAPS, voiceConfig } = require('../voicedemo/config');
+const { AGENT_PROMPT, AGENT_BEGIN_MESSAGE, AGENT_SETTINGS } = require('../voicedemo/agent-prompt');
+const voiceStore = require('../voicedemo/store');
+const proposalConfig = require('../proposals/config');
 
 const router = express.Router();
 const INVALID_BODY = Buffer.from('{"error":"invalid_body"}');
@@ -115,6 +119,35 @@ router.delete('/facts', async (req, res) => {
     res.json({ facts: result.facts });
   } catch (err) {
     console.error(`[chat] facts delete failed (${err && err.code ? err.code : 'error'})`);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+// Voice receptionist status for the CRM: whether calls are on (env only),
+// today's minutes, and what to paste into Retell. Never returns the key or
+// the agent id.
+router.get('/voice', async (req, res) => {
+  try {
+    const config = voiceConfig();
+    const today = await voiceStore.dayUsage(new Date());
+    res.json({
+      configured: Boolean(config),
+      daily_minutes: config ? config.dailyMinutes : null,
+      max_call_seconds: VOICE_CAPS.maxCallSeconds,
+      calls_per_link: VOICE_CAPS.callsPerLink,
+      seconds_per_link: VOICE_CAPS.secondsPerLink,
+      today,
+      webhook_url: `${String(proposalConfig.PUBLIC_BASE_URL || '').replace(/\/+$/, '')}${AGENT_SETTINGS.webhook_path}`,
+      prompt: AGENT_PROMPT,
+      begin_message: AGENT_BEGIN_MESSAGE,
+      agent_settings: {
+        max_call_duration: AGENT_SETTINGS.max_call_duration,
+        end_call_after_silence: AGENT_SETTINGS.end_call_after_silence,
+        data_storage: AGENT_SETTINGS.data_storage,
+      },
+    });
+  } catch (err) {
+    console.error(`[chat] voice read failed (${err && err.code ? err.code : 'error'})`);
     res.status(500).json({ error: 'server_error' });
   }
 });

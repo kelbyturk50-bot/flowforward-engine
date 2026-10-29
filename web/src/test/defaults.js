@@ -54,4 +54,10 @@ export function installApiDefaults() {
   api.createLead.mockResolvedValue(foundLead);
   api.createProject.mockResolvedValue(project);
   api.chatFacts.mockResolvedValue({ facts: [] });
+  api.voiceStatus.mockResolvedValue({
+    configured: false, daily_minutes: null, max_call_seconds: 180, calls_per_link: 3, seconds_per_link: 360,
+    today: { day: '2026-10-29', calls: 0, used_seconds: 0, held_seconds: 0 },
+    webhook_url: `${TEST_URL}/api/public/voice/retell-webhook`,
+    prompt: 'You are the AI receptionist for {{business_name}}.',
+  });
 }
