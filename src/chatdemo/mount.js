@@ -18,6 +18,11 @@ function mountBeforeCors(app) {
   const { demoRouter, prototypeChatRouter } = require('./public');
   app.use('/api/public/chat', demoRouter);
   app.use('/api/public/prototypes/:token/chat', prototypeChatRouter);
+  // Voice receptionist (docs/VOICE_DEMO.md). Same mount rules as chat: before
+  // cors() and the global parser; the webhook needs the raw body.
+  const { prototypeVoiceRouter, webhookRouter } = require('../voicedemo/public');
+  app.use('/api/public/prototypes/:token/voice', prototypeVoiceRouter);
+  app.use('/api/public/voice/retell-webhook', webhookRouter);
   // A token that is not valid percent-encoding throws while the route
   // param is decoded. That is the same 404 as any other unknown token.
   app.use((err, req, res, next) => {

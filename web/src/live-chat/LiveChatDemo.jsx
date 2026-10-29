@@ -368,6 +368,7 @@ export default function LiveChatDemo({ brandInput = SAMPLE_BRAND, transport = nu
           </button>
           <p className={bannerOpen ? 'live-chat-banner-copy' : 'live-chat-banner-copy live-chat-sr'}>{banner}</p>
         </div>
+        {transport?.voice || null}
         <div className="live-chat-stage">
           <section className="live-chat-phone" aria-label="Text-back">
             {notice?.text ? (

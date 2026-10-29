@@ -216,7 +216,12 @@ describe('web/vercel.json ignoreCommand', () => {
       { key: 'X-Content-Type-Options', value: 'nosniff' },
     ];
     const csp = [{ key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src https://flowforward-engine-production.up.railway.app; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'none'" }];
-    const prototypeHeaders = [...demoHeaders, ...csp];
+    // A shop's chat page also hosts the voice receptionist (docs/VOICE_DEMO.md).
+    const voiceCsp = [{ key: 'Content-Security-Policy', value: csp[0].value.replace(
+      'connect-src https://flowforward-engine-production.up.railway.app;',
+      'connect-src https://flowforward-engine-production.up.railway.app https://api.retellai.com https://*.livekit.cloud wss://*.livekit.cloud;'
+    ) }];
+    const prototypeHeaders = [...demoHeaders, ...voiceCsp, { key: 'Permissions-Policy', value: 'microphone=(self)' }];
     expect(config.headers).toEqual([
       { source: '/demo/:path*', headers: demoHeaders },
       { source: '/demo/:path*/', headers: demoHeaders },

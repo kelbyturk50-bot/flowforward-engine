@@ -1303,6 +1303,27 @@ ALTER TABLE prototype_facts ADD CONSTRAINT prototype_facts_tag_check CHECK (
 );
 -- END prototype_facts_tag_check upgrade
 
+-- Voice receptionist demo (docs/VOICE_DEMO.md). One row per call. A call
+-- reserves its maximum before Retell is asked; the call_ended webhook
+-- settles it. No caller number, transcript, or IP is stored.
+CREATE TABLE IF NOT EXISTS voice_demo_calls (
+  id                UUID PRIMARY KEY,
+  prototype_id      INTEGER NOT NULL REFERENCES prototypes(id) ON DELETE CASCADE,
+  call_id           TEXT UNIQUE,
+  status            TEXT NOT NULL,
+  reserved_seconds  INTEGER NOT NULL,
+  actual_seconds    INTEGER,
+  day               DATE NOT NULL,
+  created_at        TIMESTAMPTZ NOT NULL,
+  ended_at          TIMESTAMPTZ,
+  CONSTRAINT voice_demo_calls_status_check CHECK (status IN ('reserved', 'ended', 'failed', 'expired')),
+  CONSTRAINT voice_demo_calls_reserved_check CHECK (reserved_seconds BETWEEN 60 AND 180),
+  CONSTRAINT voice_demo_calls_actual_check CHECK (actual_seconds IS NULL OR actual_seconds BETWEEN 0 AND 7200),
+  CONSTRAINT voice_demo_calls_call_id_check CHECK (call_id IS NULL OR call_id ~ '^[A-Za-z0-9_-]{1,128}$')
+);
+CREATE INDEX IF NOT EXISTS idx_voice_demo_calls_prototype ON voice_demo_calls (prototype_id);
+CREATE INDEX IF NOT EXISTS idx_voice_demo_calls_day ON voice_demo_calls (day);
+
 CREATE TABLE IF NOT EXISTS chat_demo_sessions (
   id             UUID PRIMARY KEY,
   prototype_id   INTEGER REFERENCES prototypes(id) ON DELETE CASCADE,
