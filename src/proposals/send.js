@@ -316,15 +316,22 @@ function isAuthFollowupError(err) {
   return /invalid_grant|gmail access expired/i.test(errorBlob(err));
 }
 
-function isInvalidRecipient400(err) {
-  if (hasReason(err, ['invalidArgument', 'INVALID_ARGUMENT'])) return true;
-  return /recipient address required|no recipients defined|missing recipient|invalid recipient|invalid to header|address rejected|recipients were rejected|invalid[_\s-]?argument/i.test(errorBlob(err));
+// Names the recipient or the address. A bare invalidArgument does not.
+function namesRecipient(err) {
+  if (Array.isArray(err && err.rejected) && err.rejected.length > 0) return true;
+  return /recipient address required|no recipients defined|missing recipient|invalid recipient|invalid to header|invalid address|address rejected|recipients were rejected|5\.1\.[013]\b|user unknown|mailbox (not found|unavailable|does not exist)/i.test(errorBlob(err));
 }
 
-function isAddressRejected(err) {
-  if (Array.isArray(err && err.rejected) && err.rejected.length > 0) return true;
-  const text = errorBlob(err);
-  return /recipient address required|no recipients defined|missing recipient|address rejected|recipients were rejected|5\.1\.[013]\b|user unknown|mailbox (not found|unavailable|does not exist)/i.test(text);
+function isGenericInvalidArgument(err) {
+  if (hasReason(err, ['invalidArgument', 'INVALID_ARGUMENT'])) return true;
+  return /invalid[_\s-]?argument/i.test(errorBlob(err));
+}
+
+const ARGUMENT_ATTEMPTS = 3;
+
+function argumentAttempt(errorText) {
+  const match = String(errorText || '').match(/Follow-up will retry: argument \((\d+)\/\d+\)/);
+  return match ? Number(match[1]) : 0;
 }
 
 // Status and Gmail reason decide first. Body text is only a fallback once
@@ -337,8 +344,8 @@ function classifyFollowupError(err) {
   }
   if (isAuthFollowupError(err)) return { kind: 'transient', label: 'auth' };
   if (isNetworkFollowupError(err)) return { kind: 'transient', label: 'network' };
-  if (status === 400 && isInvalidRecipient400(err)) return { kind: 'permanent', label: 'recipient' };
-  if (status == null && isAddressRejected(err)) return { kind: 'permanent', label: 'recipient' };
+  if ((status === 400 || status == null) && namesRecipient(err)) return { kind: 'permanent', label: 'recipient' };
+  if (status === 400 && isGenericInvalidArgument(err)) return { kind: 'transient', label: 'argument' };
   if (status == null && /quota exceeded|rate limit exceeded|too many requests/i.test(errorBlob(err))) {
     return { kind: 'transient', label: 'quota' };
   }
@@ -553,15 +560,30 @@ async function sendDueFollowups() {
           console.info(`[send] stopped follow-up for #${p.id}: ${reason}`);
         } else {
           const label = transientFollowupLabel(err);
-          await pool.query(
-            `UPDATE proposals
+          const release = `UPDATE proposals
                 SET ${sentColumn} = NULL,
                     error = $2,
                     status = CASE WHEN status = 'sending' THEN 'sent' ELSE status END
-              WHERE id = $1 AND status IN ('sent', 'sending')`,
-            [p.id, `Follow-up will retry: ${label}`]);
-          const note = label === 'auth' ? 'Gmail auth is not connected' : label;
-          console.error(`[send] follow-up for #${p.id} will retry: ${note}`);
+              WHERE id = $1 AND status IN ('sent', 'sending')`;
+          if (label === 'argument') {
+            const next = argumentAttempt(p.error) + 1;
+            if (next >= ARGUMENT_ATTEMPTS) {
+              const reason = 'Follow-up stopped: Gmail rejected the message';
+              await pool.query(
+                `UPDATE proposals
+                    SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL
+                  WHERE id = $1 AND status IN ('sent', 'sending')`,
+                [p.id, reason]);
+              console.error(`[send] stopped follow-up for #${p.id}: Gmail invalid argument (not the recipient)`);
+            } else {
+              await pool.query(release, [p.id, `Follow-up will retry: argument (${next}/${ARGUMENT_ATTEMPTS})`]);
+              console.error(`[send] follow-up for #${p.id} will retry: Gmail invalid argument (not the recipient) (${next}/${ARGUMENT_ATTEMPTS})`);
+            }
+          } else {
+            await pool.query(release, [p.id, `Follow-up will retry: ${label}`]);
+            const note = label === 'auth' ? 'Gmail auth is not connected' : label;
+            console.error(`[send] follow-up for #${p.id} will retry: ${note}`);
+          }
         }
       }
     } catch (err) {
@@ -826,6 +848,6 @@ async function senderTick() {
 
 module.exports = {
   approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
-  missingRecipient, normalizeRecipient, isPermanentFollowupError, classifyFollowupError,
+  missingRecipient, normalizeRecipient, isPermanentFollowupError, classifyFollowupError, ARGUMENT_ATTEMPTS,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

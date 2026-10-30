@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { missingRecipient } from '../recipient';
+import { missingRecipient, recipientHint } from '../recipient';
 import { TryLiveDemoLink } from '../demo/DemoLinks';
 import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, relDate, timeAgo, toast, Stars } from '../ui';
 import { useJobs, elapsed } from '../jobs';
@@ -32,6 +32,7 @@ export default function ProposalDrawer({ id, onClose, bump, openLead, openPropos
 function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   const editable = p.status === 'draft';
   const noRecipient = missingRecipient(p.to_email);
+  const hint = noRecipient ? recipientHint(p.to_email) : '';
   const focusRecipient = () => {
     const el = document.getElementById('proposal-to-email');
     if (!el) return;
@@ -84,17 +85,17 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
       {/* ── Actions ── */}
       <div className="action-bar">
         {editable && <>
-          <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? 'Add a recipient email first' : undefined} onClick={() => setConfirming(true)}>Approve and send</button>
+          <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => setConfirming(true)}>Approve and send</button>
           <button
             className="btn btn-quiet"
             disabled={!!busy || noRecipient}
-            title={noRecipient ? 'Add a recipient email first' : undefined}
+            title={noRecipient ? hint : undefined}
             aria-describedby={noRecipient ? 'mark-sent-needs-email' : undefined}
             onClick={() => setConfirmingManual(m => !m)}
           >Mark as manually sent…</button>
           {noRecipient && (
             <button type="button" id="mark-sent-needs-email" className="recipient-hint" onClick={focusRecipient}>
-              Add a recipient email first
+              {hint}
             </button>
           )}
           <button className="btn btn-quiet" disabled={!!busy || rewriting} onClick={() => setRegen(r => !r)}>{rewriting ? 'Rewriting…' : 'Rewrite…'}</button>
@@ -139,7 +140,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
               placeholder="e.g. Sent via Facebook message, emailed through contact form…" />
           </label>
           <div className="link-row">
-            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? 'Add a recipient email first' : undefined} onClick={() =>
+            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() =>
               act('mark-sent', () => api.markSentProposal(p.id, manualNote || undefined),
                 'Marked as sent. Follow-ups scheduled.',
                 async () => { setConfirmingManual(false); setManualNote(''); await reload(p.id); })}>

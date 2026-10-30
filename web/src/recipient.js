@@ -1,30 +1,26 @@
-// Same check as src/proposals/recipient.js. Invisible and control characters
-// are removed, then the rest has to be a plausible address.
+// Same functions as src/proposals/recipient.js. An address is refused when it
+// contains a Unicode control (Cc), format (Cf), or separator (Z*) character,
+// or when it is not a plausible address.
 
 const PLAUSIBLE = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
+const FORBIDDEN = /[\p{Cc}\p{Cf}\p{Z}]/u;
 
-function isInvisible(code) {
-  return (code >= 0 && code <= 0x1F)
-    || code === 0x7F
-    || (code >= 0x80 && code <= 0x9F)
-    || code === 0xAD
-    || code === 0x180E
-    || (code >= 0x200B && code <= 0x200F)
-    || (code >= 0x202A && code <= 0x202E)
-    || (code >= 0x2060 && code <= 0x2064)
-    || (code >= 0x2066 && code <= 0x2069)
-    || code === 0xFEFF;
-}
-
-export function normalizeRecipient(email) {
-  let out = '';
-  const text = String(email ?? '');
-  for (const ch of text) {
-    if (!isInvisible(ch.codePointAt(0))) out += ch;
-  }
-  return out.trim();
+function recipientText(email) {
+  if (email == null) return '';
+  return String(email);
 }
 
 export function missingRecipient(email) {
-  return !PLAUSIBLE.test(normalizeRecipient(email));
+  const text = recipientText(email);
+  if (!text || FORBIDDEN.test(text)) return true;
+  return !PLAUSIBLE.test(text);
+}
+
+export function normalizeRecipient(email) {
+  return missingRecipient(email) ? '' : recipientText(email);
+}
+
+export function recipientHint(email) {
+  if (recipientText(email).trim() === '') return 'Add a recipient email first';
+  return 'Fix the recipient email';
 }

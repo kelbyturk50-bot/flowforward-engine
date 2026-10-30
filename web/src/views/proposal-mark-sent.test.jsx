@@ -20,11 +20,15 @@ beforeEach(() => { installApiDefaults(); });
 describe('mark as sent needs a recipient', () => {
   it('puts the helper on its own line under the buttons', () => {
     const css = fs.readFileSync(path.resolve('src/styles.css'), 'utf8');
-    expect(css).toMatch(/\.action-bar \.recipient-hint \{[^}]*flex:\s*1 0 100%/);
+    const block = css.match(/\.action-bar \.recipient-hint \{[^}]*\}/)[0];
+    expect(block).toMatch(/flex:\s*1 0 100%/);
+    expect(block).toMatch(/display:\s*flex/);
+    expect(block).toMatch(/align-items:\s*center/);
+    expect(block).toMatch(/min-height:\s*44px/);
   });
 
   it('disables both send buttons and shows why when to_email is missing', async () => {
-    for (const toEmail of [null, '', '   ', '\t', '\u200b', '\u0001', '\u200b\u0001']) {
+    for (const toEmail of [null, '', '   ', '\t']) {
       api.proposal.mockResolvedValue({ ...base, to_email: toEmail });
       const view = render(<ProposalDrawer {...props} />);
       const mark = await screen.findByRole('button', { name: 'Mark as manually sent…' });
@@ -32,11 +36,28 @@ describe('mark as sent needs a recipient', () => {
       expect(mark).toBeDisabled();
       expect(approve).toBeDisabled();
       expect(mark).toHaveAttribute('title', 'Add a recipient email first');
+      expect(approve).toHaveAttribute('title', 'Add a recipient email first');
       const hint = screen.getByRole('button', { name: 'Add a recipient email first' });
       expect(hint).toHaveClass('recipient-hint');
       expect(screen.queryByRole('alertdialog', { name: 'Confirm manual send' })).toBeNull();
       hint.click();
       expect(document.getElementById('proposal-to-email')).toHaveFocus();
+      view.unmount();
+    }
+  });
+
+  it('asks to fix an address that is present but not usable', async () => {
+    for (const toEmail of ['kelby', 'test+\u206Aa@example.com', 'test+\u0001a@example.com']) {
+      api.proposal.mockResolvedValue({ ...base, to_email: toEmail });
+      const view = render(<ProposalDrawer {...props} />);
+      const mark = await screen.findByRole('button', { name: 'Mark as manually sent…' });
+      const approve = screen.getByRole('button', { name: 'Approve and send' });
+      expect(mark).toBeDisabled();
+      expect(approve).toBeDisabled();
+      expect(mark).toHaveAttribute('title', 'Fix the recipient email');
+      expect(approve).toHaveAttribute('title', 'Fix the recipient email');
+      expect(screen.getByRole('button', { name: 'Fix the recipient email' })).toBeInTheDocument();
+      expect(screen.queryByText('Add a recipient email first')).toBeNull();
       view.unmount();
     }
   });

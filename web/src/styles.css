@@ -315,6 +315,9 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .action-bar .spacer { flex: 1; }
 .action-bar .recipient-hint {
   flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  min-height: 44px;
   margin: 0;
   padding: 0;
   border: 0;

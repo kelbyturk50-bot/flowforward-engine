@@ -16,7 +16,8 @@ const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
 const { applySchema, applyMainSchema } = require('../src/db/migrate');
-const { sendDueFollowups, _setTransport, classifyFollowupError } = require('../src/proposals/send');
+const { sendDueFollowups, _setTransport, classifyFollowupError, ARGUMENT_ATTEMPTS } = require('../src/proposals/send');
+const { missingRecipient } = require('../src/proposals/recipient');
 const cfg = require('../src/proposals/config');
 const { revokeForProposal } = require('../src/pilot/tokens');
 
@@ -263,11 +264,11 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
           },
         },
         {
-          label: 'invalid argument',
+          label: 'invalid to header',
           toEmail: 'test+invalid@example.com',
           reason: 'Follow-up stopped: invalid recipient',
           error() {
-            const err = new Error('Gmail API: Request contains an invalid argument.');
+            const err = new Error('Gmail API: Invalid To header');
             err.status = 400;
             err.gmailStatus = 'INVALID_ARGUMENT';
             err.reason = 'invalidArgument';
@@ -446,7 +447,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
   });
 
   it('mark-sent returns 400 for a missing to_email and writes nothing', async () => {
-    for (const toEmail of [null, '', '   ', '\t', '\n', '\u200b', '\u0001']) {
+    for (const toEmail of [null, '', '   ', '\t', '\n', '\u200b', '\u0001', 'kelby', 'test+\u206Aa@example.com']) {
       const prospect = await lead();
       const proposal = await insertProposal(prospect.id, { status: 'draft', toEmail });
       const beforeProposal = await fullProposal(proposal.id);
@@ -691,12 +692,56 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
         },
         {
           name: '400 invalidArgument',
-          permanent: true,
-          label: 'recipient',
+          permanent: false,
+          label: 'argument',
           err() {
             const err = new Error('Gmail API: Request contains an invalid argument.');
             err.status = 400;
             err.gmailStatus = 'INVALID_ARGUMENT';
+            err.reason = 'invalidArgument';
+            return err;
+          },
+        },
+        {
+          name: '400 Invalid thread_id',
+          permanent: false,
+          label: 'argument',
+          err() {
+            const err = new Error('Gmail API: Invalid thread_id');
+            err.status = 400;
+            err.reason = 'invalidArgument';
+            return err;
+          },
+        },
+        {
+          name: '400 message.raw',
+          permanent: false,
+          label: 'argument',
+          err() {
+            const err = new Error("Gmail API: Invalid value at 'message.raw'");
+            err.status = 400;
+            err.reason = 'invalidArgument';
+            return err;
+          },
+        },
+        {
+          name: '400 Invalid To header',
+          permanent: true,
+          label: 'recipient',
+          err() {
+            const err = new Error('Gmail API: Invalid To header');
+            err.status = 400;
+            err.reason = 'invalidArgument';
+            return err;
+          },
+        },
+        {
+          name: '400 invalid address',
+          permanent: true,
+          label: 'recipient',
+          err() {
+            const err = new Error('Gmail API: Invalid address');
+            err.status = 400;
             err.reason = 'invalidArgument';
             return err;
           },
@@ -774,5 +819,82 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     } finally {
       logs.restore();
     }
+  });
+
+  it('retries a non-recipient invalid argument three times, then stops with a different reason', async () => {
+    const logs = spyConsole();
+    try {
+      const prospect = await lead();
+      const proposal = await insertProposal(prospect.id, { toEmail: 'test+thread@example.com' });
+      let calls = 0;
+      useTransport(async () => {
+        calls += 1;
+        const err = new Error('Gmail API: Invalid thread_id');
+        err.status = 400;
+        err.reason = 'invalidArgument';
+        throw err;
+      });
+      const first = await sendDueFollowups();
+      assert.equal(first.sent, 0);
+      assert.equal(calls, 1);
+      let row = await state(proposal.id);
+      assert.equal(row.status, 'sent');
+      assert.equal(row.followup1_sent_at, null);
+      assert.equal(row.stop_reason, null);
+      assert.match(row.error, /Follow-up will retry: argument \(1\/3\)/);
+      assert.equal(logs.sendError().some((line) => line.includes('not the recipient') && line.includes('(1/3)')), true);
+
+      await sendDueFollowups();
+      row = await state(proposal.id);
+      assert.equal(row.status, 'sent');
+      assert.match(row.error, /Follow-up will retry: argument \(2\/3\)/);
+
+      await sendDueFollowups();
+      row = await state(proposal.id);
+      assert.equal(row.status, 'stopped');
+      assert.equal(row.stop_reason, 'Follow-up stopped: Gmail rejected the message');
+      assert.equal(row.stop_reason.includes('invalid recipient'), false);
+      assert.equal(row.followup1_sent_at, null);
+      assert.equal(calls, ARGUMENT_ATTEMPTS);
+      assert.equal(logs.sendError().some((line) => line.includes('stopped follow-up') && line.includes('not the recipient')), true);
+
+      await sendDueFollowups();
+      assert.equal(calls, ARGUMENT_ATTEMPTS);
+      console.log('[followup-recipient] generic invalid argument retried 3 times, then stopped as not the recipient');
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it('rejects control, format, and separator characters and matches the web copy', () => {
+    const samples = [
+      ['Cc', 'test+\u0001a@example.com'],
+      ['Cf', 'test+\u206Aa@example.com'],
+      ['Cf zero-width', 'test+\u200Ba@example.com'],
+      ['Zs', 'test+a@example.com '],
+      ['Zl', 'test+a@example.com\u2028'],
+      ['Zp', 'test+a@example.com\u2029'],
+      ['not an address', 'kelby'],
+    ];
+    for (const [label, email] of samples) {
+      assert.equal(missingRecipient(email), true, label);
+    }
+    assert.equal(missingRecipient('test+a@example.com'), false);
+    assert.equal(missingRecipient(null), true);
+    assert.equal(missingRecipient(''), true);
+
+    function core(src) {
+      return src
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/.*$/gm, '')
+        .replace(/module\.exports\s*=\s*\{[\s\S]*?\};?/, '')
+        .replace(/export function /g, 'function ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+    const server = fs.readFileSync(path.join(__dirname, '../src/proposals/recipient.js'), 'utf8');
+    const web = fs.readFileSync(path.join(__dirname, '../web/src/recipient.js'), 'utf8');
+    assert.equal(core(server), core(web));
+    console.log('[followup-recipient] Cc, Cf, and Z characters are refused; web copy matches');
   });
 });
