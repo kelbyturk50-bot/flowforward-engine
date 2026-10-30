@@ -236,12 +236,46 @@ export function proposalStatusCopy(p) {
   return '';
 }
 
+const HALT_COPY = {
+  oauth_expired: 'Follow-ups are paused: Gmail access expired. Reconnect Gmail in Settings.',
+  token_missing: 'Follow-ups are paused: Gmail isn\'t connected. Connect Gmail in Settings.',
+  insufficient_permissions: 'Follow-ups are paused: Gmail is missing send permission. Reconnect Gmail in Settings and allow sending.',
+  smtp_auth: 'Follow-ups are paused: the mail server rejected the login. Check the SMTP settings.',
+  sender: 'Follow-ups are paused: the mail server rejected the sender address. Check the sender and Reply-To in Settings.',
+  other: 'Follow-ups are paused: mail needs attention before anything else goes out. Open Settings.',
+};
+
+export function followupHaltCause(halt) {
+  if (!halt) return 'other';
+  if (HALT_COPY[halt.cause]) return halt.cause;
+  if (halt.error_class === 'sender') return 'sender';
+  if (halt.error_class === 'auth' && halt.provider === 'smtp') return 'smtp_auth';
+  if (halt.error_class === 'auth') return 'oauth_expired';
+  return 'other';
+}
+
 export function followupHaltCopy(halt) {
   if (!halt) return '';
-  if (halt.error_class === 'sender') {
-    return 'Follow-ups are paused: the sender address was rejected. Reconnect Gmail in Settings.';
-  }
-  return 'Follow-ups are paused: Gmail access expired. Reconnect Gmail in Settings.';
+  return HALT_COPY[followupHaltCause(halt)] || HALT_COPY.other;
+}
+
+export function FollowupHaltNotice({ halt }) {
+  if (!halt) return null;
+  const text = followupHaltCopy(halt);
+  const at = text.indexOf('Settings');
+  return (
+    <div className="halt-banner" role="status">
+      <strong>
+        {at === -1 ? text : (
+          <>
+            {text.slice(0, at)}
+            <a href="#/settings">Settings</a>
+            {text.slice(at + 'Settings'.length)}
+          </>
+        )}
+      </strong>
+    </div>
+  );
 }
 export function ProposalChip({ status, verdict }) {
   const label = status === 'discarded' && verdict === 'disqualify' ? 'Not a fit' : (PROPOSAL_STATUS[status] || status);

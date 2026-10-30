@@ -236,6 +236,7 @@ function haltView(row) {
     event: HALT_EVENT,
     error_class: row.error_class,
     provider: row.provider,
+    cause: row.cause || null,
     first_seen: row.first_seen,
     halted_ticks: Number(row.halted_ticks) || 0,
   };
@@ -738,7 +739,8 @@ async function approveAndSend(proposalId, options = {}) {
   const problems = await sendReadiness();
   if (problems.length) throw Object.assign(new Error(problems.join(' ')), { status: 400 });
   if (p.status !== 'draft') throw Object.assign(new Error(`This version is ${p.status}; only drafts can be sent.`), { status: 409 });
-  if (p.stop_reason === RESEND_CONFIRM && options.confirm !== true) {
+  const heldBack = p.stop_reason === RESEND_CONFIRM || String(p.stop_reason || '').startsWith('Needs manual review');
+  if (heldBack && options.confirm !== true) {
     throw Object.assign(new Error('Confirm this send before it goes out again.'), { status: 409 });
   }
   if (p.do_not_contact) throw Object.assign(new Error(`${p.company} is marked do-not-contact.`), { status: 409 });
@@ -821,7 +823,7 @@ async function approveAndSend(proposalId, options = {}) {
   try {
     const result = await pool.query(
       `UPDATE proposals SET status = 'sent', sent_at = NOW(), message_id = $2, thread_id = $5, error = NULL,
-              send_attempt_key = NULL, followup_argument_attempts = 0,
+              stop_reason = NULL, send_attempt_key = NULL, followup_argument_attempts = 0,
               followup1_due_at = CASE WHEN COALESCE(followup1, '') <> '' THEN NOW() + make_interval(days => $3) END,
               followup2_due_at = CASE WHEN COALESCE(followup2, '') <> '' THEN NOW() + make_interval(days => $4) END
         WHERE id = $1 AND status = 'sending' AND send_attempt_key = $6
@@ -974,6 +976,24 @@ function haltProvider(err) {
   return 'gmail';
 }
 
+function haltCause(klass, err) {
+  if (klass && klass.label === 'sender') return 'sender';
+  const code = smtpCode(err);
+  for (const text of replyTexts(err)) {
+    const lead = leadingSmtpReply(text);
+    if (lead && (lead.code === 535 || lead.code === 530)) return 'smtp_auth';
+  }
+  if (code === 535 || code === 530) return 'smtp_auth';
+  if (hasReason(err, ['insufficientPermissions']) || /insufficient permissions/i.test(errorBlob(err))) {
+    return 'insufficient_permissions';
+  }
+  if (/token(?:\s+is)?\s+missing|gmail is not connected/i.test(errorBlob(err))) return 'token_missing';
+  if (hasReason(err, ['invalid_grant']) || /invalid_grant|access expired/i.test(errorBlob(err)) || httpStatus(err) === 401) {
+    return 'oauth_expired';
+  }
+  return 'other';
+}
+
 async function saveHalt(state) {
   await pool.query(
     `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2::jsonb, NOW())
@@ -986,6 +1006,7 @@ async function emitHalt(state) {
     event: HALT_EVENT,
     error_class: state.error_class,
     provider: state.provider,
+    cause: state.cause,
     first_seen: state.first_seen,
     halted_ticks: state.halted_ticks,
   };
@@ -1004,11 +1025,13 @@ async function recordHalt(klass, err) {
   const existing = await loadHalt();
   const errorClass = klass && klass.label === 'sender' ? 'sender' : 'auth';
   const provider = haltProvider(err);
+  const cause = haltCause(klass, err);
   if (!existing || existing.event !== HALT_EVENT) {
     const state = {
       event: HALT_EVENT,
       error_class: errorClass,
       provider,
+      cause,
       first_seen: now.toISOString(),
       halted_ticks: 1,
       last_event_at: now.toISOString(),
@@ -1021,6 +1044,7 @@ async function recordHalt(klass, err) {
     event: HALT_EVENT,
     error_class: errorClass,
     provider,
+    cause,
     first_seen: existing.first_seen,
     halted_ticks: (Number(existing.halted_ticks) || 0) + 1,
     last_event_at: existing.last_event_at || existing.first_seen,

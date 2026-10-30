@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api';
 import { PreviewDemoLink } from '../demo/DemoLinks';
-import { useAsync, ErrorNote, FitBadge, ProposalChip, followupHaltCopy, money2, proposalStatusCopy, relDate, timeAgo, toast } from '../ui';
+import { useAsync, ErrorNote, FitBadge, FollowupHaltNotice, ProposalChip, money2, proposalStatusCopy, relDate, timeAgo, toast } from '../ui';
 import { useJobs, elapsed } from '../jobs';
 
 const TABS = [
@@ -97,11 +97,7 @@ export default function Proposals({ version, bump, openProposal }) {
         {s && !needsKey && s.eligible_leads === 0 && <p className="muted small gen-note">No untouched {s.config.tiers.join('/')}-tier leads left. Run discovery from Settings, or draft for a specific lead from its page.</p>}
       </section>
 
-      {s?.halt && (
-        <div className="setup-note halt-note" role="status">
-          <strong>{followupHaltCopy(s.halt)}</strong>
-        </div>
-      )}
+      <FollowupHaltNotice halt={s?.halt} />
 
       {s?.setup?.length > 0 && (
         <div className="setup-note" role="note">

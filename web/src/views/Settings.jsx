@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, settings } from '../api';
 import { acceptedApiUrl, apiUrlIssue, shouldStoreApiUrl } from '../api-base.js';
-import { useAsync, ErrorNote, followupHaltCopy, timeAgo, toast, money2 } from '../ui';
+import { useAsync, ErrorNote, FollowupHaltNotice, timeAgo, toast, money2 } from '../ui';
 import FeatureFlagsPanel from './FeatureFlags';
 
 export default function Settings({ authProblem, onSaved, version }) {
@@ -14,6 +14,7 @@ export default function Settings({ authProblem, onSaved, version }) {
 
   const connected = !!settings.apiKey;
   const runs = useAsync(() => connected ? api.runs() : Promise.resolve(null), [version, connected]);
+  const summary = useAsync(() => connected ? api.proposalSummary() : Promise.resolve(null), [version, connected]);
 
   const onAddress = (e) => {
     const next = e.target.value;
@@ -65,6 +66,8 @@ export default function Settings({ authProblem, onSaved, version }) {
   return (
     <div className="page page-narrow">
       <header className="page-head"><div><h1>Settings</h1></div></header>
+
+      <FollowupHaltNotice halt={summary.data?.halt} />
 
       {authProblem && <div className="error-note" role="alert"><p>The API needs a valid key. Enter the value of CRM_API_KEY from Railway.</p></div>}
 
@@ -149,7 +152,6 @@ function ProposalSettings({ version }) {
       <section className="panel">
         <h2>Proposal bot</h2>
         <ErrorNote error={summary.error} />
-        {s?.halt && <div className="setup-note halt-note" role="status"><strong>{followupHaltCopy(s.halt)}</strong></div>}
         {s?.setup?.length > 0 && <div className="setup-note"><strong>Finish setup in Railway</strong><ul>{s.setup.map(x => <li key={x}>{x}</li>)}</ul></div>}
         {c && (
           <dl className="facts">

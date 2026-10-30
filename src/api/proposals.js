@@ -389,7 +389,10 @@ router.post('/:id/mark-sent', async (req, res) => {
       return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
     }
     const manualReview = p.status === 'manual_review' || (p.status === 'stopped' && String(p.stop_reason || '').startsWith('Needs manual review'));
-    if (p.status !== 'draft' && !manualReview) { await db.query('ROLLBACK'); return res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` }); }
+    const uncertain = p.status === 'sending'
+      || String(p.stop_reason || '').startsWith('Needs manual review')
+      || String(p.error || '').startsWith('Needs manual review');
+    const override = !!(req.body && req.body.confirm_override === true);
     if (manualReview && req.body && req.body.not_sent) {
       await db.query(
         `UPDATE proposals
@@ -408,6 +411,15 @@ router.post('/:id/mark-sent', async (req, res) => {
     if (send.missingRecipient(p.to_email)) {
       await db.query('ROLLBACK');
       return res.status(400).json({ error: 'Add a recipient email before marking this as sent.' });
+    }
+    // delivered:true does not pass this check. Only confirm_override does.
+    if (uncertain && !override) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: 'This send is still uncertain. Confirm the override before recording it.' });
+    }
+    if (p.status !== 'draft' && !manualReview && !(p.status === 'sending' && override)) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` });
     }
 
     const now = new Date();
@@ -567,13 +579,20 @@ router.post('/:id/restore', async (req, res) => {
     const out = await db.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [p.prospect_id]);
     if (out.rows.length) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Another version is already out for this lead.' }); }
     await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [p.prospect_id]);
+    const sendAgain = p.stop_reason === send.RESEND_CONFIRM;
+    const uncertainFlag = String(p.stop_reason || '').startsWith('Needs manual review')
+      || String(p.error || '').startsWith('Needs manual review');
+    const keepFlag = p.sent_at && (sendAgain || uncertainFlag);
+    const nextReason = keepFlag
+      ? (sendAgain ? send.RESEND_CONFIRM : (String(p.stop_reason || '').startsWith('Needs manual review') ? p.stop_reason : send.RESEND_CONFIRM))
+      : null;
     await db.query(
       `UPDATE proposals
-          SET status = 'draft', stop_reason = NULL, error = NULL, approved_at = NULL,
+          SET status = 'draft', stop_reason = $2, error = NULL, approved_at = NULL,
               send_attempt_key = NULL, followup_argument_attempts = 0,
               followup_transient_attempts = 0, first_transient_at = NULL, next_retry_at = NULL
         WHERE id = $1`,
-      [p.id]);
+      [p.id, nextReason]);
     const lead = await db.query(`SELECT stage FROM prospects WHERE id = $1`, [p.prospect_id]);
     if (lead.rows[0]?.stage === 'disqualified') {
       await db.query(`UPDATE prospects SET stage = 'found' WHERE id = $1`, [p.prospect_id]);

@@ -6,6 +6,15 @@ import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, PROPOSA
 import { useJobs, elapsed } from '../jobs';
 import PrototypeCard from './PrototypeCard';
 
+function approveHeading(p) {
+  const email = p.to_email == null || p.to_email === 'null' ? '' : String(p.to_email);
+  const name = p.to_name == null || p.to_name === 'null' ? '' : String(p.to_name);
+  if (name && email) return `Send to ${name} <${email}>?`;
+  if (email) return `Send to ${email}?`;
+  if (name) return `Send to ${name}?`;
+  return 'Send this proposal?';
+}
+
 export default function ProposalDrawer({ id, onClose, bump, openLead, openProposal }) {
   const [p, setP] = useState(null);
   const [error, setError] = useState(null);
@@ -123,21 +132,17 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <button className="btn btn-quiet" disabled={!!busy} onClick={() => act('replied', () => api.repliedProposal(p.id, 'They got in touch another way'), 'Marked replied. Follow-ups stopped.')}>They replied another way</button>
           <button className="btn btn-danger" disabled={!!busy} onClick={() => act('stop', () => api.stopProposal(p.id), 'Follow-ups stopped.')}>Stop follow-ups</button>
         </>}
-        {(['discarded', 'superseded'].includes(p.status) || needsReview) && (
+        {['discarded', 'superseded'].includes(p.status) && (
           <button className="btn" disabled={!!busy} onClick={() => act('restore', () => api.restoreProposal(p.id), 'Back in your review queue.')}>Restore to review</button>
         )}
-        {needsReview && <>
-          <button className="btn" disabled={!!busy} onClick={() => act('mark-sent', () => api.markSentProposal(p.id, 'Recorded from review', { delivered: true }), 'Marked as sent.')}>Mark as sent</button>
-          <button className="btn btn-quiet" disabled={!!busy} onClick={() => act('not-sent', () => api.markSentProposal(p.id, undefined, { not_sent: true }), 'Back in your review queue. Approve only if you want to send it.')}>Mark not sent</button>
-        </>}
-        {!editable && ['replied', 'finished', 'stopped', 'bounced', 'opted_out'].includes(p.status) && (
+        {!editable && !needsReview && ['replied', 'finished', 'stopped', 'bounced', 'opted_out'].includes(p.status) && (
           <button className="btn btn-quiet" disabled={!!busy || rewriting} onClick={() => setRegen(r => !r)}>{rewriting ? 'Rewriting…' : 'Write a new version…'}</button>
         )}
       </div>
 
       {confirming && (
         <div className="confirm" role="alertdialog" aria-label="Confirm send">
-          <p><strong>Send to {p.to_name ? `${p.to_name} <${p.to_email}>` : p.to_email}?</strong></p>
+          <p><strong>{approveHeading(p)}</strong></p>
           <p className="muted">“{p.subject}” goes out now from your Gmail. Follow-ups are scheduled for day 3 and day 10 and stop automatically if they reply, book, bounce or opt out.</p>
           <div className="link-row">
             <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => act('send', () => api.sendProposal(p.id, p.stop_reason === 'Confirm before sending again' ? { confirm: true } : undefined), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>

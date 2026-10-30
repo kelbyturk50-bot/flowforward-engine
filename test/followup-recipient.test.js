@@ -2150,7 +2150,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     );
     const marked = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/mark-sent`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ note: 'It did go out' }),
+      body: JSON.stringify({ note: 'It did go out', confirm_override: true }),
     });
     assert.equal(marked.status, 200);
     const after = await state(row.proposal.id);
@@ -3051,7 +3051,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     );
     const marked = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/mark-sent`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ note: 'already out' }),
+      body: JSON.stringify({ note: 'already out', confirm_override: true }),
     });
     assert.equal(marked.status, 200);
     const after = await fullProposal(row.proposal.id);
@@ -3225,6 +3225,144 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     const summaryBody = await summary.json();
     assert.equal(Object.hasOwn(summaryBody, 'halt'), true);
     assert.equal(summaryBody.halt, null);
+  });
+
+  it('round 7: mark-sent returns 400 with no to_email even when delivered and confirm_override are set', async () => {
+    const prospect = await lead();
+    const proposal = await insertProposal(prospect.id, { status: 'draft', toEmail: null });
+    const before = await fullProposal(proposal.id);
+    const res = await fetch(`${apiBase}/api/proposals/${proposal.id}/mark-sent`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ delivered: true, confirm_override: true, note: 'no address' }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, 'Add a recipient email before marking this as sent.');
+    const after = await fullProposal(proposal.id);
+    assert.equal(after.status, before.status);
+    assert.equal(after.sent_at, before.sent_at);
+    assert.equal(after.stop_reason, before.stop_reason);
+  });
+
+  it('round 7: delivered true does not skip the uncertain or sending 409', async () => {
+    const uncertain = await legacySent('test+uncertain-override@example.com');
+    await pool.query(
+      `UPDATE proposals SET status = 'stopped', stop_reason = 'Needs manual review: the send outcome is uncertain' WHERE id = $1`,
+      [uncertain.proposal.id]
+    );
+    const before = await fullProposal(uncertain.proposal.id);
+    const skipped = await fetch(`${apiBase}/api/proposals/${uncertain.proposal.id}/mark-sent`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ delivered: true, note: 'skip the check' }),
+    });
+    assert.equal(skipped.status, 409);
+    const skippedBody = await skipped.json();
+    assert.match(skippedBody.error, /uncertain/);
+    const unchanged = await fullProposal(uncertain.proposal.id);
+    assert.equal(unchanged.status, before.status);
+    assert.equal(unchanged.sent_at && new Date(unchanged.sent_at).toISOString(), before.sent_at && new Date(before.sent_at).toISOString());
+    assert.equal(unchanged.stop_reason, before.stop_reason);
+
+    const allowed = await fetch(`${apiBase}/api/proposals/${uncertain.proposal.id}/mark-sent`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ delivered: true, confirm_override: true, note: 'operator confirmed' }),
+    });
+    assert.equal(allowed.status, 200);
+    const counted = await fullProposal(uncertain.proposal.id);
+    assert.equal(counted.status, 'sent');
+    assert.equal(new Date(counted.sent_at).toISOString(), new Date(before.sent_at).toISOString());
+
+    const sending = await legacySent('test+sending-override@example.com');
+    await pool.query(`UPDATE proposals SET status = 'sending', stop_reason = NULL WHERE id = $1`, [sending.proposal.id]);
+    const blocked = await fetch(`${apiBase}/api/proposals/${sending.proposal.id}/mark-sent`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ delivered: true }),
+    });
+    assert.equal(blocked.status, 409);
+    assert.equal((await fullProposal(sending.proposal.id)).status, 'sending');
+    const forced = await fetch(`${apiBase}/api/proposals/${sending.proposal.id}/mark-sent`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ confirm_override: true }),
+    });
+    assert.equal(forced.status, 200);
+    assert.equal((await fullProposal(sending.proposal.id)).status, 'sent');
+  });
+
+  it('round 7: restore keeps the send-again and uncertain flags while sent_at is set', async () => {
+    const again = await legacySent('test+restore-again@example.com');
+    await pool.query(
+      `UPDATE proposals SET status = 'manual_review', stop_reason = 'Confirm before sending again' WHERE id = $1`,
+      [again.proposal.id]
+    );
+    const againRes = await fetch(`${apiBase}/api/proposals/${again.proposal.id}/restore`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+    });
+    assert.equal(againRes.status, 200);
+    const againRow = await fullProposal(again.proposal.id);
+    assert.equal(againRow.status, 'draft');
+    assert.equal(againRow.stop_reason, 'Confirm before sending again');
+    assert.ok(againRow.sent_at);
+
+    const unsure = await legacySent('test+restore-unsure@example.com');
+    await pool.query(
+      `UPDATE proposals SET status = 'stopped', stop_reason = 'Needs manual review: the send outcome is uncertain' WHERE id = $1`,
+      [unsure.proposal.id]
+    );
+    const unsureRes = await fetch(`${apiBase}/api/proposals/${unsure.proposal.id}/restore`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+    });
+    assert.equal(unsureRes.status, 200);
+    const unsureRow = await fullProposal(unsure.proposal.id);
+    assert.equal(unsureRow.status, 'draft');
+    assert.equal(unsureRow.stop_reason, 'Needs manual review: the send outcome is uncertain');
+    const calls = useTransport();
+    const refused = await fetch(`${apiBase}/api/proposals/${unsure.proposal.id}/send`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+    });
+    assert.equal(refused.status, 409);
+    assert.equal(calls.length, 0);
+    assert.equal((await fullProposal(unsure.proposal.id)).status, 'draft');
+  });
+
+  it('round 7: a successful send clears the send-again reason', async () => {
+    const row = await legacySent('test+clear-reason@example.com');
+    await pool.query(
+      `UPDATE proposals SET status = 'draft', stop_reason = 'Confirm before sending again', sent_at = NULL,
+          followup1_due_at = NULL, followup2_due_at = NULL WHERE id = $1`,
+      [row.proposal.id]
+    );
+    useTransport();
+    const sent = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/send`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ confirm: true }),
+    });
+    assert.equal(sent.status, 200);
+    const after = await fullProposal(row.proposal.id);
+    assert.equal(after.status, 'sent');
+    assert.equal(after.stop_reason, null);
+  });
+
+  it('round 7: a halt records a fixed cause and not the error text', async () => {
+    const cases = [
+      [() => new Error('Gmail access expired. Go to Settings and click Connect Gmail again.'), 'oauth_expired'],
+      [() => Object.assign(new Error('invalid_grant'), { reason: 'invalid_grant' }), 'oauth_expired'],
+      [() => new Error('Token is missing'), 'token_missing'],
+      [() => new Error('Gmail is not connected. Go to Settings and click Connect Gmail.'), 'token_missing'],
+      [() => Object.assign(new Error('Request had insufficient authentication scopes.'), { status: 403, reason: 'insufficientPermissions' }), 'insufficient_permissions'],
+      [() => Object.assign(new Error('535 5.7.8 Authentication failed'), { responseCode: 535, command: 'AUTH' }), 'smtp_auth'],
+      [() => Object.assign(new Error('530 Authentication required'), { command: 'AUTH' }), 'smtp_auth'],
+      [() => Object.assign(new Error('550 5.1.8 Bad sender domain'), { responseCode: 550, command: 'MAIL FROM' }), 'sender'],
+    ];
+    for (const [makeErr, cause] of cases) {
+      const row = await legacySent(`test+cause-${cause}-${Math.random().toString(16).slice(2)}@example.com`);
+      useTransport(() => { throw makeErr(); });
+      await sendDueFollowups();
+      const halt = (await sendReadiness()).halt;
+      assert.equal(halt && halt.cause, cause, makeErr().message);
+      assert.equal(JSON.stringify(halt).includes('example.com'), false);
+      await pool.query('DELETE FROM app_settings WHERE key = ANY($1::text[])', [['followups.halted', 'sender_alert']]);
+      await pool.query('UPDATE prospects SET archived_at = NOW() WHERE id = $1', [row.prospect.id]);
+    }
   });
 
   describe('QA h (r7 block, run on the round 5 head)', { concurrency: false }, () => {
