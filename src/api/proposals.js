@@ -375,7 +375,7 @@ router.post('/:id/mark-sent', async (req, res) => {
          FROM proposals pr
          JOIN prospects p ON p.id = pr.prospect_id
         WHERE pr.id = $1
-        FOR UPDATE`,
+        FOR UPDATE OF pr`,
       [proposalId]
     );
     const p = rows[0];
@@ -400,6 +400,8 @@ router.post('/:id/mark-sent', async (req, res) => {
       await db.query('ROLLBACK');
       return res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` });
     }
+    await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [p.prospect_id]);
+    await send.afterLeadLock(p.prospect_id);
     const blocking = await blockingSibling(db, p.prospect_id, p.id);
     if (blocking) {
       await db.query('ROLLBACK');

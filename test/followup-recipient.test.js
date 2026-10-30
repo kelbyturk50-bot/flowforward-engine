@@ -5038,7 +5038,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
           }
           await new Promise((r) => setTimeout(r, 15));
         }
-        if (why === 'lock') { solo = true; return; }
+        if (why !== 'peer') { solo = true; return; }
       }
       if (solo) return;
       if (n >= 2) release();
@@ -5071,6 +5071,36 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
         [[first.id, second.id]]
       );
       assert.deepEqual(rows.rows.map((r) => r.status).sort(), ['draft', 'sent']);
+    } finally {
+      _setSendTxnGate(null);
+      _setTransport(null);
+    }
+  });
+
+  it('round 11: mark-sent and approve on two drafts send at most one', async () => {
+    const { approveAndSend, _setSendTxnGate } = require('../src/proposals/send');
+    const prospect = await lead();
+    const marked = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+race-mark@example.com' });
+    const approved = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+race-approve@example.com' });
+    const calls = useTransport();
+    _setSendTxnGate(overlapGate());
+    try {
+      const [markResult, approveResult] = await Promise.allSettled([
+        fetch(`${apiBase}/api/proposals/${marked.id}/mark-sent`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+        }).then(async (res) => ({ status: res.status, body: await res.json() })),
+        approveAndSend(approved.id, {}),
+      ]);
+      const markOk = markResult.status === 'fulfilled' && markResult.value.status === 200;
+      const approveOk = approveResult.status === 'fulfilled';
+      assert.equal(markOk + approveOk, 1, `mark ${markResult.status} approve ${approveResult.status}`);
+      assert.equal(calls.length, approveOk ? 1 : 0);
+      const rows = await pool.query(
+        `SELECT id, status FROM proposals WHERE id = ANY($1::int[])`,
+        [[marked.id, approved.id]]
+      );
+      assert.equal(rows.rows.filter((r) => r.status === 'sent').length, 1);
+      assert.equal(rows.rows.filter((r) => r.status === 'draft').length, 1);
     } finally {
       _setSendTxnGate(null);
       _setTransport(null);
@@ -5182,6 +5212,200 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       if (env.p === undefined) delete process.env.GMAIL_APP_PASSWORD; else process.env.GMAIL_APP_PASSWORD = env.p;
       if (env.n === undefined) delete process.env.SENDER_NAME; else process.env.SENDER_NAME = env.n;
       _setAlertHook(null);
+      _setTransport(null);
+    }
+  });
+
+  it('round 11 M66: 553 and RCPT 5.1.8 halt the sweep and do not stop the lead', async () => {
+    for (const responseCode of [553, 550]) {
+      await pool.query(`DELETE FROM app_settings WHERE key = 'followups.halted'`);
+      const first = await legacySent(`test+m66-${responseCode}@example.com`, { sentAt: new Date(Date.now() - 2 * 86400000) });
+      const second = await legacySent(`test+m67-${responseCode}@example.com`);
+      const calls = useTransport(() => {
+        throw Object.assign(new Error(`Can't send mail - all recipients were rejected: ${responseCode} 5.1.8 Bad sender address domain`), {
+          code: 'EENVELOPE', command: 'RCPT TO', responseCode,
+          response: `${responseCode} 5.1.8 Bad sender address domain`,
+        });
+      });
+      const err = Object.assign(new Error(`${responseCode} 5.1.8 Bad sender address domain`), {
+        code: 'EENVELOPE', command: 'RCPT TO', responseCode, response: `${responseCode} 5.1.8 Bad sender address domain`,
+      });
+      const klass = classifyFollowupError(err);
+      assert.equal(klass.label, 'sender', `${responseCode} was ${klass.label}`);
+      assert.equal(klass.kind, 'transient');
+      assert.notEqual(klass.kind, 'permanent');
+      await sendDueFollowups();
+      assert.equal(calls.length, 1, `${responseCode}: the next lead was attempted`);
+      const leadRow = await fullProposal(first.proposal.id);
+      assert.equal(leadRow.status, 'sent');
+      assert.equal(leadRow.stop_reason, null);
+      assert.equal(Number(leadRow.followup_argument_attempts), 0);
+      assert.equal((await fullProposal(second.proposal.id)).followup1_sent_at, null);
+      assert.equal((await sendReadiness()).halt.cause, 'sender');
+      await pool.query(`UPDATE prospects SET archived_at = NOW() WHERE id = ANY($1::int[])`, [[first.prospect.id, second.prospect.id]]);
+      await pool.query(`DELETE FROM app_settings WHERE key = 'followups.halted'`);
+    }
+  });
+
+  it('round 11 M47: stage lost at the recheck sends nothing', async () => {
+    const row = await legacySent('test+lost-recheck@example.com');
+    _beforeTransport(async (p) => {
+      await pool.query(`UPDATE prospects SET stage = 'lost' WHERE id = $1`, [p.prospect_id]);
+    });
+    const calls = useTransport();
+    await sendDueFollowups();
+    assert.equal(calls.length, 0);
+    const after = await state(row.proposal.id);
+    assert.equal(after.followup1_sent_at, null);
+    assert.equal(after.status, 'stopped');
+    assert.equal(after.stop_reason, 'Lead moved to lost');
+  });
+
+  it('round 11 M90: a Gmail 400 that leads with 550 5.1.10 is permanent', () => {
+    const { wrapGmailError } = require('../src/proposals/gmail');
+    const wrapped = wrapGmailError(Object.assign(new Error('Request failed with status code 400'), {
+      response: { status: 400, data: { error: { code: 400, message: '550 5.1.10 RESOLVER.ADR.RecipientNotFound' } } },
+    }));
+    const got = classifyFollowupError(wrapped);
+    assert.equal(got.kind, 'permanent');
+    assert.equal(got.label, 'recipient');
+  });
+
+  it('round 11 M57: the forced token refresh, settings read, and MIME build happen before the recheck', async () => {
+    const axios = require('axios');
+    const MimeNode = require('nodemailer/lib/mime-node');
+    const gmailMod = require('../src/proposals/gmail');
+    const prevAdapter = axios.defaults.adapter;
+    const prevId = process.env.GOOGLE_CLIENT_ID;
+    const prevSecret = process.env.GOOGLE_CLIENT_SECRET;
+    process.env.GOOGLE_CLIENT_ID = 'test-client-id';
+    process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret';
+    const events = [];
+    const origBuild = MimeNode.prototype.build;
+    MimeNode.prototype.build = function build(...args) {
+      events.push('build');
+      return origBuild.apply(this, args);
+    };
+    const origQuery = pool.query.bind(pool);
+    pool.query = function (text, params) {
+      const blob = `${text || ''} ${JSON.stringify(params || '')}`;
+      if (blob.includes('gmail_oauth')) events.push('settings');
+      if (String(text || '').includes('do_not_contact, stage, archived_at')) events.push('recheck');
+      return origQuery(text, params);
+    };
+    axios.defaults.adapter = async (config) => {
+      const url = String(config && config.url || '');
+      if (url.includes('oauth2.googleapis.com/token')) {
+        events.push('token');
+        return { data: { access_token: `tok-${events.length}`, expires_in: 3600 }, status: 200, statusText: 'OK', headers: {}, config };
+      }
+      if (url.includes('/messages/send')) {
+        events.push('post');
+        return { data: { id: 'mid', threadId: 'thr' }, status: 200, statusText: 'OK', headers: {}, config };
+      }
+      return { data: { payload: { headers: [] } }, status: 200, statusText: 'OK', headers: {}, config };
+    };
+    try {
+      await origQuery(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ('gmail_oauth', $1::jsonb, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [JSON.stringify({ refresh_token: 'test-refresh-token', email: 'test+sender@example.com' })]
+      );
+      _setTransport(null);
+      events.length = 0;
+      await gmailMod.accessToken();
+      events.length = 0;
+      const row = await legacySent('test+m57-order@example.com');
+      await sendDueFollowups();
+      const recheckAt = events.indexOf('recheck');
+      const postAt = events.indexOf('post');
+      assert.ok(recheckAt > 0, `no recheck in ${events.join(',')}`);
+      assert.ok(postAt > recheckAt, events.join(','));
+      assert.ok(events.indexOf('token') >= 0 && events.indexOf('token') < recheckAt, events.join(','));
+      assert.ok(events.indexOf('settings') >= 0 && events.indexOf('settings') < recheckAt, events.join(','));
+      assert.ok(events.indexOf('build') >= 0 && events.indexOf('build') < recheckAt, events.join(','));
+      const between = events.slice(recheckAt + 1, postAt);
+      assert.equal(between.includes('token'), false, between.join(','));
+      assert.equal(between.includes('settings'), false, between.join(','));
+      assert.equal(between.includes('build'), false, between.join(','));
+      assert.ok((await state(row.proposal.id)).followup1_sent_at);
+    } finally {
+      MimeNode.prototype.build = origBuild;
+      pool.query = origQuery;
+      axios.defaults.adapter = async (config) => {
+        const url = String(config && config.url || '');
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return { data: { access_token: 'expired-cache', expires_in: 0 }, status: 200, statusText: 'OK', headers: {}, config };
+        }
+        return { data: { payload: { headers: [] } }, status: 200, statusText: 'OK', headers: {}, config };
+      };
+      await gmailMod.accessToken({ force: true }).catch(() => {});
+      axios.defaults.adapter = prevAdapter;
+      await origQuery(`DELETE FROM app_settings WHERE key = 'gmail_oauth'`);
+      if (prevId === undefined) delete process.env.GOOGLE_CLIENT_ID; else process.env.GOOGLE_CLIENT_ID = prevId;
+      if (prevSecret === undefined) delete process.env.GOOGLE_CLIENT_SECRET; else process.env.GOOGLE_CLIENT_SECRET = prevSecret;
+      _setTransport(null);
+    }
+  });
+
+  it('round 11 M40: a failed sweep unlock does not stick the lock or crash the process', async () => {
+    const orig = pool.connect.bind(pool);
+    let failUnlock = false;
+    let emitError = false;
+    const hook = (client) => {
+      const query = client.query.bind(client);
+      client.query = function hooked(text, params, done) {
+        const sql = typeof text === 'string' ? text : (text && text.text) || '';
+        if (failUnlock && sql.includes('pg_advisory_unlock')) {
+          failUnlock = false;
+          const err = Object.assign(new Error('unlock failed'), { code: '57P01' });
+          if (typeof params === 'function') return params(err);
+          if (typeof done === 'function') return done(err);
+          return Promise.reject(err);
+        }
+        const pending = query(text, params, done);
+        if (emitError && sql.includes('pg_try_advisory_lock') && pending && typeof pending.then === 'function') {
+          emitError = false;
+          return pending.then((value) => {
+            client.emit('error', Object.assign(new Error('backend died'), { code: '57P01' }));
+            return value;
+          });
+        }
+        return pending;
+      };
+    };
+    pool.connect = function connect(cb) {
+      if (typeof cb === 'function') return orig(cb);
+      return orig().then((client) => {
+        hook(client);
+        return client;
+      });
+    };
+    try {
+      const first = await legacySent('test+unlock-a@example.com');
+      useTransport();
+      failUnlock = true;
+      await sendDueFollowups();
+      assert.ok((await state(first.proposal.id)).followup1_sent_at);
+      const second = await legacySent('test+unlock-b@example.com');
+      const calls = useTransport();
+      await sendDueFollowups();
+      assert.equal(calls.length, 1, 'the lock stayed on a pooled session');
+      assert.ok((await state(second.proposal.id)).followup1_sent_at);
+
+      const third = await legacySent('test+unlock-c@example.com');
+      emitError = true;
+      const afterError = useTransport();
+      await sendDueFollowups();
+      assert.equal(afterError.length, 1);
+      const fourth = await legacySent('test+unlock-d@example.com');
+      const again = useTransport();
+      await sendDueFollowups();
+      assert.equal(again.length, 1, 'a client error left the sweep lock held');
+      assert.ok((await state(third.proposal.id)).followup1_sent_at);
+      assert.ok((await state(fourth.proposal.id)).followup1_sent_at);
+    } finally {
+      pool.connect = orig;
       _setTransport(null);
     }
   });

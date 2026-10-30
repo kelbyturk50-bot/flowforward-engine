@@ -338,6 +338,9 @@ function _setSendTxnGate(fn) {
   testOnly('_setSendTxnGate');
   sendTxnGate = typeof fn === 'function' ? fn : null;
 }
+async function afterLeadLock(prospectId) {
+  if (sendTxnGate) await sendTxnGate({ prospectId });
+}
 function _setCredentialCheck(fn) {
   testOnly('_setCredentialCheck');
   credentialOverride = typeof fn === 'function' ? fn : null;
@@ -785,7 +788,7 @@ async function approveAndSend(proposalId, options = {}) {
   try {
     await db.query('BEGIN');
     await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [p.prospect_id]);
-    if (sendTxnGate) await sendTxnGate({ prospectId: p.prospect_id });
+    await afterLeadLock(p.prospect_id);
     const claim = await db.query(
       `UPDATE proposals AS pr
           SET status = 'sending', approved_at = NOW(), send_attempt_key = $2, send_attempted_at = NOW()
@@ -1738,7 +1741,7 @@ module.exports = {
   missingRecipient, normalizeRecipient, storedRecipient, isPermanentFollowupError, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
   _beforeFollowupClaim, _beforeTransport, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
-  _setRandom, _setAlertHook, _setCredentialCheck, _setSendTxnGate,
+  _setRandom, _setAlertHook, _setCredentialCheck, _setSendTxnGate, afterLeadLock,
   backoffDelayMs, backoffDelayMinutes, recheckLead, BACKOFF_CAP_MS,
   FOLLOWUP_BACKOFF_CAP_MS, FOLLOWUP_MAX_AGE_MS, RESEND_CONFIRM,
 };
