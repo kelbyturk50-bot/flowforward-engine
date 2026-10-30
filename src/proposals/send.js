@@ -13,6 +13,7 @@ const cfg  = require('./config');
 const { appendCompanyPestExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 
+const { normalizeRecipient, missingRecipient } = require('./recipient');
 const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const GENERIC_DOMAINS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'aol.com', 'live.com', 'msn.com', 'comcast.net', 'me.com', 'protonmail.com'];
@@ -206,34 +207,70 @@ async function sendReadiness() {
   return problems;
 }
 
-const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(x || '');
-
-// Null, empty, and whitespace-only. A sent row in that state cannot be mailed
-// and must not stay due, or the sender cron retries it on every tick.
-function missingRecipient(email) {
-  return String(email ?? '').trim() === '';
-}
+const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(normalizeRecipient(x));
 
 const NETWORK_CODES = new Set([
   'EAI_AGAIN', 'ECONNABORTED', 'ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH',
   'ENETUNREACH', 'ENOTFOUND', 'EPIPE', 'ESOCKETTIMEDOUT', 'ETIMEDOUT',
 ]);
+const QUOTA_REASONS = ['quotaexceeded', 'ratelimitexceeded', 'userratelimitexceeded', 'dailylimitexceeded'];
 
 function httpStatus(err) {
   if (!err || typeof err !== 'object') return null;
   const nested = err.response && err.response.data && err.response.data.error;
   const candidates = [
-    err.status, err.statusCode, err.responseCode,
+    err.status, err.statusCode,
     err.response && err.response.status,
-    nested && nested.code,
+    nested && typeof nested === 'object' ? nested.code : null,
   ];
   for (const value of candidates) {
     if (typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599) return value;
     if (typeof value === 'string' && /^\d{3}$/.test(value)) return Number(value);
   }
-  if (typeof err.code === 'number' && Number.isInteger(err.code) && err.code >= 100 && err.code <= 599) return err.code;
-  if (typeof err.code === 'string' && /^\d{3}$/.test(err.code)) return Number(err.code);
+  // googleapis puts the HTTP status on err.code. Nodemailer's SMTP status is
+  // responseCode, and a string code is a network or envelope error.
+  if (err.responseCode == null && typeof err.code === 'number' && Number.isInteger(err.code) && err.code >= 100 && err.code <= 599) {
+    return err.code;
+  }
   return null;
+}
+
+function reasonTokens(err) {
+  const out = new Set();
+  const add = (value) => {
+    if (value == null) return;
+    const text = String(value).trim();
+    if (!text) return;
+    out.add(text.toLowerCase());
+  };
+  if (!err || typeof err !== 'object') return out;
+  add(err.reason);
+  add(err.gmailStatus);
+  const nested = err.response && err.response.data && err.response.data.error;
+  if (typeof nested === 'string') add(nested);
+  if (nested && typeof nested === 'object') {
+    add(nested.status);
+    add(nested.reason);
+    if (Array.isArray(nested.errors)) {
+      for (const item of nested.errors) {
+        if (!item) continue;
+        add(item.reason);
+        add(item.status);
+      }
+    }
+  }
+  if (Array.isArray(err.errors)) {
+    for (const item of err.errors) {
+      if (!item) continue;
+      add(item.reason);
+    }
+  }
+  return out;
+}
+
+function hasReason(err, names) {
+  const tokens = reasonTokens(err);
+  return names.some((name) => tokens.has(String(name).toLowerCase()));
 }
 
 function errorBlob(err) {
@@ -270,29 +307,46 @@ function isNetworkFollowupError(err) {
   return /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|socket hang up|network error|getaddrinfo|timeout of \d+ms exceeded/i.test(errorBlob(err));
 }
 
-function isQuotaFollowupError(err) {
-  if (httpStatus(err) === 429) return true;
-  const status = String((err && err.gmailStatus) || '');
-  if (status.toUpperCase() === 'RESOURCE_EXHAUSTED') return true;
-  return /quota exceeded|rate limit|too many requests|resource_exhausted|ratelimitexceeded/i.test(errorBlob(err));
+function isQuotaReason(err) {
+  return hasReason(err, QUOTA_REASONS) || hasReason(err, ['resource_exhausted']);
 }
 
-// Permanent: the address will not start working on a later tick.
-// Invalid or missing recipient, a 400 invalid-argument, or a rejected address.
-// Quota, 5xx, and network failures are not permanent.
-function isPermanentFollowupError(err) {
-  if (!err) return false;
-  if (isNetworkFollowupError(err) || isQuotaFollowupError(err)) return false;
+function isAuthFollowupError(err) {
+  if (hasReason(err, ['invalid_grant', 'authError'])) return true;
+  return /invalid_grant|gmail access expired/i.test(errorBlob(err));
+}
+
+function isInvalidRecipient400(err) {
+  if (hasReason(err, ['invalidArgument', 'INVALID_ARGUMENT'])) return true;
+  return /recipient address required|no recipients defined|missing recipient|invalid recipient|invalid to header|address rejected|recipients were rejected|invalid[_\s-]?argument/i.test(errorBlob(err));
+}
+
+function isAddressRejected(err) {
+  if (Array.isArray(err && err.rejected) && err.rejected.length > 0) return true;
   const text = errorBlob(err);
-  // Address failures first. SMTP uses 550 for a rejected recipient, and that
-  // number also sits in the HTTP 5xx range. A rejected address does not retry.
-  if (/recipient address required|no recipients defined|missing recipient|invalid recipient/i.test(text)) return true;
-  if (/address rejected|recipients were rejected|recipient rejected|5\.1\.[013]\b|user unknown|mailbox (not found|unavailable|does not exist)/i.test(text)) return true;
-  if (Array.isArray(err.rejected) && err.rejected.length > 0) return true;
-  if (/invalid[_\s-]?argument/i.test(text)) return true;
+  return /recipient address required|no recipients defined|missing recipient|address rejected|recipients were rejected|5\.1\.[013]\b|user unknown|mailbox (not found|unavailable|does not exist)/i.test(text);
+}
+
+// Status and Gmail reason decide first. Body text is only a fallback once
+// those do not say the call is a server error, a quota error, or auth.
+function classifyFollowupError(err) {
   const status = httpStatus(err);
-  if (status === 400 && /invalid (to |email|address|header|argument)|bad request/i.test(text)) return true;
-  return false;
+  if (status != null && status >= 500 && status <= 599) return { kind: 'transient', label: 'server' };
+  if (status === 429 || ((status === 400 || status === 403) && isQuotaReason(err))) {
+    return { kind: 'transient', label: 'quota' };
+  }
+  if (isAuthFollowupError(err)) return { kind: 'transient', label: 'auth' };
+  if (isNetworkFollowupError(err)) return { kind: 'transient', label: 'network' };
+  if (status === 400 && isInvalidRecipient400(err)) return { kind: 'permanent', label: 'recipient' };
+  if (status == null && isAddressRejected(err)) return { kind: 'permanent', label: 'recipient' };
+  if (status == null && /quota exceeded|rate limit exceeded|too many requests/i.test(errorBlob(err))) {
+    return { kind: 'transient', label: 'quota' };
+  }
+  return { kind: 'transient', label: 'later' };
+}
+
+function isPermanentFollowupError(err) {
+  return classifyFollowupError(err).kind === 'permanent';
 }
 
 function permanentFollowupReason(err) {
@@ -308,12 +362,7 @@ function permanentFollowupReason(err) {
 }
 
 function transientFollowupLabel(err) {
-  if (isQuotaFollowupError(err)) return 'quota';
-  if (isNetworkFollowupError(err)) return 'network';
-  const status = httpStatus(err);
-  // HTTP 5xx. An SMTP 550 address reject is permanent and does not reach here.
-  if (status != null && status >= 500 && status <= 599) return 'server';
-  return 'later';
+  return classifyFollowupError(err).label;
 }
 
 function followupSentColumn(which) {
@@ -401,9 +450,7 @@ async function stopSequence(proposalId, reason, status = 'stopped') {
   return rows[0] || null;
 }
 
-/** Send any follow-ups that are due. Called every 15 minutes. */
-async function sendDueFollowups() {
-  if (!(await mailMode()) || !SENDER.address || !inSendWindow()) return { sent: 0 };
+async function loadDueFollowups() {
   // Exclude pest names in SQL. A JS skip after LIMIT 25 would fill the batch
   // with rows that are never sent and starve every other sequence. The
   // predicate does not update those rows.
@@ -418,83 +465,107 @@ async function sendDueFollowups() {
         AND p.archived_at IS NULL
       ORDER BY pr.sent_at LIMIT 25`,
     params);
-  let sent = 0;
+  return rows;
+}
+
+async function stopUnusableRecipient(p) {
+  if (!missingRecipient(p.to_email)) return false;
+  const stopped = await stopSequence(p.id, 'No recipient email');
+  if (stopped) {
+    console.info(`[send] skipped follow-up for #${p.id}: no recipient email; sequence stopped`);
+  }
+  return true;
+}
+
+function logFollowupSkip(p, err) {
+  console.error(`[send] follow-up for #${p.id} skipped: ${err && err.code || 'error'}`);
+}
+
+/** Send any follow-ups that are due. Called every 15 minutes. */
+async function sendDueFollowups() {
+  const rows = await loadDueFollowups();
+  const ready = [];
+  // Stop a sequence with no usable address before the mail and send-window
+  // gate. Otherwise a row stays due all weekend, and whenever Gmail is unset.
   for (const p of rows) {
-    // A sequence created before the name gate can still be due. Skip it
-    // without claiming the row or calling the transport. The log has no name,
-    // address, or id.
-    if (isPestCompanyName(p.company)) {
-      console.error('[send] skipped follow-up: company name matches pest control');
-      continue;
-    }
-    if (isArchivedLead(p)) {
-      console.error('[send] skipped follow-up: lead is archived');
-      continue;
-    }
-    // Stop before any claim. A claim keeps status 'sent', so a row with no
-    // recipient would fail sent_requires_recipient and would be due again
-    // next tick. One info line, then the row is no longer selected.
-    if (missingRecipient(p.to_email)) {
-      const stopped = await stopSequence(p.id, 'No recipient email');
-      if (stopped) {
-        console.info(`[send] skipped follow-up for #${p.id}: no recipient email; sequence stopped`);
-      }
-      continue;
-    }
-    if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
-      await stopSequence(p.id, p.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${p.stage}`);
-      continue;
-    }
-    if (await sentToday() >= cfg.SEND_DAILY_LIMIT) break;
-    const which = p.followup1_sent_at ? 'followup2' : 'followup1';
-    const sentColumn = followupSentColumn(which);
-    // Claim with the timestamp only. Status stays 'sent' — never 'sending' —
-    // so a crash or a refused update cannot leave the row stuck there.
-    const claim = await pool.query(
-      `UPDATE proposals SET ${sentColumn} = NOW() WHERE id = $1 AND ${sentColumn} IS NULL AND status = 'sent' RETURNING id`, [p.id]);
-    if (!claim.rows.length) continue;
     try {
-      await attachPrototypeUrl(p);
-      await (await mailer()).sendMail({
-        threadId: p.thread_id || undefined,
-        from: { name: SENDER.name, address: SENDER.email },
-        to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
-        subject: /^re:/i.test(p.subject) ? p.subject : `Re: ${p.subject}`,
-        text: renderMessage(p, which),
-        html: renderMessageHtml(p, which),
-        inReplyTo: p.message_id || undefined,
-        references: p.message_id ? [p.message_id] : undefined,
-        headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
-      });
-      sent++;
-      await pool.query(`UPDATE proposals SET error = NULL WHERE id = $1 AND status = 'sent'`, [p.id]);
-      await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
-      await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${p.to_email}.`);
-    } catch (err) {
-      if (isPermanentFollowupError(err)) {
-        const reason = permanentFollowupReason(err);
-        // Clear the claim in the same statement that stops the sequence.
-        // The follow-up was not sent. Status leaves 'sent', so the next tick
-        // does not select the row and does not log again.
-        await pool.query(
-          `UPDATE proposals
-              SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL
-            WHERE id = $1 AND status IN ('sent', 'sending')`,
-          [p.id, reason]);
-        console.info(`[send] stopped follow-up for #${p.id}: ${reason}`);
-      } else {
-        const label = transientFollowupLabel(err);
-        // Release the claim and leave the sequence 'sent' so a later tick
-        // retries. A 'sending' status, if one were set, is put back.
-        await pool.query(
-          `UPDATE proposals
-              SET ${sentColumn} = NULL,
-                  error = $2,
-                  status = CASE WHEN status = 'sending' THEN 'sent' ELSE status END
-            WHERE id = $1 AND status IN ('sent', 'sending')`,
-          [p.id, `Follow-up will retry: ${label}`]);
-        console.error(`[send] follow-up for #${p.id} will retry: ${label}`);
+      // A sequence created before the name gate can still be due. Skip it
+      // without claiming the row or calling the transport. The log has no name,
+      // address, or id.
+      if (isPestCompanyName(p.company)) {
+        console.error('[send] skipped follow-up: company name matches pest control');
+        continue;
       }
+      if (isArchivedLead(p)) {
+        console.error('[send] skipped follow-up: lead is archived');
+        continue;
+      }
+      if (await stopUnusableRecipient(p)) continue;
+      ready.push(p);
+    } catch (err) {
+      logFollowupSkip(p, err);
+    }
+  }
+  if (!(await mailMode()) || !SENDER.address || !inSendWindow()) return { sent: 0 };
+  let sent = 0;
+  for (const p of ready) {
+    try {
+      if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
+        await stopSequence(p.id, p.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${p.stage}`);
+        continue;
+      }
+      if (await sentToday() >= cfg.SEND_DAILY_LIMIT) break;
+      // Check again immediately before the claim. An unusable address must
+      // not be claimed, and one row's error must not skip the rest.
+      if (await stopUnusableRecipient(p)) continue;
+      const which = p.followup1_sent_at ? 'followup2' : 'followup1';
+      const sentColumn = followupSentColumn(which);
+      const toAddress = normalizeRecipient(p.to_email);
+      // Claim with the timestamp only. Status stays 'sent' — never 'sending'.
+      const claim = await pool.query(
+        `UPDATE proposals SET ${sentColumn} = NOW() WHERE id = $1 AND ${sentColumn} IS NULL AND status = 'sent' RETURNING id`, [p.id]);
+      if (!claim.rows.length) continue;
+      try {
+        await attachPrototypeUrl(p);
+        await (await mailer()).sendMail({
+          threadId: p.thread_id || undefined,
+          from: { name: SENDER.name, address: SENDER.email },
+          to: p.to_name ? { name: p.to_name, address: toAddress } : toAddress,
+          subject: /^re:/i.test(p.subject) ? p.subject : `Re: ${p.subject}`,
+          text: renderMessage(p, which),
+          html: renderMessageHtml(p, which),
+          inReplyTo: p.message_id || undefined,
+          references: p.message_id ? [p.message_id] : undefined,
+          headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
+        });
+        sent++;
+        await pool.query(`UPDATE proposals SET error = NULL WHERE id = $1 AND status = 'sent'`, [p.id]);
+        await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
+        await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${toAddress}.`);
+      } catch (err) {
+        if (isPermanentFollowupError(err)) {
+          const reason = permanentFollowupReason(err);
+          await pool.query(
+            `UPDATE proposals
+                SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL
+              WHERE id = $1 AND status IN ('sent', 'sending')`,
+            [p.id, reason]);
+          console.info(`[send] stopped follow-up for #${p.id}: ${reason}`);
+        } else {
+          const label = transientFollowupLabel(err);
+          await pool.query(
+            `UPDATE proposals
+                SET ${sentColumn} = NULL,
+                    error = $2,
+                    status = CASE WHEN status = 'sending' THEN 'sent' ELSE status END
+              WHERE id = $1 AND status IN ('sent', 'sending')`,
+            [p.id, `Follow-up will retry: ${label}`]);
+          const note = label === 'auth' ? 'Gmail auth is not connected' : label;
+          console.error(`[send] follow-up for #${p.id} will retry: ${note}`);
+        }
+      }
+    } catch (err) {
+      logFollowupSkip(p, err);
     }
   }
   // Sequences with no reply two weeks after the last follow-up are finished.
@@ -755,6 +826,6 @@ async function senderTick() {
 
 module.exports = {
   approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
-  missingRecipient, isPermanentFollowupError,
+  missingRecipient, normalizeRecipient, isPermanentFollowupError, classifyFollowupError,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
+import { missingRecipient } from '../recipient';
 import { TryLiveDemoLink } from '../demo/DemoLinks';
 import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, relDate, timeAgo, toast, Stars } from '../ui';
 import { useJobs, elapsed } from '../jobs';
@@ -30,7 +31,13 @@ export default function ProposalDrawer({ id, onClose, bump, openLead, openPropos
 
 function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   const editable = p.status === 'draft';
-  const missingRecipient = !String(p.to_email || '').trim();
+  const noRecipient = missingRecipient(p.to_email);
+  const focusRecipient = () => {
+    const el = document.getElementById('proposal-to-email');
+    if (!el) return;
+    if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
+    el.focus();
+  };
   const [busy, setBusy] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [confirmingManual, setConfirmingManual] = useState(false);
@@ -77,15 +84,19 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
       {/* ── Actions ── */}
       <div className="action-bar">
         {editable && <>
-          <button className="btn" disabled={!!busy || !p.to_email} onClick={() => setConfirming(true)}>Approve and send</button>
+          <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? 'Add a recipient email first' : undefined} onClick={() => setConfirming(true)}>Approve and send</button>
           <button
             className="btn btn-quiet"
-            disabled={!!busy || missingRecipient}
-            title={missingRecipient ? 'Add a recipient email first' : undefined}
-            aria-describedby={missingRecipient ? 'mark-sent-needs-email' : undefined}
+            disabled={!!busy || noRecipient}
+            title={noRecipient ? 'Add a recipient email first' : undefined}
+            aria-describedby={noRecipient ? 'mark-sent-needs-email' : undefined}
             onClick={() => setConfirmingManual(m => !m)}
           >Mark as manually sent…</button>
-          {missingRecipient && <span id="mark-sent-needs-email" className="muted small" role="status">Add a recipient email first</span>}
+          {noRecipient && (
+            <button type="button" id="mark-sent-needs-email" className="recipient-hint" onClick={focusRecipient}>
+              Add a recipient email first
+            </button>
+          )}
           <button className="btn btn-quiet" disabled={!!busy || rewriting} onClick={() => setRegen(r => !r)}>{rewriting ? 'Rewriting…' : 'Rewrite…'}</button>
           <a className="btn btn-quiet" href={`${p.onepager_url}?preview=1`} target="_blank" rel="noreferrer">Preview one-pager</a>
           <TryLiveDemoLink className="btn btn-quiet" />
@@ -128,7 +139,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
               placeholder="e.g. Sent via Facebook message, emailed through contact form…" />
           </label>
           <div className="link-row">
-            <button className="btn" disabled={!!busy || missingRecipient} title={missingRecipient ? 'Add a recipient email first' : undefined} onClick={() =>
+            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? 'Add a recipient email first' : undefined} onClick={() =>
               act('mark-sent', () => api.markSentProposal(p.id, manualNote || undefined),
                 'Marked as sent. Follow-ups scheduled.',
                 async () => { setConfirmingManual(false); setManualNote(''); await reload(p.id); })}>
@@ -183,7 +194,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
         <section className="review-col">
           <h3 className="col-title">Email sequence</h3>
           <div className="two">
-            <Field label="To (email)" type="email" value={p.to_email} disabled={!editable} onSave={v => save({ to_email: v })} />
+            <Field id="proposal-to-email" label="To (email)" type="email" value={p.to_email} disabled={!editable} onSave={v => save({ to_email: v })} />
             <Field label="First name in greeting" value={p.to_name} disabled={!editable} onSave={v => save({ to_name: v })} />
           </div>
           <Field label="Subject" value={p.subject} disabled={!editable} onSave={v => save({ subject: v }, 'Saved.')} />
@@ -206,11 +217,11 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   );
 }
 
-function Field({ label, value, onSave, type = 'text', disabled, rows }) {
+function Field({ label, value, onSave, type = 'text', disabled, rows, id }) {
   const [v, setV] = useState(value ?? '');
   useEffect(() => setV(value ?? ''), [value]);
   const commit = () => { if ((value ?? '') !== v) onSave(v); };
-  const props = { className: 'input', value: v, disabled, onChange: e => setV(e.target.value), onBlur: commit };
+  const props = { id, className: 'input', value: v, disabled, onChange: e => setV(e.target.value), onBlur: commit };
   return (
     <label>{label}
       {rows ? <textarea rows={rows} {...props} /> : <input type={type} {...props} onKeyDown={e => e.key === 'Enter' && e.currentTarget.blur()} />}

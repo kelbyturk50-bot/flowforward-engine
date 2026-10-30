@@ -313,6 +313,21 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .head-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .35rem; }
 .action-bar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; position: sticky; top: -1.4rem; background: var(--surface); padding: .6rem 0; z-index: 1; border-bottom: 1px solid var(--line-2); }
 .action-bar .spacer { flex: 1; }
+.action-bar .recipient-hint {
+  flex: 1 0 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: .85rem;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .confirm { border: 1px solid var(--line); border-left: 4px solid var(--juniper); border-radius: var(--radius-s); padding: .9rem 1rem; display: flex; flex-direction: column; gap: .5rem; background: var(--paper); }
 .check { flex-direction: row; align-items: center; gap: .5rem; color: var(--ink); }
 .check input { width: 18px; height: 18px; accent-color: var(--juniper); }

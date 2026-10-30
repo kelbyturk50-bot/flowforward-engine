@@ -16,7 +16,9 @@ const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
 const { applySchema, applyMainSchema } = require('../src/db/migrate');
-const { sendDueFollowups, _setTransport } = require('../src/proposals/send');
+const { sendDueFollowups, _setTransport, classifyFollowupError } = require('../src/proposals/send');
+const cfg = require('../src/proposals/config');
+const { revokeForProposal } = require('../src/pilot/tokens');
 
 const API_KEY = process.env.CRM_API_KEY;
 const MARK_SENT_ERROR = 'Add a recipient email before marking this as sent.';
@@ -99,42 +101,10 @@ async function insertProposal(prospectId, fields = {}) {
   return rows[0];
 }
 
-async function restoreRecipientConstraint() {
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'sent_requires_recipient'
-      ) THEN
-        ALTER TABLE proposals
-          ADD CONSTRAINT sent_requires_recipient CHECK (
-            status IS DISTINCT FROM 'sent'
-            OR (followup1_due_at IS NULL AND followup2_due_at IS NULL)
-            OR (
-              to_email IS NOT NULL
-              AND to_email ~ '[[:graph:]]'
-            )
-          ) NOT VALID;
-      END IF;
-    END $$;
-  `);
-}
-
-async function withConstraintDropped(fn) {
-  await pool.query('ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient');
-  try {
-    return await fn();
-  } finally {
-    await restoreRecipientConstraint();
-  }
-}
-
 async function legacySent(toEmail, fields = {}) {
-  return withConstraintDropped(async () => {
-    const prospect = await lead();
-    const proposal = await insertProposal(prospect.id, { toEmail, ...fields });
-    return { prospect, proposal };
-  });
+  const prospect = await lead();
+  const proposal = await insertProposal(prospect.id, { toEmail, ...fields });
+  return { prospect, proposal };
 }
 
 async function state(id) {
@@ -196,7 +166,6 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
 
   after(async () => {
     _setTransport(null);
-    await restoreRecipientConstraint().catch(() => {});
     if (server) await new Promise((resolve) => server.close(resolve));
     await closePool();
   });
@@ -477,7 +446,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
   });
 
   it('mark-sent returns 400 for a missing to_email and writes nothing', async () => {
-    for (const toEmail of [null, '', '   ', '\t', '\n']) {
+    for (const toEmail of [null, '', '   ', '\t', '\n', '\u200b', '\u0001']) {
       const prospect = await lead();
       const proposal = await insertProposal(prospect.id, { status: 'draft', toEmail });
       const beforeProposal = await fullProposal(proposal.id);
@@ -506,19 +475,14 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     console.log('[followup-recipient] mark-sent 400 with no row change when to_email is missing; a real address still records');
   });
 
-  it('adds sent_requires_recipient NOT VALID and keeps a legacy sent row on boot', async () => {
+  it('drops sent_requires_recipient on boot and still updates a legacy sent row', async () => {
     const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
-    const blockStart = schema.indexOf("conname = 'sent_requires_recipient'");
-    assert.ok(blockStart > 0);
-    const block = schema.slice(blockStart, schema.indexOf('END $$;', blockStart));
-    assert.match(block, /NOT VALID/);
-    assert.doesNotMatch(block, /UPDATE/i);
-    assert.doesNotMatch(block, /DELETE/i);
-    assert.doesNotMatch(schema, /VALIDATE CONSTRAINT sent_requires_recipient/);
+    const dropAt = schema.indexOf('DROP CONSTRAINT IF EXISTS sent_requires_recipient');
     const backfill = schema.indexOf('UPDATE proposals SET reviewed_at = created_at');
-    assert.ok(backfill > 0 && backfill < blockStart);
+    assert.ok(dropAt > 0 && backfill > dropAt);
+    assert.equal(schema.includes('ADD CONSTRAINT sent_requires_recipient'), false);
+    assert.doesNotMatch(schema, /VALIDATE CONSTRAINT sent_requires_recipient/);
 
-    await pool.query('ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient');
     const oldLead = await lead();
     const recentLead = await lead();
     const oldRow = await insertProposal(oldLead.id, {
@@ -533,72 +497,282 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       reviewedAt: null,
       sentAt: new Date('2026-10-20T00:00:00Z'),
     });
+    await pool.query(`
+      ALTER TABLE proposals
+        ADD CONSTRAINT sent_requires_recipient CHECK (
+          status IS DISTINCT FROM 'sent'
+          OR (followup1_due_at IS NULL AND followup2_due_at IS NULL)
+          OR (to_email IS NOT NULL AND to_email ~ '[[:graph:]]')
+        ) NOT VALID
+    `);
 
     await applyMainSchema();
-    const constraint = await pool.query(
-      `SELECT convalidated FROM pg_constraint WHERE conname = 'sent_requires_recipient'`
+    const gone = await pool.query(
+      `SELECT 1 FROM pg_constraint WHERE conname = 'sent_requires_recipient'`
     );
-    assert.equal(constraint.rows.length, 1);
-    assert.equal(constraint.rows[0].convalidated, false);
-
-    const oldAfter = await pool.query('SELECT * FROM proposals WHERE id = $1', [oldRow.id]);
-    const recentAfter = await pool.query('SELECT * FROM proposals WHERE id = $1', [recentRow.id]);
+    assert.equal(gone.rows.length, 0);
+    const oldAfter = await pool.query('SELECT status, to_email, stop_reason, followup1_due_at FROM proposals WHERE id = $1', [oldRow.id]);
+    const recentAfter = await pool.query('SELECT status, to_email, stop_reason, followup1_due_at, reviewed_at FROM proposals WHERE id = $1', [recentRow.id]);
     assert.equal(oldAfter.rows[0].status, 'sent');
     assert.equal(oldAfter.rows[0].to_email, null);
     assert.equal(oldAfter.rows[0].stop_reason, null);
-    assert.ok(oldAfter.rows[0].reviewed_at);
+    assert.ok(oldAfter.rows[0].followup1_due_at);
     assert.equal(recentAfter.rows[0].status, 'sent');
     assert.equal(recentAfter.rows[0].to_email, '   ');
     assert.equal(recentAfter.rows[0].reviewed_at, null);
 
-    const oldStamp = JSON.parse(JSON.stringify(oldAfter.rows[0]));
-    const recentStamp = JSON.parse(JSON.stringify(recentAfter.rows[0]));
-    await applyMainSchema();
-    const still = await pool.query(
-      `SELECT convalidated FROM pg_constraint WHERE conname = 'sent_requires_recipient'`
-    );
-    assert.equal(still.rows[0].convalidated, false);
-    assert.deepEqual(JSON.parse(JSON.stringify((await pool.query('SELECT * FROM proposals WHERE id = $1', [oldRow.id])).rows[0])), oldStamp);
-    assert.deepEqual(JSON.parse(JSON.stringify((await pool.query('SELECT * FROM proposals WHERE id = $1', [recentRow.id])).rows[0])), recentStamp);
+    const feedback = await fetch(`${apiBase}/api/proposals/${recentRow.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ feedback_rating: 1 }),
+    });
+    const feedbackJson = await feedback.json();
+    assert.equal(feedback.status, 200, JSON.stringify(feedbackJson));
+    assert.equal(feedbackJson.feedback_rating, 1);
+    assert.equal(feedbackJson.status, 'sent');
+    assert.equal(feedbackJson.to_email, '   ');
 
-    const fresh = await lead();
-    await assert.rejects(
-      () => insertProposal(fresh.id, { toEmail: null }),
-      (err) => {
-        assert.equal(err.code, '23514');
-        return true;
+    await pool.query(
+      `INSERT INTO pilot_tokens (proposal_id, prospect_id, generation, derived, token_hash, expires_at)
+       VALUES ($1, $2, 1, TRUE, $3, NOW() + INTERVAL '1 day')`,
+      [recentRow.id, recentLead.id, Buffer.from('legacy-recipient-token-hash-32b!!')]
+    );
+    const revoked = await revokeForProposal(recentRow.id);
+    assert.equal(revoked, 1);
+    const afterRevoke = await pool.query(
+      `SELECT pr.status, pr.to_email, pr.demo_revoked_at, t.revoked_at
+         FROM proposals pr
+         JOIN pilot_tokens t ON t.proposal_id = pr.id
+        WHERE pr.id = $1`,
+      [recentRow.id]
+    );
+    assert.equal(afterRevoke.rows[0].status, 'sent');
+    assert.equal(afterRevoke.rows[0].to_email, '   ');
+    assert.ok(afterRevoke.rows[0].demo_revoked_at);
+    assert.ok(afterRevoke.rows[0].revoked_at);
+    console.log('[followup-recipient] boot drops sent_requires_recipient; feedback and revoke update the legacy row');
+  });
+
+  it('stops an unusable address before the send window and still sends the next row', async () => {
+    const logs = spyConsole();
+    const savedHours = cfg.SEND_HOURS.slice();
+    try {
+      const invisible = await legacySent('\u200b');
+      const control = await legacySent('\u0001');
+      const mixed = await legacySent('\u200b\u0001  ');
+      const prospect = await lead();
+      const good = await insertProposal(prospect.id, { toEmail: 'test+after-bad@example.com' });
+      await pool.query(`
+        ALTER TABLE proposals
+          ADD CONSTRAINT sent_requires_recipient CHECK (
+            status IS DISTINCT FROM 'sent'
+            OR (followup1_due_at IS NULL AND followup2_due_at IS NULL)
+            OR (to_email IS NOT NULL AND to_email ~ '[[:graph:]]')
+          ) NOT VALID
+      `);
+      const calls = useTransport();
+      const open = await sendDueFollowups();
+      assert.equal(open.sent, 1);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].to.address, 'test+after-bad@example.com');
+      for (const row of [invisible, control, mixed]) {
+        const after = await state(row.proposal.id);
+        assert.equal(after.status, 'stopped');
+        assert.equal(after.stop_reason, 'No recipient email');
+        assert.equal(after.followup1_sent_at, null);
       }
-    );
-    await assert.rejects(
-      () => insertProposal(fresh.id, { toEmail: '   ' }),
-      (err) => {
-        assert.equal(err.code, '23514');
-        return true;
+      assert.ok((await state(good.id)).followup1_sent_at);
+
+      await pool.query('ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient');
+      const outside = await legacySent(null);
+      const held = await lead();
+      const waiting = await insertProposal(held.id, { toEmail: 'test+held@example.com' });
+      cfg.SEND_HOURS = [0, 0];
+      _setTransport(null);
+      calls.length = 0;
+      const closed = await sendDueFollowups();
+      assert.equal(closed.sent, 0);
+      assert.equal(calls.length, 0);
+      assert.equal((await state(outside.proposal.id)).status, 'stopped');
+      assert.equal((await state(waiting.id)).status, 'sent');
+      assert.equal((await state(waiting.id)).followup1_sent_at, null);
+      console.log('[followup-recipient] unusable address stopped before the window; the next row still sent');
+    } finally {
+      cfg.SEND_HOURS = savedHours;
+      await pool.query('ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient').catch(() => {});
+      logs.restore();
+    }
+  });
+
+  it('a per-row send error does not skip the rest of the batch', async () => {
+    const firstLead = await lead();
+    const first = await insertProposal(firstLead.id, { toEmail: 'test+row-a@example.com' });
+    const secondLead = await lead();
+    const second = await insertProposal(secondLead.id, { toEmail: 'test+row-b@example.com' });
+    const calls = useTransport(async (mail) => {
+      const address = typeof mail.to === 'string' ? mail.to : mail.to.address;
+      if (address === 'test+row-a@example.com') {
+        const err = new Error('socket hang up');
+        err.code = 'ECONNRESET';
+        throw err;
       }
-    );
-    const draft = await insertProposal(fresh.id, { status: 'draft', toEmail: null });
-    assert.equal(draft.status, 'draft');
-    const quiet = await pool.query(
-      `INSERT INTO proposals (prospect_id, version, status, slug, subject, body, sent_at)
-       VALUES ($1, 1, 'sent', $2, 'subj', 'the email', NOW()) RETURNING status, to_email, followup1_due_at`,
-      [fresh.id, `fu-quiet-${fresh.id}`]
-    );
-    assert.equal(quiet.rows[0].status, 'sent');
-    assert.equal(quiet.rows[0].to_email, null);
-    assert.equal(quiet.rows[0].followup1_due_at, null);
-    await assert.rejects(
-      () => pool.query(
-        `UPDATE proposals SET status = 'sent', followup1_due_at = NOW() WHERE id = $1`,
-        [draft.id]
-      ),
-      (err) => {
-        assert.equal(err.code, '23514');
-        return true;
+      return { messageId: '<row-b@localhost>', threadId: 'thr-b' };
+    });
+    const result = await sendDueFollowups();
+    assert.equal(calls.length, 2);
+    assert.equal(result.sent, 1);
+    const a = await state(first.id);
+    const b = await state(second.id);
+    assert.equal(a.status, 'sent');
+    assert.equal(a.followup1_sent_at, null);
+    assert.equal(a.error, 'Follow-up will retry: network');
+    assert.equal(b.status, 'sent');
+    assert.ok(b.followup1_sent_at);
+    console.log('[followup-recipient] one row error left the next follow-up in the batch');
+  });
+
+  it('classifies follow-up errors by HTTP status and Gmail reason', async () => {
+    const logs = spyConsole();
+    try {
+      const table = [
+        {
+          name: '500 invalid argument',
+          permanent: false,
+          label: 'server',
+          err() {
+            const err = new Error('Internal error: invalid argument');
+            err.status = 500;
+            err.reason = 'backendError';
+            return err;
+          },
+        },
+        {
+          name: '400 quotaExceeded',
+          permanent: false,
+          label: 'quota',
+          err() {
+            const err = new Error('Gmail API: Bad Request');
+            err.status = 400;
+            err.reason = 'quotaExceeded';
+            return err;
+          },
+        },
+        {
+          name: '403 rateLimitExceeded',
+          permanent: false,
+          label: 'quota',
+          err() {
+            const err = new Error('Gmail API: Bad Request');
+            err.status = 403;
+            err.reason = 'rateLimitExceeded';
+            return err;
+          },
+        },
+        {
+          name: '403 userRateLimitExceeded',
+          permanent: false,
+          label: 'quota',
+          err() {
+            const err = new Error('Gmail API: invalid argument');
+            err.status = 403;
+            err.reason = 'userRateLimitExceeded';
+            return err;
+          },
+        },
+        {
+          name: '429',
+          permanent: false,
+          label: 'quota',
+          err() {
+            const err = new Error('Gmail API: invalid argument');
+            err.status = 429;
+            return err;
+          },
+        },
+        {
+          name: '400 invalidArgument',
+          permanent: true,
+          label: 'recipient',
+          err() {
+            const err = new Error('Gmail API: Request contains an invalid argument.');
+            err.status = 400;
+            err.gmailStatus = 'INVALID_ARGUMENT';
+            err.reason = 'invalidArgument';
+            return err;
+          },
+        },
+        {
+          name: '400 recipient required',
+          permanent: true,
+          label: 'recipient',
+          err() {
+            const err = new Error('Gmail API: Recipient address required');
+            err.status = 400;
+            return err;
+          },
+        },
+        {
+          name: 'invalid_grant',
+          permanent: false,
+          label: 'auth',
+          err() {
+            return new Error('Gmail access expired. Go to Settings and click Connect Gmail again.');
+          },
+        },
+        {
+          name: 'address rejected',
+          permanent: true,
+          label: 'recipient',
+          err() {
+            const err = new Error('all recipients were rejected: 550 5.1.1');
+            err.responseCode = 550;
+            err.code = 'EENVELOPE';
+            err.rejected = ['test+gone@example.com'];
+            return err;
+          },
+        },
+        {
+          name: 'network',
+          permanent: false,
+          label: 'network',
+          err() {
+            const err = new Error('connect ECONNRESET');
+            err.code = 'ECONNRESET';
+            return err;
+          },
+        },
+      ];
+      for (const row of table) {
+        const got = classifyFollowupError(row.err());
+        assert.equal(got.kind, row.permanent ? 'permanent' : 'transient', row.name);
+        assert.equal(got.label, row.label, row.name);
       }
-    );
-    const kept = await state(draft.id);
-    assert.equal(kept.status, 'draft');
-    assert.equal(kept.to_email, null);
-    console.log('[followup-recipient] sent_requires_recipient stays NOT VALID; boot left the legacy sent rows in place');
+
+      const rows = [];
+      for (const name of ['500 invalid argument', '400 quotaExceeded', 'invalid_grant']) {
+        const item = table.find((row) => row.name === name);
+        const prospect = await lead();
+        const proposal = await insertProposal(prospect.id, { toEmail: `test+class-${rows.length}@example.com` });
+        rows.push({ item, proposal });
+      }
+      useTransport(async (mail) => {
+        const address = typeof mail.to === 'string' ? mail.to : mail.to.address;
+        const row = rows.find((item, index) => address === `test+class-${index}@example.com`);
+        throw row.item.err();
+      });
+      const first = await sendDueFollowups();
+      assert.equal(first.sent, 0);
+      for (const row of rows) {
+        const after = await state(row.proposal.id);
+        assert.equal(after.status, 'sent', row.item.name);
+        assert.equal(after.followup1_sent_at, null, row.item.name);
+        assert.equal(after.error, `Follow-up will retry: ${row.item.label}`, row.item.name);
+      }
+      assert.equal(logs.sendError().some((line) => line.includes('Gmail auth is not connected')), true);
+      assert.equal(logs.sendInfo().some((line) => line.includes('stopped follow-up')), false);
+      console.log('[followup-recipient] status and reason classify 5xx, quota, and auth as retries');
+    } finally {
+      logs.restore();
+    }
   });
 });
