@@ -239,6 +239,31 @@ ALTER TABLE proposals ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
 -- Drafts that existed before this column are treated as already seen
 UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND created_at < '2026-10-15';
 
+-- A follow-up-eligible sent row needs a recipient. Eligible means status
+-- sent and a follow-up due time is set. NOT VALID does not scan rows already
+-- stored, so a legacy sent row with no to_email does not fail this boot.
+-- The check is added after the reviewed_at backfill above: that UPDATE runs
+-- first, while this constraint is not yet in the transaction. New inserts
+-- and updates are checked. A sent row with no follow-up due time is left
+-- alone. This block does not UPDATE or DELETE. It is not validated later,
+-- because validating would scan those legacy rows.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'sent_requires_recipient'
+  ) THEN
+    ALTER TABLE proposals
+      ADD CONSTRAINT sent_requires_recipient CHECK (
+        status IS DISTINCT FROM 'sent'
+        OR (followup1_due_at IS NULL AND followup2_due_at IS NULL)
+        OR (
+          to_email IS NOT NULL
+          AND to_email ~ '[[:graph:]]'
+        )
+      ) NOT VALID;
+  END IF;
+END $$;
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Pilot tables. Additive and idempotent, same transaction as the rest of
 -- this file. This file does not set a session timeout; applyMainSchema sets

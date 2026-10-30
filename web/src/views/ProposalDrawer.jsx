@@ -30,6 +30,7 @@ export default function ProposalDrawer({ id, onClose, bump, openLead, openPropos
 
 function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   const editable = p.status === 'draft';
+  const missingRecipient = !String(p.to_email || '').trim();
   const [busy, setBusy] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [confirmingManual, setConfirmingManual] = useState(false);
@@ -77,7 +78,14 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
       <div className="action-bar">
         {editable && <>
           <button className="btn" disabled={!!busy || !p.to_email} onClick={() => setConfirming(true)}>Approve and send</button>
-          <button className="btn btn-quiet" disabled={!!busy} onClick={() => setConfirmingManual(m => !m)}>Mark as manually sent…</button>
+          <button
+            className="btn btn-quiet"
+            disabled={!!busy || missingRecipient}
+            title={missingRecipient ? 'Add a recipient email first' : undefined}
+            aria-describedby={missingRecipient ? 'mark-sent-needs-email' : undefined}
+            onClick={() => setConfirmingManual(m => !m)}
+          >Mark as manually sent…</button>
+          {missingRecipient && <span id="mark-sent-needs-email" className="muted small" role="status">Add a recipient email first</span>}
           <button className="btn btn-quiet" disabled={!!busy || rewriting} onClick={() => setRegen(r => !r)}>{rewriting ? 'Rewriting…' : 'Rewrite…'}</button>
           <a className="btn btn-quiet" href={`${p.onepager_url}?preview=1`} target="_blank" rel="noreferrer">Preview one-pager</a>
           <TryLiveDemoLink className="btn btn-quiet" />
@@ -120,7 +128,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
               placeholder="e.g. Sent via Facebook message, emailed through contact form…" />
           </label>
           <div className="link-row">
-            <button className="btn" disabled={!!busy} onClick={() =>
+            <button className="btn" disabled={!!busy || missingRecipient} title={missingRecipient ? 'Add a recipient email first' : undefined} onClick={() =>
               act('mark-sent', () => api.markSentProposal(p.id, manualNote || undefined),
                 'Marked as sent. Follow-ups scheduled.',
                 async () => { setConfirmingManual(false); setManualNote(''); await reload(p.id); })}>

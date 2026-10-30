@@ -125,8 +125,17 @@ async function gmail(method, path, { data, params } = {}) {
     const res = await axios({ method, url: `${API}${path}`, data, params, timeout: 20000, headers: { Authorization: `Bearer ${token}` } });
     return res.data;
   } catch (err) {
-    const msg = err.response?.data?.error?.message || err.message;
-    throw new Error(`Gmail API: ${msg}`);
+    const body = err.response?.data?.error;
+    const msg = body?.message || err.message;
+    const wrapped = new Error(`Gmail API: ${msg}`);
+    const status = err.response?.status;
+    if (Number.isInteger(status)) wrapped.status = status;
+    else if (body && Number.isInteger(body.code)) wrapped.status = body.code;
+    if (body?.status) wrapped.gmailStatus = String(body.status);
+    const reason = Array.isArray(body?.errors) ? body.errors[0]?.reason : null;
+    if (reason) wrapped.reason = String(reason);
+    if (typeof err.code === 'string' && !/^\d{3}$/.test(err.code)) wrapped.code = err.code;
+    throw wrapped;
   }
 }
 

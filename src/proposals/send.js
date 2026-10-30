@@ -208,6 +208,120 @@ async function sendReadiness() {
 
 const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(x || '');
 
+// Null, empty, and whitespace-only. A sent row in that state cannot be mailed
+// and must not stay due, or the sender cron retries it on every tick.
+function missingRecipient(email) {
+  return String(email ?? '').trim() === '';
+}
+
+const NETWORK_CODES = new Set([
+  'EAI_AGAIN', 'ECONNABORTED', 'ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH',
+  'ENETUNREACH', 'ENOTFOUND', 'EPIPE', 'ESOCKETTIMEDOUT', 'ETIMEDOUT',
+]);
+
+function httpStatus(err) {
+  if (!err || typeof err !== 'object') return null;
+  const nested = err.response && err.response.data && err.response.data.error;
+  const candidates = [
+    err.status, err.statusCode, err.responseCode,
+    err.response && err.response.status,
+    nested && nested.code,
+  ];
+  for (const value of candidates) {
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599) return value;
+    if (typeof value === 'string' && /^\d{3}$/.test(value)) return Number(value);
+  }
+  if (typeof err.code === 'number' && Number.isInteger(err.code) && err.code >= 100 && err.code <= 599) return err.code;
+  if (typeof err.code === 'string' && /^\d{3}$/.test(err.code)) return Number(err.code);
+  return null;
+}
+
+function errorBlob(err) {
+  if (!err || typeof err !== 'object') return String(err || '');
+  const bits = [];
+  if (err.message) bits.push(String(err.message));
+  if (err.gmailStatus) bits.push(String(err.gmailStatus));
+  if (err.reason) bits.push(String(err.reason));
+  const nested = err.response && err.response.data && err.response.data.error;
+  if (nested) {
+    if (nested.message) bits.push(String(nested.message));
+    if (nested.status) bits.push(String(nested.status));
+    if (Array.isArray(nested.errors)) {
+      for (const item of nested.errors) {
+        if (!item) continue;
+        if (item.message) bits.push(String(item.message));
+        if (item.reason) bits.push(String(item.reason));
+      }
+    }
+  }
+  if (Array.isArray(err.errors)) {
+    for (const item of err.errors) {
+      if (!item) continue;
+      if (item.message) bits.push(String(item.message));
+      if (item.reason) bits.push(String(item.reason));
+    }
+  }
+  return bits.join(' ');
+}
+
+function isNetworkFollowupError(err) {
+  const code = err && err.code;
+  if (typeof code === 'string' && NETWORK_CODES.has(code)) return true;
+  return /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|socket hang up|network error|getaddrinfo|timeout of \d+ms exceeded/i.test(errorBlob(err));
+}
+
+function isQuotaFollowupError(err) {
+  if (httpStatus(err) === 429) return true;
+  const status = String((err && err.gmailStatus) || '');
+  if (status.toUpperCase() === 'RESOURCE_EXHAUSTED') return true;
+  return /quota exceeded|rate limit|too many requests|resource_exhausted|ratelimitexceeded/i.test(errorBlob(err));
+}
+
+// Permanent: the address will not start working on a later tick.
+// Invalid or missing recipient, a 400 invalid-argument, or a rejected address.
+// Quota, 5xx, and network failures are not permanent.
+function isPermanentFollowupError(err) {
+  if (!err) return false;
+  if (isNetworkFollowupError(err) || isQuotaFollowupError(err)) return false;
+  const text = errorBlob(err);
+  // Address failures first. SMTP uses 550 for a rejected recipient, and that
+  // number also sits in the HTTP 5xx range. A rejected address does not retry.
+  if (/recipient address required|no recipients defined|missing recipient|invalid recipient/i.test(text)) return true;
+  if (/address rejected|recipients were rejected|recipient rejected|5\.1\.[013]\b|user unknown|mailbox (not found|unavailable|does not exist)/i.test(text)) return true;
+  if (Array.isArray(err.rejected) && err.rejected.length > 0) return true;
+  if (/invalid[_\s-]?argument/i.test(text)) return true;
+  const status = httpStatus(err);
+  if (status === 400 && /invalid (to |email|address|header|argument)|bad request/i.test(text)) return true;
+  return false;
+}
+
+function permanentFollowupReason(err) {
+  const text = errorBlob(err);
+  if (/recipient address required|no recipients defined|missing recipient/i.test(text)) {
+    return 'Follow-up stopped: recipient address required';
+  }
+  if (/address rejected|recipients were rejected|recipient rejected|5\.1\.[013]\b|user unknown|mailbox (not found|unavailable|does not exist)/i.test(text)
+      || (Array.isArray(err && err.rejected) && err.rejected.length > 0)) {
+    return 'Follow-up stopped: address rejected';
+  }
+  return 'Follow-up stopped: invalid recipient';
+}
+
+function transientFollowupLabel(err) {
+  if (isQuotaFollowupError(err)) return 'quota';
+  if (isNetworkFollowupError(err)) return 'network';
+  const status = httpStatus(err);
+  // HTTP 5xx. An SMTP 550 address reject is permanent and does not reach here.
+  if (status != null && status >= 500 && status <= 599) return 'server';
+  return 'later';
+}
+
+function followupSentColumn(which) {
+  if (which === 'followup1') return 'followup1_sent_at';
+  if (which === 'followup2') return 'followup2_sent_at';
+  throw new Error('Unknown follow-up');
+}
+
 /** Approve a draft and send the first email now. */
 async function approveAndSend(proposalId) {
   const { rows } = await pool.query(
@@ -317,17 +431,30 @@ async function sendDueFollowups() {
       console.error('[send] skipped follow-up: lead is archived');
       continue;
     }
+    // Stop before any claim. A claim keeps status 'sent', so a row with no
+    // recipient would fail sent_requires_recipient and would be due again
+    // next tick. One info line, then the row is no longer selected.
+    if (missingRecipient(p.to_email)) {
+      const stopped = await stopSequence(p.id, 'No recipient email');
+      if (stopped) {
+        console.info(`[send] skipped follow-up for #${p.id}: no recipient email; sequence stopped`);
+      }
+      continue;
+    }
     if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
       await stopSequence(p.id, p.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${p.stage}`);
       continue;
     }
     if (await sentToday() >= cfg.SEND_DAILY_LIMIT) break;
     const which = p.followup1_sent_at ? 'followup2' : 'followup1';
+    const sentColumn = followupSentColumn(which);
+    // Claim with the timestamp only. Status stays 'sent' — never 'sending' —
+    // so a crash or a refused update cannot leave the row stuck there.
     const claim = await pool.query(
-      `UPDATE proposals SET ${which}_sent_at = NOW() WHERE id = $1 AND ${which}_sent_at IS NULL AND status = 'sent' RETURNING id`, [p.id]);
+      `UPDATE proposals SET ${sentColumn} = NOW() WHERE id = $1 AND ${sentColumn} IS NULL AND status = 'sent' RETURNING id`, [p.id]);
     if (!claim.rows.length) continue;
-    await attachPrototypeUrl(p);
     try {
+      await attachPrototypeUrl(p);
       await (await mailer()).sendMail({
         threadId: p.thread_id || undefined,
         from: { name: SENDER.name, address: SENDER.email },
@@ -340,11 +467,34 @@ async function sendDueFollowups() {
         headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
       });
       sent++;
+      await pool.query(`UPDATE proposals SET error = NULL WHERE id = $1 AND status = 'sent'`, [p.id]);
       await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
       await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${p.to_email}.`);
     } catch (err) {
-      await pool.query(`UPDATE proposals SET ${which}_sent_at = NULL, error = $2 WHERE id = $1`, [p.id, `Follow-up failed: ${err.message}`]);
-      console.error(`[send] ✗ follow-up for #${p.id}: ${err.message}`);
+      if (isPermanentFollowupError(err)) {
+        const reason = permanentFollowupReason(err);
+        // Clear the claim in the same statement that stops the sequence.
+        // The follow-up was not sent. Status leaves 'sent', so the next tick
+        // does not select the row and does not log again.
+        await pool.query(
+          `UPDATE proposals
+              SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL
+            WHERE id = $1 AND status IN ('sent', 'sending')`,
+          [p.id, reason]);
+        console.info(`[send] stopped follow-up for #${p.id}: ${reason}`);
+      } else {
+        const label = transientFollowupLabel(err);
+        // Release the claim and leave the sequence 'sent' so a later tick
+        // retries. A 'sending' status, if one were set, is put back.
+        await pool.query(
+          `UPDATE proposals
+              SET ${sentColumn} = NULL,
+                  error = $2,
+                  status = CASE WHEN status = 'sending' THEN 'sent' ELSE status END
+            WHERE id = $1 AND status IN ('sent', 'sending')`,
+          [p.id, `Follow-up will retry: ${label}`]);
+        console.error(`[send] follow-up for #${p.id} will retry: ${label}`);
+      }
     }
   }
   // Sequences with no reply two weeks after the last follow-up are finished.
@@ -605,5 +755,6 @@ async function senderTick() {
 
 module.exports = {
   approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
+  missingRecipient, isPermanentFollowupError,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };

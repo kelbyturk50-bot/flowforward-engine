@@ -365,6 +365,13 @@ router.post('/:id/mark-sent', async (req, res) => {
       return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
     }
     if (p.status !== 'draft') { await db.query('ROLLBACK'); return res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` }); }
+    // No recipient: refuse before any status change, prospect update, or
+    // follow-up scheduling. A blank address would otherwise become a sent
+    // sequence that the follow-up cron cannot deliver.
+    if (send.missingRecipient(p.to_email)) {
+      await db.query('ROLLBACK');
+      return res.status(400).json({ error: 'Add a recipient email before marking this as sent.' });
+    }
 
     const now = new Date();
     const fu1 = new Date(now); fu1.setDate(fu1.getDate() + 3);

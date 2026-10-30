@@ -1,0 +1,604 @@
+process.env.SEND_HOURS = '0,24';
+process.env.SEND_DAYS = '0,1,2,3,4,5,6';
+process.env.SENDER_ADDRESS = '1 Test Street, Provo, UT 84601';
+process.env.CRM_API_KEY = 'test-followup-recipient-key-32chars!';
+
+require('./preload');
+
+// Follow-ups with no recipient, and Gmail errors on that path.
+// Disposable Postgres. The mail transport is a mock. Nothing is sent.
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const express = require('express');
+const { describe, it, before, after, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
+const { applySchema, applyMainSchema } = require('../src/db/migrate');
+const { sendDueFollowups, _setTransport } = require('../src/proposals/send');
+
+const API_KEY = process.env.CRM_API_KEY;
+const MARK_SENT_ERROR = 'Add a recipient email before marking this as sent.';
+
+let n = 0;
+let server;
+let apiBase;
+
+function spyConsole() {
+  const info = [];
+  const error = [];
+  const orig = { info: console.info, error: console.error };
+  console.info = (...args) => {
+    info.push(args.map(String).join(' '));
+    orig.info.apply(console, args);
+  };
+  console.error = (...args) => {
+    error.push(args.map(String).join(' '));
+    orig.error.apply(console, args);
+  };
+  return {
+    info,
+    error,
+    sendInfo() { return info.filter((line) => line.includes('[send]')); },
+    sendError() { return error.filter((line) => line.includes('[send]') || line.includes('[sender]')); },
+    restore() {
+      console.info = orig.info;
+      console.error = orig.error;
+    },
+  };
+}
+
+function useTransport(sendMail) {
+  const calls = [];
+  _setTransport({
+    async sendMail(mail) {
+      calls.push(mail);
+      if (sendMail) return sendMail(mail, calls);
+      return { messageId: `<m${calls.length}@localhost>`, threadId: `thr-${calls.length}` };
+    },
+  });
+  return calls;
+}
+
+async function lead() {
+  n += 1;
+  return insertProspect({
+    google_place_id: `test-place-fu-recip-${n}`,
+    company: `TEST: Recipient Shop ${n}`,
+    industry: 'HVAC',
+    website: null,
+    email: `test+fu${n}@example.com`,
+    contact_name: 'Dana',
+  });
+}
+
+async function insertProposal(prospectId, fields = {}) {
+  n += 1;
+  const slug = `fu-recip-${prospectId}-${n}`;
+  const hasEmail = Object.prototype.hasOwnProperty.call(fields, 'toEmail');
+  const toEmail = hasEmail ? fields.toEmail : `test+fu${n}@example.com`;
+  const status = fields.status || 'sent';
+  const draft = status === 'draft';
+  const sentAt = draft ? null : (fields.sentAt || new Date(Date.now() - 86400000));
+  const due1 = draft ? null : (fields.followup1Due === undefined ? new Date(Date.now() - 60000) : fields.followup1Due);
+  const due2 = draft ? null : (fields.followup2Due === undefined ? new Date(Date.now() + 10 * 86400000) : fields.followup2Due);
+  const sent1 = fields.followup1SentAt === undefined ? null : fields.followup1SentAt;
+  const createdAt = fields.createdAt || new Date();
+  const reviewedAt = fields.reviewedAt === undefined ? null : fields.reviewedAt;
+  const { rows } = await pool.query(
+    `INSERT INTO proposals (
+       prospect_id, version, status, slug, to_email, to_name, subject, body, followup1, followup2,
+       sent_at, followup1_due_at, followup2_due_at, followup1_sent_at, message_id, created_at, reviewed_at
+     ) VALUES (
+       $1, 1, $2, $3, $4, 'Dana', 'A note', 'Hello from the draft.', 'Checking back.', 'Last note.',
+       $5, $6, $7, $8, $9, $10, $11
+     ) RETURNING *`,
+    [prospectId, status, slug, toEmail, sentAt, due1, due2, sent1, `<${slug}@localhost>`, createdAt, reviewedAt]
+  );
+  return rows[0];
+}
+
+async function restoreRecipientConstraint() {
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'sent_requires_recipient'
+      ) THEN
+        ALTER TABLE proposals
+          ADD CONSTRAINT sent_requires_recipient CHECK (
+            status IS DISTINCT FROM 'sent'
+            OR (followup1_due_at IS NULL AND followup2_due_at IS NULL)
+            OR (
+              to_email IS NOT NULL
+              AND to_email ~ '[[:graph:]]'
+            )
+          ) NOT VALID;
+      END IF;
+    END $$;
+  `);
+}
+
+async function withConstraintDropped(fn) {
+  await pool.query('ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient');
+  try {
+    return await fn();
+  } finally {
+    await restoreRecipientConstraint();
+  }
+}
+
+async function legacySent(toEmail, fields = {}) {
+  return withConstraintDropped(async () => {
+    const prospect = await lead();
+    const proposal = await insertProposal(prospect.id, { toEmail, ...fields });
+    return { prospect, proposal };
+  });
+}
+
+async function state(id) {
+  const { rows } = await pool.query(
+    `SELECT status, to_email, stop_reason, error, followup1_sent_at, followup2_sent_at, sent_at
+       FROM proposals WHERE id = $1`,
+    [id]
+  );
+  return rows[0];
+}
+
+async function fullProposal(id) {
+  const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [id]);
+  return JSON.parse(JSON.stringify(rows[0]));
+}
+
+async function prospectStamp(id) {
+  const { rows } = await pool.query(
+    `SELECT stage, email, last_contacted_at, updated_at FROM prospects WHERE id = $1`,
+    [id]
+  );
+  return JSON.parse(JSON.stringify(rows[0]));
+}
+
+async function activities(prospectId) {
+  const { rows } = await pool.query(
+    `SELECT type, body FROM prospect_activities WHERE prospect_id = $1 ORDER BY id`,
+    [prospectId]
+  );
+  return rows;
+}
+
+async function markSent(id, note) {
+  const res = await fetch(`${apiBase}/api/proposals/${id}/mark-sent`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+    body: JSON.stringify(note == null ? {} : { note }),
+  });
+  const json = await res.json();
+  return { status: res.status, json };
+}
+
+describe('follow-ups need a recipient', { concurrency: false }, () => {
+  before(async () => {
+    await applySchema();
+    const app = express();
+    app.use(express.json());
+    app.use('/api', require('../src/api/auth'));
+    app.use('/api/proposals', require('../src/api/proposals'));
+    server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    apiBase = `http://127.0.0.1:${server.address().port}`;
+  });
+
+  beforeEach(async () => {
+    await resetDb();
+    useTransport();
+  });
+
+  after(async () => {
+    _setTransport(null);
+    await restoreRecipientConstraint().catch(() => {});
+    if (server) await new Promise((resolve) => server.close(resolve));
+    await closePool();
+  });
+
+  it('stops a null to_email, logs one info line, and still sends a row that has one', async () => {
+    const logs = spyConsole();
+    try {
+      const blank = await legacySent(null);
+      const prospect = await lead();
+      const good = await insertProposal(prospect.id, { toEmail: 'test+keeps@example.com' });
+      const calls = useTransport();
+      const first = await sendDueFollowups();
+      assert.equal(first.sent, 1);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].to.address, 'test+keeps@example.com');
+
+      const stopped = await state(blank.proposal.id);
+      assert.equal(stopped.status, 'stopped');
+      assert.equal(stopped.stop_reason, 'No recipient email');
+      assert.equal(stopped.followup1_sent_at, null);
+      assert.equal(stopped.to_email, null);
+      assert.notEqual(stopped.status, 'sending');
+
+      const info = logs.sendInfo();
+      assert.equal(info.length, 1);
+      assert.match(info[0], /^\[send\] skipped follow-up for #\d+: no recipient email; sequence stopped$/);
+      assert.equal(info[0].includes('@'), false);
+      assert.equal(info[0].includes('TEST:'), false);
+      assert.equal(logs.sendError().length, 0);
+
+      const infoCount = logs.info.length;
+      const errorCount = logs.error.length;
+      const second = await sendDueFollowups();
+      assert.equal(second.sent, 0);
+      assert.equal(calls.length, 1);
+      assert.equal(logs.info.length, infoCount);
+      assert.equal(logs.error.length, errorCount);
+      assert.equal((await state(blank.proposal.id)).status, 'stopped');
+      assert.equal((await state(good.id)).status, 'sent');
+      assert.ok((await state(good.id)).followup1_sent_at);
+      console.log('[followup-recipient] null to_email: stopped once; second tick silent; addressed row sent');
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it('stops an empty or whitespace to_email and does not log an error on the next tick', async () => {
+    const logs = spyConsole();
+    try {
+      const blanks = [];
+      for (const toEmail of ['', '   ', '\t', '\n', ' \t ']) {
+        blanks.push(await legacySent(toEmail));
+      }
+      const calls = useTransport();
+      const first = await sendDueFollowups();
+      assert.equal(first.sent, 0);
+      assert.equal(calls.length, 0);
+      const info = logs.sendInfo();
+      assert.equal(info.length, blanks.length);
+      for (const line of info) {
+        assert.match(line, /^\[send\] skipped follow-up for #\d+: no recipient email; sequence stopped$/);
+        assert.equal(line.includes('@'), false);
+      }
+      assert.equal(logs.sendError().length, 0);
+      for (const row of blanks) {
+        const after = await state(row.proposal.id);
+        assert.equal(after.status, 'stopped');
+        assert.equal(after.stop_reason, 'No recipient email');
+        assert.equal(after.followup1_sent_at, null);
+        assert.notEqual(after.status, 'sending');
+      }
+      const infoCount = logs.info.length;
+      const errorCount = logs.error.length;
+      await sendDueFollowups();
+      assert.equal(calls.length, 0);
+      assert.equal(logs.info.length, infoCount);
+      assert.equal(logs.error.length, errorCount);
+      console.log('[followup-recipient] blank to_email: stopped once per row; second tick silent');
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it('stops the sequence on a permanent Gmail recipient error and does not retry', async () => {
+    const logs = spyConsole();
+    try {
+      const cases = [
+        {
+          label: 'missing recipient',
+          toEmail: 'test+missing@example.com',
+          reason: 'Follow-up stopped: recipient address required',
+          error() {
+            const err = new Error('Gmail API: Recipient address required');
+            return err;
+          },
+        },
+        {
+          label: 'invalid argument',
+          toEmail: 'test+invalid@example.com',
+          reason: 'Follow-up stopped: invalid recipient',
+          error() {
+            const err = new Error('Gmail API: Request contains an invalid argument.');
+            err.status = 400;
+            err.gmailStatus = 'INVALID_ARGUMENT';
+            err.reason = 'invalidArgument';
+            return err;
+          },
+        },
+        {
+          label: 'address rejected',
+          toEmail: 'test+rejected@example.com',
+          reason: 'Follow-up stopped: address rejected',
+          followup2: true,
+          error() {
+            const err = new Error("Can't send mail - all recipients were rejected: 550 5.1.1 <test+rejected@example.com>");
+            err.responseCode = 550;
+            err.code = 'EENVELOPE';
+            err.rejected = ['test+rejected@example.com'];
+            return err;
+          },
+        },
+      ];
+      const rows = [];
+      for (const item of cases) {
+        const prospect = await lead();
+        const proposal = await insertProposal(prospect.id, {
+          toEmail: item.toEmail,
+          followup1SentAt: item.followup2 ? new Date(Date.now() - 2 * 86400000) : null,
+          followup2Due: item.followup2 ? new Date(Date.now() - 60000) : new Date(Date.now() + 10 * 86400000),
+        });
+        rows.push({ item, proposal });
+      }
+      const calls = useTransport(async (mail) => {
+        const address = mail.to.address;
+        const item = cases.find((row) => row.toEmail === address);
+        throw item.error();
+      });
+      const first = await sendDueFollowups();
+      assert.equal(first.sent, 0);
+      assert.equal(calls.length, cases.length);
+      for (const row of rows) {
+        const after = await state(row.proposal.id);
+        assert.equal(after.status, 'stopped', row.item.label);
+        assert.equal(after.stop_reason, row.item.reason, row.item.label);
+        assert.equal(after.error, row.item.reason, row.item.label);
+        assert.equal(String(after.stop_reason).includes('@'), false, row.item.label);
+        assert.equal(String(after.error).includes('@'), false, row.item.label);
+        assert.notEqual(after.status, 'sending', row.item.label);
+        if (row.item.followup2) {
+          assert.ok(after.followup1_sent_at, row.item.label);
+          assert.equal(after.followup2_sent_at, null, row.item.label);
+        } else {
+          assert.equal(after.followup1_sent_at, null, row.item.label);
+        }
+      }
+      const info = logs.sendInfo();
+      assert.equal(info.length, cases.length);
+      for (const line of info) assert.equal(line.includes('@'), false);
+      assert.equal(logs.sendError().length, 0);
+      const infoCount = logs.info.length;
+      const second = await sendDueFollowups();
+      assert.equal(second.sent, 0);
+      assert.equal(calls.length, cases.length);
+      assert.equal(logs.info.length, infoCount);
+      console.log('[followup-recipient] permanent Gmail errors stopped the sequence; second tick did not retry');
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it('retries a transient Gmail error without counting it as sent or leaving status sending', async () => {
+    const logs = spyConsole();
+    try {
+      const shapes = [
+        {
+          label: '429',
+          toEmail: 'test+quota429@example.com',
+          stored: 'Follow-up will retry: quota',
+          error() {
+            const err = new Error('Quota exceeded for quota metric');
+            err.status = 429;
+            err.gmailStatus = 'RESOURCE_EXHAUSTED';
+            return err;
+          },
+        },
+        {
+          label: 'quota text',
+          toEmail: 'test+quotatext@example.com',
+          stored: 'Follow-up will retry: quota',
+          error() {
+            return new Error('Gmail API: Quota exceeded');
+          },
+        },
+        {
+          label: '500',
+          toEmail: 'test+server@example.com',
+          stored: 'Follow-up will retry: server',
+          error() {
+            const err = new Error('Gmail API: Internal error encountered.');
+            err.status = 500;
+            return err;
+          },
+        },
+        {
+          label: 'network',
+          toEmail: 'test+network@example.com',
+          stored: 'Follow-up will retry: network',
+          error() {
+            const err = new Error('connect ECONNRESET');
+            err.code = 'ECONNRESET';
+            return err;
+          },
+        },
+        {
+          label: '400 other',
+          toEmail: 'test+precondition@example.com',
+          stored: 'Follow-up will retry: later',
+          error() {
+            const err = new Error('Gmail API: Precondition check failed.');
+            err.status = 400;
+            err.gmailStatus = 'FAILED_PRECONDITION';
+            return err;
+          },
+        },
+      ];
+      const rows = [];
+      for (const item of shapes) {
+        const prospect = await lead();
+        const proposal = await insertProposal(prospect.id, { toEmail: item.toEmail });
+        rows.push({ item, proposal, during: null });
+      }
+      let fail = true;
+      const calls = useTransport(async (mail) => {
+        const row = rows.find((item) => item.item.toEmail === mail.to.address);
+        const seen = await pool.query(
+          'SELECT status, followup1_sent_at FROM proposals WHERE id = $1',
+          [row.proposal.id]
+        );
+        row.during = seen.rows[0];
+        if (fail) throw row.item.error();
+        return { messageId: `<ok-${row.proposal.id}@localhost>`, threadId: 'thr-ok' };
+      });
+
+      const first = await sendDueFollowups();
+      assert.equal(first.sent, 0);
+      assert.equal(calls.length, shapes.length);
+      for (const row of rows) {
+        assert.equal(row.during.status, 'sent', row.item.label);
+        assert.notEqual(row.during.status, 'sending', row.item.label);
+        assert.ok(row.during.followup1_sent_at, row.item.label);
+        const after = await state(row.proposal.id);
+        assert.equal(after.status, 'sent', row.item.label);
+        assert.notEqual(after.status, 'sending', row.item.label);
+        assert.equal(after.followup1_sent_at, null, row.item.label);
+        assert.equal(after.followup2_sent_at, null, row.item.label);
+        assert.equal(after.error, row.item.stored, row.item.label);
+        assert.equal(after.stop_reason, null, row.item.label);
+        assert.equal(String(after.error).includes('@'), false, row.item.label);
+      }
+      assert.equal(logs.sendInfo().length, 0);
+      assert.equal(logs.sendError().length, shapes.length);
+
+      fail = false;
+      const second = await sendDueFollowups();
+      assert.equal(second.sent, shapes.length);
+      assert.equal(calls.length, shapes.length * 2);
+      for (const row of rows) {
+        const after = await state(row.proposal.id);
+        assert.equal(after.status, 'sent', row.item.label);
+        assert.notEqual(after.status, 'sending', row.item.label);
+        assert.ok(after.followup1_sent_at, row.item.label);
+        assert.equal(after.error, null, row.item.label);
+      }
+      console.log('[followup-recipient] transient Gmail errors retried; status stayed sent; claim cleared until the retry');
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it('mark-sent returns 400 for a missing to_email and writes nothing', async () => {
+    for (const toEmail of [null, '', '   ', '\t', '\n']) {
+      const prospect = await lead();
+      const proposal = await insertProposal(prospect.id, { status: 'draft', toEmail });
+      const beforeProposal = await fullProposal(proposal.id);
+      const beforeLead = await prospectStamp(prospect.id);
+      const beforeNotes = await activities(prospect.id);
+      const res = await markSent(proposal.id, 'left a voicemail');
+      assert.equal(res.status, 400, JSON.stringify(toEmail));
+      assert.deepEqual(res.json, { error: MARK_SENT_ERROR });
+      assert.deepEqual(await fullProposal(proposal.id), beforeProposal);
+      assert.deepEqual(await prospectStamp(prospect.id), beforeLead);
+      assert.deepEqual(await activities(prospect.id), beforeNotes);
+      assert.equal(beforeProposal.status, 'draft');
+      assert.equal(beforeProposal.sent_at, null);
+      assert.equal(beforeProposal.followup1_due_at, null);
+    }
+    const okLead = await lead();
+    const ok = await insertProposal(okLead.id, { status: 'draft', toEmail: 'test+marked@example.com' });
+    const sent = await markSent(ok.id, 'left a voicemail');
+    assert.equal(sent.status, 200, JSON.stringify(sent.json));
+    assert.equal(sent.json.status, 'sent');
+    assert.ok(sent.json.followup1_due_at);
+    const leadAfter = await prospectStamp(okLead.id);
+    assert.equal(leadAfter.stage, 'contacted');
+    const notes = await activities(okLead.id);
+    assert.equal(notes.some((row) => row.body.includes('left a voicemail')), true);
+    console.log('[followup-recipient] mark-sent 400 with no row change when to_email is missing; a real address still records');
+  });
+
+  it('adds sent_requires_recipient NOT VALID and keeps a legacy sent row on boot', async () => {
+    const schema = fs.readFileSync(path.join(__dirname, '../src/db/schema.sql'), 'utf8');
+    const blockStart = schema.indexOf("conname = 'sent_requires_recipient'");
+    assert.ok(blockStart > 0);
+    const block = schema.slice(blockStart, schema.indexOf('END $$;', blockStart));
+    assert.match(block, /NOT VALID/);
+    assert.doesNotMatch(block, /UPDATE/i);
+    assert.doesNotMatch(block, /DELETE/i);
+    assert.doesNotMatch(schema, /VALIDATE CONSTRAINT sent_requires_recipient/);
+    const backfill = schema.indexOf('UPDATE proposals SET reviewed_at = created_at');
+    assert.ok(backfill > 0 && backfill < blockStart);
+
+    await pool.query('ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient');
+    const oldLead = await lead();
+    const recentLead = await lead();
+    const oldRow = await insertProposal(oldLead.id, {
+      toEmail: null,
+      createdAt: new Date('2026-10-01T00:00:00Z'),
+      reviewedAt: null,
+      sentAt: new Date('2026-10-01T00:00:00Z'),
+    });
+    const recentRow = await insertProposal(recentLead.id, {
+      toEmail: '   ',
+      createdAt: new Date('2026-10-20T00:00:00Z'),
+      reviewedAt: null,
+      sentAt: new Date('2026-10-20T00:00:00Z'),
+    });
+
+    await applyMainSchema();
+    const constraint = await pool.query(
+      `SELECT convalidated FROM pg_constraint WHERE conname = 'sent_requires_recipient'`
+    );
+    assert.equal(constraint.rows.length, 1);
+    assert.equal(constraint.rows[0].convalidated, false);
+
+    const oldAfter = await pool.query('SELECT * FROM proposals WHERE id = $1', [oldRow.id]);
+    const recentAfter = await pool.query('SELECT * FROM proposals WHERE id = $1', [recentRow.id]);
+    assert.equal(oldAfter.rows[0].status, 'sent');
+    assert.equal(oldAfter.rows[0].to_email, null);
+    assert.equal(oldAfter.rows[0].stop_reason, null);
+    assert.ok(oldAfter.rows[0].reviewed_at);
+    assert.equal(recentAfter.rows[0].status, 'sent');
+    assert.equal(recentAfter.rows[0].to_email, '   ');
+    assert.equal(recentAfter.rows[0].reviewed_at, null);
+
+    const oldStamp = JSON.parse(JSON.stringify(oldAfter.rows[0]));
+    const recentStamp = JSON.parse(JSON.stringify(recentAfter.rows[0]));
+    await applyMainSchema();
+    const still = await pool.query(
+      `SELECT convalidated FROM pg_constraint WHERE conname = 'sent_requires_recipient'`
+    );
+    assert.equal(still.rows[0].convalidated, false);
+    assert.deepEqual(JSON.parse(JSON.stringify((await pool.query('SELECT * FROM proposals WHERE id = $1', [oldRow.id])).rows[0])), oldStamp);
+    assert.deepEqual(JSON.parse(JSON.stringify((await pool.query('SELECT * FROM proposals WHERE id = $1', [recentRow.id])).rows[0])), recentStamp);
+
+    const fresh = await lead();
+    await assert.rejects(
+      () => insertProposal(fresh.id, { toEmail: null }),
+      (err) => {
+        assert.equal(err.code, '23514');
+        return true;
+      }
+    );
+    await assert.rejects(
+      () => insertProposal(fresh.id, { toEmail: '   ' }),
+      (err) => {
+        assert.equal(err.code, '23514');
+        return true;
+      }
+    );
+    const draft = await insertProposal(fresh.id, { status: 'draft', toEmail: null });
+    assert.equal(draft.status, 'draft');
+    const quiet = await pool.query(
+      `INSERT INTO proposals (prospect_id, version, status, slug, subject, body, sent_at)
+       VALUES ($1, 1, 'sent', $2, 'subj', 'the email', NOW()) RETURNING status, to_email, followup1_due_at`,
+      [fresh.id, `fu-quiet-${fresh.id}`]
+    );
+    assert.equal(quiet.rows[0].status, 'sent');
+    assert.equal(quiet.rows[0].to_email, null);
+    assert.equal(quiet.rows[0].followup1_due_at, null);
+    await assert.rejects(
+      () => pool.query(
+        `UPDATE proposals SET status = 'sent', followup1_due_at = NOW() WHERE id = $1`,
+        [draft.id]
+      ),
+      (err) => {
+        assert.equal(err.code, '23514');
+        return true;
+      }
+    );
+    const kept = await state(draft.id);
+    assert.equal(kept.status, 'draft');
+    assert.equal(kept.to_email, null);
+    console.log('[followup-recipient] sent_requires_recipient stays NOT VALID; boot left the legacy sent rows in place');
+  });
+});
