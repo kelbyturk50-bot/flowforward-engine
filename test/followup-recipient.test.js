@@ -1,5 +1,6 @@
 process.env.SEND_HOURS = '0,24';
 process.env.SEND_DAYS = '0,1,2,3,4,5,6';
+process.env.SEND_DAILY_LIMIT = '100';
 process.env.SENDER_ADDRESS = '1 Test Street, Provo, UT 84601';
 process.env.CRM_API_KEY = 'test-followup-recipient-key-32chars!';
 
@@ -18,7 +19,9 @@ const { resetDb, insertProspect, closePool, pool } = require('./fixtures');
 const { applySchema, applyMainSchema } = require('../src/db/migrate');
 const {
   sendDueFollowups, _setTransport, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
-  _beforeFollowupClaim, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
+  _beforeFollowupClaim, _beforeTransport, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
+  backoffDelayMs, backoffDelayMinutes, BACKOFF_CAP_MS, sentToday, storedRecipient,
+  _setRandom, sendReadiness, _setAlertHook,
 } = require('../src/proposals/send');
 const { missingRecipient } = require('../src/proposals/recipient');
 const cfg = require('../src/proposals/config');
@@ -125,6 +128,21 @@ async function fullProposal(id) {
   return JSON.parse(JSON.stringify(rows[0]));
 }
 
+const QA_TICK_MIN = 15;
+const QA_CEIL_MIN = 60;
+const QA_GAP_MAX_MIN = QA_CEIL_MIN + QA_TICK_MIN;
+
+async function qaAdvance(minutes = QA_TICK_MIN) {
+  const { rows } = await pool.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'proposals'
+        AND data_type LIKE 'timestamp%'`
+  );
+  if (!rows.length) return;
+  const sets = rows.map(({ column_name: c }) => `"${c}" = "${c}" - make_interval(mins => $1)`).join(', ');
+  await pool.query(`UPDATE proposals SET ${sets}`, [minutes]);
+}
+
 async function prospectStamp(id) {
   const { rows } = await pool.query(
     `SELECT stage, email, last_contacted_at, updated_at FROM prospects WHERE id = $1`,
@@ -167,6 +185,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     await resetDb();
     useTransport();
     _resetSendTestHooks();
+    _setRandom(() => 0.5);
   });
 
   after(async () => {
@@ -349,7 +368,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
         {
           label: '429',
           toEmail: 'test+quota429@example.com',
-          stored: 'Follow-up will retry: quota (1/3)',
+          stored: 'Follow-up will retry: quota',
           error() {
             const err = new Error('Quota exceeded for quota metric');
             err.status = 429;
@@ -360,7 +379,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
         {
           label: 'quota text',
           toEmail: 'test+quotatext@example.com',
-          stored: 'Follow-up will retry: quota (1/3)',
+          stored: 'Follow-up will retry: quota',
           error() {
             return new Error('Gmail API: Quota exceeded');
           },
@@ -368,7 +387,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
         {
           label: '500',
           toEmail: 'test+server@example.com',
-          stored: 'Follow-up will retry: server (1/3)',
+          stored: 'Follow-up will retry: server',
           error() {
             const err = new Error('Gmail API: Internal error encountered.');
             err.status = 500;
@@ -378,7 +397,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
         {
           label: 'network',
           toEmail: 'test+network@example.com',
-          stored: 'Follow-up will retry: network (1/3)',
+          stored: 'Follow-up will retry: network',
           error() {
             const err = new Error('connect ECONNRESET');
             err.code = 'ECONNRESET';
@@ -429,7 +448,8 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
         assert.notEqual(after.status, 'sending', row.item.label);
         assert.equal(after.followup1_sent_at, null, row.item.label);
         assert.equal(after.followup2_sent_at, null, row.item.label);
-        assert.equal(after.error, row.item.stored, row.item.label);
+        if (row.item.stored instanceof RegExp) assert.match(after.error, row.item.stored, row.item.label);
+        else assert.equal(after.error, row.item.stored, row.item.label);
         assert.equal(after.stop_reason, null, row.item.label);
         assert.equal(String(after.error).includes('@'), false, row.item.label);
       }
@@ -437,6 +457,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       assert.equal(logs.sendError().length, shapes.length);
 
       fail = false;
+      await qaAdvance(QA_GAP_MAX_MIN);
       const second = await sendDueFollowups();
       assert.equal(second.sent, shapes.length);
       assert.equal(calls.length, shapes.length * 2);
@@ -633,7 +654,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     const b = await state(second.id);
     assert.equal(a.status, 'sent');
     assert.equal(a.followup1_sent_at, null);
-    assert.equal(a.error, 'Follow-up will retry: network (1/3)');
+    assert.equal(a.error, 'Follow-up will retry: network');
     assert.equal(b.status, 'sent');
     assert.ok(b.followup1_sent_at);
     console.log('[followup-recipient] one row error left the next follow-up in the batch');
@@ -931,9 +952,15 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
         const after = await state(row.proposal.id);
         assert.equal(after.status, 'sent', row.item.name);
         assert.equal(after.followup1_sent_at, null, row.item.name);
-        assert.equal(after.error, `Follow-up will retry: ${row.item.label} (1/3)`, row.item.name);
+        if (row.item.label === 'argument') assert.equal(after.error, 'Follow-up will retry: argument (1/3)', row.item.name);
+        else assert.match(after.error, new RegExp(`^Follow-up will retry: ${row.item.label}\\b`), row.item.name);
+        if (row.item.label === 'auth') {
+          const count = await pool.query('SELECT followup_argument_attempts, first_transient_at FROM proposals WHERE id = $1', [row.proposal.id]);
+          assert.equal(Number(count.rows[0].followup_argument_attempts), 0);
+          assert.equal(count.rows[0].first_transient_at, null);
+        }
       }
-      assert.equal(logs.sendError().some((line) => line.includes('Gmail auth is not connected')), true);
+      assert.equal(logs.sendError().some((line) => line.includes('[ALERT] gmail auth halted sweep')), true);
       assert.equal(logs.sendInfo().some((line) => line.includes('stopped follow-up')), false);
       console.log('[followup-recipient] status and reason classify 5xx, quota, and auth as retries');
     } finally {
@@ -1039,7 +1066,8 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     assert.equal(row.status, 'sent');
     assert.equal(row.followup1_sent_at, null);
     assert.equal(row.stop_reason, null);
-    assert.equal(row.error, 'Follow-up will retry: smtp (1/3)');
+    assert.match(row.error, /^Follow-up will retry: smtp\b/);
+    await qaAdvance(QA_GAP_MAX_MIN);
     const second = await sendDueFollowups();
     assert.equal(second.sent, 1);
     row = await state(temp.id);
@@ -1113,7 +1141,8 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       throw err;
     });
     const seen = [];
-    for (let i = 0; i < 3; i += 1) {
+    for (let i = 0; i < 5; i += 1) {
+      await qaAdvance(QA_GAP_MAX_MIN);
       await sendDueFollowups();
       const { rows } = await pool.query(
         'SELECT status, followup_argument_attempts, error FROM proposals WHERE id = $1',
@@ -1123,11 +1152,13 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     }
     assert.equal(Number(seen[0].followup_argument_attempts), 1);
     assert.equal(seen[0].status, 'sent');
-    assert.equal(Number(seen[1].followup_argument_attempts), 2);
-    assert.match(seen[1].error, /will retry: server \(2\/3\)/);
-    assert.equal(Number(seen[2].followup_argument_attempts), 3);
-    assert.equal(seen[2].status, 'stopped');
-    assert.equal(seen[2].error, 'Follow-up stopped: Gmail rejected the message');
+    assert.equal(Number(seen[1].followup_argument_attempts), 1);
+    assert.match(seen[1].error, /will retry: server/);
+    assert.equal(Number(seen[2].followup_argument_attempts), 2);
+    assert.equal(Number(seen[3].followup_argument_attempts), 2);
+    assert.equal(Number(seen[4].followup_argument_attempts), 3);
+    assert.equal(seen[4].status, 'stopped');
+    assert.equal(seen[4].error, 'Follow-up stopped: Gmail rejected the message');
     const before = n;
     await sendDueFollowups();
     assert.equal(n, before);
@@ -1263,7 +1294,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       [smtp(450, '450 4.1.1 recipients were rejected 5.1.1'), 'transient', 'smtp'],
       [Object.assign(new Error('Can\'t send mail - all recipients were rejected'), { rejected: [] }), 'transient', 'later'],
       [Object.assign(new Error('connect ETIMEDOUT for test+x@example.com'), { code: 'ETIMEDOUT' }), 'transient', 'network'],
-      [Object.assign(new Error('Gmail API: Invalid recipient'), { status: 403 }), 'transient', 'later'],
+      [Object.assign(new Error('Gmail API: Invalid recipient'), { status: 403 }), 'permanent', 'recipient'],
       [Object.assign(new Error('Gmail API: Invalid To header'), { status: 404 }), 'transient', 'later'],
       [Object.assign(new Error('Gmail API: Invalid From header address'), { status: 400 }), 'transient', 'sender'],
     ];
@@ -1536,7 +1567,11 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     const stopped = await state(first.proposal.id);
     assert.equal(stopped.status, 'sent');
     assert.equal(stopped.followup1_sent_at, null);
-    assert.match(stopped.error, /will retry: auth \(1\/3\)/);
+    assert.match(stopped.error, /will retry: auth\b/);
+    const charged = await pool.query('SELECT followup_argument_attempts FROM proposals WHERE id = $1', [first.proposal.id]);
+    assert.equal(Number(charged.rows[0].followup_argument_attempts), 0);
+    const alert = await pool.query(`SELECT value FROM app_settings WHERE key = 'sender_alert'`);
+    assert.equal(alert.rows.length, 1);
     const later = await state(second.proposal.id);
     assert.equal(later.followup1_sent_at, null);
     assert.equal(later.error, null);
@@ -1661,4 +1696,1058 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     assert.equal(count.rows[0].status, 'draft');
     assert.equal(Number(count.rows[0].followup_argument_attempts), 0);
   });
+
+  it('QA r4: classifies RCPT-only enhanced codes, anchoring, sender, auth, and 413 as the spec lists', () => {
+    const smtp = (code, text, command = 'RCPT TO') => Object.assign(new Error(text), {
+      responseCode: code, code: 'EENVELOPE', command,
+    });
+    const rows = [
+      [smtp(550, '550 5.1.6 Recipient has moved'), 'transient', 'later'],
+      [smtp(550, '550 5.1.4 Ambiguous destination address'), 'transient', 'later'],
+      [smtp(550, '550 5.1.1 user unknown', 'DATA'), 'transient', 'later'],
+      [Object.assign(new Error('550 5.1.1 user unknown'), { responseCode: 550 }), 'transient', 'later'],
+      [smtp(550, '551 5.1.1 user not local'), 'transient', 'later'],
+      [smtp(550, 'id 12550 5.1.1 rejected'), 'transient', 'later'],
+      [smtp(550, '550 5.1.1x rejected'), 'transient', 'later'],
+      [Object.assign(new Error('Error: 550 5.1.1 user unknown'), { command: 'RCPT TO' }), 'transient', 'later'],
+      [Object.assign(new Error('550 5.1.1x user unknown'), { command: 'RCPT TO' }), 'transient', 'later'],
+      [Object.assign(new Error('Gmail API: Message bounced, see 550 5.1.1 for details'), { status: 400 }), 'transient', 'argument'],
+      [Object.assign(new Error('Gmail API: Delivery failed\n550 5.1.6 recipient moved'), { status: 400 }), 'transient', 'argument'],
+      [Object.assign(new Error('Gmail API: Invalid To header'), { status: 403 }), 'permanent', 'recipient'],
+      [Object.assign(new Error('Gmail API: Invalid recipient'), { status: 403 }), 'permanent', 'recipient'],
+      [smtp(451, '451 4.3.0 Try again later', 'MAIL FROM'), 'transient', 'sender'],
+      [Object.assign(new Error('Gmail API: Invalid address: Reply-To'), { status: 400 }), 'transient', 'sender'],
+      [Object.assign(new Error('Gmail API: Invalid Reply-To header'), { status: 400 }), 'transient', 'sender'],
+      [Object.assign(new Error('Gmail API: Invalid Reply-To address'), { status: 400 }), 'transient', 'sender'],
+      [Object.assign(new Error('Gmail API: Invalid Sender header'), { status: 400 }), 'transient', 'sender'],
+      [smtp(553, '553 5.7.1 <test+x@example.com>: Sender address rejected: not owned by user'), 'transient', 'sender'],
+      [smtp(550, '550 5.1.8 Bad sender domain'), 'transient', 'sender'],
+      [smtp(550, '550 5.1.8 Bad sender domain', 'MAIL FROM'), 'transient', 'sender'],
+      [smtp(535, '535 5.7.8 Authentication failed', 'AUTH PLAIN'), 'transient', 'auth'],
+      [Object.assign(new Error('530 5.7.0 Must issue a STARTTLS command first'), { responseCode: 530 }), 'transient', 'auth'],
+      [Object.assign(new Error('Gmail API: Request had invalid authentication credentials.'), { status: 401 }), 'transient', 'auth'],
+      [Object.assign(new Error('Gmail API: Request had insufficient authentication scopes.'), { status: 403, reason: 'insufficientPermissions' }), 'transient', 'auth'],
+      [Object.assign(new Error('Gmail API: Request payload size exceeds the limit'), { status: 413 }), 'transient', 'payload'],
+      [smtp(550, '550 Mailbox unavailable. The policy text quotes 5.1.1 later'), 'transient', 'later'],
+      [smtp(552, '552 Mailbox full. See 5.1.1'), 'transient', 'later'],
+      [smtp(554, '554 Transaction failed. Mentioned 5.1.1'), 'transient', 'later'],
+      [Object.assign(new Error('see 553 mailbox later'), { command: 'RCPT TO' }), 'transient', 'later'],
+      [Object.assign(new Error('553 mailbox name not allowed'), { command: 'RCPT TO' }), 'permanent', 'recipient'],
+    ];
+    for (const [err, kind, label] of rows) {
+      const got = classifyFollowupError(err);
+      assert.equal(got.kind, kind, err.message);
+      assert.equal(got.label, label, err.message);
+    }
+    const payloadCap = classifyFollowupError(rows.find((row) => row[0].status === 413)[0]).cap;
+    assert.ok(payloadCap === undefined || payloadCap === 3, `413 cap is ${payloadCap}`);
+    const rejectedOnly = Object.assign(new Error('550 5.1.1 user unknown'), {
+      responseCode: 550,
+      rejectedErrors: [{ command: 'RCPT TO', response: '550 5.1.1 user unknown' }],
+    });
+    assert.equal(classifyFollowupError(rejectedOnly).kind, 'permanent');
+  });
+
+  it('QA r4: a Gmail error whose detail is only in errors[] still classifies', async () => {
+    const axios = require('axios');
+    const { AxiosError } = axios;
+    const gmail = require('../src/proposals/gmail');
+    await pool.query(
+      `INSERT INTO app_settings (key, value, updated_at) VALUES ('gmail_oauth', $1::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [JSON.stringify({ refresh_token: 'test-refresh-token', email: 'test+sender@example.com' })]
+    );
+    const prev = axios.defaults.adapter;
+    axios.defaults.adapter = async (config) => {
+      if (String(config && config.url || '').includes('oauth2.googleapis.com/token')) {
+        return { data: { access_token: 'test-access', expires_in: 3600 }, status: 200, statusText: 'OK', headers: {}, config };
+      }
+      const response = {
+        data: { error: { code: 400, message: 'Invalid argument', errors: [{ reason: 'invalidArgument', message: 'Invalid To header' }] } },
+        status: 400, statusText: '', headers: {}, config,
+      };
+      throw new AxiosError('Request failed with status code 400', 'ERR_BAD_REQUEST', config, null, response);
+    };
+    try {
+      const err = await gmail.sendMail({
+        from: { name: 'Kelby', address: 'test+sender@example.com' },
+        to: { address: 'test+to@example.com' }, subject: 'TEST', text: 'hi',
+      }).then(() => null, (e) => e);
+      assert.ok(err);
+      assert.equal(classifyFollowupError(err).kind, 'permanent');
+    } finally {
+      axios.defaults.adapter = prev;
+    }
+  });
+
+  it('QA r4: an Invalid From error stops the run without stopping or charging that lead', async () => {
+    const first = await legacySent('test+fromstop@example.com');
+    const second = await legacySent('test+afterfrom@example.com');
+    let calls = 0;
+    useTransport(async (mail) => {
+      calls += 1;
+      assert.equal(mail.to.address, 'test+fromstop@example.com');
+      throw Object.assign(new Error('Gmail API: Invalid From header address'), { status: 400 });
+    });
+    await sendDueFollowups();
+    assert.equal(calls, 1);
+    const firstState = await state(first.proposal.id);
+    assert.equal(firstState.status, 'sent');
+    assert.match(firstState.error, /^Follow-up will retry: sender\b/);
+    const count = await pool.query('SELECT followup_argument_attempts, first_transient_at FROM proposals WHERE id = $1', [first.proposal.id]);
+    assert.equal(count.rows[0].first_transient_at, null);
+    assert.equal(Number(count.rows[0].followup_argument_attempts), 0);
+    assert.equal((await state(second.proposal.id)).error, null);
+    assert.equal((await state(second.proposal.id)).followup1_sent_at, null);
+  });
+
+  it('QA r4: later errors (551) do not stop the run, share the cap, and stop after 3 ticks', async () => {
+    const a = await legacySent('test+later-a@example.com');
+    const b = await legacySent('test+later-b@example.com');
+    let calls = 0;
+    useTransport(async () => {
+      calls += 1;
+      throw Object.assign(new Error('551 5.7.1 User not local'), { responseCode: 551, code: 'EENVELOPE', command: 'RCPT TO' });
+    });
+    await sendDueFollowups();
+    assert.equal(calls, 2);
+    assert.match((await state(a.proposal.id)).error, /later \(1\/3\)/);
+    await sendDueFollowups();
+    await sendDueFollowups();
+    for (const row of [a, b]) {
+      const s = await state(row.proposal.id);
+      assert.equal(s.status, 'stopped');
+      assert.equal(s.stop_reason, 'Follow-up stopped: later retry limit reached');
+    }
+    assert.equal(calls, 6);
+    await sendDueFollowups();
+    assert.equal(calls, 6);
+  });
+
+  it('QA r4: 413 is capped at 3 and counts attempts already stored', async () => {
+    const fresh = await legacySent('test+big-fresh@example.com');
+    const counted = await legacySent('test+big-counted@example.com');
+    await pool.query('UPDATE proposals SET followup_argument_attempts = 1 WHERE id = $1', [counted.proposal.id]);
+    useTransport(async () => {
+      throw Object.assign(new Error('Gmail API: Request payload size exceeds the limit'), { status: 413 });
+    });
+    await sendDueFollowups();
+    assert.equal((await state(fresh.proposal.id)).status, 'sent');
+    assert.equal((await state(counted.proposal.id)).status, 'sent');
+    await sendDueFollowups();
+    assert.equal((await state(fresh.proposal.id)).status, 'sent');
+    assert.equal((await state(counted.proposal.id)).status, 'stopped');
+    await sendDueFollowups();
+    for (const row of [fresh, counted]) {
+      const s = await state(row.proposal.id);
+      assert.equal(s.status, 'stopped');
+      assert.equal(s.stop_reason, 'Follow-up stopped: the message was too large');
+    }
+  });
+
+  it('QA r4: the counter increments the stored value, not the value loaded at the start of the tick', async () => {
+    const row = await legacySent('test+snapshot@example.com');
+    _beforeFollowupClaim(async (p) => {
+      await pool.query('UPDATE proposals SET followup_argument_attempts = 1 WHERE id = $1', [p.id]);
+    });
+    useTransport(async () => {
+      throw Object.assign(new Error('Gmail API: Invalid thread_id'), { status: 400, reason: 'badRequest' });
+    });
+    await sendDueFollowups();
+    const count = await pool.query('SELECT followup_argument_attempts FROM proposals WHERE id = $1', [row.proposal.id]);
+    assert.equal(Number(count.rows[0].followup_argument_attempts), 2);
+  });
+
+  it('QA r4: a real DB error after the transport accepted goes to manual review and is not resent', async () => {
+    const row = await legacySent('test+realdb@example.com');
+    let calls = 0;
+    useTransport(async () => {
+      calls += 1;
+      return { messageId: '<realdb@localhost>', threadId: 'thr-realdb' };
+    });
+    const orig = pool.query;
+    let tripped = false;
+    pool.query = function (sql, ...rest) {
+      if (!tripped && typeof sql === 'string' && sql.includes('followup_argument_attempts = 0, send_attempt_key = NULL')) {
+        tripped = true;
+        return Promise.reject(Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' }));
+      }
+      return orig.call(this, sql, ...rest);
+    };
+    try {
+      await sendDueFollowups();
+    } finally {
+      pool.query = orig;
+    }
+    assert.equal(tripped, true);
+    const after = await state(row.proposal.id);
+    assert.equal(after.status, 'stopped');
+    assert.equal(after.stop_reason, 'Needs manual review: the send outcome is uncertain');
+    await sendDueFollowups();
+    assert.equal(calls, 1);
+  });
+
+  it('QA r4: a live send key is left alone and an expired lease goes to manual review', async () => {
+    const live = await legacySent('test+livekey@example.com');
+    await pool.query(`UPDATE proposals SET send_attempt_key = 'live-key', send_attempted_at = NOW() WHERE id = $1`, [live.proposal.id]);
+    const calls = useTransport();
+    await sendDueFollowups();
+    assert.equal(calls.length, 0);
+    const liveAfter = await state(live.proposal.id);
+    assert.equal(liveAfter.status, 'sent');
+    assert.equal(liveAfter.stop_reason, null);
+    const expired = await legacySent('test+oldkey@example.com');
+    await pool.query(
+      `UPDATE proposals SET send_attempt_key = 'old-key', send_attempted_at = NOW() - INTERVAL '2 hours' WHERE id = $1`,
+      [expired.proposal.id]
+    );
+    await sendDueFollowups();
+    const oldAfter = await state(expired.proposal.id);
+    assert.equal(oldAfter.status, 'stopped');
+    assert.equal(oldAfter.stop_reason, 'Needs manual review: the send outcome is uncertain');
+    assert.equal(calls.length, 0);
+  });
+
+  it('QA r4: the claim rechecks stage, archive, and status', async () => {
+    const changes = [
+      (p) => pool.query(`UPDATE prospects SET stage = 'responded' WHERE id = $1`, [p.prospect_id]),
+      (p) => pool.query('UPDATE prospects SET archived_at = NOW() WHERE id = $1', [p.prospect_id]),
+      (p) => pool.query(`UPDATE proposals SET status = 'stopped' WHERE id = $1`, [p.id]),
+    ];
+    for (const change of changes) {
+      await resetDb();
+      _resetSendTestHooks();
+      await legacySent(`test+recheck-${n}@example.com`);
+      const calls = useTransport();
+      _beforeFollowupClaim(change);
+      await sendDueFollowups();
+      assert.equal(calls.length, 0);
+    }
+  });
+
+  it('QA r4: a sending row younger than 15 minutes is left alone', async () => {
+    const prospect = await lead();
+    const young = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+young@example.com' });
+    await pool.query(`UPDATE proposals SET status = 'sending', approved_at = NOW() - INTERVAL '5 minutes' WHERE id = $1`, [young.id]);
+    await sendDueFollowups();
+    assert.equal((await state(young.id)).status, 'sending');
+  });
+
+  it('QA r4: edge set excludes BOM, includes NBSP, and the TLD needs two letters', () => {
+    const { canonicalizeRecipient } = require('../src/proposals/recipient');
+    assert.equal(canonicalizeRecipient('\uFEFFtest+bom@example.com').ok, false);
+    assert.equal(canonicalizeRecipient('test+bom@example.com\uFEFF').ok, false);
+    assert.deepEqual(canonicalizeRecipient('\u00A0test+nb@example.com\u00A0'), { ok: true, value: 'test+nb@example.com', reason: null });
+    assert.equal(canonicalizeRecipient('test+tld@example.c').ok, false);
+  });
+
+  it('QA r4: a draft stores the canonical address and inbox reply_to is canonical on PATCH and send', async () => {
+    const { draftProposal, _setClient } = require('../src/proposals/draft');
+    const { FAKE_PROPOSAL } = require('./fixtures');
+    const inbox = require('../src/proposals/inbox');
+    const prospect = await insertProspect({
+      google_place_id: `test-place-canon-${n}`, company: 'TEST: Canon Shop', industry: 'HVAC', website: null, email: '\u00A0test+draftnb@example.com\u00A0',
+    });
+    _setClient({
+      messages: {
+        async create() {
+          return {
+            stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
+            content: [{ type: 'tool_use', id: 'toolu_canon', name: 'submit_proposal',
+              input: { ...FAKE_PROPOSAL, analysis: { ...FAKE_PROPOSAL.analysis, best_email: '' } } }],
+          };
+        },
+      },
+    });
+    try {
+      const drafted = await draftProposal(prospect.id);
+      assert.equal(drafted.to_email, 'test+draftnb@example.com');
+    } finally {
+      _setClient(null);
+    }
+    const replyProspect = await lead();
+    const proposal = await insertProposal(replyProspect.id, { status: 'sent', toEmail: 'test+held2@example.com' });
+    const msg = await pool.query(
+      `INSERT INTO inbox_messages (prospect_id, proposal_id, direction, dedupe_key, from_addr, subject, body)
+       VALUES ($1, $2, 'in', $3, 'test+from@example.com', 'Hi', 'Hello') RETURNING id`,
+      [replyProspect.id, proposal.id, `dedupe-canon-${proposal.id}`]
+    );
+    const item = await pool.query(
+      `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status, reply_to, reply_subject, reply_body)
+       VALUES ($1, $2, $3, 'ready', $4, 'Re: Hi', 'Thanks for the note.') RETURNING id`,
+      [replyProspect.id, proposal.id, msg.rows[0].id, '\u00A0test+replynb@example.com']
+    );
+    const calls = useTransport();
+    await assert.rejects(inbox.sendReply(item.rows[0].id), (err) => err.status === 400);
+    assert.equal(calls.length, 0);
+    const updated = await inbox.update(item.rows[0].id, { reply_to: '  test+replynb@example.com\u00A0' });
+    assert.equal(updated.reply_to, 'test+replynb@example.com');
+  });
+
+  it('storedRecipient refuses a value that canonicalizing would change', () => {
+    assert.equal(storedRecipient('test+a@example.com\u00A0'), null);
+    assert.equal(storedRecipient('  test+a@example.com'), null);
+    assert.equal(storedRecipient('test+a@example.com'), 'test+a@example.com');
+  });
+
+  it('backoff delay stays inside the spec bounds', () => {
+    for (let i = 0; i <= 20; i += 1) {
+      const rand = i / 20;
+      const n1 = backoffDelayMinutes(1, rand);
+      assert.ok(n1 >= 15 && n1 <= 18, `n=1 rand ${rand} -> ${n1}`);
+      for (const n of [3, 4, 8, 12]) {
+        const delay = backoffDelayMinutes(n, rand);
+        assert.ok(delay >= 48 && delay <= 60, `n=${n} rand ${rand} -> ${delay}`);
+      }
+      for (let n = 1; n <= 12; n += 1) {
+        const delay = backoffDelayMinutes(n, rand);
+        assert.ok(delay >= 15 && delay <= 60, `n=${n} rand ${rand} -> ${delay}`);
+      }
+    }
+    assert.equal(backoffDelayMinutes(1, 0), 15);
+    assert.equal(backoffDelayMinutes(1, 1), 18);
+    assert.equal(backoffDelayMinutes(2, 0), 24);
+    assert.equal(backoffDelayMinutes(2, 1), 36);
+    assert.equal(backoffDelayMinutes(3, 0), 48);
+    assert.equal(backoffDelayMinutes(3, 1), 60);
+    assert.equal(backoffDelayMinutes(12, 1), 60);
+    assert.ok(backoffDelayMs(1, 0) === 15 * 60 * 1000);
+    assert.ok(backoffDelayMs(20, 1) <= BACKOFF_CAP_MS);
+  });
+
+  it('a row past 72 hours of transient failure goes to manual review', async () => {
+    const row = await legacySent('test+horizon@example.com');
+    await pool.query(
+      `UPDATE proposals SET first_transient_at = NOW() - INTERVAL '73 hours' WHERE id = $1`,
+      [row.proposal.id]
+    );
+    const calls = useTransport();
+    await sendDueFollowups();
+    assert.equal(calls.length, 0);
+    const after = await state(row.proposal.id);
+    assert.equal(after.status, 'manual_review');
+    assert.equal(after.stop_reason, 'transient_max_age');
+    assert.equal(calls.length, 0);
+  });
+
+  it('a 4-tick outage leaves leads active with 0 cap attempts and they resume', async () => {
+    const cases = [
+      ['429', () => Object.assign(new Error('Quota exceeded'), { status: 429 })],
+      ['503', () => Object.assign(new Error('unavailable'), { status: 503 })],
+      ['network', () => Object.assign(new Error('connect ECONNRESET'), { code: 'ECONNRESET' })],
+    ];
+    for (const [label, makeErr] of cases) {
+      const row = await legacySent(`test+outage-${label}-${n}@example.com`);
+      let calls = 0;
+      useTransport(async () => {
+        calls += 1;
+        if (calls <= 4) throw makeErr();
+        return { messageId: `<${label}@localhost>`, threadId: `thr-${label}` };
+      });
+      for (let i = 0; i < 4; i += 1) {
+        await pool.query('UPDATE proposals SET next_retry_at = NULL WHERE id = $1', [row.proposal.id]);
+        await sendDueFollowups();
+      }
+      const mid = await pool.query(
+        'SELECT status, followup_argument_attempts, followup1_sent_at FROM proposals WHERE id = $1',
+        [row.proposal.id]
+      );
+      assert.equal(mid.rows[0].status, 'sent', label);
+      assert.equal(Number(mid.rows[0].followup_argument_attempts), 0, label);
+      assert.equal(mid.rows[0].followup1_sent_at, null, label);
+      await pool.query('UPDATE proposals SET next_retry_at = NULL WHERE id = $1', [row.proposal.id]);
+      const done = await sendDueFollowups();
+      assert.equal(done.sent, 1, label);
+      assert.ok((await state(row.proposal.id)).followup1_sent_at, label);
+    }
+  });
+
+  it('an auth failure halts the sweep, records an alert, and charges no lead', async () => {
+    const first = await legacySent('test+alert-a@example.com');
+    const second = await legacySent('test+alert-b@example.com');
+    let calls = 0;
+    useTransport(async () => {
+      calls += 1;
+      throw new Error('invalid_grant');
+    });
+    await sendDueFollowups();
+    assert.equal(calls, 1);
+    for (const row of [first, second]) {
+      const after = await state(row.proposal.id);
+      assert.equal(after.status, 'sent');
+      assert.equal(after.followup1_sent_at, null);
+      const count = await pool.query('SELECT followup_argument_attempts FROM proposals WHERE id = $1', [row.proposal.id]);
+      assert.equal(Number(count.rows[0].followup_argument_attempts), 0);
+    }
+    const alert = await pool.query(`SELECT value->>'reason' AS reason FROM app_settings WHERE key = 'sender_alert'`);
+    assert.equal(alert.rows[0].reason, 'gmail auth');
+    useTransport(async () => ({ messageId: '<cleared@localhost>', threadId: 'thr-clear' }));
+    await sendDueFollowups();
+    const gone = await pool.query(`SELECT 1 FROM app_settings WHERE key = 'sender_alert'`);
+    assert.equal(gone.rows.length, 0);
+  });
+
+  it('do_not_contact set before a retry sends nothing', async () => {
+    const row = await legacySent('test+retry-dnc@example.com');
+    useTransport(async () => {
+      throw Object.assign(new Error('connect ECONNRESET'), { code: 'ECONNRESET' });
+    });
+    await sendDueFollowups();
+    await pool.query('UPDATE proposals SET next_retry_at = NULL WHERE id = $1', [row.proposal.id]);
+    let calls = 0;
+    _beforeTransport(async (p) => {
+      await pool.query('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [p.prospect_id]);
+    });
+    useTransport(async () => {
+      calls += 1;
+      return { messageId: '<nope@localhost>', threadId: 'thr-nope' };
+    });
+    await sendDueFollowups();
+    assert.equal(calls, 0);
+    const after = await state(row.proposal.id);
+    assert.equal(after.followup1_sent_at, null);
+    assert.equal(after.status, 'stopped');
+    assert.equal(after.stop_reason, 'Lead is do-not-contact');
+  });
+
+  it('rechecks do_not_contact, opt-out, and responded after the claim and before approve sends', async () => {
+    const flags = [
+      (id) => pool.query('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [id]),
+      (id) => pool.query(`UPDATE prospects SET stage = 'lost' WHERE id = $1`, [id]),
+      (id) => pool.query(`UPDATE prospects SET stage = 'responded' WHERE id = $1`, [id]),
+    ];
+    for (const flag of flags) {
+      const prospect = await lead();
+      const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: `test+approve-${prospect.id}@example.com` });
+      const calls = useTransport();
+      _beforeTransport(async () => { await flag(prospect.id); });
+      const res = await fetch(`${apiBase}/api/proposals/${draft.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      assert.equal(res.status, 409);
+      assert.equal(calls.length, 0);
+      assert.equal((await state(draft.id)).status, 'draft');
+      _resetSendTestHooks();
+    }
+  });
+
+  it('manual review can be marked sent or returned to draft', async () => {
+    const before = await sentToday();
+    const row = await legacySent('test+resolve@example.com');
+    await pool.query(
+      `UPDATE proposals SET status = 'stopped', stop_reason = 'Needs manual review: the send outcome is uncertain', sent_at = NULL WHERE id = $1`,
+      [row.proposal.id]
+    );
+    const marked = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/mark-sent`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ note: 'It did go out' }),
+    });
+    assert.equal(marked.status, 200);
+    const after = await state(row.proposal.id);
+    assert.equal(after.status, 'sent');
+    assert.ok(after.sent_at);
+    assert.ok(await sentToday() >= before + 1);
+    const other = await legacySent('test+unsend@example.com');
+    await pool.query(
+      `UPDATE proposals SET status = 'manual_review', stop_reason = 'transient_max_age' WHERE id = $1`,
+      [other.proposal.id]
+    );
+    const back = await fetch(`${apiBase}/api/proposals/${other.proposal.id}/restore`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+    });
+    assert.equal(back.status, 200);
+    const restored = await pool.query('SELECT status, followup_argument_attempts, stop_reason FROM proposals WHERE id = $1', [other.proposal.id]);
+    assert.equal(restored.rows[0].status, 'draft');
+    assert.equal(Number(restored.rows[0].followup_argument_attempts), 0);
+    assert.equal(restored.rows[0].stop_reason, null);
+  });
+
+  it('stops a non-ASCII address as unsupported and does not mail a trimmed copy', async () => {
+    const row = await legacySent('caf\u00e9@example.com');
+    const calls = useTransport();
+    await sendDueFollowups();
+    assert.equal(calls.length, 0);
+    const after = await state(row.proposal.id);
+    assert.equal(after.status, 'stopped');
+    assert.equal(after.stop_reason, 'Unsupported recipient email');
+    assert.equal(after.to_email, 'caf\u00e9@example.com');
+  });
+
+  it('forty concurrent sweeps record every success and do not flag Gmail 400s as uncertain', async () => {
+    const successIds = [];
+    for (let i = 0; i < 40; i += 1) successIds.push((await legacySent(`test+wave${i}@example.com`)).proposal.id);
+    const before = await sentToday();
+    useTransport();
+    await Promise.all(Array.from({ length: 40 }, () => sendDueFollowups()));
+    const sentRows = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM proposals WHERE id = ANY($1::int[]) AND followup1_sent_at IS NOT NULL',
+      [successIds]
+    );
+    assert.equal(sentRows.rows[0].n, 40);
+    assert.equal(await sentToday(), before + 40);
+    const flagged = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM proposals WHERE id = ANY($1::int[]) AND stop_reason LIKE 'Needs manual review%'`,
+      [successIds]
+    );
+    assert.equal(flagged.rows[0].n, 0);
+
+    const failIds = [];
+    for (let i = 0; i < 40; i += 1) failIds.push((await legacySent(`test+g400-${i}@example.com`)).proposal.id);
+    useTransport(async () => {
+      throw Object.assign(new Error('Gmail API: Invalid thread_id'), { status: 400, reason: 'badRequest' });
+    });
+    await Promise.all(Array.from({ length: 40 }, () => sendDueFollowups()));
+    const uncertain = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM proposals
+        WHERE id = ANY($1::int[]) AND stop_reason = 'Needs manual review: the send outcome is uncertain'`,
+      [failIds]
+    );
+    assert.equal(uncertain.rows[0].n, 0);
+  });
+
+  it('a successful send resets the 72-hour streak', async () => {
+    const row = await legacySent('test+streak@example.com');
+    let calls = 0;
+    useTransport(async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('unavailable'), { status: 503 });
+      return { messageId: '<streak@localhost>', threadId: 'thr-streak' };
+    });
+    await sendDueFollowups();
+    await pool.query(
+      `UPDATE proposals SET first_transient_at = NOW() - INTERVAL '70 hours', next_retry_at = NULL WHERE id = $1`,
+      [row.proposal.id]
+    );
+    await sendDueFollowups();
+    const mid = await pool.query(
+      'SELECT status, first_transient_at, followup1_sent_at FROM proposals WHERE id = $1',
+      [row.proposal.id]
+    );
+    assert.equal(mid.rows[0].status, 'sent');
+    assert.ok(mid.rows[0].followup1_sent_at);
+    assert.equal(mid.rows[0].first_transient_at, null);
+    useTransport(async () => { throw Object.assign(new Error('unavailable'), { status: 503 }); });
+    await pool.query(`UPDATE proposals SET followup2_due_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, [row.proposal.id]);
+    await sendDueFollowups();
+    const again = await pool.query(
+      `SELECT status, first_transient_at, EXTRACT(EPOCH FROM (NOW() - first_transient_at)) AS age
+         FROM proposals WHERE id = $1`,
+      [row.proposal.id]
+    );
+    assert.equal(again.rows[0].status, 'sent');
+    assert.ok(again.rows[0].first_transient_at);
+    assert.ok(Number(again.rows[0].age) < 120);
+  });
+
+  it('an auth halt does not age a lead', async () => {
+    const row = await legacySent('test+auth-age@example.com');
+    useTransport(async () => { throw new Error('Gmail access expired. Go to Settings and click Connect Gmail again.'); });
+    await sendDueFollowups();
+    await qaAdvance((72 * 60) + 15);
+    await sendDueFollowups();
+    const after = await pool.query(
+      `SELECT status, stop_reason, first_transient_at, followup_transient_attempts, followup_argument_attempts
+         FROM proposals WHERE id = $1`,
+      [row.proposal.id]
+    );
+    assert.equal(after.rows[0].status, 'sent');
+    assert.equal(after.rows[0].stop_reason, null);
+    assert.equal(after.rows[0].first_transient_at, null);
+    assert.equal(Number(after.rows[0].followup_transient_attempts), 0);
+    assert.equal(Number(after.rows[0].followup_argument_attempts), 0);
+  });
+
+  it('sendReadiness exposes the halt and a later tick clears it', async () => {
+    const row = await legacySent('test+ready-halt@example.com');
+    const hooked = [];
+    _setAlertHook((alert) => { hooked.push(alert); });
+    const authErr = () => { throw new Error('Gmail is not connected. Go to Settings and click Connect Gmail.'); };
+    useTransport(authErr);
+    await sendDueFollowups();
+    await sendDueFollowups();
+    assert.equal(hooked.length, 1);
+    assert.equal(hooked[0].event, 'followups.halted');
+    assert.equal(hooked[0].error_class, 'auth');
+    assert.equal(hooked[0].provider, 'gmail');
+    assert.equal(JSON.stringify(hooked[0]).includes('@'), false);
+    let readiness = await sendReadiness();
+    assert.equal(readiness.halt.event, 'followups.halted');
+    assert.equal(readiness.halt.error_class, 'auth');
+    assert.equal(readiness.halt.provider, 'gmail');
+    assert.equal(readiness.halt.halted_ticks, 2);
+    assert.equal(JSON.stringify(readiness.halt).includes('@'), false);
+    _setTransport(null);
+    await sendDueFollowups();
+    assert.equal((await sendReadiness()).halt.halted_ticks, 2);
+    const stored = await pool.query(`SELECT value FROM app_settings WHERE key = 'followups.halted'`);
+    const value = stored.rows[0].value;
+    value.last_event_at = new Date(Date.now() - (2 * 60 * 60 * 1000)).toISOString();
+    await pool.query(`UPDATE app_settings SET value = $1::jsonb WHERE key = 'followups.halted'`, [JSON.stringify(value)]);
+    useTransport(authErr);
+    await sendDueFollowups();
+    assert.equal(hooked.length, 2);
+    assert.ok(hooked[1].halted_ticks >= 3);
+    assert.equal(JSON.stringify(hooked[1]).includes('@'), false);
+    useTransport(async () => ({ messageId: '<cleared-halt@localhost>', threadId: 'thr-halt' }));
+    await sendDueFollowups();
+    readiness = await sendReadiness();
+    assert.equal(readiness.halt, null);
+    assert.equal((await state(row.proposal.id)).followup1_sent_at == null, false);
+  });
+
+  // QA r6: outage recovery. Summit's formula and halt rules win where this
+  // block disagrees: 72h is status manual_review and reason transient_max_age.
+  const QA_SEND = require('../src/proposals/send');
+  const QA_GAP_MIN_MIN = QA_TICK_MIN;
+  const QA_MAX_AGE_MIN = 72 * 60;
+  const QA_OUTAGE_TICKS = 32;
+  const QA_RECOVER_TICKS = Math.ceil(QA_GAP_MAX_MIN / QA_TICK_MIN) + 1;
+
+  it('QA r6: exported backoff ceiling and max age, when present, match the spec (1h, 72h)', () => {
+    if (QA_SEND.FOLLOWUP_BACKOFF_CAP_MS !== undefined) assert.equal(Number(QA_SEND.FOLLOWUP_BACKOFF_CAP_MS), 60 * 60 * 1000);
+    if (QA_SEND.FOLLOWUP_MAX_AGE_MS !== undefined) assert.equal(Number(QA_SEND.FOLLOWUP_MAX_AGE_MS), 72 * 60 * 60 * 1000);
+  });
+
+  async function qaLeads(tag, count) {
+    const out = [];
+    for (let i = 0; i < count; i += 1) {
+      const { proposal } = await legacySent(`test+qa6-${tag}-${i}@example.com`);
+      out.push(proposal);
+    }
+    return out;
+  }
+
+  function qaGaps(ticks) {
+    return ticks.slice(1).map((t, i) => (t - ticks[i]) * QA_TICK_MIN);
+  }
+
+  function qaSeeded(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6D2B79F5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  async function qaWithRandom(rng, fn) {
+    const probe = { used: 0 };
+    const wrapped = () => { probe.used += 1; return rng(); };
+    const hook = typeof QA_SEND._setRandom === 'function' ? QA_SEND._setRandom : null;
+    const original = Math.random;
+    if (hook) hook(wrapped); else Math.random = wrapped;
+    try {
+      probe.result = await fn();
+    } finally {
+      if (hook) hook(null); else Math.random = original;
+    }
+    return probe;
+  }
+
+  function qaAssertBackoff(label, ticks, { trend = false } = {}) {
+    const gaps = qaGaps(ticks);
+    assert.ok(gaps.length >= 4, `${label}: expected several retries in 8h, got attempts at ticks ${ticks}`);
+    for (const g of gaps) {
+      assert.ok(g >= QA_GAP_MIN_MIN && g <= QA_GAP_MAX_MIN,
+        `${label}: gap ${g} min is outside ${QA_GAP_MIN_MIN}..${QA_GAP_MAX_MIN}: gaps ${gaps} min`);
+    }
+    assert.ok(gaps.some((g) => g > QA_TICK_MIN), `${label}: no backoff; retried every tick: gaps ${gaps} min`);
+    const mean = (xs) => xs.reduce((s, x) => s + x, 0) / xs.length;
+    assert.ok(mean(gaps.slice(2)) >= mean(gaps.slice(0, 2)),
+      `${label}: later gaps are shorter than the first two: gaps ${gaps} min`);
+    if (trend) {
+      const first = gaps.slice(0, 4);
+      for (let i = 1; i < first.length; i += 1) {
+        assert.ok(first[i] >= first[i - 1], `${label}: the first retries do not grow: gaps ${gaps} min`);
+      }
+      assert.ok(first[first.length - 1] > first[0], `${label}: the first retries do not grow: gaps ${gaps} min`);
+    }
+    return gaps;
+  }
+
+  async function qaRun(rows, ticks, sendMail, { allowStop = false, perTick } = {}) {
+    const byAddress = new Map(rows.map((r) => [r.to_email, r.id]));
+    const attempts = new Map(rows.map((r) => [r.id, []]));
+    let tick = 0;
+    let callsThisTick = [];
+    _setTransport({
+      async sendMail(mail) {
+        const id = byAddress.get(mail.to.address);
+        attempts.get(id).push(tick);
+        callsThisTick.push(id);
+        return sendMail({ id, tick, n: attempts.get(id).length, mail });
+      },
+    });
+    for (tick = 0; tick < ticks; tick += 1) {
+      callsThisTick = [];
+      await sendDueFollowups();
+      if (perTick) await perTick({ tick, callsThisTick: callsThisTick.length, ids: callsThisTick });
+      if (!allowStop) {
+        for (const r of rows) {
+          const s = await fullProposal(r.id);
+          assert.equal(s.status, 'sent',
+            `#${r.id} left 'sent' at tick ${tick} (${tick * QA_TICK_MIN} min): ${s.stop_reason}`);
+          assert.equal(Number(s.followup_argument_attempts), 0,
+            `#${r.id} was charged a capped attempt at tick ${tick}: ${s.error}`);
+        }
+      }
+      await qaAdvance();
+    }
+    return attempts;
+  }
+
+  async function qaRecover(rows, label) {
+    const sentAt = new Map();
+    await qaRun(rows, QA_RECOVER_TICKS, ({ id }) => {
+      sentAt.set(id, true);
+      return { messageId: `<qa6-${label.replace(/\W+/g, '-')}-${id}@localhost>`, threadId: `thr-qa6-${id}` };
+    });
+    for (const r of rows) {
+      const s = await fullProposal(r.id);
+      assert.ok(sentAt.has(r.id), `${label}: #${r.id} did not send within ${QA_GAP_MAX_MIN} min of recovery`);
+      assert.equal(s.status, 'sent');
+      assert.ok(s.followup1_sent_at, `${label}: follow-up 1 not recorded`);
+      assert.equal(s.followup2_sent_at, null);
+      assert.equal(s.error, null);
+      assert.equal(s.stop_reason, null);
+      assert.equal(Number(s.followup_argument_attempts), 0);
+    }
+    await pool.query(`UPDATE proposals SET followup2_due_at = NOW() - INTERVAL '1 minute' WHERE id = ANY($1)`,
+      [rows.map((r) => r.id)]);
+    const calls = useTransport();
+    await sendDueFollowups();
+    assert.equal(calls.length, rows.length, `${label}: follow-up 2 did not send on the first due tick`);
+    for (const r of rows) {
+      const s = await fullProposal(r.id);
+      assert.ok(s.followup2_sent_at, `${label}: follow-up 2 not recorded for #${r.id}`);
+      assert.equal(s.status, 'sent');
+    }
+  }
+
+  const QA_OUTAGE_LABELS = ['network', 'server', 'quota', 'smtp'];
+  const QA_PROVIDER_OUTAGES = {
+    'network ECONNRESET': () => Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+    'network ETIMEDOUT': () => Object.assign(new Error('connect ETIMEDOUT 142.250.0.1:443'), { code: 'ETIMEDOUT' }),
+    'Gmail 503': () => Object.assign(new Error('Gmail API: The service is currently unavailable.'), { status: 503 }),
+    'Gmail 429': () => Object.assign(new Error('Gmail API: Too many concurrent requests for user'), { status: 429 }),
+    'Gmail 403 rateLimitExceeded': () => Object.assign(new Error('Gmail API: User-rate limit exceeded'), {
+      status: 403, errors: [{ reason: 'rateLimitExceeded', message: 'User-rate limit exceeded' }],
+    }),
+    'SMTP 451 4xx': () => Object.assign(new Error('451 4.3.0 Temporary server error. Please try again later'), {
+      responseCode: 451, code: 'EENVELOPE', command: 'RCPT TO',
+    }),
+  };
+
+  for (const [label, makeErr] of Object.entries(QA_PROVIDER_OUTAGES)) {
+    it(`QA r6: a ${label} outage over 8h backs off with jitter under the 1h ceiling, never stops, then recovers with no restore`, async () => {
+      assert.ok(QA_OUTAGE_LABELS.includes(classifyFollowupError(makeErr()).label),
+        `${label} is not classified as an outage class`);
+      const tag = label.replace(/\W+/g, '-');
+      const fail = () => { throw makeErr(); };
+      const mid = await qaLeads(`${tag}-mid`, 1);
+      const midRun = await qaWithRandom(() => 0.5, () => qaRun(mid, QA_OUTAGE_TICKS, fail));
+      qaAssertBackoff(`${label} random=0.5`, midRun.result.get(mid[0].id), { trend: true });
+      const lo = await qaLeads(`${tag}-lo`, 1);
+      const loRun = await qaWithRandom(() => 0, () => qaRun(lo, QA_OUTAGE_TICKS, fail));
+      const loGaps = qaAssertBackoff(`${label} random=0`, loRun.result.get(lo[0].id));
+      const hi = await qaLeads(`${tag}-hi`, 1);
+      const hiRun = await qaWithRandom(() => 0.999999, () => qaRun(hi, QA_OUTAGE_TICKS, fail));
+      const hiGaps = qaAssertBackoff(`${label} random=1`, hiRun.result.get(hi[0].id));
+      if (loRun.used && hiRun.used) {
+        assert.notDeepEqual(loGaps, hiGaps, `${label}: the random value did not change the schedule (no jitter)`);
+      }
+      const rows = await qaLeads(tag, 2);
+      const seeded = await qaWithRandom(qaSeeded(120), () => qaRun(rows, QA_OUTAGE_TICKS, fail));
+      for (const r of rows) qaAssertBackoff(`${label} seeded #${r.id}`, seeded.result.get(r.id));
+      await qaRecover(rows, label);
+    });
+
+    it(`QA r6: a ${label} outage retries under 72h, recovers with no restore, and moves to manual review at 72h`, async () => {
+      const tag = `age-${label.replace(/\W+/g, '-')}`;
+      const [recover, aged] = await qaLeads(tag, 2);
+      const T72 = QA_MAX_AGE_MIN / QA_TICK_MIN;
+      const recoverAt = T72 - 16;
+      const lastTick = T72 + QA_RECOVER_TICKS;
+      let reviewedAt = null;
+      const attempts = await qaRun([recover, aged], lastTick + 1, ({ id, tick }) => {
+        if (id === recover.id && tick >= recoverAt) {
+          return { messageId: `<qa6-${tag}-${id}@localhost>`, threadId: `thr-qa6-${id}` };
+        }
+        throw makeErr();
+      }, {
+        allowStop: true,
+        perTick: async ({ tick }) => {
+          const r = await fullProposal(recover.id);
+          assert.equal(r.status, 'sent', `${label}: the recovering lead left 'sent' at tick ${tick}: ${r.stop_reason}`);
+          assert.equal(Number(r.followup_argument_attempts), 0, `${label}: recovering lead charged at tick ${tick}`);
+          const a = await fullProposal(aged.id);
+          assert.equal(Number(a.followup_argument_attempts), 0, `${label}: aged lead charged at tick ${tick}: ${a.error}`);
+          if (tick < T72) {
+            assert.equal(a.status, 'sent',
+              `${label}: moved before 72h, at ${(tick * QA_TICK_MIN / 60).toFixed(2)}h: ${a.stop_reason}`);
+          } else if (reviewedAt == null && a.status !== 'sent') {
+            reviewedAt = tick;
+          }
+        },
+      });
+      const agedTicks = attempts.get(aged.id);
+      assert.ok(agedTicks.some((t) => t < T72 && t >= T72 - QA_RECOVER_TICKS),
+        `${label}: no retry in the last ${QA_GAP_MAX_MIN} min before 72h: last attempts ${agedTicks.slice(-4)}`);
+      const a = await fullProposal(aged.id);
+      assert.ok(reviewedAt != null, `${label}: still '${a.status}' ${QA_GAP_MAX_MIN} min after 72h: ${a.error}`);
+      assert.equal(a.status, 'manual_review');
+      assert.equal(a.stop_reason, 'transient_max_age', `${label}: stop reason ${a.stop_reason}`);
+      assert.doesNotMatch(String(a.stop_reason), /address rejected|retry limit|outcome is uncertain/i,
+        `${label}: max age reused another reason: ${a.stop_reason}`);
+      assert.equal(a.followup1_sent_at, null);
+      assert.ok(agedTicks.every((t) => t <= reviewedAt), `${label}: sent after manual review`);
+      const r = await fullProposal(recover.id);
+      const recTicks = attempts.get(recover.id).filter((t) => t >= recoverAt);
+      assert.equal(recTicks.length, 1, `${label}: recovery sent ${recTicks.length} times`);
+      assert.ok(recTicks[0] - recoverAt < QA_RECOVER_TICKS, `${label}: recovery took too long`);
+      assert.ok(r.followup1_sent_at);
+      assert.equal(r.error, null);
+      assert.equal(r.stop_reason, null);
+    });
+  }
+
+  async function qaAlertRows() {
+    const { rows: tables } = await pool.query(
+      `SELECT table_name FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_name ILIKE '%alert%'`
+    );
+    let n = 0;
+    for (const { table_name: t } of tables) {
+      const { rows } = await pool.query(`SELECT COUNT(*)::int AS n FROM "${t}"`);
+      n += rows[0].n;
+    }
+    const act = await pool.query(`SELECT COUNT(*)::int AS n FROM prospect_activities WHERE type ILIKE '%alert%'`);
+    return n + act.rows[0].n;
+  }
+
+  async function qaCaptureAlerts(fn) {
+    const hooked = [];
+    const setHook = QA_SEND._setAlertHook || QA_SEND._setAlert;
+    if (typeof setHook === 'function') setHook(async (alert) => { hooked.push(alert); });
+    const lines = [];
+    const orig = { error: console.error, warn: console.warn, info: console.info };
+    for (const k of Object.keys(orig)) console[k] = (...args) => { lines.push(args.map(String).join(' ')); };
+    const before = await qaAlertRows();
+    try {
+      await fn();
+    } finally {
+      Object.assign(console, orig);
+      if (typeof setHook === 'function') setHook(null);
+    }
+    const tableRows = (await qaAlertRows()) - before;
+    const logged = lines.filter((l) => /alert/i.test(l));
+    return { hooked, tableRows, logged, lines, total: hooked.length + tableRows + logged.length };
+  }
+
+  const QA_AUTH_OUTAGES = {
+    'refresh invalid_grant': () => new Error("Couldn't refresh Gmail access: invalid_grant"),
+    'HTTP 401': () => Object.assign(new Error('Gmail API: Request had invalid authentication credentials.'), { status: 401 }),
+    'SMTP 535': () => Object.assign(new Error('Invalid login: 535-5.7.8 Username and Password not accepted'), {
+      responseCode: 535, code: 'EAUTH', command: 'AUTH PLAIN',
+    }),
+    'access expired': () => new Error('Gmail access expired. Go to Settings and click Connect Gmail again.'),
+    'token missing': () => new Error('Gmail is not connected. Go to Settings and click Connect Gmail.'),
+  };
+
+  for (const [label, makeErr] of Object.entries(QA_AUTH_OUTAGES)) {
+    it(`QA r6: an auth outage (${label}) halts each sweep, raises an alert, charges and stops no lead, then recovers`, async () => {
+      assert.equal(classifyFollowupError(makeErr()).label, 'auth', `${label} is not classified as auth`);
+      const rows = await qaLeads(`auth-${label.replace(/\W+/g, '-')}`, 3);
+      let attempts;
+      const alerts = await qaCaptureAlerts(async () => {
+        attempts = await qaRun(rows, QA_OUTAGE_TICKS, () => { throw makeErr(); }, {
+          perTick: ({ tick, callsThisTick, ids }) => {
+            assert.ok(callsThisTick <= 1,
+              `${label}: the sweep did not halt at tick ${tick}: ${callsThisTick} calls (#${ids.join(', #')})`);
+          },
+        });
+      });
+      const total = [...attempts.values()].reduce((sum, list) => sum + list.length, 0);
+      assert.ok(total >= 1 && total <= QA_OUTAGE_TICKS, `${label}: ${total} calls in ${QA_OUTAGE_TICKS} ticks`);
+      assert.ok(alerts.total >= 1, `${label}: no alert raised (hook ${alerts.hooked.length}, rows ${alerts.tableRows}, log lines ${alerts.logged.length})`);
+      for (const text of [...alerts.logged, ...alerts.hooked.map((x) => JSON.stringify(x))]) {
+        assert.equal(/@example\.com/.test(text), false, `${label}: the alert names a lead address`);
+      }
+      await qaRecover(rows, `auth ${label}`);
+    });
+  }
+
+  const QA_SENDER_ERRORS = {
+    'Invalid From header': () => Object.assign(new Error('Gmail API: Invalid From header address'), { status: 400 }),
+    'Invalid Reply-To header': () => Object.assign(new Error('Gmail API: Invalid Reply-To header'), {
+      status: 400, reason: 'invalidArgument',
+    }),
+  };
+
+  for (const [label, makeErr] of Object.entries(QA_SENDER_ERRORS)) {
+    it(`QA r6: a sender-config error (${label}) stops only the sweep and charges and stops no lead`, async () => {
+      assert.equal(classifyFollowupError(makeErr()).label, 'sender', `${label} is not sender config`);
+      const rows = await qaLeads(`sender-${label.replace(/\W+/g, '-')}`, 3);
+      const attempts = await qaRun(rows, 12, () => { throw makeErr(); }, {
+        perTick: ({ tick, callsThisTick }) => {
+          assert.ok(callsThisTick <= 1, `${label}: the sweep did not stop at tick ${tick}: ${callsThisTick} calls`);
+        },
+      });
+      const total = [...attempts.values()].reduce((sum, list) => sum + list.length, 0);
+      assert.ok(total >= 1);
+      await qaRecover(rows, `sender ${label}`);
+    });
+  }
+
+  it('QA r6: with no Gmail token and no transport, ticks send nothing and stop nothing', async () => {
+    const rows = await qaLeads('no-token', 2);
+    _setTransport(null);
+    for (let tick = 0; tick < 6; tick += 1) {
+      assert.deepEqual(await sendDueFollowups(), { sent: 0 });
+      await qaAdvance();
+    }
+    for (const r of rows) {
+      const s = await fullProposal(r.id);
+      assert.equal(s.status, 'sent');
+      assert.equal(Number(s.followup_argument_attempts), 0);
+    }
+  });
+
+  const QA_CAPPED = {
+    'Gmail 400 badRequest': {
+      label: 'argument', reason: 'Follow-up stopped: Gmail rejected the message',
+      err: () => Object.assign(new Error('Gmail API: Invalid thread_id'), { status: 400, reason: 'badRequest' }),
+    },
+    'Gmail 413': {
+      label: 'payload', reason: 'Follow-up stopped: the message was too large',
+      err: () => Object.assign(new Error('Gmail API: Request payload size exceeds the limit'), { status: 413 }),
+    },
+    unknown: {
+      label: 'later', reason: 'Follow-up stopped: later retry limit reached',
+      err: () => new Error('Unexpected mailer failure'),
+    },
+  };
+
+  for (const [label, item] of Object.entries(QA_CAPPED)) {
+    it(`QA r6: a ${label} error stops after exactly 3 attempts`, async () => {
+      assert.equal(classifyFollowupError(item.err()).label, item.label);
+      const [row] = await qaLeads(`cap-${label.replace(/\W+/g, '-')}`, 1);
+      const seen = [];
+      const attempts = await qaRun([row], 16, () => { throw item.err(); }, {
+        allowStop: true,
+        perTick: async ({ callsThisTick }) => {
+          if (!callsThisTick) return;
+          const s = await fullProposal(row.id);
+          seen.push([s.status, Number(s.followup_argument_attempts)]);
+        },
+      });
+      assert.equal(attempts.get(row.id).length, 3, `${label}: attempts at ticks ${attempts.get(row.id)}`);
+      assert.deepEqual(seen.slice(0, 2), [['sent', 1], ['sent', 2]]);
+      const s = await fullProposal(row.id);
+      assert.equal(s.status, 'stopped');
+      assert.equal(s.stop_reason, item.reason);
+      assert.equal(s.followup1_sent_at, null);
+    });
+  }
+
+  it('QA r6: 400, 413, and unknown errors share one 3-attempt count', async () => {
+    const [row] = await qaLeads('cap-shared', 1);
+    const script = [QA_CAPPED['Gmail 400 badRequest'].err, QA_CAPPED['Gmail 413'].err, QA_CAPPED.unknown.err];
+    const attempts = await qaRun([row], 16, ({ n }) => { throw script[Math.min(n, 3) - 1](); }, { allowStop: true });
+    assert.equal(attempts.get(row.id).length, 3, `attempts at ticks ${attempts.get(row.id)}`);
+    const s = await fullProposal(row.id);
+    assert.equal(s.status, 'stopped');
+    assert.equal(s.stop_reason, QA_CAPPED.unknown.reason);
+  });
+
+  it('QA r6: a permanent 550 5.1.1 stops on the first attempt, fresh or after an outage backoff', async () => {
+    const perm = () => Object.assign(new Error("Can't send mail - all recipients were rejected: 550 5.1.1 User unknown"), {
+      responseCode: 550, command: 'RCPT TO', response: '550 5.1.1 <test+qa6@example.com>: User unknown',
+    });
+    assert.equal(classifyFollowupError(perm()).kind, 'permanent');
+    const [fresh, outaged] = await qaLeads('perm', 2);
+    const attempts = await qaRun([fresh, outaged], 12, ({ id, n }) => {
+      if (id === outaged.id && n === 1) throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+      throw perm();
+    }, { allowStop: true });
+    assert.equal(attempts.get(fresh.id).length, 1);
+    assert.equal(attempts.get(outaged.id).length, 2);
+    for (const r of [fresh, outaged]) {
+      const s = await fullProposal(r.id);
+      assert.equal(s.status, 'stopped');
+      assert.equal(s.stop_reason, 'Follow-up stopped: address rejected');
+      assert.equal(Number(s.followup_argument_attempts), 0, `#${r.id}: the earlier network error was charged a capped attempt`);
+    }
+  });
+
+  it('QA r6: interleaved outage errors neither consume nor reset the capped counter', async () => {
+    const [row] = await qaLeads('interleave', 1);
+    const script = [
+      () => new Error('Unexpected mailer failure'),
+      () => Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+      () => new Error('Unexpected mailer failure'),
+      () => Object.assign(new Error('Gmail API: Backend Error'), { status: 503 }),
+      () => Object.assign(new Error('Gmail API: Too many concurrent requests for user'), { status: 429 }),
+      () => new Error('Unexpected mailer failure'),
+    ];
+    const after = [];
+    const attempts = await qaRun([row], 40, ({ n }) => { throw script[Math.min(n, script.length) - 1](); }, {
+      allowStop: true,
+      perTick: async ({ callsThisTick }) => {
+        if (!callsThisTick) return;
+        const s = await fullProposal(row.id);
+        after.push([s.status, Number(s.followup_argument_attempts)]);
+      },
+    });
+    assert.equal(attempts.get(row.id).length, script.length, `attempts at ticks ${attempts.get(row.id)}`);
+    assert.deepEqual(after.slice(0, 5), [['sent', 1], ['sent', 1], ['sent', 2], ['sent', 2], ['sent', 2]]);
+    const s = await fullProposal(row.id);
+    assert.equal(s.status, 'stopped');
+    assert.equal(s.stop_reason, 'Follow-up stopped: later retry limit reached');
+  });
+
+  const QA_RECHECK = {
+    'an outage backoff': () => Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+    'an unknown-error retry': () => new Error('Unexpected mailer failure'),
+  };
+
+  for (const [label, makeErr] of Object.entries(QA_RECHECK)) {
+    it(`QA r6: do-not-contact or a reply during ${label} stops the sequence at the next retry with no send`, async () => {
+      const [dnc, replied, control] = await qaLeads(`recheck-${label.replace(/\W+/g, '-')}`, 3);
+      const ids = new Map([[dnc.id, 'dnc'], [replied.id, 'replied'], [control.id, 'control']]);
+      let flagged = false;
+      const stoppedAt = new Map();
+      const attempts = await qaRun([dnc, replied, control], 12, () => { throw makeErr(); }, {
+        allowStop: true,
+        perTick: async ({ tick }) => {
+          for (const id of [dnc.id, replied.id]) {
+            if (!stoppedAt.has(id) && (await fullProposal(id)).status !== 'sent') stoppedAt.set(id, tick);
+          }
+          if (tick === 0) {
+            await pool.query('UPDATE prospects SET do_not_contact = TRUE WHERE id = (SELECT prospect_id FROM proposals WHERE id = $1)', [dnc.id]);
+            await pool.query(`UPDATE prospects SET stage = 'responded' WHERE id = (SELECT prospect_id FROM proposals WHERE id = $1)`, [replied.id]);
+            flagged = true;
+          }
+        },
+      });
+      assert.ok(flagged);
+      for (const [id, name] of ids) {
+        assert.equal(attempts.get(id)[0], 0, `${name}: first attempt not at tick 0`);
+      }
+      const controlTicks = attempts.get(control.id);
+      assert.ok(controlTicks.length >= 2, `control did not retry: ${controlTicks}`);
+      for (const [row, reason] of [[dnc, 'Lead is do-not-contact'], [replied, 'Lead moved to responded']]) {
+        assert.deepEqual(attempts.get(row.id), [0], `${ids.get(row.id)}: sent again after the flag`);
+        assert.ok(stoppedAt.get(row.id) <= controlTicks[1],
+          `${ids.get(row.id)}: stopped at tick ${stoppedAt.get(row.id)}, after the next retry at ${controlTicks[1]}`);
+        const s = await fullProposal(row.id);
+        assert.equal(s.status, 'stopped', `${ids.get(row.id)}: still ${s.status}`);
+        assert.equal(s.stop_reason, reason);
+        assert.equal(s.followup1_sent_at, null);
+        assert.ok(Number(s.followup_argument_attempts) <= 1, `${ids.get(row.id)}: charged after the flag`);
+      }
+    });
+  }
 });

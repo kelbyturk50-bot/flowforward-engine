@@ -234,7 +234,9 @@ async function triage(item) {
   // A rewrite Kelby asked for always comes back as a draft to review.
   if (item.status === 'rewriting' && t.reply_body && t.kind !== 'auto_reply') t.needs_reply = true;
   const automated = AUTOMATED_FROM.test(message.from_addr || '');
-  const replyTo = automated ? (proposal?.to_email || lead.email) : message.from_addr;
+  const rawReply = automated ? (proposal?.to_email || lead.email) : message.from_addr;
+  const canonicalReply = canonicalizeRecipient(rawReply);
+  const replyTo = canonicalReply.ok ? canonicalReply.value : null;
   const subjectBase = message.subject || proposal?.subject || '';
   const subject = t.reply_subject || (/^re:/i.test(subjectBase) ? subjectBase : `Re: ${subjectBase}`);
 
@@ -368,6 +370,13 @@ async function sendReply(id) {
   const claim = await pool.query(`UPDATE inbox_items SET status = 'sending' WHERE id = $1 AND status = 'ready' RETURNING id`, [id]);
   if (!claim.rows.length) throw httpError('Already sending.', 409);
   const subject = String(item.reply_subject || `Re: ${item.message_subject || ''}`).replace(/\r\n|\r|\n/g, '');
+  const gate = await s.recheckLead(item.prospect_id);
+  // Stage "responded" is set when their reply arrives. This send is the answer,
+  // so only do-not-contact and an opt-out stage block it.
+  if (gate && (gate.do_not_contact || gate.stage === 'lost' || gate.stage === 'disqualified')) {
+    await pool.query(`UPDATE inbox_items SET status = 'ready' WHERE id = $1 AND status = 'sending'`, [id]);
+    throw httpError(gate.do_not_contact ? 'This lead asked not to be contacted.' : 'This lead is no longer a send.', 409);
+  }
   let info;
   try {
     const refs = item.header_message_id ? [item.header_message_id] : undefined;

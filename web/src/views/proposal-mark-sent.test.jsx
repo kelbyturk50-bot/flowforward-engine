@@ -83,6 +83,28 @@ describe('mark as sent needs a recipient', () => {
     await userEvent.click(mark);
     expect(screen.getByRole('alertdialog', { name: 'Confirm manual send' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Yes, mark as sent' })).toBeEnabled();
+    const approve = screen.getByRole('button', { name: 'Approve and send' });
+    expect(approve).not.toHaveAttribute('aria-describedby');
+    await userEvent.click(approve);
+    expect(screen.getByRole('button', { name: 'Send it' })).toBeEnabled();
+  });
+
+  it('points Approve at the helper and keeps Send it off without a recipient', async () => {
+    api.proposal.mockResolvedValue({ ...base, to_email: null });
+    render(<ProposalDrawer {...props} />);
+    const approve = await screen.findByRole('button', { name: 'Approve and send' });
+    expect(approve).toBeDisabled();
+    expect(approve).toHaveAttribute('aria-describedby', 'mark-sent-needs-email');
+  });
+
+  it('does not strip a leading BOM from To on blur', async () => {
+    api.proposal.mockResolvedValue({ ...base, to_email: '\uFEFFtest+a@peak.test' });
+    render(<ProposalDrawer {...props} />);
+    const input = await screen.findByLabelText('To (email)');
+    input.focus();
+    await userEvent.tab();
+    expect(api.updateProposal).not.toHaveBeenCalled();
+    expect(input).toHaveValue('\uFEFFtest+a@peak.test');
   });
 
   it('points the disabled mark-sent button at the helper for screen readers', async () => {

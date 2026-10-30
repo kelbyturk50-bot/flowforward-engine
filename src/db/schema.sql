@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   prospect_id       INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
   version           INTEGER NOT NULL DEFAULT 1,
   status            TEXT NOT NULL DEFAULT 'draft',
-    -- draft | sent (sequence running) | replied | bounced | opted_out | finished | stopped | discarded | superseded
+    -- draft | sent (sequence running) | replied | bounced | opted_out | finished | stopped | discarded | superseded | manual_review
   slug              TEXT UNIQUE NOT NULL,          -- public one-pager URL: /p/<slug>
   to_email          TEXT,
   to_name           TEXT,
@@ -250,6 +250,12 @@ ALTER TABLE proposals ADD COLUMN IF NOT EXISTS followup_argument_attempts INTEGE
 -- again while this key is set. Boot adds the columns and does not fill them.
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS send_attempt_key TEXT;
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS send_attempted_at TIMESTAMPTZ;
+-- Outage backoff. These columns do not stop a lead. Boot adds them and does
+-- not fill them. next_retry_at skips a row until that time. first_transient_at
+-- is the start of the 72-hour horizon and is cleared when a send succeeds.
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS first_transient_at TIMESTAMPTZ;
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS followup_transient_attempts INTEGER NOT NULL DEFAULT 0;
 -- Drafts that existed before this column are treated as already seen
 UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND created_at < '2026-10-15';
 -- Trim edge whitespace on to_email only when the trimmed value is one

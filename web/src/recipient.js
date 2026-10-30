@@ -20,6 +20,10 @@ function trimEdges(text) {
   return text.slice(start, end);
 }
 
+export function trimRecipientEdges(email) {
+  return trimEdges(recipientText(email));
+}
+
 export function canonicalizeRecipient(raw) {
   const value = trimEdges(recipientText(raw));
   if (!value) return { ok: false, value: '', reason: 'empty' };

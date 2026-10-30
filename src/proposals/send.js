@@ -196,6 +196,22 @@ async function sentToday() {
   return Number(rows[0].n);
 }
 
+function haltView(row) {
+  if (!row || row.event !== HALT_EVENT) return null;
+  return {
+    event: HALT_EVENT,
+    error_class: row.error_class,
+    provider: row.provider,
+    first_seen: row.first_seen,
+    halted_ticks: Number(row.halted_ticks) || 0,
+  };
+}
+
+async function loadHalt() {
+  const { rows } = await pool.query('SELECT value FROM app_settings WHERE key = $1', [HALT_KEY]);
+  return rows[0] ? rows[0].value : null;
+}
+
 async function sendReadiness() {
   const problems = [];
   const mode = await mailMode();
@@ -205,14 +221,26 @@ async function sendReadiness() {
       : 'Set up Gmail sending: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Railway, then click Connect Gmail in Settings.');
   }
   if (!SENDER.address) problems.push('Add SENDER_ADDRESS (a mailing address for the email footer; the law requires one).');
+  problems.halt = haltView(await loadHalt());
   return problems;
 }
 
 const MANUAL_REVIEW = 'Needs manual review: the send outcome is uncertain';
+const TRANSIENT_MAX_AGE = 'transient_max_age';
+const MANUAL_REVIEW_STATUS = 'manual_review';
 const STALE_SENDING = '15 minutes';
 const ATTEMPT_CAP = 3;
+const FOLLOWUP_SWEEP_LOCK = 89089017;
+const FOLLOWUP_BACKOFF_CAP_MS = 60 * 60 * 1000;
+const FOLLOWUP_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+const BACKOFF_CAP_MS = FOLLOWUP_BACKOFF_CAP_MS;
+const SENDER_ALERT_KEY = 'sender_alert';
+const HALT_KEY = 'followups.halted';
+const HALT_EVENT = 'followups.halted';
+const OUTAGE_LABELS = new Set(['quota', 'server', 'network', 'smtp']);
 
 let beforeFollowupClaim = null;
+let beforeTransport = null;
 let failNextRelease = false;
 let failNextPostSend = false;
 
@@ -225,6 +253,11 @@ function _beforeFollowupClaim(fn) {
   beforeFollowupClaim = fn;
 }
 
+function _beforeTransport(fn) {
+  testOnly('_beforeTransport');
+  beforeTransport = fn;
+}
+
 function _failNextRelease() {
   testOnly('_failNextRelease');
   failNextRelease = true;
@@ -235,11 +268,48 @@ function _failNextPostSend() {
   failNextPostSend = true;
 }
 
+let randomSource = null;
+let alertHook = null;
+
+function _setRandom(fn) {
+  testOnly('_setRandom');
+  randomSource = typeof fn === 'function' ? fn : null;
+}
+
+function _setAlertHook(fn) {
+  testOnly('_setAlertHook');
+  alertHook = typeof fn === 'function' ? fn : null;
+}
+
 function _resetSendTestHooks() {
   testOnly('_resetSendTestHooks');
   beforeFollowupClaim = null;
+  beforeTransport = null;
   failNextRelease = false;
   failNextPostSend = false;
+  randomSource = null;
+  alertHook = null;
+}
+
+function unitRandom(rand) {
+  const raw = rand == null ? (randomSource ? randomSource() : Math.random()) : rand;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+// Minutes: clamp(min(60, 15 * 2^(n-1)) * U(0.8, 1.2), 15, 60).
+// n is the transient attempt in the current streak. U comes from _setRandom.
+function backoffDelayMinutes(attempt, rand) {
+  const n = Math.max(1, Number(attempt) || 1);
+  const u = 0.8 + unitRandom(rand) * 0.4;
+  const slot = Math.min(60, 15 * (2 ** (n - 1)));
+  const raw = Math.round((slot * u) * 1e6) / 1e6;
+  return Math.min(60, Math.max(15, raw));
+}
+
+function backoffDelayMs(attempt, rand) {
+  return backoffDelayMinutes(attempt, rand) * 60 * 1000;
 }
 
 function envelopeTo(name, address) {
@@ -422,20 +492,39 @@ function isTemporarySmtp(err) {
 
 function isPermanentSmtpRecipient(err) {
   if (!atCommand(err, 'RCPT TO')) return false;
+  // MAIL FROM is sender/config even when the text looks like a recipient bounce.
   if (atCommand(err, 'MAIL FROM')) return false;
-  const code = smtpCode(err);
-  const anchored = firstAnchoredEnhanced(err);
-  const replyCode = code != null ? code : (anchored && anchored.code);
-  if (replyCode === 553) return true;
-  if (replyCode == null || replyCode < 500) return false;
-  return !!(anchored && PERMANENT_ENHANCED.has(anchored.enhanced));
+  let code = smtpCode(err);
+  let enhanced = null;
+  if (code == null) {
+    const lead = leadingSmtpReply(err && err.message);
+    if (!lead) return false;
+    code = lead.code;
+    enhanced = lead.enhanced;
+  } else {
+    const anchored = firstAnchoredEnhanced(err);
+    if (anchored && anchored.code === code) enhanced = anchored.enhanced;
+  }
+  if (code === 553) return true;
+  if (code == null || code < 500) return false;
+  return !!(enhanced && PERMANENT_ENHANCED.has(enhanced));
+}
+
+function isSenderWording(text) {
+  return /invalid\s+(?:from|reply-to|sender)\s+(?:header|address)|invalid address in from header|invalid address:\s*reply-to|sender address rejected/i.test(String(text || ''));
 }
 
 function isSenderConfig(err) {
   if (atCommand(err, 'MAIL FROM')) return true;
-  if (/invalid from header|\bfrom address\b|invalid address in from header|invalid address:\s*reply-to|sender address rejected/i.test(errorBlob(err))) return true;
+  if (isSenderWording(errorBlob(err))) return true;
   const anchored = firstAnchoredEnhanced(err);
   return !!(anchored && anchored.enhanced === '5.1.8');
+}
+
+function leadingSmtpReply(text) {
+  const match = String(text || '').match(/^\s*(\d{3})(?:[ \t]+(5\.\d{1,3}\.\d{1,3}))?\b/);
+  if (!match) return null;
+  return { code: Number(match[1]), enhanced: match[2] || null };
 }
 
 function namesRecipient(err) {
@@ -454,7 +543,7 @@ function isGmailPermanentRecipient(err) {
   const status = httpStatus(err);
   if (status != null && status !== 400 && status !== 403) return false;
   if (/invalid from header|\bfrom address\b/i.test(errorBlob(err))) return false;
-  if (status === 403) return /invalid to header/i.test(errorBlob(err)) || gmailRecipientReply(err);
+  if (status === 403) return /invalid to header|invalid recipient/i.test(errorBlob(err)) || gmailRecipientReply(err);
   return namesRecipient(err) || (status === 400 && gmailRecipientReply(err));
 }
 
@@ -465,7 +554,7 @@ function isAuthFollowupError(err) {
   const code = smtpCode(err);
   if (code === 535 || code === 530) return true;
   if (httpStatus(err) === 401) return true;
-  return /invalid_grant|gmail access expired|insufficient permissions/i.test(errorBlob(err));
+  return /invalid_grant|gmail access expired|insufficient permissions|gmail is not connected|token missing/i.test(errorBlob(err));
 }
 
 function classifyFollowupError(err) {
@@ -479,7 +568,7 @@ function classifyFollowupError(err) {
   if (status === 429 || ((status === 400 || status === 403) && isQuotaReason(err))) {
     return { kind: 'transient', label: 'quota' };
   }
-  if (status === 413) return { kind: 'transient', label: 'payload', cap: 1 };
+  if (status === 413) return { kind: 'transient', label: 'payload' };
   if (isNetworkFollowupError(err)) return { kind: 'transient', label: 'network' };
   if (status === 400 || hasReason(err, [
     'badRequest', 'invalidArgument', 'failedPrecondition',
@@ -558,8 +647,12 @@ function attemptCap(klass) {
 function capStopReason(label) {
   if (label === 'argument') return 'Follow-up stopped: Gmail rejected the message';
   if (label === 'payload') return 'Follow-up stopped: the message was too large';
-  if (label === 'auth' || label === 'sender') return 'Follow-up stopped: Gmail auth is not connected';
+  if (label === 'later') return 'Follow-up stopped: later retry limit reached';
   return `Follow-up stopped: ${label} retry limit reached`;
+}
+
+function isOutageClass(klass) {
+  return !!(klass && !klass.sweep && OUTAGE_LABELS.has(klass.label));
 }
 
 function uncertainSend(err) {
@@ -608,6 +701,19 @@ async function approveAndSend(proposalId) {
   // The prototype link's 14 days start when it is first shared.
   try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }
   await attachPrototypeUrl(p);
+  const gate = await recheckLead(p.prospect_id);
+  const block = leadBlocksSend(gate);
+  if (block) {
+    await pool.query(
+      `UPDATE proposals
+          SET status = 'draft', approved_at = NULL, send_attempt_key = NULL
+        WHERE id = $1 AND status = 'sending' AND send_attempt_key = $2`,
+      [p.id, attemptKey]);
+    const message = block === 'do_not_contact'
+      ? `${p.company} is marked do-not-contact.`
+      : `Lead moved to ${gate && gate.stage}.`;
+    throw Object.assign(new Error(message), { status: 409 });
+  }
 
   let info;
   let mailed = false;
@@ -642,13 +748,33 @@ async function approveAndSend(proposalId) {
   }
 
   const [d1, d2] = cfg.FOLLOWUP_DAYS;
-  const { rows: updated } = await pool.query(
-    `UPDATE proposals SET status = 'sent', sent_at = NOW(), message_id = $2, thread_id = $5, error = NULL,
-            send_attempt_key = NULL, followup_argument_attempts = 0,
-            followup1_due_at = CASE WHEN COALESCE(followup1, '') <> '' THEN NOW() + make_interval(days => $3) END,
-            followup2_due_at = CASE WHEN COALESCE(followup2, '') <> '' THEN NOW() + make_interval(days => $4) END
-      WHERE id = $1 RETURNING *`,
-    [p.id, info.messageId || null, d1 ?? 3, d2 ?? 10, info.threadId || null]);
+  let updated;
+  try {
+    const result = await pool.query(
+      `UPDATE proposals SET status = 'sent', sent_at = NOW(), message_id = $2, thread_id = $5, error = NULL,
+              send_attempt_key = NULL, followup_argument_attempts = 0,
+              followup1_due_at = CASE WHEN COALESCE(followup1, '') <> '' THEN NOW() + make_interval(days => $3) END,
+              followup2_due_at = CASE WHEN COALESCE(followup2, '') <> '' THEN NOW() + make_interval(days => $4) END
+        WHERE id = $1 AND status = 'sending' AND send_attempt_key = $6
+        RETURNING *`,
+      [p.id, info.messageId || null, d1 ?? 3, d2 ?? 10, info.threadId || null, attemptKey]);
+    if (!result.rowCount) {
+      console.error(`[send] first send success write matched 0 rows for #${p.id}`);
+      await pool.query(
+        `UPDATE proposals SET status = 'stopped', stop_reason = $2, error = $2 WHERE id = $1 AND status = 'sending'`,
+        [p.id, MANUAL_REVIEW]);
+      throw Object.assign(new Error(MANUAL_REVIEW), { status: 409 });
+    }
+    updated = result.rows;
+  } catch (err) {
+    if (err && err.status === 409) throw err;
+    console.error(`[send] first send success write failed: ${err && err.code || 'error'}`);
+    await pool.query(
+      `UPDATE proposals SET status = 'stopped', stop_reason = $2, error = $2 WHERE id = $1 AND status = 'sending'`,
+      [p.id, MANUAL_REVIEW]);
+    throw Object.assign(new Error(MANUAL_REVIEW), { status: 409 });
+  }
+  await clearSenderAlert();
 
   await pool.query(
     `UPDATE prospects SET last_contacted_at = NOW(), email = COALESCE(NULLIF(email, ''), $2),
@@ -673,7 +799,7 @@ async function stopSequence(proposalId, reason, status = 'stopped') {
 }
 
 async function loadDueFollowups() {
-  // Exclude pest names in SQL. A JS skip after LIMIT 25 would fill the batch
+  // Exclude pest names in SQL. A JS skip after LIMIT 100 would fill the batch
   // with rows that are never sent and starve every other sequence. The
   // predicate does not update those rows.
   const params = [];
@@ -685,16 +811,26 @@ async function loadDueFollowups() {
             (pr.followup1_sent_at IS NOT NULL AND pr.followup2_sent_at IS NULL AND pr.followup2_due_at <= NOW()))
         AND ${nameSql}
         AND p.archived_at IS NULL
-      ORDER BY pr.sent_at LIMIT 25`,
+        AND (pr.next_retry_at IS NULL OR pr.next_retry_at <= NOW())
+      ORDER BY pr.sent_at LIMIT 100`,
     params);
   return rows;
 }
 
+function unusableRecipientReason(email) {
+  const text = email == null ? '' : String(email);
+  const outsideAscii = text.replace(/[\u0000-\u007F]/g, '');
+  if (outsideAscii && /[\p{L}\p{N}]/u.test(outsideAscii)) return 'Unsupported recipient email';
+  return 'No recipient email';
+}
+
 async function stopUnusableRecipient(p) {
   if (!missingRecipient(p.to_email)) return false;
-  const stopped = await stopSequence(p.id, 'No recipient email');
+  const reason = unusableRecipientReason(p.to_email);
+  const stopped = await stopSequence(p.id, reason);
   if (stopped) {
-    console.info(`[send] skipped follow-up for #${p.id}: no recipient email; sequence stopped`);
+    const logged = reason === 'No recipient email' ? 'no recipient email' : reason;
+    console.info(`[send] skipped follow-up for #${p.id}: ${logged}; sequence stopped`);
   }
   return true;
 }
@@ -732,16 +868,158 @@ async function claimFollowupSend(p, sentColumn) {
   return rows.length ? key : null;
 }
 
-async function markManualReview(id, sentColumn) {
-  await pool.query(
+async function markManualReview(id, sentColumn, key) {
+  const res = await pool.query(
     `UPDATE proposals
         SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL
-      WHERE id = $1 AND status IN ('sent', 'sending')`,
-    [id, MANUAL_REVIEW]);
+      WHERE id = $1 AND send_attempt_key = $3 AND status IN ('sent', 'sending')
+      RETURNING id`,
+    [id, MANUAL_REVIEW, key]);
+  if (!res.rowCount) {
+    console.error(`[send] manual review matched 0 rows for #${id}`);
+    return false;
+  }
   console.error(`[send] follow-up for #${id} needs manual review: outcome uncertain`);
+  return true;
 }
 
-async function recordTransient(p, sentColumn, klass) {
+async function recheckLead(prospectId) {
+  if (beforeTransport) await beforeTransport({ prospect_id: prospectId });
+  const { rows } = await pool.query(
+    `SELECT do_not_contact, stage, archived_at FROM prospects WHERE id = $1`,
+    [prospectId]);
+  return rows[0] || null;
+}
+
+function leadBlocksSend(row) {
+  if (!row) return 'missing';
+  if (row.archived_at) return 'archived';
+  if (row.do_not_contact) return 'do_not_contact';
+  if (ACTIVE_STAGES_TO_STOP.includes(row.stage)) return 'stage';
+  return null;
+}
+
+function haltProvider(err) {
+  if (smtpCode(err) != null) return 'smtp';
+  if (err && typeof err.command === 'string' && /AUTH/i.test(err.command)) return 'smtp';
+  return 'gmail';
+}
+
+async function saveHalt(state) {
+  await pool.query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [HALT_KEY, JSON.stringify(state)]);
+}
+
+async function emitHalt(state) {
+  const payload = {
+    event: HALT_EVENT,
+    error_class: state.error_class,
+    provider: state.provider,
+    first_seen: state.first_seen,
+    halted_ticks: state.halted_ticks,
+  };
+  const reason = state.error_class === 'auth' ? 'gmail auth' : 'sender configuration';
+  console.error(`[send] [ALERT] gmail auth halted sweep: ${reason}`);
+  console.error(`[send] [ALERT] followups.halted ${JSON.stringify(payload)}`);
+  if (alertHook) await alertHook(payload);
+  await pool.query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [SENDER_ALERT_KEY, JSON.stringify({ at: state.first_seen, reason })]);
+}
+
+async function recordHalt(klass, err) {
+  const now = new Date();
+  const existing = await loadHalt();
+  const errorClass = klass && klass.label === 'sender' ? 'sender' : 'auth';
+  const provider = haltProvider(err);
+  if (!existing || existing.event !== HALT_EVENT) {
+    const state = {
+      event: HALT_EVENT,
+      error_class: errorClass,
+      provider,
+      first_seen: now.toISOString(),
+      halted_ticks: 1,
+      last_event_at: now.toISOString(),
+    };
+    await saveHalt(state);
+    await emitHalt(state);
+    return;
+  }
+  const state = {
+    event: HALT_EVENT,
+    error_class: errorClass,
+    provider,
+    first_seen: existing.first_seen,
+    halted_ticks: (Number(existing.halted_ticks) || 0) + 1,
+    last_event_at: existing.last_event_at || existing.first_seen,
+  };
+  const last = Date.parse(state.last_event_at);
+  if (!Number.isFinite(last) || now.getTime() - last >= 60 * 60 * 1000) {
+    state.last_event_at = now.toISOString();
+    await saveHalt(state);
+    await emitHalt(state);
+  } else {
+    await saveHalt(state);
+  }
+}
+
+async function clearSenderAlert() {
+  await pool.query('DELETE FROM app_settings WHERE key = ANY($1::text[])', [[SENDER_ALERT_KEY, HALT_KEY]]);
+}
+
+async function releaseOwnedClaim(id, sentColumn, key) {
+  const res = await pool.query(
+    `UPDATE proposals
+        SET send_attempt_key = NULL, ${sentColumn} = NULL
+      WHERE id = $1 AND send_attempt_key = $2
+      RETURNING id`,
+    [id, key]);
+  if (!res.rowCount) console.error(`[send] follow-up release matched 0 rows for #${id}`);
+  return res.rowCount;
+}
+
+async function recordOutage(p, sentColumn, key, klass) {
+  const bumped = await pool.query(
+    `UPDATE proposals
+        SET followup_transient_attempts = followup_transient_attempts + 1,
+            first_transient_at = COALESCE(first_transient_at, NOW()),
+            send_attempt_key = NULL,
+            ${sentColumn} = NULL,
+            error = $2
+      WHERE id = $1 AND send_attempt_key = $3
+      RETURNING followup_transient_attempts`,
+    [p.id, `Follow-up will retry: ${klass.label}`, key]);
+  if (!bumped.rowCount) {
+    console.error(`[send] follow-up backoff matched 0 rows for #${p.id}`);
+    return;
+  }
+  const attempt = Number(bumped.rows[0].followup_transient_attempts);
+  const seconds = Math.round(backoffDelayMinutes(attempt) * 60);
+  const scheduled = await pool.query(
+    `UPDATE proposals
+        SET next_retry_at = NOW() + make_interval(secs => $2)
+      WHERE id = $1 AND send_attempt_key IS NULL
+      RETURNING next_retry_at`,
+    [p.id, seconds]);
+  const next = scheduled.rows[0] && scheduled.rows[0].next_retry_at;
+  console.error(`[send] follow-up for #${p.id} will retry: ${klass.label} attempt ${attempt} next ${next ? new Date(next).toISOString() : 'unscheduled'}`);
+}
+
+async function reapExpiredFollowupLeases() {
+  await pool.query(
+    `UPDATE proposals
+        SET status = 'stopped', stop_reason = $1, error = $1, send_attempt_key = NULL
+      WHERE status = 'sent'
+        AND send_attempt_key IS NOT NULL
+        AND send_attempted_at IS NOT NULL
+        AND send_attempted_at < NOW() - INTERVAL '${STALE_SENDING}'`,
+    [MANUAL_REVIEW]);
+}
+
+async function recordTransient(p, sentColumn, klass, key) {
   const cap = attemptCap(klass);
   const bump = async () => {
     if (failNextRelease) {
@@ -761,7 +1039,7 @@ async function recordTransient(p, sentColumn, klass) {
       next = await claimFollowupAttempt(p.id, cap);
     } catch (err2) {
       console.error(`[send] follow-up release failed: ${err2 && err2.code || 'error'}`);
-      await markManualReview(p.id, sentColumn);
+      await markManualReview(p.id, sentColumn, key);
       return;
     }
   }
@@ -770,32 +1048,53 @@ async function recordTransient(p, sentColumn, klass) {
     await pool.query(
       `UPDATE proposals
           SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL, send_attempt_key = NULL
-        WHERE id = $1 AND status IN ('sent', 'sending')`,
-      [p.id, reason]);
+        WHERE id = $1 AND send_attempt_key = $3 AND status IN ('sent', 'sending')`,
+      [p.id, reason, key]);
     const note = klass.label === 'argument' ? 'Gmail invalid argument (not the recipient)' : reason;
     console.error(`[send] stopped follow-up for #${p.id}: ${note}`);
     return;
   }
-  await pool.query(
+  const released = await pool.query(
     `UPDATE proposals
         SET send_attempt_key = NULL, ${sentColumn} = NULL, error = $2,
             status = CASE WHEN status = 'sending' THEN 'sent' ELSE status END
-      WHERE id = $1`,
-    [p.id, `Follow-up will retry: ${klass.label} (${next}/${cap})`]);
-  if (klass.label === 'auth') {
-    console.error(`[send] follow-up for #${p.id} will retry: Gmail auth is not connected (${next}/${cap})`);
-  } else if (klass.label === 'argument') {
+      WHERE id = $1 AND send_attempt_key = $3
+      RETURNING id`,
+    [p.id, `Follow-up will retry: ${klass.label} (${next}/${cap})`, key]);
+  if (!released.rowCount) {
+    console.error(`[send] follow-up retry write matched 0 rows for #${p.id}`);
+    return;
+  }
+  if (klass.label === 'argument') {
     console.error(`[send] follow-up for #${p.id} will retry: Gmail invalid argument (not the recipient) (${next}/${cap})`);
-  } else if (klass.label === 'sender') {
-    console.error(`[send] follow-up for #${p.id} sender configuration error; stopping this run (${next}/${cap})`);
   } else {
     console.error(`[send] follow-up for #${p.id} will retry: ${klass.label} (${next}/${cap})`);
   }
 }
 
-/** Send any follow-ups that are due. Called every 15 minutes. */
+/** Send any follow-ups that are due. Called every 15 minutes and from check-inbox. */
 async function sendDueFollowups() {
+  // The lock is session-level. Acquire and release it on the same client.
+  // pool.query would check the lock out on one connection and unlock on another.
+  const client = await pool.connect();
+  let held = false;
+  try {
+    const locked = await client.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', [FOLLOWUP_SWEEP_LOCK]);
+    held = !!locked.rows[0].ok;
+    if (!held) return { sent: 0, skipped: true };
+    return await sendDueFollowupsLocked();
+  } finally {
+    if (held) {
+      try { await client.query('SELECT pg_advisory_unlock($1::bigint)', [FOLLOWUP_SWEEP_LOCK]); }
+      catch (err) { console.error(`[send] follow-up sweep unlock failed: ${err && err.code || 'error'}`); }
+    }
+    client.release();
+  }
+}
+
+async function sendDueFollowupsLocked() {
   await recoverStaleSending();
+  await reapExpiredFollowupLeases();
   const rows = await loadDueFollowups();
   const ready = [];
   // Stop a sequence with no usable address before the mail and send-window
@@ -821,6 +1120,7 @@ async function sendDueFollowups() {
   }
   if (!(await mailMode()) || !SENDER.address || !inSendWindow()) return { sent: 0 };
   let sent = 0;
+  let halted = false;
   for (const p of ready) {
     try {
       if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
@@ -836,20 +1136,31 @@ async function sendDueFollowups() {
         await stopUnusableRecipient(p);
         continue;
       }
+      const aged = await pool.query(
+        `UPDATE proposals
+            SET status = $2, stop_reason = $3, error = $3, next_retry_at = NULL
+          WHERE id = $1 AND status = 'sent' AND send_attempt_key IS NULL
+            AND first_transient_at IS NOT NULL
+            AND first_transient_at <= NOW() - INTERVAL '72 hours'
+          RETURNING id`,
+        [p.id, MANUAL_REVIEW_STATUS, TRANSIENT_MAX_AGE]);
+      if (aged.rowCount) {
+        console.error(`[send] follow-up for #${p.id} reached transient_max_age`);
+        continue;
+      }
       if (beforeFollowupClaim) await beforeFollowupClaim(p);
       const attemptKey = await claimFollowupSend(p, sentColumn);
       if (!attemptKey) {
         const fresh = await reloadFollowup(p.id);
-        if (fresh && fresh.send_attempt_key && fresh.status === 'sent') {
-          await markManualReview(p.id, sentColumn);
-        } else if (fresh && (fresh.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(fresh.stage))) {
+        if (fresh && fresh.send_attempt_key) continue;
+        if (fresh && (fresh.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(fresh.stage))) {
           await stopSequence(p.id, fresh.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${fresh.stage}`);
         } else if (fresh && fresh.status === 'sent' && Number(fresh.followup_argument_attempts) >= ATTEMPT_CAP) {
           const reason = capStopReason('later');
           await pool.query(
             `UPDATE proposals
-                SET status = 'stopped', stop_reason = $2, error = $2, send_attempt_key = NULL
-              WHERE id = $1 AND status = 'sent'`,
+                SET status = 'stopped', stop_reason = $2, error = $2
+              WHERE id = $1 AND status = 'sent' AND send_attempt_key IS NULL`,
             [p.id, reason]);
           console.error(`[send] stopped follow-up for #${p.id}: ${reason}`);
         }
@@ -859,6 +1170,15 @@ async function sendDueFollowups() {
       let stopSweep = false;
       try {
         await attachPrototypeUrl(p);
+        const gate = await recheckLead(p.prospect_id);
+        const block = leadBlocksSend(gate);
+        if (block) {
+          await releaseOwnedClaim(p.id, sentColumn, attemptKey);
+          if (block === 'do_not_contact' || block === 'stage') {
+            await stopSequence(p.id, block === 'do_not_contact' ? 'Lead is do-not-contact' : `Lead moved to ${gate.stage}`);
+          }
+          continue;
+        }
         await (await mailer()).sendMail({
           threadId: p.thread_id || undefined,
           from: { name: SENDER.name, address: SENDER.email },
@@ -877,31 +1197,61 @@ async function sendDueFollowups() {
           fault.code = 'POST_SEND_WRITE';
           throw fault;
         }
-        await pool.query(
+        const wrote = await pool.query(
           `UPDATE proposals
-              SET ${sentColumn} = NOW(), error = NULL, followup_argument_attempts = 0, send_attempt_key = NULL
-            WHERE id = $1 AND status = 'sent' AND send_attempt_key = $2`,
+              SET ${sentColumn} = NOW(), error = NULL, followup_argument_attempts = 0, send_attempt_key = NULL,
+                  followup_transient_attempts = 0, first_transient_at = NULL, next_retry_at = NULL
+            WHERE id = $1 AND status = 'sent' AND send_attempt_key = $2
+            RETURNING id`,
           [p.id, attemptKey]);
-        sent++;
-        await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
-        await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${toAddress}.`);
+        if (!wrote.rowCount) {
+          console.error(`[send] follow-up success write matched 0 rows for #${p.id}`);
+        } else {
+          sent++;
+          await clearSenderAlert();
+          await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
+          await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${toAddress}.`);
+        }
       } catch (err) {
         if (mailed || uncertainSend(err)) {
-          await markManualReview(p.id, sentColumn);
+          await markManualReview(p.id, sentColumn, attemptKey);
         } else if (isPermanentFollowupError(err)) {
           const reason = permanentFollowupReason(err);
-          await pool.query(
+          const stopped = await pool.query(
             `UPDATE proposals
                 SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL, send_attempt_key = NULL
-              WHERE id = $1 AND status IN ('sent', 'sending')`,
-            [p.id, reason]);
-          console.info(`[send] stopped follow-up for #${p.id}: ${reason}`);
+              WHERE id = $1 AND send_attempt_key = $3 AND status IN ('sent', 'sending')
+              RETURNING id`,
+            [p.id, reason, attemptKey]);
+          if (!stopped.rowCount) console.error(`[send] follow-up stop matched 0 rows for #${p.id}`);
+          else console.info(`[send] stopped follow-up for #${p.id}: ${reason}`);
         } else {
           const klass = classifyFollowupError(err);
-          await recordTransient(p, sentColumn, klass);
           if (klass.sweep) {
-            console.error(`[send] stopping this follow-up run: ${klass.label}`);
+            const released = await pool.query(
+              `UPDATE proposals
+                  SET send_attempt_key = NULL, ${sentColumn} = NULL, error = $2
+                WHERE id = $1 AND send_attempt_key = $3
+                RETURNING id`,
+              [p.id, `Follow-up will retry: ${klass.label}`, attemptKey]);
+            if (!released.rowCount) console.error(`[send] follow-up release matched 0 rows for #${p.id}`);
+            await recordHalt(klass, err);
             stopSweep = true;
+            halted = true;
+          } else if (isOutageClass(klass)) {
+            const agedNow = await pool.query(
+              `UPDATE proposals
+                  SET status = $2, stop_reason = $3, error = $3, send_attempt_key = NULL,
+                      ${sentColumn} = NULL, next_retry_at = NULL
+                WHERE id = $1 AND send_attempt_key = $4
+                  AND first_transient_at IS NOT NULL
+                  AND first_transient_at <= NOW() - INTERVAL '72 hours'
+                RETURNING id`,
+              [p.id, MANUAL_REVIEW_STATUS, TRANSIENT_MAX_AGE, attemptKey]);
+            if (agedNow.rowCount) console.error(`[send] follow-up for #${p.id} reached transient_max_age`);
+            else await recordOutage(p, sentColumn, attemptKey, klass);
+          } else {
+            await recordTransient(p, sentColumn, klass, attemptKey);
           }
         }
       }
@@ -910,6 +1260,7 @@ async function sendDueFollowups() {
       logFollowupSkip(p, err);
     }
   }
+  if (!halted) await clearSenderAlert();
   // Sequences with no reply two weeks after the last follow-up are finished.
   // Archived leads stay sent. This update does not write their status or
   // next_action.
@@ -1168,7 +1519,10 @@ async function senderTick() {
 
 module.exports = {
   approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
-  missingRecipient, normalizeRecipient, isPermanentFollowupError, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
+  missingRecipient, normalizeRecipient, storedRecipient, isPermanentFollowupError, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
-  _beforeFollowupClaim, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
+  _beforeFollowupClaim, _beforeTransport, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
+  _setRandom, _setAlertHook,
+  backoffDelayMs, backoffDelayMinutes, recheckLead, BACKOFF_CAP_MS,
+  FOLLOWUP_BACKOFF_CAP_MS, FOLLOWUP_MAX_AGE_MS,
 };

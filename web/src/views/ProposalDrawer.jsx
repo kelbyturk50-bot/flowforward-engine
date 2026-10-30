@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { missingRecipient, recipientHint } from '../recipient';
+import { missingRecipient, recipientHint, trimRecipientEdges } from '../recipient';
 import { TryLiveDemoLink } from '../demo/DemoLinks';
 import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, relDate, timeAgo, toast, Stars } from '../ui';
 import { useJobs, elapsed } from '../jobs';
@@ -85,7 +85,13 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
       {/* ── Actions ── */}
       <div className="action-bar">
         {editable && <>
-          <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => setConfirming(true)}>Approve and send</button>
+          <button
+            className="btn"
+            disabled={!!busy || noRecipient}
+            title={noRecipient ? hint : undefined}
+            aria-describedby={noRecipient ? 'mark-sent-needs-email' : undefined}
+            onClick={() => setConfirming(true)}
+          >Approve and send</button>
           <button
             className="btn btn-quiet"
             disabled={!!busy || noRecipient}
@@ -124,7 +130,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <p><strong>Send to {p.to_name ? `${p.to_name} <${p.to_email}>` : p.to_email}?</strong></p>
           <p className="muted">“{p.subject}” goes out now from your Gmail. Follow-ups are scheduled for day 3 and day 10 and stop automatically if they reply, book, bounce or opt out.</p>
           <div className="link-row">
-            <button className="btn" disabled={!!busy} onClick={() => act('send', () => api.sendProposal(p.id), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>
+            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => act('send', () => api.sendProposal(p.id), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>
               {busy === 'send' ? 'Sending…' : 'Send it'}
             </button>
             <button className="btn btn-quiet" onClick={() => setConfirming(false)}>Cancel</button>
@@ -222,7 +228,7 @@ function Field({ label, value, onSave, type = 'text', disabled, rows, id }) {
   const [v, setV] = useState(value ?? '');
   useEffect(() => setV(value ?? ''), [value]);
   const commit = () => {
-    const next = type === 'email' ? v.trim() : v;
+    const next = type === 'email' ? trimRecipientEdges(v) : v;
     if (next !== v) setV(next);
     if ((value ?? '') !== next) onSave(next);
   };

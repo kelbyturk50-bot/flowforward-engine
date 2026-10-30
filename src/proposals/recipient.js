@@ -21,6 +21,10 @@ function trimEdges(text) {
   return text.slice(start, end);
 }
 
+function trimRecipientEdges(email) {
+  return trimEdges(recipientText(email));
+}
+
 function canonicalizeRecipient(raw) {
   const value = trimEdges(recipientText(raw));
   if (!value) return { ok: false, value: '', reason: 'empty' };
@@ -47,4 +51,6 @@ function recipientHint(email) {
   return 'Fix the recipient email';
 }
 
-module.exports = { canonicalizeRecipient, missingRecipient, normalizeRecipient, recipientHint };
+module.exports = {
+  canonicalizeRecipient, missingRecipient, normalizeRecipient, recipientHint, trimRecipientEdges,
+};
