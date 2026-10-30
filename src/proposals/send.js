@@ -316,28 +316,42 @@ function isAuthFollowupError(err) {
   return /invalid_grant|gmail access expired/i.test(errorBlob(err));
 }
 
-// Names the recipient or the address. A bare invalidArgument does not.
-function namesRecipient(err) {
-  if (Array.isArray(err && err.rejected) && err.rejected.length > 0) return true;
-  return /recipient address required|no recipients defined|missing recipient|invalid recipient|invalid to header|invalid address|address rejected|recipients were rejected|5\.1\.[013]\b|user unknown|mailbox (not found|unavailable|does not exist)/i.test(errorBlob(err));
+function smtpCode(err) {
+  const code = err && err.responseCode;
+  if (typeof code === 'number' && Number.isInteger(code) && code >= 400 && code <= 599) return code;
+  return null;
 }
 
-function isGenericInvalidArgument(err) {
-  if (hasReason(err, ['invalidArgument', 'INVALID_ARGUMENT'])) return true;
-  return /invalid[_\s-]?argument/i.test(errorBlob(err));
+// 421, 450, 451, 452 and any other SMTP 4xx are temporary. A rejected list
+// or the words "recipients were rejected" do not make them permanent.
+function isTemporarySmtp(err) {
+  const code = smtpCode(err);
+  return code != null && code >= 400 && code < 500;
+}
+
+// Permanent only for SMTP 5xx that name a bad recipient: 550 5.1.0, 5.1.1,
+// 5.1.3, or 553. A bare 550 without that enhanced status retries.
+function isPermanentSmtpRecipient(err) {
+  const code = smtpCode(err);
+  if (code == null || code < 500) return false;
+  if (code === 553) return true;
+  return /\b5\.1\.[013]\b/.test(errorBlob(err));
+}
+
+// Names the recipient or the address. A bare invalidArgument, badRequest,
+// or SMTP "recipients were rejected" does not.
+function namesRecipient(err) {
+  return /recipient address required|no recipients defined|missing recipient|invalid recipient|invalid to header|\binvalid address\b/i.test(errorBlob(err));
 }
 
 const ARGUMENT_ATTEMPTS = 3;
-
-function argumentAttempt(errorText) {
-  const match = String(errorText || '').match(/Follow-up will retry: argument \((\d+)\/\d+\)/);
-  return match ? Number(match[1]) : 0;
-}
 
 // Status and Gmail reason decide first. Body text is only a fallback once
 // those do not say the call is a server error, a quota error, or auth.
 function classifyFollowupError(err) {
   const status = httpStatus(err);
+  if (isTemporarySmtp(err)) return { kind: 'transient', label: 'smtp' };
+  if (isPermanentSmtpRecipient(err)) return { kind: 'permanent', label: 'recipient' };
   if (status != null && status >= 500 && status <= 599) return { kind: 'transient', label: 'server' };
   if (status === 429 || ((status === 400 || status === 403) && isQuotaReason(err))) {
     return { kind: 'transient', label: 'quota' };
@@ -345,7 +359,14 @@ function classifyFollowupError(err) {
   if (isAuthFollowupError(err)) return { kind: 'transient', label: 'auth' };
   if (isNetworkFollowupError(err)) return { kind: 'transient', label: 'network' };
   if ((status === 400 || status == null) && namesRecipient(err)) return { kind: 'permanent', label: 'recipient' };
-  if (status === 400 && isGenericInvalidArgument(err)) return { kind: 'transient', label: 'argument' };
+  // Every other HTTP 400 shares the attempt cap, including when the HTTP
+  // status was dropped and only reason or Gmail status remains.
+  if (status === 400 || hasReason(err, [
+    'badRequest', 'invalidArgument', 'failedPrecondition',
+    'INVALID_ARGUMENT', 'FAILED_PRECONDITION', 'BAD_REQUEST',
+  ])) {
+    return { kind: 'transient', label: 'argument' };
+  }
   if (status == null && /quota exceeded|rate limit exceeded|too many requests/i.test(errorBlob(err))) {
     return { kind: 'transient', label: 'quota' };
   }
@@ -546,7 +567,9 @@ async function sendDueFollowups() {
           headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
         });
         sent++;
-        await pool.query(`UPDATE proposals SET error = NULL WHERE id = $1 AND status = 'sent'`, [p.id]);
+        await pool.query(
+          `UPDATE proposals SET error = NULL, followup_argument_attempts = 0 WHERE id = $1 AND status = 'sent'`,
+          [p.id]);
         await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
         await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${toAddress}.`);
       } catch (err) {
@@ -566,17 +589,25 @@ async function sendDueFollowups() {
                     status = CASE WHEN status = 'sending' THEN 'sent' ELSE status END
               WHERE id = $1 AND status IN ('sent', 'sending')`;
           if (label === 'argument') {
-            const next = argumentAttempt(p.error) + 1;
+            const next = Number(p.followup_argument_attempts || 0) + 1;
             if (next >= ARGUMENT_ATTEMPTS) {
               const reason = 'Follow-up stopped: Gmail rejected the message';
               await pool.query(
                 `UPDATE proposals
-                    SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL
+                    SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL,
+                        followup_argument_attempts = $3
                   WHERE id = $1 AND status IN ('sent', 'sending')`,
-                [p.id, reason]);
+                [p.id, reason, next]);
               console.error(`[send] stopped follow-up for #${p.id}: Gmail invalid argument (not the recipient)`);
             } else {
-              await pool.query(release, [p.id, `Follow-up will retry: argument (${next}/${ARGUMENT_ATTEMPTS})`]);
+              await pool.query(
+                `UPDATE proposals
+                    SET ${sentColumn} = NULL,
+                        error = $2,
+                        followup_argument_attempts = $3,
+                        status = CASE WHEN status = 'sending' THEN 'sent' ELSE status END
+                  WHERE id = $1 AND status IN ('sent', 'sending')`,
+                [p.id, `Follow-up will retry: argument (${next}/${ARGUMENT_ATTEMPTS})`, next]);
               console.error(`[send] follow-up for #${p.id} will retry: Gmail invalid argument (not the recipient) (${next}/${ARGUMENT_ATTEMPTS})`);
             }
           } else {

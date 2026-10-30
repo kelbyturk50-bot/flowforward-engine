@@ -267,12 +267,13 @@ router.patch('/:id', async (req, res) => {
     const cur = await pool.query('SELECT status FROM proposals WHERE id = $1', [req.params.id]);
     if (!cur.rows.length) return res.status(404).json({ error: 'Not found' });
     const b = req.body || {};
+    if (typeof b.to_email === 'string') b.to_email = b.to_email.trim();
     const updates = [];
     for (const k of COPY_FIELDS) if (b[k] !== undefined) updates.push([k, k === 'onepager' ? b[k] : (b[k] === '' ? null : String(b[k]))]);
     if (updates.length && cur.rows[0].status !== 'draft') {
       return res.status(409).json({ error: 'This version has already gone out, so its copy is locked. Feedback can still be added.' });
     }
-    if (b.to_email && !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(b.to_email)) return res.status(400).json({ error: 'That email address doesn\'t look right.' });
+    if (b.to_email && send.missingRecipient(b.to_email)) return res.status(400).json({ error: 'That email address doesn\'t look right.' });
     if (b.feedback_rating !== undefined) updates.push(['feedback_rating', [1, -1].includes(Number(b.feedback_rating)) ? Number(b.feedback_rating) : null]);
     if (b.feedback_note !== undefined) updates.push(['feedback_note', String(b.feedback_note || '').slice(0, 2000) || null]);
     if (!updates.length) return res.status(400).json({ error: 'No valid fields' });

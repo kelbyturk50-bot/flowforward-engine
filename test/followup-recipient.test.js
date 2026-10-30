@@ -383,11 +383,12 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
         {
           label: '400 other',
           toEmail: 'test+precondition@example.com',
-          stored: 'Follow-up will retry: later',
+          stored: 'Follow-up will retry: argument (1/3)',
           error() {
             const err = new Error('Gmail API: Precondition check failed.');
             err.status = 400;
             err.gmailStatus = 'FAILED_PRECONDITION';
+            err.reason = 'failedPrecondition';
             return err;
           },
         },
@@ -786,6 +787,116 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
             return err;
           },
         },
+        {
+          name: '450 recipients were rejected',
+          permanent: false,
+          label: 'smtp',
+          err() {
+            const err = new Error('450 4.2.1 recipients were rejected');
+            err.responseCode = 450;
+            err.code = 'EENVELOPE';
+            err.rejected = ['test+temp@example.com'];
+            return err;
+          },
+        },
+        {
+          name: '421',
+          permanent: false,
+          label: 'smtp',
+          err() {
+            const err = new Error('421 4.4.2 recipients were rejected');
+            err.responseCode = 421;
+            err.rejected = ['test+temp@example.com'];
+            return err;
+          },
+        },
+        {
+          name: '451',
+          permanent: false,
+          label: 'smtp',
+          err() {
+            const err = new Error('451 4.3.0 recipients were rejected');
+            err.responseCode = 451;
+            err.rejected = ['test+temp@example.com'];
+            return err;
+          },
+        },
+        {
+          name: '452',
+          permanent: false,
+          label: 'smtp',
+          err() {
+            const err = new Error('452 4.2.2 recipients were rejected');
+            err.responseCode = 452;
+            err.rejected = ['test+temp@example.com'];
+            return err;
+          },
+        },
+        {
+          name: '550 5.1.1',
+          permanent: true,
+          label: 'recipient',
+          err() {
+            const err = new Error('550 5.1.1 The email account does not exist');
+            err.responseCode = 550;
+            err.rejected = ['test+gone@example.com'];
+            return err;
+          },
+        },
+        {
+          name: '553',
+          permanent: true,
+          label: 'recipient',
+          err() {
+            const err = new Error('553 5.1.3 mailbox name not allowed');
+            err.responseCode = 553;
+            return err;
+          },
+        },
+        {
+          name: 'bare 550',
+          permanent: false,
+          label: 'later',
+          err() {
+            const err = new Error('550 Mailbox unavailable');
+            err.responseCode = 550;
+            err.rejected = ['test+gone@example.com'];
+            return err;
+          },
+        },
+        {
+          name: 'badRequest without status',
+          permanent: false,
+          label: 'argument',
+          err() {
+            const err = new Error('Gmail API: Invalid thread_id');
+            err.reason = 'badRequest';
+            return err;
+          },
+        },
+        {
+          name: 'errors[].reason badRequest',
+          permanent: false,
+          label: 'argument',
+          err() {
+            const err = new Error('Gmail API: Invalid thread_id');
+            err.status = 400;
+            err.errors = [{ reason: 'badRequest', message: 'Invalid thread_id' }];
+            return err;
+          },
+        },
+        {
+          name: 'failedPrecondition',
+          permanent: false,
+          label: 'argument',
+          err() {
+            const err = new Error('Gmail API: Precondition check failed.');
+            err.status = 400;
+            err.gmailStatus = 'FAILED_PRECONDITION';
+            err.reason = 'failedPrecondition';
+            return err;
+          },
+        },
       ];
       for (const row of table) {
         const got = classifyFollowupError(row.err());
@@ -896,5 +1007,171 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     const web = fs.readFileSync(path.join(__dirname, '../web/src/recipient.js'), 'utf8');
     assert.equal(core(server), core(web));
     console.log('[followup-recipient] Cc, Cf, and Z characters are refused; web copy matches');
+  });
+
+  it('retries SMTP 450 and stops on SMTP 550 5.1.1', async () => {
+    const tempLead = await lead();
+    const temp = await insertProposal(tempLead.id, { toEmail: 'test+temp450@example.com' });
+    let tempCalls = 0;
+    useTransport(async () => {
+      tempCalls += 1;
+      if (tempCalls === 1) {
+        const err = new Error('450 4.2.1 recipients were rejected: test+temp450@example.com');
+        err.responseCode = 450;
+        err.code = 'EENVELOPE';
+        err.rejected = ['test+temp450@example.com'];
+        throw err;
+      }
+      return { messageId: '<ok-450@localhost>', threadId: 'thr-450' };
+    });
+    const first = await sendDueFollowups();
+    assert.equal(first.sent, 0);
+    let row = await state(temp.id);
+    assert.equal(row.status, 'sent');
+    assert.equal(row.followup1_sent_at, null);
+    assert.equal(row.stop_reason, null);
+    assert.equal(row.error, 'Follow-up will retry: smtp');
+    const second = await sendDueFollowups();
+    assert.equal(second.sent, 1);
+    row = await state(temp.id);
+    assert.equal(row.status, 'sent');
+    assert.ok(row.followup1_sent_at);
+    assert.equal(row.error, null);
+
+    const deadLead = await lead();
+    const dead = await insertProposal(deadLead.id, { toEmail: 'test+dead550@example.com' });
+    let deadCalls = 0;
+    useTransport(async () => {
+      deadCalls += 1;
+      const err = new Error('550 5.1.1 The email account does not exist');
+      err.responseCode = 550;
+      err.code = 'EENVELOPE';
+      err.rejected = ['test+dead550@example.com'];
+      throw err;
+    });
+    await sendDueFollowups();
+    row = await state(dead.id);
+    assert.equal(row.status, 'stopped');
+    assert.equal(row.stop_reason, 'Follow-up stopped: address rejected');
+    assert.equal(row.followup1_sent_at, null);
+    await sendDueFollowups();
+    assert.equal(deadCalls, 1);
+    console.log('[followup-recipient] SMTP 450 retried; SMTP 550 5.1.1 stopped');
+  });
+
+  it('stops Invalid thread_id with reason badRequest after 3 attempts', async () => {
+    const prospect = await lead();
+    const proposal = await insertProposal(prospect.id, { toEmail: 'test+badreq@example.com' });
+    let calls = 0;
+    useTransport(async () => {
+      calls += 1;
+      const err = new Error('Gmail API: Invalid thread_id');
+      err.status = 400;
+      err.errors = [{ reason: 'badRequest', message: 'Invalid thread_id' }];
+      throw err;
+    });
+    await sendDueFollowups();
+    await sendDueFollowups();
+    let row = await state(proposal.id);
+    assert.equal(row.status, 'sent');
+    const count = await pool.query('SELECT followup_argument_attempts FROM proposals WHERE id = $1', [proposal.id]);
+    assert.equal(Number(count.rows[0].followup_argument_attempts), 2);
+    await sendDueFollowups();
+    row = await state(proposal.id);
+    assert.equal(row.status, 'stopped');
+    assert.equal(row.stop_reason, 'Follow-up stopped: Gmail rejected the message');
+    assert.equal(calls, 3);
+    await sendDueFollowups();
+    assert.equal(calls, 3);
+    console.log('[followup-recipient] badRequest Invalid thread_id stopped after 3 attempts');
+  });
+
+  it('keeps the argument count when a 500 lands between 400s', async () => {
+    const prospect = await lead();
+    const proposal = await insertProposal(prospect.id, { toEmail: 'test+alternate@example.com' });
+    let n = 0;
+    useTransport(async () => {
+      n += 1;
+      if (n % 2 === 1) {
+        const err = new Error('Gmail API: Invalid thread_id');
+        err.status = 400;
+        err.reason = 'badRequest';
+        throw err;
+      }
+      const err = new Error('Internal error encountered.');
+      err.status = 500;
+      throw err;
+    });
+    const seen = [];
+    for (let i = 0; i < 5; i += 1) {
+      await sendDueFollowups();
+      const { rows } = await pool.query(
+        'SELECT status, followup_argument_attempts, error FROM proposals WHERE id = $1',
+        [proposal.id]
+      );
+      seen.push(rows[0]);
+    }
+    assert.equal(Number(seen[0].followup_argument_attempts), 1);
+    assert.equal(seen[0].status, 'sent');
+    assert.equal(Number(seen[1].followup_argument_attempts), 1);
+    assert.match(seen[1].error, /will retry: server/);
+    assert.equal(Number(seen[2].followup_argument_attempts), 2);
+    assert.equal(Number(seen[3].followup_argument_attempts), 2);
+    assert.equal(Number(seen[4].followup_argument_attempts), 3);
+    assert.equal(seen[4].status, 'stopped');
+    assert.equal(seen[4].error, 'Follow-up stopped: Gmail rejected the message');
+    const before = n;
+    await sendDueFollowups();
+    assert.equal(n, before);
+
+    const okLead = await lead();
+    const ok = await insertProposal(okLead.id, { toEmail: 'test+resetcount@example.com' });
+    let phase = 'fail';
+    useTransport(async () => {
+      if (phase === 'fail') {
+        const err = new Error('Gmail API: Invalid thread_id');
+        err.status = 400;
+        err.reason = 'badRequest';
+        throw err;
+      }
+      return { messageId: '<reset@localhost>', threadId: 'thr-reset' };
+    });
+    await sendDueFollowups();
+    let count = await pool.query('SELECT followup_argument_attempts FROM proposals WHERE id = $1', [ok.id]);
+    assert.equal(Number(count.rows[0].followup_argument_attempts), 1);
+    phase = 'ok';
+    const sent = await sendDueFollowups();
+    assert.equal(sent.sent, 1);
+    count = await pool.query('SELECT followup_argument_attempts, error, followup1_sent_at FROM proposals WHERE id = $1', [ok.id]);
+    assert.equal(Number(count.rows[0].followup_argument_attempts), 0);
+    assert.equal(count.rows[0].error, null);
+    assert.ok(count.rows[0].followup1_sent_at);
+    console.log('[followup-recipient] argument count survived a 500 and reset on send');
+  });
+
+  it('trims surrounding spaces on to_email and rejects interior whitespace', async () => {
+    const prospect = await lead();
+    const proposal = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+space@example.com' });
+    const trimmed = await fetch(`${apiBase}/api/proposals/${proposal.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ to_email: '  test+trim@example.com  ' }),
+    });
+    const trimmedJson = await trimmed.json();
+    assert.equal(trimmed.status, 200, JSON.stringify(trimmedJson));
+    assert.equal(trimmedJson.to_email, 'test+trim@example.com');
+    for (const bad of ['test+a @example.com', 'test+\u206Aa@example.com', 'kelby']) {
+      const res = await fetch(`${apiBase}/api/proposals/${proposal.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+        body: JSON.stringify({ to_email: bad }),
+      });
+      const json = await res.json();
+      assert.equal(res.status, 400, bad);
+      assert.equal(json.error, "That email address doesn't look right.");
+    }
+    const still = await pool.query('SELECT to_email FROM proposals WHERE id = $1', [proposal.id]);
+    assert.equal(still.rows[0].to_email, 'test+trim@example.com');
+    console.log('[followup-recipient] PATCH trims to_email and rejects interior whitespace');
   });
 });

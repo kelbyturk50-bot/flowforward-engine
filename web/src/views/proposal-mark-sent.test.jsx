@@ -62,6 +62,17 @@ describe('mark as sent needs a recipient', () => {
     }
   });
 
+  it('saves a trailing space in To when the field blurs', async () => {
+    api.proposal.mockResolvedValue({ ...base, to_email: 'test+a@peak.test ' });
+    api.updateProposal.mockResolvedValue({ ...base, to_email: 'test+a@peak.test' });
+    render(<ProposalDrawer {...props} />);
+    const input = await screen.findByLabelText('To (email)');
+    expect(screen.getByRole('button', { name: 'Fix the recipient email' })).toBeInTheDocument();
+    input.focus();
+    await userEvent.tab();
+    expect(api.updateProposal).toHaveBeenCalledWith(9, { to_email: 'test+a@peak.test' });
+  });
+
   it('enables both buttons when a recipient email is present', async () => {
     api.proposal.mockResolvedValue({ ...base, to_email: 'test+a@peak.test' });
     render(<ProposalDrawer {...props} />);

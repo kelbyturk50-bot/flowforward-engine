@@ -132,8 +132,17 @@ async function gmail(method, path, { data, params } = {}) {
     if (Number.isInteger(status)) wrapped.status = status;
     else if (body && Number.isInteger(body.code)) wrapped.status = body.code;
     if (body?.status) wrapped.gmailStatus = String(body.status);
-    const reason = Array.isArray(body?.errors) ? body.errors[0]?.reason : null;
+    const listed = Array.isArray(body?.errors)
+      ? body.errors.map((item) => item && item.reason).find(Boolean)
+      : null;
+    const reason = listed || body?.reason || null;
     if (reason) wrapped.reason = String(reason);
+    if (Array.isArray(body?.errors)) {
+      wrapped.errors = body.errors.map((item) => ({
+        reason: item && item.reason,
+        message: item && item.message,
+      }));
+    }
     if (typeof err.code === 'string' && !/^\d{3}$/.test(err.code)) wrapped.code = err.code;
     throw wrapped;
   }

@@ -221,7 +221,11 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
 function Field({ label, value, onSave, type = 'text', disabled, rows, id }) {
   const [v, setV] = useState(value ?? '');
   useEffect(() => setV(value ?? ''), [value]);
-  const commit = () => { if ((value ?? '') !== v) onSave(v); };
+  const commit = () => {
+    const next = type === 'email' ? v.trim() : v;
+    if (next !== v) setV(next);
+    if ((value ?? '') !== next) onSave(next);
+  };
   const props = { id, className: 'input', value: v, disabled, onChange: e => setV(e.target.value), onBlur: commit };
   return (
     <label>{label}

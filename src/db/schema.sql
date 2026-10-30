@@ -242,6 +242,10 @@ ALTER TABLE proposals ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
 -- It runs before the reviewed_at backfill so that backfill is not blocked
 -- by the check. IF EXISTS is a no-op when the check was never added.
 ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient;
+-- Non-recipient HTTP 400s on a follow-up. The count stays across other
+-- errors and is cleared only when that follow-up send succeeds. Boot adds
+-- the column and does not rewrite other proposal fields.
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS followup_argument_attempts INTEGER NOT NULL DEFAULT 0;
 -- Drafts that existed before this column are treated as already seen
 UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND created_at < '2026-10-15';
 
