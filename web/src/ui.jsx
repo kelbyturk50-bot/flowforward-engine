@@ -237,47 +237,88 @@ export function proposalStatusCopy(p) {
 }
 
 const HALT_COPY = {
-  oauth_expired: 'Follow-ups are paused: Gmail access expired. Reconnect Gmail in Settings.',
-  token_missing: 'Follow-ups are paused: Gmail isn\'t connected. Connect Gmail in Settings.',
-  insufficient_permissions: 'Follow-ups are paused: Gmail is missing send permission. Reconnect Gmail in Settings and allow sending.',
-  smtp_auth: 'Follow-ups are paused: the mail server rejected the login. Check the SMTP settings.',
-  sender: 'Follow-ups are paused: the mail server rejected the sender address. Check the sender and Reply-To in Settings.',
-  other: 'Follow-ups are paused: mail needs attention before anything else goes out. Open Settings.',
+  proposals: {
+    oauth_expired: 'Follow-ups are paused: Gmail access expired. Reconnect Gmail in Settings.',
+    token_missing: 'Follow-ups are paused: Gmail isn\'t connected. Connect Gmail in Settings.',
+    insufficient_permissions: 'Follow-ups are paused: Gmail is missing send permission. Reconnect Gmail in Settings and allow sending.',
+    smtp_auth: 'Follow-ups are paused: the mail server rejected the login. The SMTP login is GMAIL_USER and GMAIL_APP_PASSWORD in the server configuration. Open settings.',
+    sender: 'Follow-ups are paused: the mail server rejected the sender address. Ask your admin to fix the sending address in the server configuration.',
+    other: 'Follow-ups are paused: mail needs attention before anything else goes out. Open Settings.',
+  },
+  settings: {
+    oauth_expired: 'Follow-ups are paused: Gmail access expired. Reconnect Gmail in Email sending below.',
+    token_missing: 'Follow-ups are paused: Gmail isn\'t connected. Connect Gmail in Email sending below.',
+    insufficient_permissions: 'Follow-ups are paused: Gmail is missing send permission. Reconnect Gmail in Email sending below and allow sending.',
+    smtp_auth: 'Follow-ups are paused: the mail server rejected the login. The SMTP login is GMAIL_USER and GMAIL_APP_PASSWORD in the server configuration. See settings below.',
+    sender: 'Follow-ups are paused: the mail server rejected the sender address. Ask your admin to fix the sending address in the server configuration.',
+    other: 'Follow-ups are paused: mail needs attention before anything else goes out. See Email sending below.',
+  },
 };
 
 export function followupHaltCause(halt) {
   if (!halt) return 'other';
-  if (HALT_COPY[halt.cause]) return halt.cause;
+  if (halt.cause && HALT_COPY.proposals[halt.cause]) return halt.cause;
+  if (halt.cause) return 'other';
   if (halt.error_class === 'sender') return 'sender';
   if (halt.error_class === 'auth' && halt.provider === 'smtp') return 'smtp_auth';
-  if (halt.error_class === 'auth') return 'oauth_expired';
+  if (halt.error_class === 'auth' && halt.provider === 'gmail') return 'oauth_expired';
   return 'other';
 }
 
-export function followupHaltCopy(halt) {
+export function followupHaltCopy(halt, place = 'proposals') {
   if (!halt) return '';
-  return HALT_COPY[followupHaltCause(halt)] || HALT_COPY.other;
+  const book = HALT_COPY[place] || HALT_COPY.proposals;
+  return book[followupHaltCause(halt)] || book.other;
 }
 
-export function FollowupHaltNotice({ halt }) {
+function haltLink(text, place) {
+  const settingsAt = text.search(/settings/i);
+  const emailAt = text.indexOf('Email sending');
+  const at = emailAt >= 0 ? emailAt : settingsAt;
+  if (at < 0) return text;
+  const word = emailAt >= 0 ? 'Email sending' : text.slice(at, at + 'settings'.length);
+  const href = place === 'settings' ? '#email-sending' : '#/settings';
+  const onClick = (event) => {
+    if (place === 'settings') {
+      event.preventDefault();
+      const card = document.getElementById('email-sending');
+      if (card) {
+        card.scrollIntoView({ block: 'start' });
+        card.focus();
+      }
+      return;
+    }
+    try { sessionStorage.setItem('ff.scrollEmail', '1'); } catch { /* storage blocked */ }
+  };
+  return (
+    <>
+      {text.slice(0, at)}
+      <a href={href} onClick={onClick}>{word}</a>
+      {text.slice(at + word.length)}
+    </>
+  );
+}
+
+export function FollowupHaltNotice({ halt, place = 'proposals' }) {
   if (!halt) return null;
-  const text = followupHaltCopy(halt);
-  const at = text.indexOf('Settings');
+  const text = followupHaltCopy(halt, place);
   return (
     <div className="halt-banner" role="status">
-      <strong>
-        {at === -1 ? text : (
-          <>
-            {text.slice(0, at)}
-            <a href="#/settings">Settings</a>
-            {text.slice(at + 'Settings'.length)}
-          </>
-        )}
-      </strong>
+      <strong>{haltLink(text, place)}</strong>
     </div>
   );
 }
-export function ProposalChip({ status, verdict }) {
+
+export function needsReviewStatus(p) {
+  if (!p) return false;
+  return p.status === 'manual_review' || String(p.stop_reason || p.stopReason || '').startsWith('Needs manual review');
+}
+
+export function ProposalChip({ status, verdict, stopReason, stop_reason }) {
+  const reason = stopReason || stop_reason;
+  if (status === 'manual_review' || String(reason || '').startsWith('Needs manual review')) {
+    return <span className="pchip pchip-manual_review">Needs review</span>;
+  }
   const label = status === 'discarded' && verdict === 'disqualify' ? 'Not a fit' : (PROPOSAL_STATUS[status] || status);
   return <span className={`pchip pchip-${status}`}>{label}</span>;
 }

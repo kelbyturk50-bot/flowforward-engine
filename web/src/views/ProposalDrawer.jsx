@@ -6,6 +6,10 @@ import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, PROPOSA
 import { useJobs, elapsed } from '../jobs';
 import PrototypeCard from './PrototypeCard';
 
+function guardedSend(p) {
+  return p.stop_reason === 'Confirm before sending again' || String(p.stop_reason || '').startsWith('Needs manual review');
+}
+
 function approveHeading(p) {
   const email = p.to_email == null || p.to_email === 'null' ? '' : String(p.to_email);
   const name = p.to_name == null || p.to_name === 'null' ? '' : String(p.to_name);
@@ -78,7 +82,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <h2>{p.company}</h2>
           <p className="muted">{p.industry}{p.city ? `, ${p.city}` : ''} <Stars rating={p.rating} reviews={p.review_count} /></p>
           <div className="head-chips">
-            <ProposalChip status={p.status} verdict={a.fit_verdict} />
+            <ProposalChip status={p.status} verdict={a.fit_verdict} stopReason={p.stop_reason} />
             {p.versions?.length > 1 ? (
               <select className="mini-select" value={p.id} onChange={e => openProposal(Number(e.target.value))} aria-label="Version">
                 {p.versions.map(v => <option key={v.id} value={v.id}>v{v.version} · {v.status === 'superseded' ? 'older' : (PROPOSAL_STATUS[v.status] || v.status)}{v.instructions ? ' · w/ notes' : ''}</option>)}
@@ -143,9 +147,10 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
       {confirming && (
         <div className="confirm" role="alertdialog" aria-label="Confirm send">
           <p><strong>{approveHeading(p)}</strong></p>
+          {guardedSend(p) && <p>This draft is marked for another look. Send it only if you mean to.</p>}
           <p className="muted">“{p.subject}” goes out now from your Gmail. Follow-ups are scheduled for day 3 and day 10 and stop automatically if they reply, book, bounce or opt out.</p>
           <div className="link-row">
-            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => act('send', () => api.sendProposal(p.id, p.stop_reason === 'Confirm before sending again' ? { confirm: true } : undefined), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>
+            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => act('send', () => api.sendProposal(p.id, guardedSend(p) ? { confirm: true } : undefined), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>
               {busy === 'send' ? 'Sending…' : 'Send it'}
             </button>
             <button className="btn btn-quiet" onClick={() => setConfirming(false)}>Cancel</button>
@@ -313,7 +318,7 @@ function ThinOnepager({ p, reload, bump }) {
   const [busy, setBusy] = useState(false);
   const o = p.onepager || {};
   const thin = !(o.observations || []).length && !(o.opportunities || []).length;
-  if (!thin || ['discarded', 'superseded'].includes(p.status)) return null;
+  if (!thin || ['discarded', 'superseded', 'manual_review'].includes(p.status) || String(p.stop_reason || '').startsWith('Needs manual review')) return null;
   const go = async () => {
     setBusy(true);
     try { await api.rebuildOnepager(p.id); toast('One-pager rebuilt. Same link.'); bump(); await reload(p.id); }

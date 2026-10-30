@@ -51,28 +51,33 @@ async function mailer() {
 // Status, token refresh, and the SMTP transport are resolved here. The caller
 // rechecks the lead after this returns, then calls send() with no await between
 // that recheck and the transport.
+function smtpTransport() {
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+    connectionTimeout: 20000,
+  });
+}
+
 async function prepareOutgoing() {
   const status = await gmail.status();
-  if (status && status.connected && typeof gmail.accessToken === 'function') {
-    await gmail.accessToken();
+  let delivery = null;
+  if (status && status.connected && typeof gmail.prepareDelivery === 'function') {
+    delivery = await gmail.prepareDelivery();
+  } else if (status && status.connected && typeof gmail.accessToken === 'function') {
+    await gmail.accessToken({ force: true });
   }
   const mode = await mailMode();
   let transportClient = null;
   if (mode === 'test') transportClient = testTransport;
-  else if (mode === 'gmail_api') transportClient = gmail;
   else if (mode === 'smtp') {
-    if (!transport) {
-      transport = nodemailer.createTransport({
-        service: 'gmail',
-        auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
-        connectionTimeout: 20000,
-      });
-    }
+    if (!transport) transport = smtpTransport();
     transportClient = transport;
   }
   return {
     mode,
     send(mail) {
+      if (mode === 'gmail_api' && delivery) return delivery.send(mail);
       if (!transportClient || typeof transportClient.sendMail !== 'function') {
         throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
       }
@@ -317,6 +322,12 @@ function _setAlertHook(fn) {
   alertHook = typeof fn === 'function' ? fn : null;
 }
 
+let credentialOverride = null;
+function _setCredentialCheck(fn) {
+  testOnly('_setCredentialCheck');
+  credentialOverride = typeof fn === 'function' ? fn : null;
+}
+
 function _resetSendTestHooks() {
   testOnly('_resetSendTestHooks');
   beforeFollowupClaim = null;
@@ -325,6 +336,7 @@ function _resetSendTestHooks() {
   failNextPostSend = false;
   randomSource = null;
   alertHook = null;
+  credentialOverride = null;
 }
 
 function unitRandom(rand) {
@@ -457,8 +469,9 @@ function errorBlob(err) {
 function isNetworkFollowupError(err) {
   const code = err && err.code;
   if (typeof code === 'string' && NETWORK_CODES.has(code)) return true;
-  // SMTP that accepts DATA and then drops the connection is an outage.
-  if (atCommand(err, 'DATA') && /connection closed|unexpectedly closed/i.test(errorBlob(err))) return true;
+  // Nodemailer reports a socket drop after DATA as ECONNECTION with command CONN.
+  if (code === 'ECONNECTION') return true;
+  if ((atCommand(err, 'DATA') || atCommand(err, 'CONN')) && /connection closed|server closed the connection|unexpectedly closed/i.test(errorBlob(err))) return true;
   return /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|socket hang up|network error|getaddrinfo|timeout of \d+ms exceeded/i.test(errorBlob(err));
 }
 
@@ -497,27 +510,19 @@ function replyTexts(err) {
   return out;
 }
 
+function serverReply(text) {
+  return String(text || '').replace(/^(?:(?:Can't send mail - )?all recipients were rejected|Data command failed|Message failed for recipient [^\n:]*|Message failed|Invalid login):\s*/i, '');
+}
+
 function anchoredEnhanced(text, responseCode) {
-  const found = [];
-  for (const line of String(text || '').split(/\r?\n/)) {
-    // The basic code and the enhanced code have to sit at the start of a reply
-    // line. A code quoted later on that line is not this reply's status.
-    const start = line.match(/^\s*(\d{3})(?:[ \t]+|-)(5\.\d{1,3}\.\d{1,3})\b/);
-    if (start) {
-      const code = Number(start[1]);
-      if (responseCode == null || code === responseCode) found.push({ code, enhanced: start[2] });
-      continue;
-    }
-    // A line that already begins with an SMTP code, without the enhanced code
-    // beside it, does not get a second look. That keeps "upstream said 550 5.1.1"
-    // from becoming a recipient failure.
-    if (/^\s*\d{3}\b/.test(line)) continue;
-    // Nodemailer wraps the server reply: "all recipients were rejected: 550 5.1.1".
-    if (responseCode == null) continue;
-    const wrapped = line.match(new RegExp(`(?:^|\\D)${responseCode}[ \\t]+(5\\.\\d{1,3}\\.\\d{1,3})\\b`));
-    if (wrapped) found.push({ code: responseCode, enhanced: wrapped[1] });
-  }
-  return found;
+  // Only the start of the server's own reply line. A code quoted later,
+  // including after nodemailer's prefix, is not this reply's status.
+  const first = serverReply(text).split(/\r?\n/)[0];
+  const start = first.match(/^\s*(\d{3})(?:[ \t]+|-)(5\.\d{1,3}\.\d{1,3})\b/);
+  if (!start) return [];
+  const code = Number(start[1]);
+  if (responseCode != null && code !== responseCode) return [];
+  return [{ code, enhanced: start[2] }];
 }
 
 function firstAnchoredEnhanced(err) {
@@ -556,10 +561,9 @@ function isPermanentSmtpRecipient(err) {
     const anchored = firstAnchoredEnhanced(err);
     if (anchored && anchored.code === code) enhanced = anchored.enhanced;
   }
-  if (code === 553) return true;
+  if (code === 553 && enhanced !== '5.1.8') return true;
   if (code == null || code < 500) return false;
-  // 5.1.8 at RCPT TO is this recipient. At MAIL FROM it is a sender halt.
-  if (enhanced === '5.1.8') return true;
+  if (enhanced === '5.1.8') return false;
   return !!(enhanced && PERMANENT_ENHANCED.has(enhanced));
 }
 
@@ -572,11 +576,13 @@ function isSenderConfig(err) {
   if (isTemporarySmtp(err)) return false;
   if (atCommand(err, 'MAIL FROM')) return true;
   if (isSenderWording(errorBlob(err))) return true;
-  return false;
+  // 5.1.8 at the start of the reply halts at RCPT TO the same way it does at MAIL FROM.
+  const anchored = firstAnchoredEnhanced(err);
+  return !!(anchored && anchored.enhanced === '5.1.8' && atCommand(err, 'RCPT TO'));
 }
 
 function leadingSmtpReply(text) {
-  const match = String(text || '').match(/^\s*(\d{3})(?:[ \t]+(5\.\d{1,3}\.\d{1,3}))?\b/);
+  const match = serverReply(text).match(/^\s*(\d{3})(?:[ \t]+(5\.\d{1,3}\.\d{1,3}))?\b/);
   if (!match) return null;
   return { code: Number(match[1]), enhanced: match[2] || null };
 }
@@ -1011,7 +1017,7 @@ async function emitHalt(state) {
     halted_ticks: state.halted_ticks,
   };
   const reason = state.error_class === 'auth' ? 'gmail auth' : 'sender configuration';
-  console.error(`[send] [ALERT] gmail auth halted sweep: ${reason}`);
+  console.error(`[send] [ALERT] ${state.provider} ${state.cause || state.error_class} halted sweep`);
   console.error(`[send] [ALERT] followups.halted ${JSON.stringify(payload)}`);
   if (alertHook) await alertHook(payload);
   await pool.query(
@@ -1064,6 +1070,7 @@ async function clearSenderAlert() {
 }
 
 async function credentialsPass() {
+  if (credentialOverride) return credentialOverride();
   if (testTransport) return true;
   let status;
   try {
@@ -1074,14 +1081,22 @@ async function credentialsPass() {
   }
   if (status && status.connected) {
     try {
-      await gmail.accessToken();
+      await gmail.accessToken({ force: true });
       return true;
     } catch (err) {
       console.error(`[send] credential check did not pass: ${err && err.code || 'auth'}`);
       return false;
     }
   }
-  if (cfg.mailConfigured()) return true;
+  if (cfg.mailConfigured()) {
+    try {
+      await smtpTransport().verify();
+      return true;
+    } catch (err) {
+      console.error(`[send] credential check did not pass: ${err && err.code || 'smtp'}`);
+      return false;
+    }
+  }
   return false;
 }
 
@@ -1646,7 +1661,7 @@ module.exports = {
   missingRecipient, normalizeRecipient, storedRecipient, isPermanentFollowupError, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
   _beforeFollowupClaim, _beforeTransport, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
-  _setRandom, _setAlertHook,
+  _setRandom, _setAlertHook, _setCredentialCheck,
   backoffDelayMs, backoffDelayMinutes, recheckLead, BACKOFF_CAP_MS,
   FOLLOWUP_BACKOFF_CAP_MS, FOLLOWUP_MAX_AGE_MS, RESEND_CONFIRM,
 };

@@ -97,8 +97,8 @@ async function disconnect() {
 }
 
 let cache = null;
-async function accessToken() {
-  if (cache && cache.exp > Date.now()) return cache.token;
+async function accessToken(options = {}) {
+  if (!options.force && cache && cache.exp > Date.now()) return cache.token;
   const saved = await getSetting('gmail_oauth');
   if (!saved?.refresh_token) throw new Error('Gmail is not connected. Go to Settings and click Connect Gmail.');
   try {
@@ -151,20 +151,73 @@ async function gmail(method, path, { data, params } = {}) {
 // ── Sending ───────────────────────────────────────────────────────────────
 function toBase64Url(buf) { return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
 
+function wrapGmailError(err) {
+  const body = err.response?.data?.error;
+  const msg = body?.message || err.message;
+  const wrapped = new Error(`Gmail API: ${msg}`);
+  const status = err.response?.status;
+  if (Number.isInteger(status)) wrapped.status = status;
+  else if (body && Number.isInteger(body.code)) wrapped.status = body.code;
+  if (body?.status) wrapped.gmailStatus = String(body.status);
+  const listed = Array.isArray(body?.errors)
+    ? body.errors.map((item) => item && item.reason).find(Boolean)
+    : null;
+  const reason = listed || body?.reason || null;
+  if (reason) wrapped.reason = String(reason);
+  if (Array.isArray(body?.errors)) {
+    wrapped.errors = body.errors.map((item) => ({
+      reason: item && item.reason,
+      message: item && item.message,
+    }));
+  }
+  if (typeof err.code === 'string' && !/^\d{3}$/.test(err.code)) wrapped.code = err.code;
+  return wrapped;
+}
+
+// Every settings read and the token refresh happen here. send() only posts
+// the message that was already addressed with that token.
+async function prepareDelivery() {
+  const saved = await getSetting('gmail_oauth');
+  const token = await module.exports.accessToken({ force: true });
+  const fromAddr = saved?.email || SENDER.email;
+  return {
+    fromAddr,
+    async send(mail) {
+      const from = typeof mail.from === 'object' ? { ...mail.from, address: fromAddr } : fromAddr;
+      const raw = await new MailComposer({ ...mail, from, threadId: undefined }).compile().build();
+      let sent;
+      try {
+        const res = await axios({
+          method: 'post',
+          url: `${API}/messages/send`,
+          data: { raw: toBase64Url(raw), ...(mail.threadId ? { threadId: mail.threadId } : {}) },
+          timeout: 20000,
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        sent = res.data;
+      } catch (err) {
+        throw wrapGmailError(err);
+      }
+      let messageId = null;
+      try {
+        const meta = await axios({
+          method: 'get',
+          url: `${API}/messages/${sent.id}`,
+          params: { format: 'metadata', metadataHeaders: 'Message-ID' },
+          timeout: 20000,
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        messageId = (meta.data.payload?.headers || []).find((h) => h.name.toLowerCase() === 'message-id')?.value || null;
+      } catch { /* threading still works via threadId */ }
+      return { id: sent.id, threadId: sent.threadId, messageId };
+    },
+  };
+}
+
 /** Same shape as nodemailer's sendMail; also accepts threadId. Returns { messageId, threadId, id }. */
 async function sendMail(mail) {
-  const saved = await getSetting('gmail_oauth');
-  const fromAddr = saved?.email || SENDER.email;
-  const from = typeof mail.from === 'object' ? { ...mail.from, address: fromAddr } : fromAddr;
-  const raw = await new MailComposer({ ...mail, from, threadId: undefined }).compile().build();
-  const sent = await gmail('post', '/messages/send', { data: { raw: toBase64Url(raw), ...(mail.threadId ? { threadId: mail.threadId } : {}) } });
-  // Read back the Message-ID Gmail actually used, for threading follow-ups.
-  let messageId = null;
-  try {
-    const meta = await gmail('get', `/messages/${sent.id}`, { params: { format: 'metadata', metadataHeaders: 'Message-ID' } });
-    messageId = (meta.payload?.headers || []).find(h => h.name.toLowerCase() === 'message-id')?.value || null;
-  } catch { /* threading still works via threadId */ }
-  return { id: sent.id, threadId: sent.threadId, messageId };
+  const prepared = await prepareDelivery();
+  return prepared.send(mail);
 }
 
 // ── Reading ───────────────────────────────────────────────────────────────
@@ -248,4 +301,4 @@ async function sentSince(since, max = 100) {
   return out;
 }
 
-module.exports = { status, authUrl, handleCallback, disconnect, accessToken, sendMail, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText };
+module.exports = { status, authUrl, handleCallback, disconnect, accessToken, prepareDelivery, sendMail, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText };

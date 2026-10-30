@@ -160,7 +160,7 @@ export default function Proposals({ version, bump, openProposal }) {
                   <span className="prop-side">
                     {activeFor(p.prospect_id) && <span className="pchip pchip-working"><span className="spinner spinner-sm" aria-hidden="true" />Rewriting…</span>}
                     {p.status === 'draft' && !p.reviewed_at && <span className="pchip pchip-new">New</span>}
-                    <ProposalChip status={p.status} verdict={p.fit_verdict} />
+                    <ProposalChip status={p.status} verdict={p.fit_verdict} stopReason={p.stop_reason} />
                     {tab === 'review' && p.fit_verdict === 'weak' && <span className="pchip pchip-weak">Weak fit</span>}
                     {p.feedback_rating === 1 && <span aria-label="You liked this">👍</span>}
                     {p.feedback_rating === -1 && <span aria-label="You disliked this">👎</span>}

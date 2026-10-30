@@ -388,36 +388,13 @@ router.post('/:id/mark-sent', async (req, res) => {
       await db.query('ROLLBACK');
       return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
     }
-    const manualReview = p.status === 'manual_review' || (p.status === 'stopped' && String(p.stop_reason || '').startsWith('Needs manual review'));
-    const uncertain = p.status === 'sending'
-      || String(p.stop_reason || '').startsWith('Needs manual review')
-      || String(p.error || '').startsWith('Needs manual review');
-    const override = !!(req.body && req.body.confirm_override === true);
-    if (manualReview && req.body && req.body.not_sent) {
-      await db.query(
-        `UPDATE proposals
-            SET status = 'draft', stop_reason = $2, error = NULL, approved_at = NULL,
-                send_attempt_key = NULL, followup_argument_attempts = 0,
-                followup_transient_attempts = 0, first_transient_at = NULL, next_retry_at = NULL
-          WHERE id = $1`,
-        [p.id, send.RESEND_CONFIRM]);
-      await db.query('COMMIT');
-      const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
-      return res.json(withUrl(fresh.rows[0]));
-    }
-    // No recipient: refuse before any status change, prospect update, or
-    // follow-up scheduling. A blank address would otherwise become a sent
-    // sequence that the follow-up cron cannot deliver.
+    // Review-row resolve (delivered, confirm_override, not_sent) is issue #123.
+    // A missing recipient is still refused before any write.
     if (send.missingRecipient(p.to_email)) {
       await db.query('ROLLBACK');
       return res.status(400).json({ error: 'Add a recipient email before marking this as sent.' });
     }
-    // delivered:true does not pass this check. Only confirm_override does.
-    if (uncertain && !override) {
-      await db.query('ROLLBACK');
-      return res.status(409).json({ error: 'This send is still uncertain. Confirm the override before recording it.' });
-    }
-    if (p.status !== 'draft' && !manualReview && !(p.status === 'sending' && override)) {
+    if (p.status !== 'draft') {
       await db.query('ROLLBACK');
       return res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` });
     }
@@ -426,52 +403,15 @@ router.post('/:id/mark-sent', async (req, res) => {
     const fu1 = new Date(now); fu1.setDate(fu1.getDate() + 3);
     const fu2 = new Date(now); fu2.setDate(fu2.getDate() + 10);
     const note = req.body?.note || 'Manual outreach';
-    const maxAge = p.stop_reason === 'transient_max_age' || p.error === 'transient_max_age';
-    const alreadyDelivered = !!(p.sent_at || p.followup1_sent_at || p.followup2_sent_at);
-
-    if (maxAge && !(req.body && req.body.delivered === true)) {
-      await db.query('ROLLBACK');
-      return res.status(409).json({ error: 'This message was not delivered. Confirm delivery to record it.' });
-    }
-
-    if (maxAge) {
-      const requested = req.body && req.body.step;
-      const step = requested === 'first' || requested === 'followup1' || requested === 'followup2'
-        ? requested
-        : (!p.sent_at ? 'first' : (!p.followup1_sent_at ? 'followup1' : 'followup2'));
-      await db.query(
-        `UPDATE proposals SET status = 'sent',
-          sent_at = CASE WHEN $2 = 'first' THEN COALESCE(sent_at, $3) ELSE sent_at END,
-          followup1_sent_at = CASE WHEN $2 = 'followup1' THEN COALESCE(followup1_sent_at, $3) ELSE followup1_sent_at END,
-          followup2_sent_at = CASE WHEN $2 = 'followup2' THEN COALESCE(followup2_sent_at, $3) ELSE followup2_sent_at END,
-          followup1_due_at = CASE WHEN $2 = 'first' AND followup1_sent_at IS NULL THEN $4 ELSE followup1_due_at END,
-          followup2_due_at = CASE WHEN $2 IN ('first', 'followup1') AND followup2_sent_at IS NULL THEN $5 ELSE followup2_due_at END,
-          stop_reason = NULL, error = NULL, send_attempt_key = NULL,
-          followup_argument_attempts = 0, followup_transient_attempts = 0,
-          first_transient_at = NULL, next_retry_at = NULL
-         WHERE id = $1`,
-        [p.id, step, now, fu1, fu2]
-      );
-    } else if (alreadyDelivered) {
-      await db.query(
-        `UPDATE proposals SET status = 'sent',
-          stop_reason = NULL, error = NULL, send_attempt_key = NULL,
-          followup_argument_attempts = 0, followup_transient_attempts = 0,
-          first_transient_at = NULL, next_retry_at = NULL
-         WHERE id = $1`,
-        [p.id]
-      );
-    } else {
-      await db.query(
-        `UPDATE proposals SET status = 'sent', sent_at = $2,
-          followup1_due_at = $3, followup2_due_at = $4,
-          stop_reason = NULL, error = NULL, send_attempt_key = NULL,
-          followup_argument_attempts = 0, followup_transient_attempts = 0,
-          first_transient_at = NULL, next_retry_at = NULL
-         WHERE id = $1`,
-        [p.id, now, fu1, fu2]
-      );
-    }
+    await db.query(
+      `UPDATE proposals SET status = 'sent', sent_at = $2,
+        followup1_due_at = $3, followup2_due_at = $4,
+        stop_reason = NULL, error = NULL, send_attempt_key = NULL,
+        followup_argument_attempts = 0, followup_transient_attempts = 0,
+        first_transient_at = NULL, next_retry_at = NULL
+       WHERE id = $1`,
+      [p.id, now, fu1, fu2]
+    );
     await db.query(
       `UPDATE prospects SET stage = CASE WHEN stage IN ('found','qualified') THEN 'contacted' ELSE stage END,
         last_contacted_at = $2, updated_at = NOW() WHERE id = $1`,
@@ -574,25 +514,17 @@ router.post('/:id/restore', async (req, res) => {
       await db.query('ROLLBACK');
       return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
     }
-    const manualReview = p.status === 'manual_review' || (p.status === 'stopped' && String(p.stop_reason || '').startsWith('Needs manual review'));
-    if (!['discarded', 'superseded'].includes(p.status) && !manualReview) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Only discarded or older versions can be restored.' }); }
+    if (!['discarded', 'superseded'].includes(p.status)) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Only discarded or older versions can be restored.' }); }
     const out = await db.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [p.prospect_id]);
     if (out.rows.length) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Another version is already out for this lead.' }); }
     await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [p.prospect_id]);
-    const sendAgain = p.stop_reason === send.RESEND_CONFIRM;
-    const uncertainFlag = String(p.stop_reason || '').startsWith('Needs manual review')
-      || String(p.error || '').startsWith('Needs manual review');
-    const keepFlag = p.sent_at && (sendAgain || uncertainFlag);
-    const nextReason = keepFlag
-      ? (sendAgain ? send.RESEND_CONFIRM : (String(p.stop_reason || '').startsWith('Needs manual review') ? p.stop_reason : send.RESEND_CONFIRM))
-      : null;
     await db.query(
       `UPDATE proposals
-          SET status = 'draft', stop_reason = $2, error = NULL, approved_at = NULL,
+          SET status = 'draft', stop_reason = NULL, error = NULL, approved_at = NULL,
               send_attempt_key = NULL, followup_argument_attempts = 0,
               followup_transient_attempts = 0, first_transient_at = NULL, next_retry_at = NULL
         WHERE id = $1`,
-      [p.id, nextReason]);
+      [p.id]);
     const lead = await db.query(`SELECT stage FROM prospects WHERE id = $1`, [p.prospect_id]);
     if (lead.rows[0]?.stage === 'disqualified') {
       await db.query(`UPDATE prospects SET stage = 'found' WHERE id = $1`, [p.prospect_id]);

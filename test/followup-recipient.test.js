@@ -960,7 +960,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
           assert.equal(count.rows[0].first_transient_at, null);
         }
       }
-      assert.equal(logs.sendError().some((line) => line.includes('[ALERT] gmail auth halted sweep')), true);
+      assert.equal(logs.sendError().some((line) => /\[ALERT\] gmail oauth_expired halted sweep/.test(line)), true);
       assert.equal(logs.sendInfo().some((line) => line.includes('stopped follow-up')), false);
       console.log('[followup-recipient] status and reason classify 5xx, quota, and auth as retries');
     } finally {
@@ -1719,7 +1719,7 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       [Object.assign(new Error('Gmail API: Invalid Reply-To address'), { status: 400 }), 'transient', 'sender'],
       [Object.assign(new Error('Gmail API: Invalid Sender header'), { status: 400 }), 'transient', 'sender'],
       [smtp(553, '553 5.7.1 <test+x@example.com>: Sender address rejected: not owned by user'), 'transient', 'sender'],
-      [smtp(550, '550 5.1.8 Bad sender domain'), 'permanent', 'recipient'],
+      [smtp(550, '550 5.1.8 Bad sender domain'), 'transient', 'sender'],
       [smtp(550, '550 5.1.8 Bad sender domain', 'MAIL FROM'), 'transient', 'sender'],
       [smtp(535, '535 5.7.8 Authentication failed', 'AUTH PLAIN'), 'transient', 'auth'],
       [Object.assign(new Error('530 5.7.0 Must issue a STARTTLS command first'), { responseCode: 530 }), 'transient', 'auth'],
@@ -2139,37 +2139,6 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       assert.equal((await state(draft.id)).status, 'draft');
       _resetSendTestHooks();
     }
-  });
-
-  it('manual review can be marked sent or returned to draft', async () => {
-    const before = await sentToday();
-    const row = await legacySent('test+resolve@example.com');
-    await pool.query(
-      `UPDATE proposals SET status = 'stopped', stop_reason = 'Needs manual review: the send outcome is uncertain', sent_at = NULL WHERE id = $1`,
-      [row.proposal.id]
-    );
-    const marked = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/mark-sent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ note: 'It did go out', confirm_override: true }),
-    });
-    assert.equal(marked.status, 200);
-    const after = await state(row.proposal.id);
-    assert.equal(after.status, 'sent');
-    assert.ok(after.sent_at);
-    assert.ok(await sentToday() >= before + 1);
-    const other = await legacySent('test+unsend@example.com');
-    await pool.query(
-      `UPDATE proposals SET status = 'manual_review', stop_reason = 'transient_max_age' WHERE id = $1`,
-      [other.proposal.id]
-    );
-    const back = await fetch(`${apiBase}/api/proposals/${other.proposal.id}/restore`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
-    });
-    assert.equal(back.status, 200);
-    const restored = await pool.query('SELECT status, followup_argument_attempts, stop_reason FROM proposals WHERE id = $1', [other.proposal.id]);
-    assert.equal(restored.rows[0].status, 'draft');
-    assert.equal(Number(restored.rows[0].followup_argument_attempts), 0);
-    assert.equal(restored.rows[0].stop_reason, null);
   });
 
   it('stops a non-ASCII address as unsupported and does not mail a trimmed copy', async () => {
@@ -3038,109 +3007,24 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     assert.equal(after.stop_reason, null);
   });
 
-  it('round 6: mark-sent keeps a delivery that was already counted', async () => {
-    const before = await sentToday();
-    const row = await legacySent('test+counted@example.com');
-    const sentAt = new Date(Date.now() - 3 * 86400000).toISOString();
-    await pool.query(
-      `UPDATE proposals
-          SET status = 'stopped', stop_reason = 'Needs manual review: the send outcome is uncertain',
-              sent_at = $2, followup1_sent_at = $2
-        WHERE id = $1`,
-      [row.proposal.id, sentAt]
-    );
-    const marked = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/mark-sent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ note: 'already out', confirm_override: true }),
-    });
-    assert.equal(marked.status, 200);
-    const after = await fullProposal(row.proposal.id);
-    assert.equal(after.status, 'sent');
-    assert.equal(new Date(after.sent_at).toISOString(), new Date(sentAt).toISOString());
-    assert.equal(new Date(after.followup1_sent_at).toISOString(), new Date(sentAt).toISOString());
-    assert.equal(await sentToday(), before);
-    const calls = useTransport();
-    await sendDueFollowups();
-    assert.equal(calls.length, 0);
-  });
-
-  it('round 6: transient_max_age is counted only when delivery is confirmed', async () => {
-    const before = await sentToday();
-    const row = await legacySent('test+maxage-resolve@example.com');
-    const sentAt = (await fullProposal(row.proposal.id)).sent_at;
-    await pool.query(
-      `UPDATE proposals SET status = 'manual_review', stop_reason = 'transient_max_age', error = 'transient_max_age' WHERE id = $1`,
-      [row.proposal.id]
-    );
-    const denied = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/mark-sent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ note: 'guess' }),
-    });
-    assert.equal(denied.status, 409);
-    const still = await fullProposal(row.proposal.id);
-    assert.equal(still.status, 'manual_review');
-    assert.equal(still.followup1_sent_at, null);
-    assert.equal(await sentToday(), before);
-    const allowed = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/mark-sent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ delivered: true, step: 'followup1' }),
-    });
-    assert.equal(allowed.status, 200);
-    const after = await fullProposal(row.proposal.id);
-    assert.equal(after.status, 'sent');
-    assert.equal(new Date(after.sent_at).toISOString(), new Date(sentAt).toISOString());
-    assert.ok(after.followup1_sent_at);
-    assert.equal(await sentToday(), before + 1);
-  });
-
-  it('round 6: not_sent returns a draft that approve will not send until confirm', async () => {
-    const row = await legacySent('test+not-sent@example.com');
-    await pool.query(
-      `UPDATE proposals SET status = 'stopped', stop_reason = 'Needs manual review: the send outcome is uncertain' WHERE id = $1`,
-      [row.proposal.id]
-    );
-    const back = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/mark-sent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ not_sent: true }),
-    });
-    assert.equal(back.status, 200);
-    const draft = await fullProposal(row.proposal.id);
-    assert.equal(draft.status, 'draft');
-    assert.equal(draft.stop_reason, 'Confirm before sending again');
-    const calls = useTransport();
-    const refused = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/send`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
-    });
-    assert.equal(refused.status, 409);
-    assert.equal(calls.length, 0);
-    assert.equal((await state(row.proposal.id)).status, 'draft');
-    const sent = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/send`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ confirm: true }),
-    });
-    assert.equal(sent.status, 200);
-    assert.equal(calls.length, 1);
-    assert.equal((await state(row.proposal.id)).status, 'sent');
-  });
-
-  it('round 6: 5.1.8 at RCPT TO stops that lead and the sweep continues', async () => {
+  it('round 8: 5.1.8 at RCPT TO halts the sweep and charges no lead', async () => {
     const first = await legacySent('test+rcpt518-a@example.com');
     const second = await legacySent('test+rcpt518-b@example.com');
-    const calls = useTransport(async (mail) => {
-      if (String(mail.to.address).includes('rcpt518-a')) {
-        const err = new Error('550 5.1.8 Bad sender domain');
-        err.responseCode = 550;
-        err.command = 'RCPT TO';
-        err.code = 'EENVELOPE';
-        throw err;
-      }
-      return { messageId: '<next@localhost>', threadId: 'thr-next' };
+    const calls = useTransport(async () => {
+      const err = new Error('550 5.1.8 Bad sender domain');
+      err.responseCode = 550;
+      err.command = 'RCPT TO';
+      err.code = 'EENVELOPE';
+      throw err;
     });
     await sendDueFollowups();
-    assert.equal(calls.length, 2);
-    assert.equal((await state(first.proposal.id)).status, 'stopped');
-    assert.equal((await state(first.proposal.id)).stop_reason, 'Follow-up stopped: invalid recipient');
-    assert.ok((await state(second.proposal.id)).followup1_sent_at);
+    assert.equal(calls.length, 1);
+    const lead = await state(first.proposal.id);
+    assert.equal(lead.status, 'sent');
+    assert.match(lead.error, /^Follow-up will retry: sender\b/);
+    assert.equal(lead.followup1_sent_at, null);
+    assert.equal((await state(second.proposal.id)).followup1_sent_at, null);
+    assert.ok((await sendReadiness()).halt);
   });
 
   it('round 6: 5.1.8 at MAIL FROM halts the sweep', async () => {
@@ -3244,85 +3128,6 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     assert.equal(after.stop_reason, before.stop_reason);
   });
 
-  it('round 7: delivered true does not skip the uncertain or sending 409', async () => {
-    const uncertain = await legacySent('test+uncertain-override@example.com');
-    await pool.query(
-      `UPDATE proposals SET status = 'stopped', stop_reason = 'Needs manual review: the send outcome is uncertain' WHERE id = $1`,
-      [uncertain.proposal.id]
-    );
-    const before = await fullProposal(uncertain.proposal.id);
-    const skipped = await fetch(`${apiBase}/api/proposals/${uncertain.proposal.id}/mark-sent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ delivered: true, note: 'skip the check' }),
-    });
-    assert.equal(skipped.status, 409);
-    const skippedBody = await skipped.json();
-    assert.match(skippedBody.error, /uncertain/);
-    const unchanged = await fullProposal(uncertain.proposal.id);
-    assert.equal(unchanged.status, before.status);
-    assert.equal(unchanged.sent_at && new Date(unchanged.sent_at).toISOString(), before.sent_at && new Date(before.sent_at).toISOString());
-    assert.equal(unchanged.stop_reason, before.stop_reason);
-
-    const allowed = await fetch(`${apiBase}/api/proposals/${uncertain.proposal.id}/mark-sent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ delivered: true, confirm_override: true, note: 'operator confirmed' }),
-    });
-    assert.equal(allowed.status, 200);
-    const counted = await fullProposal(uncertain.proposal.id);
-    assert.equal(counted.status, 'sent');
-    assert.equal(new Date(counted.sent_at).toISOString(), new Date(before.sent_at).toISOString());
-
-    const sending = await legacySent('test+sending-override@example.com');
-    await pool.query(`UPDATE proposals SET status = 'sending', stop_reason = NULL WHERE id = $1`, [sending.proposal.id]);
-    const blocked = await fetch(`${apiBase}/api/proposals/${sending.proposal.id}/mark-sent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ delivered: true }),
-    });
-    assert.equal(blocked.status, 409);
-    assert.equal((await fullProposal(sending.proposal.id)).status, 'sending');
-    const forced = await fetch(`${apiBase}/api/proposals/${sending.proposal.id}/mark-sent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
-      body: JSON.stringify({ confirm_override: true }),
-    });
-    assert.equal(forced.status, 200);
-    assert.equal((await fullProposal(sending.proposal.id)).status, 'sent');
-  });
-
-  it('round 7: restore keeps the send-again and uncertain flags while sent_at is set', async () => {
-    const again = await legacySent('test+restore-again@example.com');
-    await pool.query(
-      `UPDATE proposals SET status = 'manual_review', stop_reason = 'Confirm before sending again' WHERE id = $1`,
-      [again.proposal.id]
-    );
-    const againRes = await fetch(`${apiBase}/api/proposals/${again.proposal.id}/restore`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
-    });
-    assert.equal(againRes.status, 200);
-    const againRow = await fullProposal(again.proposal.id);
-    assert.equal(againRow.status, 'draft');
-    assert.equal(againRow.stop_reason, 'Confirm before sending again');
-    assert.ok(againRow.sent_at);
-
-    const unsure = await legacySent('test+restore-unsure@example.com');
-    await pool.query(
-      `UPDATE proposals SET status = 'stopped', stop_reason = 'Needs manual review: the send outcome is uncertain' WHERE id = $1`,
-      [unsure.proposal.id]
-    );
-    const unsureRes = await fetch(`${apiBase}/api/proposals/${unsure.proposal.id}/restore`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
-    });
-    assert.equal(unsureRes.status, 200);
-    const unsureRow = await fullProposal(unsure.proposal.id);
-    assert.equal(unsureRow.status, 'draft');
-    assert.equal(unsureRow.stop_reason, 'Needs manual review: the send outcome is uncertain');
-    const calls = useTransport();
-    const refused = await fetch(`${apiBase}/api/proposals/${unsure.proposal.id}/send`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
-    });
-    assert.equal(refused.status, 409);
-    assert.equal(calls.length, 0);
-    assert.equal((await fullProposal(unsure.proposal.id)).status, 'draft');
-  });
 
   it('round 7: a successful send clears the send-again reason', async () => {
     const row = await legacySent('test+clear-reason@example.com');
@@ -4126,5 +3931,267 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       assert.equal((await QA_I.sendReadiness()).halt, null, 'halt alert stayed after a clean pass');
     });
   });
+
+
+  describe('QA j (r9, adjusted for Summit: 5.1.8 at RCPT TO halts)', { concurrency: false }, () => {
+    const QA_J = require('../src/proposals/send');
+    const QA_J_GMAIL = require('../src/proposals/gmail');
+
+    async function qaJRow(id) {
+      const { rows } = await pool.query(
+        `SELECT status, stop_reason, error, followup1_sent_at, followup_argument_attempts,
+                followup_transient_attempts, first_transient_at, next_retry_at, send_attempt_key
+           FROM proposals WHERE id = $1`, [id]);
+      return rows[0];
+    }
+
+    for (const [name, make] of [
+      ['numeric 451', () => Object.assign(new Error('451 4.3.0 Try again later'), { responseCode: 451, command: 'MAIL FROM', response: '451 4.3.0 Try again later', code: 'EENVELOPE' })],
+      ['code-less 421', () => Object.assign(new Error('421 4.4.2 try again later'), { command: 'MAIL FROM' })],
+    ]) {
+      it(`QA r9: a ${name} at MAIL FROM backs off as an outage and the next lead still sends`, async () => {
+        QA_J._setRandom(() => 0.5);
+        try {
+          const first = await legacySent(`test+mail4xx-a-${name.replace(/\W/g, '')}@example.com`, { sentAt: new Date(Date.now() - 2 * 86400000) });
+          const second = await legacySent(`test+mail4xx-b-${name.replace(/\W/g, '')}@example.com`);
+          const calls = useTransport(async (mail) => {
+            if (String(mail.to.address).includes('mail4xx-a')) throw make();
+            return { messageId: '<ok@localhost>', threadId: 'thr-ok' };
+          });
+          await sendDueFollowups();
+          assert.equal(calls.length, 2, 'the sweep stopped after a MAIL FROM 4xx');
+          const a = await qaJRow(first.proposal.id);
+          assert.equal(a.status, 'sent');
+          assert.equal(a.error, 'Follow-up will retry: smtp');
+          assert.equal(Number(a.followup_argument_attempts), 0);
+          assert.equal(Number(a.followup_transient_attempts), 1);
+          assert.ok((await qaJRow(second.proposal.id)).followup1_sent_at);
+          assert.equal((await QA_J.sendReadiness()).halt, null);
+        } finally {
+          QA_J._setRandom(() => 0.5);
+        }
+      });
+    }
+
+    it('QA r9: a 5.1.8 at RCPT TO halts the sweep and charges no lead', async () => {
+      const first = await legacySent('test+rcpt518j-a@example.com', { sentAt: new Date(Date.now() - 2 * 86400000) });
+      const second = await legacySent('test+rcpt518j-b@example.com');
+      const calls = useTransport(async () => {
+        throw Object.assign(new Error("Can't send mail - all recipients were rejected: 550 5.1.8 Bad sender domain"), {
+          code: 'EENVELOPE', command: 'RCPT TO', responseCode: 550,
+          response: '550 5.1.8 Bad sender domain',
+        });
+      });
+      await sendDueFollowups();
+      assert.equal(calls.length, 1);
+      const a = await qaJRow(first.proposal.id);
+      assert.equal(a.status, 'sent');
+      assert.match(a.error, /^Follow-up will retry: sender\b/);
+      assert.equal(Number(a.followup_argument_attempts), 0);
+      assert.equal(a.followup1_sent_at, null);
+      assert.equal((await qaJRow(second.proposal.id)).followup1_sent_at, null);
+      assert.equal((await QA_J.sendReadiness()).halt.cause, 'sender');
+    });
+
+    it('QA r9: an empty sweep clears the halt only after a real Gmail token check passes', async () => {
+      const row = await legacySent('test+halt-pass-r9@example.com');
+      useTransport(() => { throw Object.assign(new Error('Gmail API: Invalid Credentials'), { status: 401 }); });
+      await sendDueFollowups();
+      assert.ok((await QA_J.sendReadiness()).halt);
+      await pool.query('UPDATE prospects SET archived_at = NOW() WHERE id = $1', [row.prospect.id]);
+      _setTransport(null);
+      const original = { status: QA_J_GMAIL.status, accessToken: QA_J_GMAIL.accessToken };
+      let tokenChecks = 0;
+      QA_J_GMAIL.status = async () => ({ configured: true, connected: true, email: 'test+sender@example.com' });
+      try {
+        QA_J_GMAIL.accessToken = async () => { tokenChecks += 1; throw new Error('Gmail access expired. Go to Settings and click Connect Gmail again.'); };
+        await sendDueFollowups();
+        assert.ok(tokenChecks >= 1, 'the empty sweep ran no token check');
+        assert.ok((await QA_J.sendReadiness()).halt, 'a failing token check cleared the halt');
+        QA_J_GMAIL.accessToken = async () => { tokenChecks += 1; return 'test-token'; };
+        const before = tokenChecks;
+        await sendDueFollowups();
+        assert.ok(tokenChecks > before, 'the clearing sweep ran no token check');
+        assert.equal((await QA_J.sendReadiness()).halt, null);
+      } finally {
+        QA_J_GMAIL.status = original.status;
+        QA_J_GMAIL.accessToken = original.accessToken;
+        _setTransport(null);
+      }
+    });
+
+    it('QA r9 probe: an empty sweep in SMTP mode keeps a 535 halt when no SMTP login was checked', async () => {
+      const row = await legacySent('test+halt-smtp-r9@example.com');
+      useTransport(() => { throw Object.assign(new Error('535 5.7.8 Username and Password not accepted'), { responseCode: 535, command: 'AUTH PLAIN' }); });
+      await sendDueFollowups();
+      assert.ok((await QA_J.sendReadiness()).halt, 'no halt after a 535');
+      await pool.query('UPDATE prospects SET archived_at = NOW() WHERE id = $1', [row.prospect.id]);
+      _setTransport(null);
+      const env = { u: process.env.GMAIL_USER, p: process.env.GMAIL_APP_PASSWORD };
+      const original = QA_J_GMAIL.status;
+      process.env.GMAIL_USER = 'test+smtp@example.com';
+      process.env.GMAIL_APP_PASSWORD = 'not-a-real-password';
+      QA_J_GMAIL.status = async () => ({ configured: false, connected: false });
+      try {
+        assert.equal(await QA_J.mailMode(), 'smtp');
+        await sendDueFollowups();
+        assert.ok((await QA_J.sendReadiness()).halt, 'SMTP env vars alone cleared a 535 halt');
+      } finally {
+        QA_J_GMAIL.status = original;
+        if (env.u === undefined) delete process.env.GMAIL_USER; else process.env.GMAIL_USER = env.u;
+        if (env.p === undefined) delete process.env.GMAIL_APP_PASSWORD; else process.env.GMAIL_APP_PASSWORD = env.p;
+        _setTransport(null);
+      }
+    });
+  });
+
+  it('round 8: nodemailer prefixes do not make a quoted enhanced code permanent', () => {
+    const SMTPConnection = require('nodemailer/lib/smtp-connection');
+    const conn = new SMTPConnection({ port: 1, host: '127.0.0.1' });
+    const replies = [
+      '550 Rejected by policy; upstream said 550 5.1.1 user unknown',
+      '554 Transaction failed: relay said 554 5.1.1 unknown',
+      '552 Mailbox over quota; earlier hop 552 5.1.1',
+      'see 550 5.1.8 bad',
+    ];
+    for (const reply of replies) {
+      const raw = Object.assign(new Error(reply), { responseCode: Number(reply.slice(0, 3)) || 550, command: 'RCPT TO', response: reply });
+      if (!/^\d{3}/.test(reply)) raw.responseCode = 550;
+      const formatted = conn._formatError("Can't send mail - all recipients were rejected", 'EENVELOPE', reply, 'RCPT TO');
+      for (const err of [raw, formatted]) {
+        const got = classifyFollowupError(err);
+        assert.notEqual(got.kind, 'permanent', err.message);
+        assert.notEqual(got.label, 'sender', err.message);
+      }
+    }
+    const real = conn._formatError("Can't send mail - all recipients were rejected", 'EENVELOPE', '550 5.1.1 user unknown', 'RCPT TO');
+    assert.equal(classifyFollowupError(real).kind, 'permanent');
+  });
+
+  it('round 8: a loopback SMTP drop after DATA is an outage, not the cap', async () => {
+    const net = require('net');
+    const nodemailer = require('nodemailer');
+    const server = net.createServer((socket) => {
+      socket.write('220 localhost ESMTP\r\n');
+      let buf = '';
+      let data = false;
+      socket.on('data', (chunk) => {
+        if (data) { socket.destroy(); return; }
+        buf += chunk.toString('utf8');
+        if (!buf.includes('\n')) return;
+        const line = buf.split(/\r?\n/)[0];
+        buf = '';
+        const cmd = line.split(' ')[0].toUpperCase();
+        if (cmd === 'EHLO' || cmd === 'HELO') socket.write('250-localhost\r\n250 OK\r\n');
+        else if (cmd === 'DATA') { data = true; socket.write('354 Go\r\n'); }
+        else if (cmd === 'QUIT') socket.end('221 bye\r\n');
+        else socket.write('250 OK\r\n');
+      });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    let caught;
+    try {
+      const tx = nodemailer.createTransport({ host: '127.0.0.1', port, secure: false, connectionTimeout: 5000, tls: { rejectUnauthorized: false } });
+      await tx.sendMail({ from: 'test+from@example.com', to: 'test+to@example.com', subject: 'TEST', text: 'hi' });
+    } catch (err) {
+      caught = err;
+    } finally {
+      server.close();
+    }
+    assert.ok(caught, 'the drop did not throw');
+    assert.equal(classifyFollowupError(caught).label, 'network', `${caught.code} ${caught.command} ${caught.message}`);
+    const row = await legacySent('test+data-drop@example.com');
+    let n = 0;
+    useTransport(() => { n += 1; throw caught; });
+    await sendDueFollowups();
+    await qaAdvance(75);
+    await sendDueFollowups();
+    await qaAdvance(75);
+    await sendDueFollowups();
+    await qaAdvance(75);
+    await sendDueFollowups();
+    const after = await fullProposal(row.proposal.id);
+    assert.equal(after.status, 'sent');
+    assert.notEqual(after.stop_reason, 'Follow-up stopped: later retry limit reached');
+    assert.ok(n >= 2, `only ${n} calls`);
+  });
+
+  it('round 8: do-not-contact set by a settings read is seen before send', async () => {
+    const axios = require('axios');
+    const gmailMod = require('../src/proposals/gmail');
+    const prevAdapter = axios.defaults.adapter;
+    const prevId = process.env.GOOGLE_CLIENT_ID;
+    const prevSecret = process.env.GOOGLE_CLIENT_SECRET;
+    process.env.GOOGLE_CLIENT_ID = 'test-client-id';
+    process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret';
+    let sends = 0;
+    axios.defaults.adapter = async (config) => {
+      const url = String(config && config.url || '');
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return { data: { access_token: 'test-access', expires_in: 3600 }, status: 200, statusText: 'OK', headers: {}, config };
+      }
+      if (url.includes('/messages/send')) {
+        sends += 1;
+        return { data: { id: 'mid', threadId: 'thr' }, status: 200, statusText: 'OK', headers: {}, config };
+      }
+      return { data: { payload: { headers: [] } }, status: 200, statusText: 'OK', headers: {}, config };
+    };
+    const orig = pool.query.bind(pool);
+    const arm = { id: null };
+    pool.query = function (text, params) {
+      const q = orig(text, params);
+      if (arm.id && typeof text === 'string' && text.includes('app_settings')) {
+        return q.then(async (value) => {
+          await orig('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [arm.id]);
+          return value;
+        });
+      }
+      return q;
+    };
+    try {
+      await pool.query(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ('gmail_oauth', $1::jsonb, NOW())`,
+        [JSON.stringify({ refresh_token: 'test-refresh-token', email: 'test+sender@example.com' })]
+      );
+      _setTransport(null);
+      const follow = await legacySent('test+dnc-read-fu@example.com');
+      arm.id = follow.prospect.id;
+      await sendDueFollowups();
+      assert.equal(sends, 0, 'follow-up mailed after the settings read');
+      assert.equal((await state(follow.proposal.id)).followup1_sent_at, null);
+
+      const prospect = await lead();
+      const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+dnc-read-approve@example.com' });
+      arm.id = prospect.id;
+      const approved = await fetch(`${apiBase}/api/proposals/${draft.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      assert.equal(approved.status, 409);
+      assert.equal(sends, 0, 'approve mailed after the settings read');
+
+      const message = await pool.query(
+        `INSERT INTO inbox_messages (prospect_id, direction, dedupe_key, from_addr, subject, body)
+         VALUES ($1, 'in', $2, 'test+dnc-read-inbox@example.com', 'Hi', 'hello') RETURNING id`,
+        [prospect.id, `round8-dnc-${prospect.id}`]
+      );
+      const item = await pool.query(
+        `INSERT INTO inbox_items (prospect_id, message_id, status, reply_to, reply_subject, reply_body)
+         VALUES ($1, $2, 'ready', 'test+dnc-read-inbox@example.com', 'Re: Hi', 'Thanks.') RETURNING id`,
+        [prospect.id, message.rows[0].id]
+      );
+      await pool.query('UPDATE prospects SET do_not_contact = FALSE WHERE id = $1', [prospect.id]);
+      const inbox = require('../src/proposals/inbox');
+      await assert.rejects(() => inbox.sendReply(item.rows[0].id));
+      assert.equal(sends, 0, 'inbox reply mailed after the settings read');
+    } finally {
+      pool.query = orig;
+      axios.defaults.adapter = prevAdapter;
+      if (prevId === undefined) delete process.env.GOOGLE_CLIENT_ID; else process.env.GOOGLE_CLIENT_ID = prevId;
+      if (prevSecret === undefined) delete process.env.GOOGLE_CLIENT_SECRET; else process.env.GOOGLE_CLIENT_SECRET = prevSecret;
+      _setTransport(null);
+    }
+  });
+
 
 });
