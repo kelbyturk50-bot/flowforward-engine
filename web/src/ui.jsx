@@ -223,7 +223,26 @@ export const mapsHref = (lead) => 'https://www.google.com/maps/search/?api=1&que
 export const PROPOSAL_STATUS = {
   draft: 'To review', sending: 'Sending', sent: 'Out', replied: 'Replied', bounced: 'Bounced', opted_out: 'Opted out',
   finished: 'No reply', stopped: 'Stopped', discarded: 'Discarded', superseded: 'Older version',
+  manual_review: 'Needs review',
 };
+
+export function proposalStatusCopy(p) {
+  if (!p) return '';
+  const blob = `${p.stop_reason || ''} ${p.error || ''}`;
+  if (blob.includes('transient_max_age')) return 'Gmail kept failing for 3 days, so we stopped retrying.';
+  if (p.status === 'manual_review' || String(p.stop_reason || '').startsWith('Needs manual review')) {
+    return 'The send may have gone out. Check Gmail before you retry it.';
+  }
+  return '';
+}
+
+export function followupHaltCopy(halt) {
+  if (!halt) return '';
+  if (halt.error_class === 'sender') {
+    return 'Follow-ups are paused: the sender address was rejected. Reconnect Gmail in Settings.';
+  }
+  return 'Follow-ups are paused: Gmail access expired. Reconnect Gmail in Settings.';
+}
 export function ProposalChip({ status, verdict }) {
   const label = status === 'discarded' && verdict === 'disqualify' ? 'Not a fit' : (PROPOSAL_STATUS[status] || status);
   return <span className={`pchip pchip-${status}`}>{label}</span>;

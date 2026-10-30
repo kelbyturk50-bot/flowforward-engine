@@ -370,17 +370,27 @@ async function sendReply(id) {
   const claim = await pool.query(`UPDATE inbox_items SET status = 'sending' WHERE id = $1 AND status = 'ready' RETURNING id`, [id]);
   if (!claim.rows.length) throw httpError('Already sending.', 409);
   const subject = String(item.reply_subject || `Re: ${item.message_subject || ''}`).replace(/\r\n|\r|\n/g, '');
+  let prepared;
+  try {
+    prepared = await s.prepareOutgoing();
+  } catch (err) {
+    console.error('[inbox] send failed:', errCode(err));
+    await pool.query(`UPDATE inbox_items SET status = 'ready', error = $2 WHERE id = $1`, [id, SEND_FAILED_MESSAGE]);
+    const wrapped = httpError(SEND_FAILED_MESSAGE, 500);
+    wrapped.code = err && err.code;
+    throw wrapped;
+  }
   const gate = await s.recheckLead(item.prospect_id);
   // Stage "responded" is set when their reply arrives. This send is the answer,
   // so only do-not-contact and an opt-out stage block it.
-  if (gate && (gate.do_not_contact || gate.stage === 'lost' || gate.stage === 'disqualified')) {
+  if (gate && (gate.archived_at || gate.do_not_contact || gate.stage === 'lost' || gate.stage === 'disqualified')) {
     await pool.query(`UPDATE inbox_items SET status = 'ready' WHERE id = $1 AND status = 'sending'`, [id]);
     throw httpError(gate.do_not_contact ? 'This lead asked not to be contacted.' : 'This lead is no longer a send.', 409);
   }
   let info;
   try {
     const refs = item.header_message_id ? [item.header_message_id] : undefined;
-    info = await (await s.mailer()).sendMail({
+    info = await prepared.send({
       from: { name: cfg.SENDER.name, address: cfg.SENDER.email },
       to: { address: canonicalTo.value },
       subject,

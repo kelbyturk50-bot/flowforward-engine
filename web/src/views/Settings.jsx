@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, settings } from '../api';
 import { acceptedApiUrl, apiUrlIssue, shouldStoreApiUrl } from '../api-base.js';
-import { useAsync, ErrorNote, timeAgo, toast, money2 } from '../ui';
+import { useAsync, ErrorNote, followupHaltCopy, timeAgo, toast, money2 } from '../ui';
 import FeatureFlagsPanel from './FeatureFlags';
 
 export default function Settings({ authProblem, onSaved, version }) {
@@ -149,6 +149,7 @@ function ProposalSettings({ version }) {
       <section className="panel">
         <h2>Proposal bot</h2>
         <ErrorNote error={summary.error} />
+        {s?.halt && <div className="setup-note halt-note" role="status"><strong>{followupHaltCopy(s.halt)}</strong></div>}
         {s?.setup?.length > 0 && <div className="setup-note"><strong>Finish setup in Railway</strong><ul>{s.setup.map(x => <li key={x}>{x}</li>)}</ul></div>}
         {c && (
           <dl className="facts">

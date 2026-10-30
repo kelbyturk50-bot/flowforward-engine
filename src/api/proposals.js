@@ -23,7 +23,7 @@ const VIEWS = {
   out:     `pr.status IN ('sent', 'sending')`,
   replied: `pr.status = 'replied'`,
   flagged: `pr.status = 'discarded' AND pr.analysis->>'fit_verdict' = 'disqualify'`,
-  closed:  `(pr.status IN ('finished', 'stopped', 'bounced', 'opted_out') OR (pr.status = 'discarded' AND COALESCE(pr.analysis->>'fit_verdict', '') <> 'disqualify'))`,
+  closed:  `(pr.status IN ('finished', 'stopped', 'bounced', 'opted_out', 'manual_review') OR (pr.status = 'discarded' AND COALESCE(pr.analysis->>'fit_verdict', '') <> 'disqualify'))`,
 };
 
 const fail = (res, err) => res.status(err.status || 500).json({ error: err.message });
@@ -80,7 +80,8 @@ router.get('/summary', async (req, res) => {
     counts.jobs_active = activeJobs.rows[0].n;
     const setup = [];
     if (!cfg.anthropicConfigured()) setup.push('Add ANTHROPIC_API_KEY in Railway Variables so the bot can write drafts.');
-    setup.push(...await send.sendReadiness());
+    const readiness = await send.sendReadiness();
+    setup.push(...readiness);
     const gstatus = await require('../proposals/gmail').status();
     res.json({
       counts, setup, running: isRunning(),
@@ -88,6 +89,7 @@ router.get('/summary', async (req, res) => {
       spend_this_month: spend.rows[0].month,
       chat_demo_this_month: chatSpend.rows[0].month,
       sent_today: sentToday, daily_limit: cfg.SEND_DAILY_LIMIT,
+      halt: readiness.halt || null,
       eligible_leads: eligible.rows[0].n,
       config: {
         model: cfg.MODEL, nightly_count: cfg.NIGHTLY_COUNT, auto_draft: cfg.AUTO_DRAFT, tiers: cfg.TIERS, excluded: cfg.EXCLUDED_INDUSTRIES, cron: cfg.CRON,
@@ -302,7 +304,10 @@ router.patch('/:id', async (req, res) => {
 
 // POST /api/proposals/:id/send — approve + send the first email now
 router.post('/:id/send', async (req, res) => {
-  try { res.json(withUrl(await send.approveAndSend(parseInt(req.params.id, 10)))); } catch (err) { fail(res, err); }
+  try {
+    const confirm = !!(req.body && req.body.confirm === true);
+    res.json(withUrl(await send.approveAndSend(parseInt(req.params.id, 10), { confirm })));
+  } catch (err) { fail(res, err); }
 });
 
 // POST /api/proposals/:id/regenerate { instructions, fresh_research }
@@ -388,11 +393,11 @@ router.post('/:id/mark-sent', async (req, res) => {
     if (manualReview && req.body && req.body.not_sent) {
       await db.query(
         `UPDATE proposals
-            SET status = 'draft', stop_reason = NULL, error = NULL, approved_at = NULL,
+            SET status = 'draft', stop_reason = $2, error = NULL, approved_at = NULL,
                 send_attempt_key = NULL, followup_argument_attempts = 0,
                 followup_transient_attempts = 0, first_transient_at = NULL, next_retry_at = NULL
           WHERE id = $1`,
-        [p.id]);
+        [p.id, send.RESEND_CONFIRM]);
       await db.query('COMMIT');
       const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
       return res.json(withUrl(fresh.rows[0]));
@@ -409,16 +414,52 @@ router.post('/:id/mark-sent', async (req, res) => {
     const fu1 = new Date(now); fu1.setDate(fu1.getDate() + 3);
     const fu2 = new Date(now); fu2.setDate(fu2.getDate() + 10);
     const note = req.body?.note || 'Manual outreach';
+    const maxAge = p.stop_reason === 'transient_max_age' || p.error === 'transient_max_age';
+    const alreadyDelivered = !!(p.sent_at || p.followup1_sent_at || p.followup2_sent_at);
 
-    await db.query(
-      `UPDATE proposals SET status = 'sent', sent_at = $2,
-        followup1_due_at = $3, followup2_due_at = $4,
-        stop_reason = NULL, error = NULL, send_attempt_key = NULL,
-        followup_argument_attempts = 0, followup_transient_attempts = 0,
-        first_transient_at = NULL, next_retry_at = NULL
-       WHERE id = $1`,
-      [p.id, now, fu1, fu2]
-    );
+    if (maxAge && !(req.body && req.body.delivered === true)) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ error: 'This message was not delivered. Confirm delivery to record it.' });
+    }
+
+    if (maxAge) {
+      const requested = req.body && req.body.step;
+      const step = requested === 'first' || requested === 'followup1' || requested === 'followup2'
+        ? requested
+        : (!p.sent_at ? 'first' : (!p.followup1_sent_at ? 'followup1' : 'followup2'));
+      await db.query(
+        `UPDATE proposals SET status = 'sent',
+          sent_at = CASE WHEN $2 = 'first' THEN COALESCE(sent_at, $3) ELSE sent_at END,
+          followup1_sent_at = CASE WHEN $2 = 'followup1' THEN COALESCE(followup1_sent_at, $3) ELSE followup1_sent_at END,
+          followup2_sent_at = CASE WHEN $2 = 'followup2' THEN COALESCE(followup2_sent_at, $3) ELSE followup2_sent_at END,
+          followup1_due_at = CASE WHEN $2 = 'first' AND followup1_sent_at IS NULL THEN $4 ELSE followup1_due_at END,
+          followup2_due_at = CASE WHEN $2 IN ('first', 'followup1') AND followup2_sent_at IS NULL THEN $5 ELSE followup2_due_at END,
+          stop_reason = NULL, error = NULL, send_attempt_key = NULL,
+          followup_argument_attempts = 0, followup_transient_attempts = 0,
+          first_transient_at = NULL, next_retry_at = NULL
+         WHERE id = $1`,
+        [p.id, step, now, fu1, fu2]
+      );
+    } else if (alreadyDelivered) {
+      await db.query(
+        `UPDATE proposals SET status = 'sent',
+          stop_reason = NULL, error = NULL, send_attempt_key = NULL,
+          followup_argument_attempts = 0, followup_transient_attempts = 0,
+          first_transient_at = NULL, next_retry_at = NULL
+         WHERE id = $1`,
+        [p.id]
+      );
+    } else {
+      await db.query(
+        `UPDATE proposals SET status = 'sent', sent_at = $2,
+          followup1_due_at = $3, followup2_due_at = $4,
+          stop_reason = NULL, error = NULL, send_attempt_key = NULL,
+          followup_argument_attempts = 0, followup_transient_attempts = 0,
+          first_transient_at = NULL, next_retry_at = NULL
+         WHERE id = $1`,
+        [p.id, now, fu1, fu2]
+      );
+    }
     await db.query(
       `UPDATE prospects SET stage = CASE WHEN stage IN ('found','qualified') THEN 'contacted' ELSE stage END,
         last_contacted_at = $2, updated_at = NOW() WHERE id = $1`,

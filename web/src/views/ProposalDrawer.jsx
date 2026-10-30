@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { missingRecipient, recipientHint, trimRecipientEdges } from '../recipient';
 import { TryLiveDemoLink } from '../demo/DemoLinks';
-import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, relDate, timeAgo, toast, Stars } from '../ui';
+import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, PROPOSAL_STATUS, proposalStatusCopy, relDate, timeAgo, toast, Stars } from '../ui';
 import { useJobs, elapsed } from '../jobs';
 import PrototypeCard from './PrototypeCard';
 
@@ -31,6 +31,8 @@ export default function ProposalDrawer({ id, onClose, bump, openLead, openPropos
 
 function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   const editable = p.status === 'draft';
+  const needsReview = p.status === 'manual_review' || String(p.stop_reason || '').startsWith('Needs manual review');
+  const reviewCopy = proposalStatusCopy(p);
   const noRecipient = missingRecipient(p.to_email);
   const hint = noRecipient ? recipientHint(p.to_email) : '';
   const focusRecipient = () => {
@@ -70,7 +72,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
             <ProposalChip status={p.status} verdict={a.fit_verdict} />
             {p.versions?.length > 1 ? (
               <select className="mini-select" value={p.id} onChange={e => openProposal(Number(e.target.value))} aria-label="Version">
-                {p.versions.map(v => <option key={v.id} value={v.id}>v{v.version} · {v.status === 'superseded' ? 'older' : v.status}{v.instructions ? ' · w/ notes' : ''}</option>)}
+                {p.versions.map(v => <option key={v.id} value={v.id}>v{v.version} · {v.status === 'superseded' ? 'older' : (PROPOSAL_STATUS[v.status] || v.status)}{v.instructions ? ' · w/ notes' : ''}</option>)}
               </select>
             ) : <span className="muted small">v{p.version}</span>}
             <span className="muted small">{money2(p.cost_usd)} · drafted {timeAgo(p.created_at)}</span>
@@ -79,8 +81,12 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
         </div>
       </header>
 
-      {p.error && <div className="error-note"><p>{p.error}</p></div>}
-      {p.stop_reason && p.status !== 'draft' && <p className="muted">{p.stop_reason}</p>}
+      {reviewCopy && <div className="error-note" role="status"><p>{reviewCopy}</p></div>}
+      {!reviewCopy && p.error && <div className="error-note"><p>{p.error}</p></div>}
+      {!reviewCopy && p.stop_reason && p.status !== 'draft' && <p className="muted">{p.stop_reason}</p>}
+      {p.status === 'draft' && p.stop_reason === 'Confirm before sending again' && (
+        <p className="muted">This was marked not sent. Approve only if you want to send it.</p>
+      )}
 
       {/* ── Actions ── */}
       <div className="action-bar">
@@ -117,9 +123,13 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <button className="btn btn-quiet" disabled={!!busy} onClick={() => act('replied', () => api.repliedProposal(p.id, 'They got in touch another way'), 'Marked replied. Follow-ups stopped.')}>They replied another way</button>
           <button className="btn btn-danger" disabled={!!busy} onClick={() => act('stop', () => api.stopProposal(p.id), 'Follow-ups stopped.')}>Stop follow-ups</button>
         </>}
-        {['discarded', 'superseded'].includes(p.status) && (
+        {(['discarded', 'superseded'].includes(p.status) || needsReview) && (
           <button className="btn" disabled={!!busy} onClick={() => act('restore', () => api.restoreProposal(p.id), 'Back in your review queue.')}>Restore to review</button>
         )}
+        {needsReview && <>
+          <button className="btn" disabled={!!busy} onClick={() => act('mark-sent', () => api.markSentProposal(p.id, 'Recorded from review', { delivered: true }), 'Marked as sent.')}>Mark as sent</button>
+          <button className="btn btn-quiet" disabled={!!busy} onClick={() => act('not-sent', () => api.markSentProposal(p.id, undefined, { not_sent: true }), 'Back in your review queue. Approve only if you want to send it.')}>Mark not sent</button>
+        </>}
         {!editable && ['replied', 'finished', 'stopped', 'bounced', 'opted_out'].includes(p.status) && (
           <button className="btn btn-quiet" disabled={!!busy || rewriting} onClick={() => setRegen(r => !r)}>{rewriting ? 'Rewriting…' : 'Write a new version…'}</button>
         )}
@@ -130,7 +140,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <p><strong>Send to {p.to_name ? `${p.to_name} <${p.to_email}>` : p.to_email}?</strong></p>
           <p className="muted">“{p.subject}” goes out now from your Gmail. Follow-ups are scheduled for day 3 and day 10 and stop automatically if they reply, book, bounce or opt out.</p>
           <div className="link-row">
-            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => act('send', () => api.sendProposal(p.id), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>
+            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => act('send', () => api.sendProposal(p.id, p.stop_reason === 'Confirm before sending again' ? { confirm: true } : undefined), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>
               {busy === 'send' ? 'Sending…' : 'Send it'}
             </button>
             <button className="btn btn-quiet" onClick={() => setConfirming(false)}>Cancel</button>

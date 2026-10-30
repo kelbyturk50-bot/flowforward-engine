@@ -47,6 +47,40 @@ async function mailer() {
   }
   throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
 }
+
+// Status, token refresh, and the SMTP transport are resolved here. The caller
+// rechecks the lead after this returns, then calls send() with no await between
+// that recheck and the transport.
+async function prepareOutgoing() {
+  const status = await gmail.status();
+  if (status && status.connected && typeof gmail.accessToken === 'function') {
+    await gmail.accessToken();
+  }
+  const mode = await mailMode();
+  let transportClient = null;
+  if (mode === 'test') transportClient = testTransport;
+  else if (mode === 'gmail_api') transportClient = gmail;
+  else if (mode === 'smtp') {
+    if (!transport) {
+      transport = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+        connectionTimeout: 20000,
+      });
+    }
+    transportClient = transport;
+  }
+  return {
+    mode,
+    send(mail) {
+      if (!transportClient || typeof transportClient.sendMail !== 'function') {
+        throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
+      }
+      return transportClient.sendMail(mail);
+    },
+  };
+}
+
 // Tests swap in a fake transport. Refuses to run outside the test process.
 function _setTransport(t) {
   if (process.env.NODE_ENV !== 'test') {
@@ -226,6 +260,7 @@ async function sendReadiness() {
 }
 
 const MANUAL_REVIEW = 'Needs manual review: the send outcome is uncertain';
+const RESEND_CONFIRM = 'Confirm before sending again';
 const TRANSIENT_MAX_AGE = 'transient_max_age';
 const MANUAL_REVIEW_STATUS = 'manual_review';
 const STALE_SENDING = '15 minutes';
@@ -421,6 +456,8 @@ function errorBlob(err) {
 function isNetworkFollowupError(err) {
   const code = err && err.code;
   if (typeof code === 'string' && NETWORK_CODES.has(code)) return true;
+  // SMTP that accepts DATA and then drops the connection is an outage.
+  if (atCommand(err, 'DATA') && /connection closed|unexpectedly closed/i.test(errorBlob(err))) return true;
   return /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|socket hang up|network error|getaddrinfo|timeout of \d+ms exceeded/i.test(errorBlob(err));
 }
 
@@ -460,16 +497,24 @@ function replyTexts(err) {
 }
 
 function anchoredEnhanced(text, responseCode) {
-  const source = String(text || '');
-  if (responseCode == null) {
-    const start = source.match(/^\s*(\d{3})[ \t]+(5\.\d{1,3}\.\d{1,3})\b/);
-    return start ? [{ code: Number(start[1]), enhanced: start[2] }] : [];
-  }
   const found = [];
-  const re = /(^|[^\d])(\d{3})[ \t]+(5\.\d{1,3}\.\d{1,3})\b/g;
-  let match;
-  while ((match = re.exec(source))) {
-    if (Number(match[2]) === responseCode) found.push({ code: responseCode, enhanced: match[3] });
+  for (const line of String(text || '').split(/\r?\n/)) {
+    // The basic code and the enhanced code have to sit at the start of a reply
+    // line. A code quoted later on that line is not this reply's status.
+    const start = line.match(/^\s*(\d{3})(?:[ \t]+|-)(5\.\d{1,3}\.\d{1,3})\b/);
+    if (start) {
+      const code = Number(start[1]);
+      if (responseCode == null || code === responseCode) found.push({ code, enhanced: start[2] });
+      continue;
+    }
+    // A line that already begins with an SMTP code, without the enhanced code
+    // beside it, does not get a second look. That keeps "upstream said 550 5.1.1"
+    // from becoming a recipient failure.
+    if (/^\s*\d{3}\b/.test(line)) continue;
+    // Nodemailer wraps the server reply: "all recipients were rejected: 550 5.1.1".
+    if (responseCode == null) continue;
+    const wrapped = line.match(new RegExp(`(?:^|\\D)${responseCode}[ \\t]+(5\\.\\d{1,3}\\.\\d{1,3})\\b`));
+    if (wrapped) found.push({ code: responseCode, enhanced: wrapped[1] });
   }
   return found;
 }
@@ -487,7 +532,12 @@ const PERMANENT_ENHANCED = new Set(['5.1.0', '5.1.1', '5.1.2', '5.1.3', '5.1.10'
 
 function isTemporarySmtp(err) {
   const code = smtpCode(err);
-  return code != null && code >= 400 && code < 500;
+  if (code != null && code >= 400 && code < 500) return true;
+  for (const text of replyTexts(err)) {
+    const lead = leadingSmtpReply(text);
+    if (lead && lead.code >= 400 && lead.code < 500) return true;
+  }
+  return false;
 }
 
 function isPermanentSmtpRecipient(err) {
@@ -507,6 +557,8 @@ function isPermanentSmtpRecipient(err) {
   }
   if (code === 553) return true;
   if (code == null || code < 500) return false;
+  // 5.1.8 at RCPT TO is this recipient. At MAIL FROM it is a sender halt.
+  if (enhanced === '5.1.8') return true;
   return !!(enhanced && PERMANENT_ENHANCED.has(enhanced));
 }
 
@@ -515,10 +567,11 @@ function isSenderWording(text) {
 }
 
 function isSenderConfig(err) {
+  // A 4xx at MAIL FROM is an outage, not a sender stop.
+  if (isTemporarySmtp(err)) return false;
   if (atCommand(err, 'MAIL FROM')) return true;
   if (isSenderWording(errorBlob(err))) return true;
-  const anchored = firstAnchoredEnhanced(err);
-  return !!(anchored && anchored.enhanced === '5.1.8');
+  return false;
 }
 
 function leadingSmtpReply(text) {
@@ -553,8 +606,12 @@ function isAuthFollowupError(err) {
   if (hasReason(err, ['invalid_grant', 'authError', 'insufficientPermissions'])) return true;
   const code = smtpCode(err);
   if (code === 535 || code === 530) return true;
+  for (const text of replyTexts(err)) {
+    const lead = leadingSmtpReply(text);
+    if (lead && (lead.code === 535 || lead.code === 530)) return true;
+  }
   if (httpStatus(err) === 401) return true;
-  return /invalid_grant|gmail access expired|insufficient permissions|gmail is not connected|token missing/i.test(errorBlob(err));
+  return /invalid_grant|access expired|insufficient permissions|gmail is not connected|token(?:\s+is)?\s+missing/i.test(errorBlob(err));
 }
 
 function classifyFollowupError(err) {
@@ -660,7 +717,7 @@ function uncertainSend(err) {
 }
 
 /** Approve a draft and send the first email now. */
-async function approveAndSend(proposalId) {
+async function approveAndSend(proposalId, options = {}) {
   const stale = await recoverStaleSending(proposalId);
   if (stale.length) throw Object.assign(new Error(MANUAL_REVIEW), { status: 409 });
 
@@ -681,6 +738,9 @@ async function approveAndSend(proposalId) {
   const problems = await sendReadiness();
   if (problems.length) throw Object.assign(new Error(problems.join(' ')), { status: 400 });
   if (p.status !== 'draft') throw Object.assign(new Error(`This version is ${p.status}; only drafts can be sent.`), { status: 409 });
+  if (p.stop_reason === RESEND_CONFIRM && options.confirm !== true) {
+    throw Object.assign(new Error('Confirm this send before it goes out again.'), { status: 409 });
+  }
   if (p.do_not_contact) throw Object.assign(new Error(`${p.company} is marked do-not-contact.`), { status: 409 });
   const toAddress = storedRecipient(p.to_email);
   if (!toAddress) throw Object.assign(new Error('Add a valid "To" email before sending.'), { status: 400 });
@@ -701,6 +761,15 @@ async function approveAndSend(proposalId) {
   // The prototype link's 14 days start when it is first shared.
   try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }
   await attachPrototypeUrl(p);
+  let prepared;
+  try {
+    prepared = await prepareOutgoing();
+  } catch (err) {
+    await pool.query(
+      `UPDATE proposals SET status = 'draft', approved_at = NULL, send_attempt_key = NULL, error = $2 WHERE id = $1`,
+      [p.id, `Send failed: ${err.message}`]);
+    throw Object.assign(new Error(`The email didn't send: ${err.message}`), { status: 502 });
+  }
   const gate = await recheckLead(p.prospect_id);
   const block = leadBlocksSend(gate);
   if (block) {
@@ -718,7 +787,7 @@ async function approveAndSend(proposalId) {
   let info;
   let mailed = false;
   try {
-    info = await (await mailer()).sendMail({
+    info = await prepared.send({
       from: { name: SENDER.name, address: SENDER.email },
       to: envelopeTo(p.to_name, toAddress),
       subject: p.subject.trim(),
@@ -970,6 +1039,28 @@ async function clearSenderAlert() {
   await pool.query('DELETE FROM app_settings WHERE key = ANY($1::text[])', [[SENDER_ALERT_KEY, HALT_KEY]]);
 }
 
+async function credentialsPass() {
+  if (testTransport) return true;
+  let status;
+  try {
+    status = await gmail.status();
+  } catch (err) {
+    console.error(`[send] credential check did not pass: ${err && err.code || 'error'}`);
+    return false;
+  }
+  if (status && status.connected) {
+    try {
+      await gmail.accessToken();
+      return true;
+    } catch (err) {
+      console.error(`[send] credential check did not pass: ${err && err.code || 'auth'}`);
+      return false;
+    }
+  }
+  if (cfg.mailConfigured()) return true;
+  return false;
+}
+
 async function releaseOwnedClaim(id, sentColumn, key) {
   const res = await pool.query(
     `UPDATE proposals
@@ -1076,19 +1167,34 @@ async function recordTransient(p, sentColumn, klass, key) {
 async function sendDueFollowups() {
   // The lock is session-level. Acquire and release it on the same client.
   // pool.query would check the lock out on one connection and unlock on another.
+  // A terminated backend emits 'error'. Without a listener that crashes the
+  // process. A failed unlock destroys the client so the lock cannot stay on a
+  // pooled session.
   const client = await pool.connect();
   let held = false;
+  let failed = null;
+  const onError = (err) => {
+    failed = err || new Error('follow-up sweep client error');
+    console.error(`[send] follow-up sweep client error: ${err && err.code || 'error'}`);
+  };
+  client.on('error', onError);
   try {
     const locked = await client.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', [FOLLOWUP_SWEEP_LOCK]);
-    held = !!locked.rows[0].ok;
+    held = !!(locked.rows[0] && locked.rows[0].ok);
     if (!held) return { sent: 0, skipped: true };
     return await sendDueFollowupsLocked();
   } finally {
-    if (held) {
-      try { await client.query('SELECT pg_advisory_unlock($1::bigint)', [FOLLOWUP_SWEEP_LOCK]); }
-      catch (err) { console.error(`[send] follow-up sweep unlock failed: ${err && err.code || 'error'}`); }
+    if (held && !failed) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1::bigint)', [FOLLOWUP_SWEEP_LOCK]);
+      } catch (err) {
+        failed = err || new Error('follow-up sweep unlock failed');
+        console.error(`[send] follow-up sweep unlock failed: ${err && err.code || 'error'}`);
+      }
     }
-    client.release();
+    client.removeListener('error', onError);
+    if (failed) client.release(failed instanceof Error ? failed : new Error('follow-up sweep client failed'));
+    else client.release();
   }
 }
 
@@ -1155,14 +1261,6 @@ async function sendDueFollowupsLocked() {
         if (fresh && fresh.send_attempt_key) continue;
         if (fresh && (fresh.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(fresh.stage))) {
           await stopSequence(p.id, fresh.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${fresh.stage}`);
-        } else if (fresh && fresh.status === 'sent' && Number(fresh.followup_argument_attempts) >= ATTEMPT_CAP) {
-          const reason = capStopReason('later');
-          await pool.query(
-            `UPDATE proposals
-                SET status = 'stopped', stop_reason = $2, error = $2
-              WHERE id = $1 AND status = 'sent' AND send_attempt_key IS NULL`,
-            [p.id, reason]);
-          console.error(`[send] stopped follow-up for #${p.id}: ${reason}`);
         }
         continue;
       }
@@ -1170,6 +1268,7 @@ async function sendDueFollowupsLocked() {
       let stopSweep = false;
       try {
         await attachPrototypeUrl(p);
+        const prepared = await prepareOutgoing();
         const gate = await recheckLead(p.prospect_id);
         const block = leadBlocksSend(gate);
         if (block) {
@@ -1179,7 +1278,7 @@ async function sendDueFollowupsLocked() {
           }
           continue;
         }
-        await (await mailer()).sendMail({
+        await prepared.send({
           threadId: p.thread_id || undefined,
           from: { name: SENDER.name, address: SENDER.email },
           to: envelopeTo(p.to_name, toAddress),
@@ -1206,6 +1305,7 @@ async function sendDueFollowupsLocked() {
           [p.id, attemptKey]);
         if (!wrote.rowCount) {
           console.error(`[send] follow-up success write matched 0 rows for #${p.id}`);
+          await markManualReview(p.id, sentColumn, attemptKey);
         } else {
           sent++;
           await clearSenderAlert();
@@ -1260,7 +1360,7 @@ async function sendDueFollowupsLocked() {
       logFollowupSkip(p, err);
     }
   }
-  if (!halted) await clearSenderAlert();
+  if (!halted && await credentialsPass()) await clearSenderAlert();
   // Sequences with no reply two weeks after the last follow-up are finished.
   // Archived leads stay sent. This update does not write their status or
   // next_action.
@@ -1518,11 +1618,11 @@ async function senderTick() {
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, prepareOutgoing, senderTick, stopSequence, classifyMessage, applyOutcome,
   missingRecipient, normalizeRecipient, storedRecipient, isPermanentFollowupError, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
   _beforeFollowupClaim, _beforeTransport, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
   _setRandom, _setAlertHook,
   backoffDelayMs, backoffDelayMinutes, recheckLead, BACKOFF_CAP_MS,
-  FOLLOWUP_BACKOFF_CAP_MS, FOLLOWUP_MAX_AGE_MS,
+  FOLLOWUP_BACKOFF_CAP_MS, FOLLOWUP_MAX_AGE_MS, RESEND_CONFIRM,
 };

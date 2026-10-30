@@ -38,11 +38,14 @@ function testEnv() {
 }
 
 function runFile(file) {
+  // The follow-up file carries the QA sweeps. They finish, and the process
+  // needs the extra room to close the pool after the last one.
+  const timeout = file.endsWith('followup-recipient.test.js') ? '120000' : '60000';
   const args = [
     '--require', path.join(__dirname, 'preload.js'),
     '--test',
     '--test-reporter=spec',
-    '--test-timeout=60000',
+    '--test-timeout=' + timeout,
     file,
   ];
   return new Promise(resolve => {

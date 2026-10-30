@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api';
 import { PreviewDemoLink } from '../demo/DemoLinks';
-import { useAsync, ErrorNote, FitBadge, ProposalChip, money2, relDate, timeAgo, toast } from '../ui';
+import { useAsync, ErrorNote, FitBadge, ProposalChip, followupHaltCopy, money2, proposalStatusCopy, relDate, timeAgo, toast } from '../ui';
 import { useJobs, elapsed } from '../jobs';
 
 const TABS = [
@@ -9,7 +9,7 @@ const TABS = [
   { id: 'out',     label: 'Out',       note: 'Sent. Follow-ups go out on day 3 and day 10 unless they reply, book, or you stop it.' },
   { id: 'replied', label: 'Replied',   note: 'They wrote back or booked a call. Follow-ups stopped.' },
   { id: 'flagged', label: 'Not a fit', note: 'The bot flagged these. Restore any you disagree with.' },
-  { id: 'closed',  label: 'Closed',    note: 'No reply after the follow-ups, stopped, bounced, opted out, or discarded.' },
+  { id: 'closed',  label: 'Closed',    note: 'No reply after the follow-ups, needs review, stopped, bounced, opted out, or discarded.' },
 ];
 
 function readTab() {
@@ -19,6 +19,8 @@ function readTab() {
 
 function sequenceLine(p) {
   if (p.status === 'sending') return 'Sending…';
+  const review = proposalStatusCopy(p);
+  if (review) return review;
   if (p.status === 'replied') return `Replied ${timeAgo(p.replied_at)}${p.stop_reason ? ` · ${p.stop_reason}` : ''}`;
   if (p.status !== 'sent') return p.stop_reason || '';
   const parts = [`Sent ${timeAgo(p.sent_at)}`];
@@ -94,6 +96,12 @@ export default function Proposals({ version, bump, openProposal }) {
         {needsKey && <p className="warn-text small gen-note">Add ANTHROPIC_API_KEY in Railway first, then refresh this page.</p>}
         {s && !needsKey && s.eligible_leads === 0 && <p className="muted small gen-note">No untouched {s.config.tiers.join('/')}-tier leads left. Run discovery from Settings, or draft for a specific lead from its page.</p>}
       </section>
+
+      {s?.halt && (
+        <div className="setup-note halt-note" role="status">
+          <strong>{followupHaltCopy(s.halt)}</strong>
+        </div>
+      )}
 
       {s?.setup?.length > 0 && (
         <div className="setup-note" role="note">
