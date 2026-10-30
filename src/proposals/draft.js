@@ -14,6 +14,7 @@ const { rescore } = require('../scoring/fit');
 const { systemPrompt, userPrompt, SUBMIT_TOOL } = require('./prompt');
 const { attachPrototype } = require('../prototypes/store');
 const { canonicalizeRecipient } = require('./recipient');
+const { siblingBlockMessage, blockingSibling } = require('./sequence-block');
 
 let client = null;
 function claude() {
@@ -200,8 +201,9 @@ async function draftProposal(prospectId, opts = {}) {
   const prev = await pool.query(
     'SELECT id, version, research, status FROM proposals WHERE prospect_id = $1 ORDER BY version DESC LIMIT 1', [lead.id]);
   const last = prev.rows[0];
-  if (last && ['sent'].includes(last.status)) {
-    throw Object.assign(new Error('A proposal is already out for this lead. Stop that sequence before drafting a new one.'), { status: 409 });
+  const blockedEarly = await blockingSibling(pool, lead.id);
+  if (blockedEarly) {
+    throw Object.assign(new Error(siblingBlockMessage(blockedEarly)), { status: 409 });
   }
 
   const reuse = opts.reuseResearch !== false && last?.research;
@@ -213,6 +215,13 @@ async function draftProposal(prospectId, opts = {}) {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
+    // The model call already finished. A sibling can have moved into review
+    // while that call was in flight, so the block is checked again here.
+    const blocked = await blockingSibling(db, lead.id);
+    if (blocked) {
+      await db.query('ROLLBACK');
+      throw Object.assign(new Error(siblingBlockMessage(blocked)), { status: 409 });
+    }
     await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [lead.id]);
     const version = (last?.version || 0) + 1;
     const ins = await db.query(

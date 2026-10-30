@@ -299,4 +299,4 @@ async function sentSince(since, max = 100) {
   return out;
 }
 
-module.exports = { status, authUrl, handleCallback, disconnect, accessToken, prepareDelivery, sendMail, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText };
+module.exports = { status, authUrl, handleCallback, disconnect, accessToken, prepareDelivery, sendMail, wrapGmailError, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText };

@@ -16,7 +16,7 @@ const causes = [
   ['token_missing', 'Follow-ups are paused: Gmail isn\'t connected. Connect Gmail in Settings.', 'Follow-ups are paused: Gmail isn\'t connected. Connect Gmail in Email sending below.'],
   ['insufficient_permissions', 'Follow-ups are paused: Gmail is missing send permission. Reconnect Gmail in Settings and allow sending.', 'Follow-ups are paused: Gmail is missing send permission. Reconnect Gmail in Email sending below and allow sending.'],
   ['smtp_auth', 'Follow-ups are paused: the mail server rejected the Gmail login. Update the Gmail address and app password in Railway (GMAIL_USER and GMAIL_APP_PASSWORD).', 'Follow-ups are paused: the mail server rejected the Gmail login. Update the Gmail address and app password in Railway (GMAIL_USER and GMAIL_APP_PASSWORD).'],
-  ['sender', 'Follow-ups are paused: Fix the sending address in Railway (GMAIL_USER, and SENDER_NAME for the display name). It has to match the Gmail account you send from.', 'Follow-ups are paused: Fix the sending address in Railway (GMAIL_USER, and SENDER_NAME for the display name). It has to match the Gmail account you send from.'],
+  ['sender', 'Follow-ups are paused: the mail server rejected the sender address. Fix the sending address in Railway (GMAIL_USER, and SENDER_NAME for the display name). It has to match the Gmail account you send from.', 'Follow-ups are paused: the mail server rejected the sender address. Fix the sending address in Railway (GMAIL_USER, and SENDER_NAME for the display name). It has to match the Gmail account you send from.'],
   ['other', 'Follow-ups are paused: mail needs attention before anything else goes out. Open Settings.', 'Follow-ups are paused: mail needs attention before anything else goes out. See Email sending below.'],
 ];
 

@@ -1696,6 +1696,10 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
   });
 
   it('QA r4: classifies RCPT-only enhanced codes, anchoring, sender, auth, and 413 as the spec lists', () => {
+    const { wrapGmailError } = require('../src/proposals/gmail');
+    const gmail400 = (message) => wrapGmailError(Object.assign(new Error('Request failed with status code 400'), {
+      response: { status: 400, data: { error: { code: 400, message } } },
+    }));
     const smtp = (code, text, command = 'RCPT TO') => Object.assign(new Error(text), {
       responseCode: code, code: 'EENVELOPE', command,
     });
@@ -1711,8 +1715,8 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       [Object.assign(new Error('550 5.1.1x user unknown'), { command: 'RCPT TO' }), 'transient', 'later'],
       [Object.assign(new Error('Gmail API: Message bounced, see 550 5.1.1 for details'), { status: 400 }), 'transient', 'argument'],
       [Object.assign(new Error('Gmail API: Delivery failed\n550 5.1.6 recipient moved'), { status: 400 }), 'transient', 'argument'],
-      [Object.assign(new Error('Gmail API: Delivery failed\n550 5.1.1 user unknown'), { status: 400 }), 'transient', 'argument'],
-      [Object.assign(new Error('550 5.1.1 user unknown'), { status: 400 }), 'permanent', 'recipient'],
+      [gmail400('Delivery failed\n550 5.1.1 user unknown'), 'transient', 'argument'],
+      [gmail400('550 5.1.1 The email account that you tried to reach does not exist.'), 'permanent', 'recipient'],
       [Object.assign(new Error('Gmail API: Invalid To header'), { status: 403 }), 'permanent', 'recipient'],
       [Object.assign(new Error('Gmail API: Invalid recipient'), { status: 403 }), 'permanent', 'recipient'],
       [smtp(451, '451 4.3.0 Try again later', 'MAIL FROM'), 'transient', 'smtp'],
@@ -3927,10 +3931,22 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       await sendDueFollowups();
       assert.notEqual((await QA_I.sendReadiness()).halt, null);
       await pool.query('UPDATE prospects SET archived_at = NOW() WHERE id = $1', [row.prospect.id]);
-      const calls = useTransport();
-      await sendDueFollowups();
-      assert.equal(calls.length, 0);
-      assert.equal((await QA_I.sendReadiness()).halt, null, 'halt alert stayed after a clean pass');
+      _setTransport(null);
+      const gmailMod = require('../src/proposals/gmail');
+      const original = { status: gmailMod.status, accessToken: gmailMod.accessToken };
+      gmailMod.status = async () => ({ configured: true, connected: true, email: 'test+sender@example.com' });
+      gmailMod.accessToken = async (opts) => {
+        assert.equal(opts && opts.force, true);
+        return 'test-token';
+      };
+      try {
+        await sendDueFollowups();
+        assert.equal((await QA_I.sendReadiness()).halt, null, 'halt alert stayed after a clean pass');
+      } finally {
+        gmailMod.status = original.status;
+        gmailMod.accessToken = original.accessToken;
+        _setTransport(null);
+      }
     });
   });
 
@@ -4677,6 +4693,325 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       assert.equal(done.stop_reason, null);
     });
 });
+
+  const REVIEW_WAIT = 'Another version is waiting for review.';
+
+  async function olderDraft(tag, siblingSql, siblingParams) {
+    const prospect = await lead();
+    const review = await insertProposal(prospect.id, { status: 'sent', toEmail: `test+sib-${tag}@example.com` });
+    await pool.query(siblingSql, [review.id, ...(siblingParams || [])]);
+    const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: `test+draft-${tag}@example.com` });
+    return { prospect, review, draft };
+  }
+
+  it('round 10: approve and mark-sent refuse a draft while a sibling is in review', async () => {
+    const calls = useTransport();
+    const manual = await olderDraft(
+      'manual',
+      `UPDATE proposals SET status = 'manual_review', stop_reason = 'transient_max_age', error = 'transient_max_age',
+              sent_at = NOW(), followup1_due_at = NULL, followup2_due_at = NULL WHERE id = $1`
+    );
+    const uncertain = await olderDraft(
+      'uncertain',
+      `UPDATE proposals SET status = 'stopped', stop_reason = $2, error = $2, sent_at = NULL,
+              followup1_due_at = NULL, followup2_due_at = NULL WHERE id = $1`,
+      ['Needs manual review: the send outcome is uncertain']
+    );
+    for (const row of [manual, uncertain]) {
+      const sent = await fetch(`${apiBase}/api/proposals/${row.draft.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      const body = await sent.json();
+      assert.equal(sent.status, 409, body.error);
+      assert.equal(body.error, REVIEW_WAIT);
+      assert.equal((await state(row.draft.id)).status, 'draft');
+      const marked = await fetch(`${apiBase}/api/proposals/${row.draft.id}/mark-sent`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      const markedBody = await marked.json();
+      assert.equal(marked.status, 409, markedBody.error);
+      assert.equal(markedBody.error, REVIEW_WAIT);
+      const after = await fullProposal(row.draft.id);
+      assert.equal(after.status, 'draft');
+      assert.equal(after.sent_at, null);
+      assert.equal(after.followup1_due_at, null);
+    }
+    assert.equal(calls.length, 0);
+
+    const live = await olderDraft(
+      'out',
+      `UPDATE proposals SET status = 'sent', followup1_due_at = NULL, followup2_due_at = NULL WHERE id = $1`
+    );
+    const refused = await fetch(`${apiBase}/api/proposals/${live.draft.id}/send`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+    });
+    const refusedBody = await refused.json();
+    assert.equal(refused.status, 409);
+    assert.match(refusedBody.error, /already out/);
+    assert.equal((await state(live.draft.id)).status, 'draft');
+  });
+
+  it('round 10: an in-flight regenerate does not insert a draft after the source goes into review', async () => {
+    const prevKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'test-not-a-real-key';
+    const { _setClient } = require('../src/proposals/draft');
+    const { fakeClaude } = require('./fixtures');
+    let release;
+    let entered;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const inside = new Promise((resolve) => { entered = resolve; });
+    _setClient({
+      messages: {
+        async create() {
+          entered();
+          await gate;
+          return fakeClaude().messages.create();
+        },
+      },
+    });
+    try {
+      const prospect = await lead();
+      const source = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+race-source@example.com' });
+      await pool.query(`UPDATE proposals SET research = $2::jsonb WHERE id = $1`, [source.id, JSON.stringify({ notes: 'cached' })]);
+      const started = await fetch(`${apiBase}/api/proposals/${source.id}/regenerate`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+        body: JSON.stringify({ instructions: 'Shorter' }),
+      });
+      assert.equal(started.status, 202);
+      await inside;
+      await pool.query(
+        `UPDATE proposals SET status = 'stopped', stop_reason = $2, error = $2 WHERE id = $1`,
+        [source.id, 'Needs manual review: the send outcome is uncertain']
+      );
+      release();
+      let job = null;
+      for (let i = 0; i < 50; i += 1) {
+        const { rows } = await pool.query(
+          `SELECT status, error FROM proposal_jobs WHERE prospect_id = $1 ORDER BY id DESC LIMIT 1`,
+          [prospect.id]
+        );
+        job = rows[0];
+        if (job && job.status !== 'queued' && job.status !== 'running') break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(job.status, 'failed');
+      assert.equal(job.error, REVIEW_WAIT);
+      const { rows } = await pool.query(
+        `SELECT id, status FROM proposals WHERE prospect_id = $1 ORDER BY id`,
+        [prospect.id]
+      );
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].status, 'stopped');
+      const calls = useTransport();
+      const sent = await fetch(`${apiBase}/api/proposals/${source.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      assert.equal(sent.status, 409);
+      assert.equal(calls.length, 0);
+    } finally {
+      release();
+      _setClient(null);
+      if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+    }
+  });
+
+  it('round 10: a Gmail 400 whose API message starts with 550 5.1.1 stops the follow-up', async () => {
+    const axios = require('axios');
+    const prevAdapter = axios.defaults.adapter;
+    const prevId = process.env.GOOGLE_CLIENT_ID;
+    const prevSecret = process.env.GOOGLE_CLIENT_SECRET;
+    process.env.GOOGLE_CLIENT_ID = 'test-client-id';
+    process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret';
+    const reply = (config, status, data) => {
+      if (status >= 400) {
+        const err = new Error(`Request failed with status code ${status}`);
+        err.response = { status, data, headers: {}, config };
+        err.config = config;
+        throw err;
+      }
+      return { data, status, statusText: 'OK', headers: {}, config };
+    };
+    axios.defaults.adapter = async (config) => {
+      const url = String(config && config.url || '');
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return reply(config, 200, { access_token: 'test-access', expires_in: 3600 });
+      }
+      if (url.includes('/messages/send')) {
+        return reply(config, 400, { error: { code: 400, message: '550 5.1.1 The email account that you tried to reach does not exist.' } });
+      }
+      return reply(config, 200, { payload: { headers: [] } });
+    };
+    try {
+      await pool.query(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ('gmail_oauth', $1::jsonb, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [JSON.stringify({ refresh_token: 'test-refresh-token', email: 'test+sender@example.com' })]
+      );
+      _setTransport(null);
+      const row = await legacySent('test+gmail-550@example.com');
+      await sendDueFollowups();
+      const after = await fullProposal(row.proposal.id);
+      assert.equal(after.status, 'stopped');
+      assert.equal(after.stop_reason, 'Follow-up stopped: address rejected');
+      assert.equal(Number(after.followup_argument_attempts), 0);
+      assert.equal(after.followup1_sent_at, null);
+    } finally {
+      const gmailMod = require('../src/proposals/gmail');
+      axios.defaults.adapter = async (config) => {
+        const url = String(config && config.url || '');
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return { data: { access_token: 'expired-cache', expires_in: 0 }, status: 200, statusText: 'OK', headers: {}, config };
+        }
+        return { data: { payload: { headers: [] } }, status: 200, statusText: 'OK', headers: {}, config };
+      };
+      await gmailMod.accessToken({ force: true }).catch(() => {});
+      axios.defaults.adapter = prevAdapter;
+      await pool.query(`DELETE FROM app_settings WHERE key = 'gmail_oauth'`);
+      if (prevId === undefined) delete process.env.GOOGLE_CLIENT_ID; else process.env.GOOGLE_CLIENT_ID = prevId;
+      if (prevSecret === undefined) delete process.env.GOOGLE_CLIENT_SECRET; else process.env.GOOGLE_CLIENT_SECRET = prevSecret;
+      _setTransport(null);
+    }
+  });
+
+  it('round 10: a passing verify() does not clear a sender halt or alert again inside the hour', async () => {
+    const alerts = [];
+    _setAlertHook((alert) => { alerts.push(alert); });
+    const nodemailer = require('nodemailer');
+    const origCreate = nodemailer.createTransport;
+    const env = { u: process.env.GMAIL_USER, p: process.env.GMAIL_APP_PASSWORD, n: process.env.SENDER_NAME };
+    process.env.GMAIL_USER = 'test+smtp@example.com';
+    process.env.GMAIL_APP_PASSWORD = 'not-a-real-password';
+    const gmailMod = require('../src/proposals/gmail');
+    const origStatus = gmailMod.status;
+    gmailMod.status = async () => ({ configured: false, connected: false });
+    const bounce = () => {
+      throw Object.assign(new Error("Can't send mail - all recipients were rejected: 550 5.1.8 Bad sender address domain"), {
+        code: 'EENVELOPE', command: 'RCPT TO', responseCode: 550, response: '550 5.1.8 Bad sender address domain',
+      });
+    };
+    try {
+      const row = await legacySent('test+sender-hold@example.com');
+      useTransport(bounce);
+      await sendDueFollowups();
+      assert.equal(alerts.length, 1);
+      assert.equal((await sendReadiness()).halt.cause, 'sender');
+      assert.equal(Number((await sendReadiness()).halt.halted_ticks), 1);
+      await pool.query('UPDATE prospects SET archived_at = NOW() WHERE id = $1', [row.prospect.id]);
+      _setTransport(null);
+      let verifies = 0;
+      nodemailer.createTransport = () => ({
+        async verify() { verifies += 1; return true; },
+        async sendMail() { throw new Error('no send'); },
+      });
+      await sendDueFollowups();
+      assert.equal(alerts.length, 1, 'the empty sweep alerted again');
+      const held = await sendReadiness();
+      assert.equal(held.halt.cause, 'sender');
+      assert.equal(Number(held.halt.halted_ticks), 1);
+      await pool.query('UPDATE prospects SET archived_at = NULL WHERE id = $1', [row.prospect.id]);
+      useTransport(bounce);
+      await sendDueFollowups();
+      assert.equal(alerts.length, 1, 'the same sender halt alerted again inside the hour');
+      assert.equal(Number((await sendReadiness()).halt.halted_ticks), 2);
+    } finally {
+      nodemailer.createTransport = origCreate;
+      gmailMod.status = origStatus;
+      if (env.u === undefined) delete process.env.GMAIL_USER; else process.env.GMAIL_USER = env.u;
+      if (env.p === undefined) delete process.env.GMAIL_APP_PASSWORD; else process.env.GMAIL_APP_PASSWORD = env.p;
+      if (env.n === undefined) delete process.env.SENDER_NAME; else process.env.SENDER_NAME = env.n;
+      _setAlertHook(null);
+      _setTransport(null);
+    }
+  });
+
+  it("round 10: confirm must be boolean true, and a string 'true' stays 409", async () => {
+    const { approveAndSend } = require('../src/proposals/send');
+    const prospect = await lead();
+    const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+confirm-string@example.com' });
+    await pool.query(`UPDATE proposals SET stop_reason = 'Confirm before sending again' WHERE id = $1`, [draft.id]);
+    const calls = useTransport();
+    await assert.rejects(
+      () => approveAndSend(draft.id, { confirm: 'true' }),
+      (err) => err.status === 409 && /Confirm this send/.test(err.message)
+    );
+    const posted = await fetch(`${apiBase}/api/proposals/${draft.id}/send`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ confirm: 'true' }),
+    });
+    assert.equal(posted.status, 409);
+    assert.equal(calls.length, 0);
+    assert.equal((await state(draft.id)).status, 'draft');
+    const ok = await approveAndSend(draft.id, { confirm: true });
+    assert.equal(ok.status, 'sent');
+    assert.equal(calls.length, 1);
+  });
+
+  it('round 10: the non-API prepare still force-refreshes a warm token, and a test transport is not a credential pass', async () => {
+    const axios = require('axios');
+    const gmailMod = require('../src/proposals/gmail');
+    const prevAdapter = axios.defaults.adapter;
+    const prevId = process.env.GOOGLE_CLIENT_ID;
+    const prevSecret = process.env.GOOGLE_CLIENT_SECRET;
+    process.env.GOOGLE_CLIENT_ID = 'test-client-id';
+    process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret';
+    let tokenCalls = 0;
+    let grant = 'ok';
+    const reply = (config, status, data) => {
+      if (status >= 400) {
+        const err = new Error(`Request failed with status code ${status}`);
+        err.response = { status, data, headers: {}, config };
+        err.config = config;
+        throw err;
+      }
+      return { data, status, statusText: 'OK', headers: {}, config };
+    };
+    axios.defaults.adapter = async (config) => {
+      const url = String(config && config.url || '');
+      if (url.includes('oauth2.googleapis.com/token')) {
+        tokenCalls += 1;
+        if (grant === 'revoked') return reply(config, 400, { error: 'invalid_grant' });
+        return reply(config, 200, { access_token: `warm-${tokenCalls}`, expires_in: 3600 });
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    try {
+      await pool.query(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ('gmail_oauth', $1::jsonb, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [JSON.stringify({ refresh_token: 'test-refresh-token', email: 'test+sender@example.com' })]
+      );
+      _setTransport(null);
+      await gmailMod.accessToken();
+      assert.equal(tokenCalls, 1);
+      grant = 'revoked';
+      const row = await legacySent('test+force-branch@example.com');
+      const calls = useTransport();
+      await sendDueFollowups();
+      assert.ok(tokenCalls > 1, 'prepare used the warm cache');
+      assert.equal(calls.length, 0, 'the follow-up sent on a cached token');
+      assert.equal((await state(row.proposal.id)).followup1_sent_at, null);
+      await pool.query('UPDATE prospects SET archived_at = NOW() WHERE id = $1', [row.prospect.id]);
+      const before = tokenCalls;
+      await sendDueFollowups();
+      assert.ok(tokenCalls > before, 'the empty sweep treated the test transport as a pass');
+      assert.ok((await sendReadiness()).halt, 'a failed refresh cleared the halt while a test transport was set');
+      grant = 'ok';
+      axios.defaults.adapter = async (config) => {
+        const url = String(config && config.url || '');
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return reply(config, 200, { access_token: 'expired-cache', expires_in: 0 });
+        }
+        throw new Error(`unexpected ${url}`);
+      };
+      await gmailMod.accessToken({ force: true });
+    } finally {
+      axios.defaults.adapter = prevAdapter;
+      await pool.query(`DELETE FROM app_settings WHERE key = 'gmail_oauth'`);
+      if (prevId === undefined) delete process.env.GOOGLE_CLIENT_ID; else process.env.GOOGLE_CLIENT_ID = prevId;
+      if (prevSecret === undefined) delete process.env.GOOGLE_CLIENT_SECRET; else process.env.GOOGLE_CLIENT_SECRET = prevSecret;
+      _setTransport(null);
+    }
+  });
 
 
 });

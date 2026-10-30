@@ -16,6 +16,7 @@ const { appendCompanyPestExclusion, isPestCompanyName, PEST_NAME_REASON } = requ
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 
 const { canonicalizeRecipient, missingRecipient, normalizeRecipient } = require('./recipient');
+const { blocksNewSendSql, siblingBlockMessage, blockingSibling } = require('./sequence-block');
 const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const GENERIC_DOMAINS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'aol.com', 'live.com', 'msn.com', 'comcast.net', 'me.com', 'protonmail.com'];
@@ -605,7 +606,10 @@ function namesRecipient(err) {
 function gmailRecipientReply(err) {
   const status = httpStatus(err);
   if (status !== 400 && status !== 403) return false;
-  return replyTexts(err).some((text) => /^\s*550[ \t]+5\.1\.(?:0|1|2|3|10)\b/.test(String(text).split(/\r?\n/, 1)[0]));
+  return replyTexts(err).some((text) => {
+    const line = String(text || '').replace(/^(?:Gmail API:\s*)+/, '').split(/\r?\n/, 1)[0];
+    return /^\s*550[ \t]+5\.1\.(?:0|1|2|3|10)\b/.test(line);
+  });
 }
 
 function isGmailPermanentRecipient(err) {
@@ -766,14 +770,26 @@ async function approveAndSend(proposalId, options = {}) {
     throw Object.assign(new Error(`Daily send limit (${cfg.SEND_DAILY_LIMIT}) reached. Try again tomorrow.`), { status: 429 });
   }
 
-  // Claim the row first so a double-click can't send twice.
+  // Claim the row first so a double-click can't send twice. A sibling that is
+  // out, or waiting for review, blocks the claim in the same statement.
   const attemptKey = crypto.randomBytes(16).toString('hex');
   const claim = await pool.query(
-    `UPDATE proposals
+    `UPDATE proposals AS pr
         SET status = 'sending', approved_at = NOW(), send_attempt_key = $2, send_attempted_at = NOW()
-      WHERE id = $1 AND status = 'draft' RETURNING id`,
+      WHERE pr.id = $1 AND pr.status = 'draft'
+        AND NOT EXISTS (
+          SELECT 1 FROM proposals sib
+           WHERE sib.prospect_id = pr.prospect_id
+             AND sib.id <> pr.id
+             AND ${blocksNewSendSql('sib')}
+        )
+      RETURNING pr.id`,
     [p.id, attemptKey]);
-  if (!claim.rows.length) throw Object.assign(new Error('Already sending.'), { status: 409 });
+  if (!claim.rows.length) {
+    const blocking = await blockingSibling(pool, p.prospect_id, p.id);
+    if (blocking) throw Object.assign(new Error(siblingBlockMessage(blocking)), { status: 409 });
+    throw Object.assign(new Error('Already sending.'), { status: 409 });
+  }
 
   // The prototype link's 14 days start when it is first shared.
   try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }
@@ -1042,6 +1058,7 @@ async function recordHalt(klass, err) {
   const errorClass = klass && klass.label === 'sender' ? 'sender' : 'auth';
   const provider = haltProvider(err);
   const cause = haltCause(klass, err);
+  const identity = errorClass === 'sender' ? currentSenderIdentity() : null;
   if (!existing || existing.event !== HALT_EVENT) {
     const state = {
       event: HALT_EVENT,
@@ -1052,6 +1069,10 @@ async function recordHalt(klass, err) {
       halted_ticks: 1,
       last_event_at: now.toISOString(),
     };
+    if (identity) {
+      state.sender_email = identity.email;
+      state.sender_name = identity.name;
+    }
     await saveHalt(state);
     await emitHalt(state);
     return;
@@ -1065,6 +1086,10 @@ async function recordHalt(klass, err) {
     halted_ticks: (Number(existing.halted_ticks) || 0) + 1,
     last_event_at: existing.last_event_at || existing.first_seen,
   };
+  if (identity) {
+    state.sender_email = existing.sender_email || identity.email;
+    state.sender_name = existing.sender_name || identity.name;
+  }
   const last = Date.parse(state.last_event_at);
   if (!Number.isFinite(last) || now.getTime() - last >= 60 * 60 * 1000) {
     state.last_event_at = now.toISOString();
@@ -1079,9 +1104,22 @@ async function clearSenderAlert() {
   await pool.query('DELETE FROM app_settings WHERE key = ANY($1::text[])', [[SENDER_ALERT_KEY, HALT_KEY]]);
 }
 
+function currentSenderIdentity() {
+  return {
+    email: process.env.GMAIL_USER || SENDER.email,
+    name: process.env.SENDER_NAME || SENDER.name,
+  };
+}
+
+function senderIdentityChanged(halt) {
+  if (!halt || halt.error_class !== 'sender') return false;
+  if (!halt.sender_email && !halt.sender_name) return false;
+  const now = currentSenderIdentity();
+  return halt.sender_email !== now.email || halt.sender_name !== now.name;
+}
+
 async function credentialsPass() {
   if (credentialOverride) return credentialOverride();
-  if (testTransport) return true;
   let status;
   try {
     status = await gmail.status();
@@ -1410,7 +1448,14 @@ async function sendDueFollowupsLocked() {
       logFollowupSkip(p, err);
     }
   }
-  if (!halted && await credentialsPass()) await clearSenderAlert();
+  const openHalt = await loadHalt();
+  if (!halted && openHalt && openHalt.error_class === 'sender') {
+    // verify() does not try the from-address. A sender halt stays until a real
+    // send succeeds, or the sending address changes.
+    if (senderIdentityChanged(openHalt)) await clearSenderAlert();
+  } else if (!halted && await credentialsPass()) {
+    await clearSenderAlert();
+  }
   // Sequences with no reply two weeks after the last follow-up are finished.
   // Archived leads stay sent. This update does not write their status or
   // next_action.
