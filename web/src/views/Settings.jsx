@@ -221,8 +221,8 @@ function EmailSettings() {
     try { await api.gmailDisconnect(); toast('Gmail disconnected.'); st.reload(); } catch (e) { toast(e.message); } finally { setBusy(false); }
   };
   return (
-    <section className="panel" id="email-sending" tabIndex={-1}>
-      <h2>Email sending</h2>
+    <section className="panel" id="email-sending" tabIndex={-1} aria-labelledby="email-sending-title">
+      <h2 id="email-sending-title">Email sending</h2>
       <p className="muted">{"Proposals go out from your Gmail through Google's API, and replies are picked up from its inbox."}</p>
       <ErrorNote error={st.error} onRetry={st.reload} />
       {g && (

@@ -1711,6 +1711,8 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       [Object.assign(new Error('550 5.1.1x user unknown'), { command: 'RCPT TO' }), 'transient', 'later'],
       [Object.assign(new Error('Gmail API: Message bounced, see 550 5.1.1 for details'), { status: 400 }), 'transient', 'argument'],
       [Object.assign(new Error('Gmail API: Delivery failed\n550 5.1.6 recipient moved'), { status: 400 }), 'transient', 'argument'],
+      [Object.assign(new Error('Gmail API: Delivery failed\n550 5.1.1 user unknown'), { status: 400 }), 'transient', 'argument'],
+      [Object.assign(new Error('550 5.1.1 user unknown'), { status: 400 }), 'permanent', 'recipient'],
       [Object.assign(new Error('Gmail API: Invalid To header'), { status: 403 }), 'permanent', 'recipient'],
       [Object.assign(new Error('Gmail API: Invalid recipient'), { status: 403 }), 'permanent', 'recipient'],
       [smtp(451, '451 4.3.0 Try again later', 'MAIL FROM'), 'transient', 'smtp'],
@@ -4192,6 +4194,489 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
       _setTransport(null);
     }
   });
+
+
+  it('round 9: MIME build that marks do-not-contact sends nothing on follow-up, approve, and inbox', async () => {
+    const MimeNode = require('nodemailer/lib/mime-node');
+    const inbox = require('../src/proposals/inbox');
+    const orig = MimeNode.prototype.build;
+    let arm = null;
+    MimeNode.prototype.build = function build(...args) {
+      const pending = arm
+        ? pool.query('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [arm])
+        : Promise.resolve();
+      return Promise.resolve(pending).then(() => orig.apply(this, args));
+    };
+    try {
+      const row = await legacySent('test+build-dnc-fu@example.com');
+      arm = row.prospect.id;
+      const followCalls = useTransport();
+      await sendDueFollowups();
+      assert.equal(followCalls.length, 0, 'follow-up mailed after build() marked do-not-contact');
+      const followed = await state(row.proposal.id);
+      assert.equal(followed.followup1_sent_at, null);
+      assert.equal(followed.status, 'stopped');
+      assert.equal(followed.stop_reason, 'Lead is do-not-contact');
+
+      const prospect = await lead();
+      const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+build-dnc-approve@example.com' });
+      arm = prospect.id;
+      const approveCalls = useTransport();
+      const approved = await fetch(`${apiBase}/api/proposals/${draft.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      assert.equal(approved.status, 409);
+      assert.equal(approveCalls.length, 0, 'approve mailed after build() marked do-not-contact');
+      assert.equal((await state(draft.id)).status, 'draft');
+
+      const message = await pool.query(
+        `INSERT INTO inbox_messages (prospect_id, direction, dedupe_key, from_addr, subject, body)
+         VALUES ($1, 'in', $2, 'test+build-dnc-inbox@example.com', 'Hi', 'hello') RETURNING id`,
+        [prospect.id, `round9-build-${prospect.id}`]
+      );
+      const item = await pool.query(
+        `INSERT INTO inbox_items (prospect_id, message_id, status, reply_to, reply_subject, reply_body)
+         VALUES ($1, $2, 'ready', 'test+build-dnc-inbox@example.com', 'Re: Hi', 'Thanks.') RETURNING id`,
+        [prospect.id, message.rows[0].id]
+      );
+      await pool.query('UPDATE prospects SET do_not_contact = FALSE WHERE id = $1', [prospect.id]);
+      arm = prospect.id;
+      const replyCalls = useTransport();
+      await assert.rejects(() => inbox.sendReply(item.rows[0].id), (err) => err.status === 409);
+      assert.equal(replyCalls.length, 0, 'inbox reply mailed after build() marked do-not-contact');
+      const reply = await pool.query('SELECT status FROM inbox_items WHERE id = $1', [item.rows[0].id]);
+      assert.equal(reply.rows[0].status, 'ready');
+    } finally {
+      MimeNode.prototype.build = orig;
+    }
+  });
+
+  it('round 9: ECONNECTION is a network outage without a closed-connection phrase', () => {
+    const err = Object.assign(new Error('socket dropped'), { code: 'ECONNECTION', command: 'API' });
+    const got = classifyFollowupError(err);
+    assert.equal(got.kind, 'transient');
+    assert.equal(got.label, 'network');
+  });
+
+  describe('QA k (r10: round 8 scope, run on 16fe5ab)', { concurrency: false }, () => {
+    const QA_K = require('../src/proposals/send');
+    const QA_K_GMAIL = require('../src/proposals/gmail');
+    const QA_K_UNCERTAIN = 'Needs manual review: the send outcome is uncertain';
+
+    async function qaKPost(id, route, body) {
+      const res = await fetch(`${apiBase}/api/proposals/${id}/${route}`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+        body: JSON.stringify(body == null ? {} : body),
+      });
+      let json = null;
+      try { json = await res.json(); } catch { json = null; }
+      return { status: res.status, body: json };
+    }
+
+    async function qaKSnapshot(row) {
+      const { rows } = await pool.query('SELECT * FROM proposals WHERE prospect_id = $1 ORDER BY id', [row.prospect.id]);
+      return {
+        proposals: JSON.parse(JSON.stringify(rows)),
+        prospect: await prospectStamp(row.prospect.id),
+        activities: await activities(row.prospect.id),
+      };
+    }
+
+    // The four review shapes #120 can produce.
+    async function qaKReviewRows(tag, toEmail) {
+      const email = (k) => (toEmail === undefined ? `test+k-${tag}-${k}@example.com` : toEmail);
+      const aged = await legacySent(email('aged'));
+      await pool.query(
+        `UPDATE proposals SET status = 'manual_review', stop_reason = 'transient_max_age', error = 'transient_max_age',
+                first_transient_at = NOW() - INTERVAL '80 hours' WHERE id = $1`, [aged.proposal.id]);
+      const firstSend = await legacySent(email('first'), { sentAt: null });
+      await pool.query(
+        `UPDATE proposals SET status = 'stopped', stop_reason = $2, error = $2, sent_at = NULL, approved_at = NOW() - INTERVAL '1 hour',
+                followup1_due_at = NULL, followup2_due_at = NULL WHERE id = $1`, [firstSend.proposal.id, QA_K_UNCERTAIN]);
+      const followUp = await legacySent(email('fu'));
+      await pool.query(
+        `UPDATE proposals SET status = 'stopped', stop_reason = $2, error = $2 WHERE id = $1`, [followUp.proposal.id, QA_K_UNCERTAIN]);
+      const sending = await legacySent(email('sending'), { sentAt: null });
+      await pool.query(
+        `UPDATE proposals SET status = 'sending', sent_at = NULL, approved_at = NOW(), send_attempt_key = 'k-live-key' WHERE id = $1`,
+        [sending.proposal.id]);
+      return { aged, firstSend, followUp, sending };
+    }
+
+    const QA_K_BODIES = [
+      {}, { note: 'Called them' }, { delivered: true }, { confirm_override: true }, { not_sent: true },
+      { confirm_override: true, delivered: true }, { confirm_override: true, not_sent: true }, { confirm: true },
+    ];
+
+    it('QA r10: mark-sent and restore refuse every review row, whatever the body, and write nothing', async () => {
+      const calls = useTransport();
+      const rows = await qaKReviewRows('refuse');
+      for (const [name, row] of Object.entries(rows)) {
+        const before = await qaKSnapshot(row);
+        for (const body of QA_K_BODIES) {
+          const marked = await qaKPost(row.proposal.id, 'mark-sent', body);
+          assert.equal(marked.status, 409, `mark-sent ${JSON.stringify(body)} on ${name}`);
+          const restored = await qaKPost(row.proposal.id, 'restore', body);
+          assert.equal(restored.status, 409, `restore ${JSON.stringify(body)} on ${name}`);
+        }
+        assert.deepEqual(await qaKSnapshot(row), before, `a refused resolve wrote ${name}`);
+      }
+      assert.equal(calls.length, 0);
+    });
+
+    it('QA r10: with no to_email, mark-sent is 400 on every review row and on a draft, even with the override, and writes nothing', async () => {
+      for (const blank of [null, '', '   ']) {
+        const rows = await qaKReviewRows(`blank${String(blank).length}`, blank);
+        const draftLead = await lead();
+        const draft = await insertProposal(draftLead.id, { status: 'draft', toEmail: blank });
+        const all = { ...rows, draft: { prospect: draftLead, proposal: draft } };
+        for (const [name, row] of Object.entries(all)) {
+          const before = await qaKSnapshot(row);
+          for (const body of [{}, { confirm_override: true, delivered: true }]) {
+            const out = await qaKPost(row.proposal.id, 'mark-sent', body);
+            assert.equal(out.status, 400, `${name} ${JSON.stringify(blank)} ${JSON.stringify(body)}`);
+            assert.equal(out.body.error, MARK_SENT_ERROR);
+          }
+          assert.deepEqual(await qaKSnapshot(row), before, `${name} was written`);
+        }
+      }
+    });
+
+    it('QA r10: a plain draft still marks sent and schedules both follow-ups', async () => {
+      const prospect = await lead();
+      const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+k-plain@example.com' });
+      const out = await qaKPost(draft.id, 'mark-sent', { note: 'Called' });
+      assert.equal(out.status, 200);
+      const after = await fullProposal(draft.id);
+      assert.equal(after.status, 'sent');
+      assert.ok(after.sent_at && after.followup1_due_at && after.followup2_due_at);
+    });
+
+    it('QA r10: the old probe paths (restore then approve, override then sweep) send nothing', async () => {
+      const calls = useTransport();
+      const rows = await qaKReviewRows('oldprobe');
+      for (const [name, row] of Object.entries(rows)) {
+        const before = await qaKSnapshot(row);
+        assert.equal((await qaKPost(row.proposal.id, 'restore', {})).status, 409, name);
+        const approve = await qaKPost(row.proposal.id, 'send', { confirm: true });
+        assert.equal(approve.status, 409, `approve on ${name}`);
+        assert.equal((await qaKPost(row.proposal.id, 'mark-sent', { confirm_override: true, delivered: true })).status, 409, name);
+        await sendDueFollowups();
+        await sendDueFollowups();
+        const afterRows = (await qaKSnapshot(row));
+        if (name === 'sending') {
+          // A live key younger than the stale window is left alone.
+          assert.equal(afterRows.proposals[0].status, 'sending');
+        } else {
+          assert.deepEqual(afterRows, before, `${name} changed`);
+        }
+      }
+      assert.equal(calls.length, 0, 'a review row was mailed');
+    });
+
+    it('QA r10: no other route resolves a review row', async () => {
+      const calls = useTransport();
+      const rows = await qaKReviewRows('other');
+      for (const [name, row] of Object.entries(rows)) {
+        if (name === 'sending') continue;
+        const before = (await fullProposal(row.proposal.id));
+        const patch = await fetch(`${apiBase}/api/proposals/${row.proposal.id}`, {
+          method: 'PATCH', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+          body: JSON.stringify({ subject: 'Changed', to_email: 'test+k-new@example.com' }),
+        });
+        assert.equal(patch.status, 409, `PATCH copy on ${name}`);
+        await fetch(`${apiBase}/api/proposals/${row.proposal.id}`, {
+          method: 'PATCH', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+          body: JSON.stringify({ feedback_rating: 1 }),
+        });
+        for (const route of ['send', 'stop', 'replied', 'discard']) {
+          await qaKPost(row.proposal.id, route, { confirm: true });
+        }
+        const after = await fullProposal(row.proposal.id);
+        for (const col of ['status', 'stop_reason', 'sent_at', 'followup1_sent_at', 'followup1_due_at', 'send_attempt_key', 'to_email', 'subject']) {
+          assert.deepEqual(after[col], before[col], `${name}.${col} changed`);
+        }
+      }
+      assert.equal(calls.length, 0);
+    });
+
+    it('QA r10: a discarded sibling cannot be restored and sent while another version is in review', async () => {
+      const calls = useTransport();
+      const rows = await qaKReviewRows('sibling');
+      for (const [name, row] of Object.entries(rows)) {
+        if (name === 'sending') continue;
+        const { rows: ins } = await pool.query(
+          `INSERT INTO proposals (prospect_id, version, status, slug, to_email, to_name, subject, body, followup1, followup2)
+           VALUES ($1, 0, 'discarded', $2, $3, 'Dana', 'Older note', 'Older body.', 'Checking back.', 'Last note.') RETURNING id`,
+          [row.prospect.id, `k-sib-${row.proposal.id}`, row.proposal.to_email]);
+        const restored = await qaKPost(ins[0].id, 'restore', {});
+        const approve = restored.status === 200 ? await qaKPost(ins[0].id, 'send', {}) : null;
+        assert.equal(restored.status, 409, `restore of a sibling of a ${name} row was allowed (approve then returned ${approve && approve.status})`);
+      }
+      assert.equal(calls.length, 0, 'a lead in review got another first email through a restored sibling');
+    });
+
+    it('QA r10: a lead in review cannot be redrafted', async () => {
+      const prevKey = process.env.ANTHROPIC_API_KEY;
+      process.env.ANTHROPIC_API_KEY = 'test-not-a-real-key';
+      const { _setClient } = require('../src/proposals/draft');
+      const { fakeClaude } = require('./fixtures');
+      _setClient(fakeClaude());
+      try {
+        const rows = await qaKReviewRows('regen');
+        const statuses = {};
+        for (const [name, row] of Object.entries(rows)) {
+          if (name === 'sending') continue;
+          const out = await qaKPost(row.proposal.id, 'regenerate', { instructions: 'Shorter' });
+          statuses[name] = out.status;
+        }
+        for (let i = 0; i < 100; i += 1) {
+          const { rows: active } = await pool.query(`SELECT 1 FROM proposal_jobs WHERE status IN ('queued', 'running')`);
+          if (!active.length) break;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        const calls = useTransport();
+        const sentAfter = {};
+        for (const [name, row] of Object.entries(rows)) {
+          if (name === 'sending') continue;
+          const { rows: drafts } = await pool.query(
+            `SELECT id FROM proposals WHERE prospect_id = $1 AND status = 'draft' ORDER BY id DESC LIMIT 1`, [row.prospect.id]);
+          sentAfter[name] = drafts.length ? (await qaKPost(drafts[0].id, 'send', {})).status : 'no draft';
+        }
+        assert.deepEqual(statuses, { aged: 409, firstSend: 409, followUp: 409 },
+          `regenerate was accepted on a lead in review; approve of the new draft without confirm returned ${JSON.stringify(sentAfter)}, ${calls.length} first emails`);
+        assert.equal(calls.length, 0);
+      } finally {
+        _setClient(null);
+        if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+      }
+    });
+
+    function rcpt(response, extra = {}) {
+      return Object.assign(new Error(`Can't send mail - all recipients were rejected: ${response}`), {
+        code: 'EENVELOPE', command: 'RCPT TO', response, ...extra,
+      });
+    }
+
+    it('QA r10: a 5.1.8 at RCPT TO halts on the first of three leads, charges and stops nothing, and recovers', async () => {
+      const leads = [];
+      for (const k of ['a', 'b', 'c']) {
+        leads.push(await legacySent(`test+k518-${k}@example.com`, { sentAt: new Date(Date.now() - (5 - leads.length) * 86400000) }));
+      }
+      for (const responseCode of [550, 553]) {
+        await pool.query(`DELETE FROM app_settings WHERE key = 'followups.halted'`);
+        const calls = useTransport(async () => { throw rcpt(`${responseCode} 5.1.8 Bad sender address domain`, { responseCode }); });
+        await sendDueFollowups();
+        await sendDueFollowups();
+        assert.equal(calls.length, 2, `${responseCode}: a later lead was attempted after the halt`);
+        for (const row of leads) {
+          const { rows: [r] } = await pool.query(
+            `SELECT status, stop_reason, followup1_sent_at, followup_argument_attempts, followup_transient_attempts,
+                    first_transient_at, next_retry_at, send_attempt_key FROM proposals WHERE id = $1`, [row.proposal.id]);
+          assert.equal(r.status, 'sent');
+          assert.equal(r.stop_reason, null);
+          assert.equal(r.followup1_sent_at, null);
+          assert.equal(Number(r.followup_argument_attempts), 0, `${responseCode}: charged`);
+          assert.equal(Number(r.followup_transient_attempts), 0, `${responseCode}: outage streak`);
+          assert.equal(r.first_transient_at, null);
+          assert.equal(r.next_retry_at, null);
+          assert.equal(r.send_attempt_key, null);
+        }
+        const halt = (await sendReadiness()).halt;
+        assert.ok(halt, `${responseCode}: no halt`);
+        assert.equal(halt.error_class, 'sender');
+        assert.equal(halt.cause, 'sender');
+        assert.equal(Number(halt.halted_ticks), 2);
+      }
+      const ok = useTransport();
+      await sendDueFollowups();
+      assert.equal(ok.length, 3, 'recovery did not send every lead');
+      for (const row of leads) assert.ok((await state(row.proposal.id)).followup1_sent_at);
+      assert.equal((await sendReadiness()).halt, null, 'recovery did not clear the halt');
+    });
+
+    it('QA r10: only a leading 5.1.8 that matches the reply code halts', async () => {
+      const cases = [
+        ['code-less', rcpt('5.1.8 Bad sender address domain')],
+        ['mid-text', rcpt('550 5.7.1 Message rejected, see 5.1.8 policy', { responseCode: 550 })],
+        ['5.1.8x', rcpt('550 5.1.8x odd', { responseCode: 550 })],
+        ['5.1.80', rcpt('550 5.1.80 odd', { responseCode: 550 })],
+        ['code mismatch', rcpt('550 5.1.8 Bad sender address domain', { responseCode: 554 })],
+        ['second line', rcpt('550-Policy note\n550 5.1.8 Bad sender address domain', { responseCode: 550 })],
+        ['message only', Object.assign(new Error('Message failed: 550 5.7.1 see 5.1.8'), { responseCode: 550, command: 'RCPT TO' })],
+      ];
+      for (const [name, err] of cases) {
+        const k = classifyFollowupError(err);
+        assert.notEqual(k.label, 'sender', `${name} classified sender`);
+        assert.notEqual(k.sweep, true, `${name} halts`);
+      }
+      for (const [name, err] of [
+        ['plain', rcpt('550 5.1.8 Bad sender address domain', { responseCode: 550 })],
+        ['dash', rcpt('550-5.1.8 Bad sender address domain', { responseCode: 550 })],
+        ['553', rcpt('553 5.1.8 Sender domain does not exist', { responseCode: 553 })],
+        ['MAIL FROM', Object.assign(rcpt('550 5.1.8 Bad sender', { responseCode: 550 }), { command: 'MAIL FROM' })],
+      ]) {
+        const k = classifyFollowupError(err);
+        assert.equal(k.label, 'sender', `${name} did not halt`);
+        assert.equal(k.sweep, true, name);
+      }
+    });
+
+    it('QA r10: a quoted or prefixed 5.1.1 is not permanent, a leading one is', () => {
+      const SMTPConnection = require('nodemailer/lib/smtp-connection');
+      const conn = new SMTPConnection({ port: 1, host: '127.0.0.1' });
+      const quoted = [
+        '550 5.7.1 Relaying denied; earlier reply was 5.1.1',
+        '550 Requested action not taken: 5.1.1 mailbox unavailable',
+        '554 5.7.1 Message rejected (5.1.1 seen upstream)',
+        '552 5.2.2 Mailbox full, not 5.1.1',
+      ];
+      for (const response of quoted) {
+        const code = Number(response.slice(0, 3));
+        for (const err of [
+          rcpt(response, { responseCode: code }),
+          conn._formatError('Recipient command failed', 'EENVELOPE', response, 'RCPT TO'),
+          Object.assign(new Error(`Message failed: ${response}`), { responseCode: code, command: 'DATA', response }),
+        ]) {
+          assert.notEqual(classifyFollowupError(err).kind, 'permanent', `${response} (${err.message}) is permanent`);
+        }
+      }
+      for (const response of ['550 5.1.1 User unknown', '550-5.1.1 The email account that you tried to reach does not exist.\n550 5.1.1 More']) {
+        assert.equal(classifyFollowupError(rcpt(response, { responseCode: 550 })).kind, 'permanent', response);
+      }
+      conn.close();
+    });
+
+    it('QA r10: SMTP mode clears a halt only when transporter.verify() passes', async () => {
+      const nodemailer = require('nodemailer');
+      const origCreate = nodemailer.createTransport;
+      const env = { u: process.env.GMAIL_USER, p: process.env.GMAIL_APP_PASSWORD };
+      const row = await legacySent('test+k-smtp-verify@example.com');
+      useTransport(() => { throw Object.assign(new Error('535 5.7.8 Username and Password not accepted'), { responseCode: 535, command: 'AUTH PLAIN' }); });
+      await sendDueFollowups();
+      assert.ok((await sendReadiness()).halt);
+      await pool.query('UPDATE prospects SET archived_at = NOW() WHERE id = $1', [row.prospect.id]);
+      _setTransport(null);
+      let verifies = 0;
+      let pass = false;
+      nodemailer.createTransport = () => ({
+        async verify() { verifies += 1; if (!pass) throw Object.assign(new Error('Invalid login'), { responseCode: 535 }); return true; },
+        async sendMail() { throw new Error('no sends in this probe'); },
+      });
+      process.env.GMAIL_USER = 'test+smtp@example.com';
+      process.env.GMAIL_APP_PASSWORD = 'not-a-real-password';
+      try {
+        assert.equal(await QA_K.mailMode(), 'smtp');
+        await sendDueFollowups();
+        assert.ok(verifies >= 1, 'the empty sweep did not call verify()');
+        assert.ok((await sendReadiness()).halt, 'a failing verify cleared the halt');
+        pass = true;
+        const before = verifies;
+        await sendDueFollowups();
+        assert.ok(verifies > before, 'the clearing sweep did not call verify()');
+        assert.equal((await sendReadiness()).halt, null, 'a passing verify did not clear the halt');
+      } finally {
+        nodemailer.createTransport = origCreate;
+        if (env.u === undefined) delete process.env.GMAIL_USER; else process.env.GMAIL_USER = env.u;
+        if (env.p === undefined) delete process.env.GMAIL_APP_PASSWORD; else process.env.GMAIL_APP_PASSWORD = env.p;
+        _setTransport(null);
+      }
+    });
+
+    it('QA r10: after a Gmail 401 a warm token cache does not clear the halt (real accessToken)', async () => {
+      const axios = require('axios');
+      const prevAdapter = axios.defaults.adapter;
+      const prevId = process.env.GOOGLE_CLIENT_ID;
+      const prevSecret = process.env.GOOGLE_CLIENT_SECRET;
+      process.env.GOOGLE_CLIENT_ID = 'test-client-id';
+      process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret';
+      let tokenCalls = 0;
+      let grant = 'ok';
+      let sends = 0;
+      const reply = (config, status, data) => {
+        if (status >= 400) {
+          const err = new Error(`Request failed with status code ${status}`);
+          err.response = { status, data, headers: {}, config };
+          err.config = config;
+          throw err;
+        }
+        return { data, status, statusText: 'OK', headers: {}, config };
+      };
+      axios.defaults.adapter = async (config) => {
+        const url = String(config && config.url || '');
+        if (url.includes('oauth2.googleapis.com/token')) {
+          tokenCalls += 1;
+          if (grant === 'revoked') return reply(config, 400, { error: 'invalid_grant' });
+          return reply(config, 200, { access_token: `test-access-${tokenCalls}`, expires_in: 3600 });
+        }
+        if (url.includes('/messages/send')) {
+          sends += 1;
+          return reply(config, 401, { error: { code: 401, message: 'Request had invalid authentication credentials.', status: 'UNAUTHENTICATED' } });
+        }
+        return reply(config, 200, { payload: { headers: [] } });
+      };
+      try {
+        await pool.query(
+          `INSERT INTO app_settings (key, value, updated_at) VALUES ('gmail_oauth', $1::jsonb, NOW())`,
+          [JSON.stringify({ refresh_token: 'test-refresh-token', email: 'test+sender@example.com' })]);
+        _setTransport(null);
+        assert.equal(await QA_K.mailMode(), 'gmail_api');
+        const row = await legacySent('test+k-warm@example.com');
+        await QA_K_GMAIL.accessToken();
+        await sendDueFollowups();
+        assert.equal(sends, 1);
+        const halt = (await sendReadiness()).halt;
+        assert.ok(halt, 'a Gmail 401 did not halt');
+        assert.equal(halt.cause, 'oauth_expired');
+        await pool.query('UPDATE prospects SET archived_at = NOW() WHERE id = $1', [row.prospect.id]);
+        grant = 'revoked';
+        const before = tokenCalls;
+        await sendDueFollowups();
+        assert.ok(tokenCalls > before, 'the empty sweep used the cached token');
+        assert.ok((await sendReadiness()).halt, 'a warm cache cleared the halt');
+        grant = 'ok';
+        await pool.query(`UPDATE app_settings SET value = $1::jsonb WHERE key = 'gmail_oauth'`,
+          [JSON.stringify({ refresh_token: 'test-refresh-token', email: 'test+sender@example.com' })]);
+        await sendDueFollowups();
+        assert.equal((await sendReadiness()).halt, null, 'a passing refresh did not clear the halt');
+      } finally {
+        axios.defaults.adapter = prevAdapter;
+        if (prevId === undefined) delete process.env.GOOGLE_CLIENT_ID; else process.env.GOOGLE_CLIENT_ID = prevId;
+        if (prevSecret === undefined) delete process.env.GOOGLE_CLIENT_SECRET; else process.env.GOOGLE_CLIENT_SECRET = prevSecret;
+        _setTransport(null);
+      }
+    });
+  
+    it('QA k: restore of a discarded version with no sent_at clears the reason, and a confirmed approve clears it after send', async () => {
+      const row = await legacySent('test+k-restore-plain@example.com', { sentAt: null });
+      await pool.query(`UPDATE proposals SET status = 'discarded', sent_at = NULL, stop_reason = 'Lead moved to lost' WHERE id = $1`, [row.proposal.id]);
+      const res = await fetch(`${apiBase}/api/proposals/${row.proposal.id}/restore`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      assert.equal(res.status, 200);
+      const after = await fullProposal(row.proposal.id);
+      assert.equal(after.status, 'draft');
+      assert.equal(after.stop_reason, null);
+
+      const held = await legacySent('test+k-held@example.com');
+      await pool.query(`UPDATE proposals SET status = 'draft', stop_reason = 'Needs manual review: the send outcome is uncertain', sent_at = NULL,
+                          followup1_due_at = NULL, followup2_due_at = NULL WHERE id = $1`, [held.proposal.id]);
+      const calls = useTransport();
+      const refused = await fetch(`${apiBase}/api/proposals/${held.proposal.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      assert.equal(refused.status, 409);
+      assert.equal(calls.length, 0);
+      const sent = await fetch(`${apiBase}/api/proposals/${held.proposal.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: JSON.stringify({ confirm: true }),
+      });
+      assert.equal(sent.status, 200);
+      assert.equal(calls.length, 1);
+      const done = await fullProposal(held.proposal.id);
+      assert.equal(done.status, 'sent');
+      assert.equal(done.stop_reason, null);
+    });
+});
 
 
 });

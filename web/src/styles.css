@@ -287,6 +287,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 /* ── Proposals ─────────────────────────────────────────── */
 .setup-note { background: var(--ochre-wash); border-radius: var(--radius-s); padding: .7rem 1rem; margin-bottom: 1rem; }
 .halt-banner { background: var(--rust-wash); color: var(--ink); border: 1px solid var(--rust); border-left: 4px solid var(--rust); border-radius: var(--radius-s); padding: .8rem 1rem; margin-bottom: 1rem; }
+#email-sending { scroll-margin-top: 61px; }
 .halt-banner a { color: var(--rust); font-weight: 700; }
 .setup-note ul { margin: .3rem 0 0; padding-left: 1.1rem; }
 .tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--line); margin-bottom: .6rem; overflow-x: auto; }

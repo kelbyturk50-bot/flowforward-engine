@@ -9,6 +9,7 @@
 
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
+const MailComposer = require('nodemailer/lib/mail-composer');
 const pool = require('../db/client');
 const cfg  = require('./config');
 const { appendCompanyPestExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
@@ -48,9 +49,9 @@ async function mailer() {
   throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
 }
 
-// Status, token refresh, and the SMTP transport are resolved here. The caller
+// Status, token refresh, and the raw MIME are resolved here. The caller
 // rechecks the lead after this returns, then calls send() with no await between
-// that recheck and the transport.
+// that recheck and the POST.
 function smtpTransport() {
   return nodemailer.createTransport({
     service: 'gmail',
@@ -59,15 +60,23 @@ function smtpTransport() {
   });
 }
 
-async function prepareOutgoing() {
+async function compileOutgoing(mail) {
+  if (!mail) return;
+  await new MailComposer({ ...mail, threadId: undefined }).compile().build();
+}
+
+async function prepareOutgoing(mail) {
   const status = await gmail.status();
-  let delivery = null;
-  if (status && status.connected && typeof gmail.prepareDelivery === 'function') {
-    delivery = await gmail.prepareDelivery();
-  } else if (status && status.connected && typeof gmail.accessToken === 'function') {
-    await gmail.accessToken({ force: true });
-  }
   const mode = await mailMode();
+  let delivery = null;
+  if (mode === 'gmail_api' && status && status.connected && typeof gmail.prepareDelivery === 'function') {
+    delivery = await gmail.prepareDelivery(mail);
+  } else {
+    if (status && status.connected && typeof gmail.accessToken === 'function') {
+      await gmail.accessToken({ force: true });
+    }
+    await compileOutgoing(mail);
+  }
   let transportClient = null;
   if (mode === 'test') transportClient = testTransport;
   else if (mode === 'smtp') {
@@ -76,8 +85,8 @@ async function prepareOutgoing() {
   }
   return {
     mode,
-    send(mail) {
-      if (mode === 'gmail_api' && delivery) return delivery.send(mail);
+    send() {
+      if (mode === 'gmail_api' && delivery) return delivery.send();
       if (!transportClient || typeof transportClient.sendMail !== 'function') {
         throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
       }
@@ -596,7 +605,7 @@ function namesRecipient(err) {
 function gmailRecipientReply(err) {
   const status = httpStatus(err);
   if (status !== 400 && status !== 403) return false;
-  return replyTexts(err).some((text) => /(^|\n)\s*550[ \t]+5\.1\.(?:0|1|2|3|10)\b/.test(String(text)));
+  return replyTexts(err).some((text) => /^\s*550[ \t]+5\.1\.(?:0|1|2|3|10)\b/.test(String(text).split(/\r?\n/, 1)[0]));
 }
 
 function isGmailPermanentRecipient(err) {
@@ -769,9 +778,17 @@ async function approveAndSend(proposalId, options = {}) {
   // The prototype link's 14 days start when it is first shared.
   try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }
   await attachPrototypeUrl(p);
+  const mail = {
+    from: { name: SENDER.name, address: SENDER.email },
+    to: envelopeTo(p.to_name, toAddress),
+    subject: p.subject.trim(),
+    text: renderMessage(p, 'first'),
+    html: renderMessageHtml(p, 'first'),
+    headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
+  };
   let prepared;
   try {
-    prepared = await prepareOutgoing();
+    prepared = await prepareOutgoing(mail);
   } catch (err) {
     await pool.query(
       `UPDATE proposals SET status = 'draft', approved_at = NULL, send_attempt_key = NULL, error = $2 WHERE id = $1`,
@@ -795,14 +812,7 @@ async function approveAndSend(proposalId, options = {}) {
   let info;
   let mailed = false;
   try {
-    info = await prepared.send({
-      from: { name: SENDER.name, address: SENDER.email },
-      to: envelopeTo(p.to_name, toAddress),
-      subject: p.subject.trim(),
-      text: renderMessage(p, 'first'),
-      html: renderMessageHtml(p, 'first'),
-      headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
-    });
+    info = await prepared.send();
     mailed = true;
     if (failNextPostSend) {
       failNextPostSend = false;
@@ -1307,17 +1317,7 @@ async function sendDueFollowupsLocked() {
       let stopSweep = false;
       try {
         await attachPrototypeUrl(p);
-        const prepared = await prepareOutgoing();
-        const gate = await recheckLead(p.prospect_id);
-        const block = leadBlocksSend(gate);
-        if (block) {
-          await releaseOwnedClaim(p.id, sentColumn, attemptKey);
-          if (block === 'do_not_contact' || block === 'stage') {
-            await stopSequence(p.id, block === 'do_not_contact' ? 'Lead is do-not-contact' : `Lead moved to ${gate.stage}`);
-          }
-          continue;
-        }
-        await prepared.send({
+        const mail = {
           threadId: p.thread_id || undefined,
           from: { name: SENDER.name, address: SENDER.email },
           to: envelopeTo(p.to_name, toAddress),
@@ -1327,7 +1327,18 @@ async function sendDueFollowupsLocked() {
           inReplyTo: p.message_id || undefined,
           references: p.message_id ? [p.message_id] : undefined,
           headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
-        });
+        };
+        const prepared = await prepareOutgoing(mail);
+        const gate = await recheckLead(p.prospect_id);
+        const block = leadBlocksSend(gate);
+        if (block) {
+          await releaseOwnedClaim(p.id, sentColumn, attemptKey);
+          if (block === 'do_not_contact' || block === 'stage') {
+            await stopSequence(p.id, block === 'do_not_contact' ? 'Lead is do-not-contact' : `Lead moved to ${gate.stage}`);
+          }
+          continue;
+        }
+        await prepared.send();
         mailed = true;
         if (failNextPostSend) {
           failNextPostSend = false;

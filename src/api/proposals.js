@@ -18,6 +18,9 @@ const LIST_COLS = `pr.id, pr.prospect_id, pr.version, pr.status, pr.slug, pr.to_
   pr.analysis->>'fit_verdict' AS fit_verdict, (pr.analysis->>'confidence')::int AS confidence, pr.analysis->>'snapshot' AS snapshot,
   p.company, p.industry, p.city, p.fit_score, p.fit_tier, p.stage, p.phone, p.website`;
 
+// A live send, or a row waiting on a manual look, blocks another first send.
+const BLOCKS_NEW_SEND = `status IN ('sent', 'sending', 'manual_review') OR (status = 'stopped' AND stop_reason LIKE 'Needs manual review%')`;
+
 const VIEWS = {
   review:  `pr.status = 'draft'`,
   out:     `pr.status IN ('sent', 'sending')`,
@@ -129,7 +132,7 @@ async function startJob(res, { prospectId, kind, sourceProposalId, instructions,
   }
   if (!cfg.anthropicConfigured()) return res.status(400).json({ error: 'Add ANTHROPIC_API_KEY in Railway Variables first.' });
   if (lead.rows[0].do_not_contact) return res.status(409).json({ error: 'This lead asked not to be contacted.' });
-  const out = await pool.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [prospectId]);
+  const out = await pool.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND (${BLOCKS_NEW_SEND})`, [prospectId]);
   if (out.rows.length) return res.status(409).json({ error: 'A proposal is already out for this lead. Stop that sequence before writing a new one.' });
   const { job, existing } = await jobs.enqueue({ prospectId, kind, sourceProposalId, instructions, freshResearch });
   res.status(202).json({ job, existing });
@@ -515,7 +518,7 @@ router.post('/:id/restore', async (req, res) => {
       return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
     }
     if (!['discarded', 'superseded'].includes(p.status)) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Only discarded or older versions can be restored.' }); }
-    const out = await db.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [p.prospect_id]);
+    const out = await db.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND (${BLOCKS_NEW_SEND})`, [p.prospect_id]);
     if (out.rows.length) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Another version is already out for this lead.' }); }
     await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [p.prospect_id]);
     await db.query(

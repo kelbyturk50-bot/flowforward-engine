@@ -174,50 +174,48 @@ function wrapGmailError(err) {
   return wrapped;
 }
 
-// Every settings read and the token refresh happen here. send() only posts
-// the message that was already addressed with that token.
-async function prepareDelivery() {
+// Settings, the token refresh, and the MIME build happen here. send() posts
+// the payload that was already built. It does not await anything before that POST.
+async function prepareDelivery(mail) {
   const saved = await getSetting('gmail_oauth');
   const token = await module.exports.accessToken({ force: true });
   const fromAddr = saved?.email || SENDER.email;
+  const from = mail && typeof mail.from === 'object' ? { ...mail.from, address: fromAddr } : fromAddr;
+  const raw = await new MailComposer({ ...mail, from, threadId: undefined }).compile().build();
+  const payload = { raw: toBase64Url(raw), ...(mail && mail.threadId ? { threadId: mail.threadId } : {}) };
   return {
     fromAddr,
-    async send(mail) {
-      const from = typeof mail.from === 'object' ? { ...mail.from, address: fromAddr } : fromAddr;
-      const raw = await new MailComposer({ ...mail, from, threadId: undefined }).compile().build();
-      let sent;
-      try {
-        const res = await axios({
-          method: 'post',
-          url: `${API}/messages/send`,
-          data: { raw: toBase64Url(raw), ...(mail.threadId ? { threadId: mail.threadId } : {}) },
-          timeout: 20000,
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        sent = res.data;
-      } catch (err) {
-        throw wrapGmailError(err);
-      }
-      let messageId = null;
-      try {
-        const meta = await axios({
+    send() {
+      return axios({
+        method: 'post',
+        url: `${API}/messages/send`,
+        data: payload,
+        timeout: 20000,
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((res) => {
+        const sent = res.data;
+        return axios({
           method: 'get',
           url: `${API}/messages/${sent.id}`,
           params: { format: 'metadata', metadataHeaders: 'Message-ID' },
           timeout: 20000,
           headers: { Authorization: `Bearer ${token}` },
-        });
-        messageId = (meta.data.payload?.headers || []).find((h) => h.name.toLowerCase() === 'message-id')?.value || null;
-      } catch { /* threading still works via threadId */ }
-      return { id: sent.id, threadId: sent.threadId, messageId };
+        }).then((meta) => ({
+          id: sent.id,
+          threadId: sent.threadId,
+          messageId: (meta.data.payload?.headers || []).find((h) => h.name.toLowerCase() === 'message-id')?.value || null,
+        })).catch(() => ({ id: sent.id, threadId: sent.threadId, messageId: null }));
+      }).catch((err) => {
+        throw wrapGmailError(err);
+      });
     },
   };
 }
 
 /** Same shape as nodemailer's sendMail; also accepts threadId. Returns { messageId, threadId, id }. */
 async function sendMail(mail) {
-  const prepared = await prepareDelivery();
-  return prepared.send(mail);
+  const prepared = await prepareDelivery(mail);
+  return prepared.send();
 }
 
 // ── Reading ───────────────────────────────────────────────────────────────
