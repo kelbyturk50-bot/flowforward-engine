@@ -246,8 +246,26 @@ ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient;
 -- errors and is cleared only when that follow-up send succeeds. Boot adds
 -- the column and does not rewrite other proposal fields.
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS followup_argument_attempts INTEGER NOT NULL DEFAULT 0;
+-- Set when a follow-up or first send is claimed. A later tick will not mail
+-- again while this key is set. Boot adds the columns and does not fill them.
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS send_attempt_key TEXT;
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS send_attempted_at TIMESTAMPTZ;
 -- Drafts that existed before this column are treated as already seen
 UPDATE proposals SET reviewed_at = created_at WHERE reviewed_at IS NULL AND created_at < '2026-10-15';
+-- Trim edge whitespace on to_email only when the trimmed value is one
+-- canonical address. Rows that stay invalid are left byte for byte, including
+-- a comma address or a zero-width space. A second boot matches nothing.
+DO $ff_trim_to_email$
+DECLARE
+  trim_set text := U&'\0009\000A\000B\000C\000D\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000';
+BEGIN
+  UPDATE proposals
+     SET to_email = btrim(to_email, trim_set)
+   WHERE to_email IS NOT NULL
+     AND to_email IS DISTINCT FROM btrim(to_email, trim_set)
+     AND btrim(to_email, trim_set) ~ $re$^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.[A-Za-z]{2,}$$re$;
+END
+$ff_trim_to_email$;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Pilot tables. Additive and idempotent, same transaction as the rest of

@@ -12,6 +12,7 @@ const { replySystemPrompt, replyUserPrompt, TRIAGE_TOOL, KINDS, STAGES } = requi
 const { isArchivedLead } = require('../db/pest-archive');
 const { isPestCompanyName } = require('../scoring/industry');
 
+const { canonicalizeRecipient } = require('./recipient');
 const send  = () => require('./send');   // lazy: send.js requires this file too
 const draft = () => require('./draft');
 
@@ -331,7 +332,11 @@ async function update(id, patch) {
     // A subject is a mail header. CR or LF would inject another header.
     if (k === 'reply_subject') v = v.replace(/\r\n|\r|\n/g, '');
     v = v.slice(0, k === 'reply_body' ? 8000 : 300);
-    if (k === 'reply_to' && !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(v)) throw httpError("That email address doesn't look right.", 400);
+    if (k === 'reply_to') {
+      const canonical = canonicalizeRecipient(v);
+      if (!canonical.ok) throw httpError("That email address doesn't look right.", 400);
+      v = canonical.value;
+    }
     vals.push(v); sets.push(`${k} = $${vals.length}`);
   }
   if (!sets.length) throw httpError('No valid fields', 400);
@@ -355,7 +360,8 @@ async function sendReply(id) {
   if (!body) throw httpError('The reply is empty.', 400);
   const holes = placeholdersIn(body);
   if (holes.length) throw httpError(`Fill in ${holes.join(', ')} before sending.`, 400);
-  if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(item.reply_to || '')) throw httpError('Add a valid "To" address.', 400);
+  const canonicalTo = canonicalizeRecipient(item.reply_to);
+  if (!canonicalTo.ok || canonicalTo.value !== String(item.reply_to || '')) throw httpError('Add a valid "To" address.', 400);
   const s = send();
   if (!(await s.mailMode())) throw httpError('Email is not set up. Go to Settings and click Connect Gmail.', 400);
 
@@ -367,7 +373,7 @@ async function sendReply(id) {
     const refs = item.header_message_id ? [item.header_message_id] : undefined;
     info = await (await s.mailer()).sendMail({
       from: { name: cfg.SENDER.name, address: cfg.SENDER.email },
-      to: item.reply_to,
+      to: { address: canonicalTo.value },
       subject,
       text: body,
       html: require('./email-html').renderHtml(body, { company: item.company }, { footer: false }),

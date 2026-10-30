@@ -27,6 +27,14 @@ const VIEWS = {
 };
 
 const fail = (res, err) => res.status(err.status || 500).json({ error: err.message });
+const { canonicalizeRecipient } = require('../proposals/recipient');
+
+function proposalIdOrNull(raw) {
+  if (typeof raw !== 'string' || !/^\d{1,9}$/.test(raw)) return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 2147483647) return null;
+  return n;
+}
 const withUrl = (p) => p && ({ ...p, onepager_url: send.onepagerUrl(p) });
 
 // GET /api/proposals?view=review|out|replied|flagged|closed  or  ?prospect_id=
@@ -263,11 +271,19 @@ router.get('/:id', async (req, res) => {
 // PATCH /api/proposals/:id — edit copy (drafts only) or leave feedback (any time)
 const COPY_FIELDS = ['to_email', 'to_name', 'subject', 'body', 'followup1', 'followup2', 'onepager'];
 router.patch('/:id', async (req, res) => {
+  const proposalId = proposalIdOrNull(req.params.id);
+  if (proposalId == null) return res.status(400).json({ error: 'Bad request.' });
   try {
-    const cur = await pool.query('SELECT status FROM proposals WHERE id = $1', [req.params.id]);
+    const cur = await pool.query('SELECT status FROM proposals WHERE id = $1', [proposalId]);
     if (!cur.rows.length) return res.status(404).json({ error: 'Not found' });
     const b = req.body || {};
-    if (typeof b.to_email === 'string') b.to_email = b.to_email.trim();
+    if (typeof b.to_email === 'string') {
+      const canonical = canonicalizeRecipient(b.to_email);
+      if (!canonical.ok) {
+        if (canonical.reason === 'empty') b.to_email = '';
+        else return res.status(400).json({ error: 'That email address doesn\'t look right.' });
+      } else b.to_email = canonical.value;
+    }
     const updates = [];
     for (const k of COPY_FIELDS) if (b[k] !== undefined) updates.push([k, k === 'onepager' ? b[k] : (b[k] === '' ? null : String(b[k]))]);
     if (updates.length && cur.rows[0].status !== 'draft') {
@@ -278,8 +294,8 @@ router.patch('/:id', async (req, res) => {
     if (b.feedback_note !== undefined) updates.push(['feedback_note', String(b.feedback_note || '').slice(0, 2000) || null]);
     if (!updates.length) return res.status(400).json({ error: 'No valid fields' });
     const sets = updates.map(([k], i) => `${k} = $${i + 2}`).join(', ');
-    await pool.query(`UPDATE proposals SET ${sets}, error = NULL WHERE id = $1`, [req.params.id, ...updates.map(([, v]) => v)]);
-    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
+    await pool.query(`UPDATE proposals SET ${sets}, error = NULL WHERE id = $1`, [proposalId, ...updates.map(([, v]) => v)]);
+    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [proposalId]);
     res.json(withUrl(rows[0]));
   } catch (err) { fail(res, err); }
 });
@@ -342,6 +358,8 @@ router.post('/:id/replied', async (req, res) => {
 
 // POST /api/proposals/:id/mark-sent — record a manual outreach as sent
 router.post('/:id/mark-sent', async (req, res) => {
+  const proposalId = proposalIdOrNull(req.params.id);
+  if (proposalId == null) return res.status(400).json({ error: 'Bad request.' });
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
@@ -351,7 +369,7 @@ router.post('/:id/mark-sent', async (req, res) => {
          JOIN prospects p ON p.id = pr.prospect_id
         WHERE pr.id = $1
         FOR UPDATE`,
-      [req.params.id]
+      [proposalId]
     );
     const p = rows[0];
     if (!p) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
@@ -492,7 +510,7 @@ router.post('/:id/restore', async (req, res) => {
     const out = await db.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [p.prospect_id]);
     if (out.rows.length) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Another version is already out for this lead.' }); }
     await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [p.prospect_id]);
-    await db.query(`UPDATE proposals SET status = 'draft', stop_reason = NULL WHERE id = $1`, [p.id]);
+    await db.query(`UPDATE proposals SET status = 'draft', stop_reason = NULL, followup_argument_attempts = 0 WHERE id = $1`, [p.id]);
     const lead = await db.query(`SELECT stage FROM prospects WHERE id = $1`, [p.prospect_id]);
     if (lead.rows[0]?.stage === 'disqualified') {
       await db.query(`UPDATE prospects SET stage = 'found' WHERE id = $1`, [p.prospect_id]);

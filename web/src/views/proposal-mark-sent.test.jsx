@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { api } from '../api';
 import { installApiDefaults } from '../test/defaults.js';
@@ -83,5 +83,41 @@ describe('mark as sent needs a recipient', () => {
     await userEvent.click(mark);
     expect(screen.getByRole('alertdialog', { name: 'Confirm manual send' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Yes, mark as sent' })).toBeEnabled();
+  });
+
+  it('points the disabled mark-sent button at the helper for screen readers', async () => {
+    api.proposal.mockResolvedValue({ ...base, to_email: null });
+    render(<ProposalDrawer {...props} />);
+    const mark = await screen.findByRole('button', { name: 'Mark as manually sent…' });
+    expect(mark).toHaveAttribute('aria-describedby', 'mark-sent-needs-email');
+    expect(document.getElementById('mark-sent-needs-email')).toHaveTextContent('Add a recipient email first');
+  });
+
+  it('disables the confirm button when the recipient is cleared after the dialog opened', async () => {
+    api.proposal.mockResolvedValue({ ...base, to_email: 'test+a@peak.test' });
+    render(<ProposalDrawer {...props} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Mark as manually sent…' }));
+    expect(screen.getByRole('button', { name: 'Yes, mark as sent' })).toBeEnabled();
+    api.proposal.mockResolvedValue({ ...base, to_email: null });
+    api.updateProposal.mockResolvedValue({ ...base, to_email: null });
+    const input = screen.getByLabelText('To (email)');
+    await userEvent.clear(input);
+    await userEvent.tab();
+    expect(api.updateProposal).toHaveBeenCalledWith(9, { to_email: '' });
+    const confirm = await screen.findByRole('button', { name: 'Yes, mark as sent' });
+    await waitFor(() => expect(confirm).toBeDisabled());
+    await userEvent.click(confirm);
+    expect(api.markSentProposal).not.toHaveBeenCalled();
+  });
+
+  it('shows the trimmed address when a trailing no-break space is added to an unchanged value', async () => {
+    api.proposal.mockResolvedValue({ ...base, to_email: 'test+a@peak.test' });
+    render(<ProposalDrawer {...props} />);
+    const input = await screen.findByLabelText('To (email)');
+    await userEvent.type(input, '\u00A0');
+    expect(input).toHaveValue('test+a@peak.test\u00A0');
+    await userEvent.tab();
+    expect(input).toHaveValue('test+a@peak.test');
+    expect(api.updateProposal).not.toHaveBeenCalled();
   });
 });

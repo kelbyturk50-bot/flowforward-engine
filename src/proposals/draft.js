@@ -13,6 +13,7 @@ const { fsmDetectedFromResearch } = require('./servicetitan');
 const { rescore } = require('../scoring/fit');
 const { systemPrompt, userPrompt, SUBMIT_TOOL } = require('./prompt');
 const { attachPrototype } = require('../prototypes/store');
+const { canonicalizeRecipient } = require('./recipient');
 
 let client = null;
 function claude() {
@@ -169,8 +170,12 @@ function cleanOutput(out, research, lead) {
   };
   const email = { to_name: str(e.to_name), subject: str(e.subject), body: str(e.body), followup1: str(e.followup1), followup2: str(e.followup2) };
 
-  const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(x || '');
-  const toEmail = [analysis.best_email, lead.email, ...(research.site?.emails || [])].find(validEmail) || null;
+  const toEmail = [analysis.best_email, lead.email, ...(research.site?.emails || [])]
+    .map((value) => {
+      const canonical = canonicalizeRecipient(value);
+      return canonical.ok ? canonical.value : '';
+    })
+    .find(Boolean) || null;
   return { analysis, onepager, email, toEmail };
 }
 
