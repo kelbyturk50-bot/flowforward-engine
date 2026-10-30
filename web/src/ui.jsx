@@ -211,7 +211,12 @@ export function toast(msg) { toastSet?.(msg); }
 export function Toaster() {
   const [msg, setMsg] = useState(null);
   useEffect(() => { toastSet = (m) => { setMsg(m); }; return () => { toastSet = null; }; }, []);
-  useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 2600); return () => clearTimeout(t); }, [msg]);
+  useEffect(() => {
+    if (!msg) return;
+    const delay = String(msg).length > 60 ? 8000 : 2600;
+    const t = setTimeout(() => setMsg(null), delay);
+    return () => clearTimeout(t);
+  }, [msg]);
   return <div className={`toast ${msg ? 'show' : ''}`} role="status" aria-live="polite">{msg}</div>;
 }
 

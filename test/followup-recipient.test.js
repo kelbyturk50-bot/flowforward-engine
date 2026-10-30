@@ -5013,5 +5013,178 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     }
   });
 
+  function overlapGate() {
+    let n = 0;
+    let solo = false;
+    let release;
+    const together = new Promise((resolve) => { release = resolve; });
+    return async function gate() {
+      const mine = ++n;
+      if (mine === 1) {
+        const deadline = Date.now() + 4000;
+        let why = 'timeout';
+        while (Date.now() < deadline) {
+          if (n >= 2) { why = 'peer'; break; }
+          const { rows } = await pool.query(
+            `SELECT query FROM pg_stat_activity
+              WHERE datname = current_database()
+                AND wait_event_type = 'Lock'
+                AND pid <> pg_backend_pid()`
+          );
+          if (n >= 2) { why = 'peer'; break; }
+          if (rows.some((row) => /from prospects/i.test(row.query || '') && /for update/i.test(row.query || ''))) {
+            why = 'lock';
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 15));
+        }
+        if (why === 'lock') { solo = true; return; }
+      }
+      if (solo) return;
+      if (n >= 2) release();
+      await together;
+    };
+  }
+
+  it('round 11: two overlapping approves send once and the other gets 409', async () => {
+    const { approveAndSend, _setSendTxnGate } = require('../src/proposals/send');
+    const prospect = await lead();
+    const first = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+race-a@example.com' });
+    const second = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+race-b@example.com' });
+    const calls = useTransport();
+    _setSendTxnGate(overlapGate());
+    try {
+      const results = await Promise.allSettled([
+        approveAndSend(first.id, {}),
+        approveAndSend(second.id, {}),
+      ]);
+      const ok = results.filter((r) => r.status === 'fulfilled');
+      const blocked = results.filter((r) => r.status === 'rejected');
+      assert.equal(ok.length, 1, 'both approves sent');
+      assert.equal(blocked.length, 1);
+      assert.equal(blocked[0].reason.status, 409);
+      assert.match(blocked[0].reason.message, /already out/);
+      assert.match(blocked[0].reason.message, /Stop that sequence first/);
+      assert.equal(calls.length, 1);
+      const rows = await pool.query(
+        `SELECT status FROM proposals WHERE id = ANY($1::int[]) ORDER BY status`,
+        [[first.id, second.id]]
+      );
+      assert.deepEqual(rows.rows.map((r) => r.status).sort(), ['draft', 'sent']);
+    } finally {
+      _setSendTxnGate(null);
+      _setTransport(null);
+    }
+  });
+
+  it('round 11: two overlapping draft inserts leave one live draft', async () => {
+    const { draftProposal, _setClient, _setDraftTxnGate } = require('../src/proposals/draft');
+    const { fakeClaude } = require('./fixtures');
+    const prevKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'test-not-a-real-key';
+    _setClient(fakeClaude());
+    _setDraftTxnGate(overlapGate());
+    try {
+      const prospect = await lead();
+      const existing = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+race-draft@example.com' });
+      await pool.query(`UPDATE proposals SET research = $2::jsonb WHERE id = $1`, [existing.id, JSON.stringify({ notes: 'cached' })]);
+      const results = await Promise.allSettled([
+        draftProposal(prospect.id, { trigger: 'manual' }),
+        draftProposal(prospect.id, { trigger: 'manual' }),
+      ]);
+      assert.equal(results.filter((r) => r.status === 'rejected').length, 0, results.map((r) => r.reason && r.reason.message).join(' | '));
+      const { rows } = await pool.query(
+        `SELECT status FROM proposals WHERE prospect_id = $1 AND status = 'draft'`,
+        [prospect.id]
+      );
+      assert.equal(rows.length, 1, 'both inserts left a live draft');
+    } finally {
+      _setDraftTxnGate(null);
+      _setClient(null);
+      if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+    }
+  });
+
+  it('round 11: confirm and the review prefix ignore surrounding space and case', async () => {
+    const prospect = await lead();
+    const spaced = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+confirm-space@example.com' });
+    await pool.query(`UPDATE proposals SET stop_reason = 'Confirm before sending again ' WHERE id = $1`, [spaced.id]);
+    const calls = useTransport();
+    const refused = await fetch(`${apiBase}/api/proposals/${spaced.id}/send`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+    });
+    assert.equal(refused.status, 409);
+    assert.equal(calls.length, 0);
+    assert.equal((await state(spaced.id)).status, 'draft');
+
+    const lower = await lead();
+    const review = await insertProposal(lower.id, { status: 'sent', toEmail: 'test+lower-review@example.com' });
+    await pool.query(
+      `UPDATE proposals SET status = 'stopped', stop_reason = 'needs manual review: lowercase',
+              followup1_due_at = NULL, followup2_due_at = NULL WHERE id = $1`,
+      [review.id]
+    );
+    const draft = await insertProposal(lower.id, { status: 'draft', toEmail: 'test+lower-draft@example.com' });
+    const sent = await fetch(`${apiBase}/api/proposals/${draft.id}/send`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+    });
+    const body = await sent.json();
+    assert.equal(sent.status, 409);
+    assert.equal(body.error, REVIEW_WAIT);
+    assert.equal(calls.length, 0);
+    assert.equal((await state(draft.id)).status, 'draft');
+  });
+
+  it('round 11: a Gmail body that starts on the next line is not a permanent 550', () => {
+    const { wrapGmailError } = require('../src/proposals/gmail');
+    const wrapped = wrapGmailError(Object.assign(new Error('Request failed with status code 400'), {
+      response: { status: 400, data: { error: { code: 400, message: '\n550 5.1.1 user unknown' } } },
+    }));
+    assert.notEqual(classifyFollowupError(wrapped).kind, 'permanent');
+    const leading = wrapGmailError(Object.assign(new Error('Request failed with status code 400'), {
+      response: { status: 400, data: { error: { code: 400, message: '550 5.1.1 user unknown' } } },
+    }));
+    assert.equal(classifyFollowupError(leading).kind, 'permanent');
+  });
+
+  it('round 11: a display-name change does not clear a sender halt, and a from-address change does', async () => {
+    const alerts = [];
+    _setAlertHook((alert) => { alerts.push(alert); });
+    const env = { u: process.env.GMAIL_USER, p: process.env.GMAIL_APP_PASSWORD, n: process.env.SENDER_NAME };
+    process.env.GMAIL_USER = 'test+from@example.com';
+    process.env.GMAIL_APP_PASSWORD = 'not-a-real-password';
+    process.env.SENDER_NAME = 'Original Name';
+    const gmailMod = require('../src/proposals/gmail');
+    const origStatus = gmailMod.status;
+    gmailMod.status = async () => ({ configured: false, connected: false });
+    try {
+      const row = await legacySent('test+sender-name@example.com');
+      useTransport(() => {
+        throw Object.assign(new Error("Can't send mail - all recipients were rejected: 550 5.1.8 Bad sender address domain"), {
+          code: 'EENVELOPE', command: 'RCPT TO', responseCode: 550, response: '550 5.1.8 Bad sender address domain',
+        });
+      });
+      await sendDueFollowups();
+      assert.equal(alerts.length, 1);
+      await pool.query('UPDATE prospects SET archived_at = NOW() WHERE id = $1', [row.prospect.id]);
+      _setTransport(null);
+      process.env.SENDER_NAME = 'A Different Display Name';
+      await sendDueFollowups();
+      assert.equal(alerts.length, 1, 'a display-name change alerted again');
+      assert.equal((await sendReadiness()).halt && (await sendReadiness()).halt.cause, 'sender');
+      process.env.GMAIL_USER = 'test+other-from@example.com';
+      await sendDueFollowups();
+      assert.equal((await sendReadiness()).halt, null, 'a from-address change left the sender halt');
+      assert.equal(alerts.length, 1);
+    } finally {
+      gmailMod.status = origStatus;
+      if (env.u === undefined) delete process.env.GMAIL_USER; else process.env.GMAIL_USER = env.u;
+      if (env.p === undefined) delete process.env.GMAIL_APP_PASSWORD; else process.env.GMAIL_APP_PASSWORD = env.p;
+      if (env.n === undefined) delete process.env.SENDER_NAME; else process.env.SENDER_NAME = env.n;
+      _setAlertHook(null);
+      _setTransport(null);
+    }
+  });
+
 
 });

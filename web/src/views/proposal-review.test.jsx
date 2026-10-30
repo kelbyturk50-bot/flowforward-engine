@@ -198,6 +198,8 @@ describe('follow-up halt and manual review', () => {
   it('labels the email sending card and offsets it below the sticky header', async () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../styles.css'), 'utf8');
     expect(css).toMatch(/#email-sending\s*\{[^}]*scroll-margin-top:\s*61px/);
+    expect(css).toMatch(/\.halt-banner\s*\{[^}]*text-wrap:\s*pretty/);
+    expect(css).toMatch(/\.toast\s*\{[^}]*width:\s*max-content/);
     render(<Settings version={1} onSaved={() => {}} />);
     const card = await screen.findByRole('region', { name: 'Email sending' });
     expect(card).toHaveAttribute('id', 'email-sending');

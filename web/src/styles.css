@@ -286,7 +286,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 
 /* ── Proposals ─────────────────────────────────────────── */
 .setup-note { background: var(--ochre-wash); border-radius: var(--radius-s); padding: .7rem 1rem; margin-bottom: 1rem; }
-.halt-banner { background: var(--rust-wash); color: var(--ink); border: 1px solid var(--rust); border-left: 4px solid var(--rust); border-radius: var(--radius-s); padding: .8rem 1rem; margin-bottom: 1rem; }
+.halt-banner { background: var(--rust-wash); color: var(--ink); border: 1px solid var(--rust); border-left: 4px solid var(--rust); border-radius: var(--radius-s); padding: .8rem 1rem; margin-bottom: 1rem; text-wrap: pretty; }
 #email-sending { scroll-margin-top: 61px; }
 .halt-banner a { color: var(--rust); font-weight: 700; }
 .setup-note ul { margin: .3rem 0 0; padding-left: 1.1rem; }
@@ -538,6 +538,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .toast {
   position: fixed; left: 50%; bottom: 1.5rem; transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
   background: var(--ink); color: var(--paper); padding: .7rem 1.1rem; border-radius: var(--radius-s); z-index: 80;
+  width: max-content;
   transition: opacity .2s, transform .2s; max-width: calc(100vw - 2rem); box-shadow: var(--shadow);
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }

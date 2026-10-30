@@ -403,7 +403,7 @@ router.post('/:id/mark-sent', async (req, res) => {
     const blocking = await blockingSibling(db, p.prospect_id, p.id);
     if (blocking) {
       await db.query('ROLLBACK');
-      return res.status(409).json({ error: siblingBlockMessage(blocking) });
+      return res.status(409).json({ error: siblingBlockMessage(blocking, { send: true }) });
     }
 
     const now = new Date();

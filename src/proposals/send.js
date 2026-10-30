@@ -333,6 +333,11 @@ function _setAlertHook(fn) {
 }
 
 let credentialOverride = null;
+let sendTxnGate = null;
+function _setSendTxnGate(fn) {
+  testOnly('_setSendTxnGate');
+  sendTxnGate = typeof fn === 'function' ? fn : null;
+}
 function _setCredentialCheck(fn) {
   testOnly('_setCredentialCheck');
   credentialOverride = typeof fn === 'function' ? fn : null;
@@ -347,6 +352,7 @@ function _resetSendTestHooks() {
   randomSource = null;
   alertHook = null;
   credentialOverride = null;
+  sendTxnGate = null;
 }
 
 function unitRandom(rand) {
@@ -607,7 +613,7 @@ function gmailRecipientReply(err) {
   const status = httpStatus(err);
   if (status !== 400 && status !== 403) return false;
   return replyTexts(err).some((text) => {
-    const line = String(text || '').replace(/^(?:Gmail API:\s*)+/, '').split(/\r?\n/, 1)[0];
+    const line = String(text || '').replace(/^(?:Gmail API:[ \t]*)+/, '').split(/\r?\n/, 1)[0];
     return /^\s*550[ \t]+5\.1\.(?:0|1|2|3|10)\b/.test(line);
   });
 }
@@ -758,7 +764,8 @@ async function approveAndSend(proposalId, options = {}) {
   const problems = await sendReadiness();
   if (problems.length) throw Object.assign(new Error(problems.join(' ')), { status: 400 });
   if (p.status !== 'draft') throw Object.assign(new Error(`This version is ${p.status}; only drafts can be sent.`), { status: 409 });
-  const heldBack = p.stop_reason === RESEND_CONFIRM || String(p.stop_reason || '').startsWith('Needs manual review');
+  const reasonKey = String(p.stop_reason || '').trim().toLowerCase();
+  const heldBack = reasonKey === RESEND_CONFIRM.toLowerCase() || reasonKey.startsWith('needs manual review');
   if (heldBack && options.confirm !== true) {
     throw Object.assign(new Error('Confirm this send before it goes out again.'), { status: 409 });
   }
@@ -770,25 +777,40 @@ async function approveAndSend(proposalId, options = {}) {
     throw Object.assign(new Error(`Daily send limit (${cfg.SEND_DAILY_LIMIT}) reached. Try again tomorrow.`), { status: 429 });
   }
 
-  // Claim the row first so a double-click can't send twice. A sibling that is
-  // out, or waiting for review, blocks the claim in the same statement.
+  // Claim the row first so a double-click can't send twice. Lock the prospect
+  // first so two drafts cannot both pass the sibling check.
   const attemptKey = crypto.randomBytes(16).toString('hex');
-  const claim = await pool.query(
-    `UPDATE proposals AS pr
-        SET status = 'sending', approved_at = NOW(), send_attempt_key = $2, send_attempted_at = NOW()
-      WHERE pr.id = $1 AND pr.status = 'draft'
-        AND NOT EXISTS (
-          SELECT 1 FROM proposals sib
-           WHERE sib.prospect_id = pr.prospect_id
-             AND sib.id <> pr.id
-             AND ${blocksNewSendSql('sib')}
-        )
-      RETURNING pr.id`,
-    [p.id, attemptKey]);
-  if (!claim.rows.length) {
-    const blocking = await blockingSibling(pool, p.prospect_id, p.id);
-    if (blocking) throw Object.assign(new Error(siblingBlockMessage(blocking)), { status: 409 });
-    throw Object.assign(new Error('Already sending.'), { status: 409 });
+  const db = await pool.connect();
+  let claimed = false;
+  try {
+    await db.query('BEGIN');
+    await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [p.prospect_id]);
+    if (sendTxnGate) await sendTxnGate({ prospectId: p.prospect_id });
+    const claim = await db.query(
+      `UPDATE proposals AS pr
+          SET status = 'sending', approved_at = NOW(), send_attempt_key = $2, send_attempted_at = NOW()
+        WHERE pr.id = $1 AND pr.status = 'draft'
+          AND NOT EXISTS (
+            SELECT 1 FROM proposals sib
+             WHERE sib.prospect_id = pr.prospect_id
+               AND sib.id <> pr.id
+               AND ${blocksNewSendSql('sib')}
+          )
+        RETURNING pr.id`,
+      [p.id, attemptKey]);
+    if (!claim.rows.length) {
+      const blocking = await blockingSibling(db, p.prospect_id, p.id);
+      await db.query('ROLLBACK');
+      if (blocking) throw Object.assign(new Error(siblingBlockMessage(blocking, { send: true })), { status: 409 });
+      throw Object.assign(new Error('Already sending.'), { status: 409 });
+    }
+    await db.query('COMMIT');
+    claimed = true;
+  } catch (err) {
+    if (!claimed) await db.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    db.release();
   }
 
   // The prototype link's 14 days start when it is first shared.
@@ -1113,9 +1135,8 @@ function currentSenderIdentity() {
 
 function senderIdentityChanged(halt) {
   if (!halt || halt.error_class !== 'sender') return false;
-  if (!halt.sender_email && !halt.sender_name) return false;
-  const now = currentSenderIdentity();
-  return halt.sender_email !== now.email || halt.sender_name !== now.name;
+  if (!halt.sender_email) return false;
+  return halt.sender_email !== (process.env.GMAIL_USER || SENDER.email);
 }
 
 async function credentialsPass() {
@@ -1717,7 +1738,7 @@ module.exports = {
   missingRecipient, normalizeRecipient, storedRecipient, isPermanentFollowupError, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
   _beforeFollowupClaim, _beforeTransport, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
-  _setRandom, _setAlertHook, _setCredentialCheck,
+  _setRandom, _setAlertHook, _setCredentialCheck, _setSendTxnGate,
   backoffDelayMs, backoffDelayMinutes, recheckLead, BACKOFF_CAP_MS,
   FOLLOWUP_BACKOFF_CAP_MS, FOLLOWUP_MAX_AGE_MS, RESEND_CONFIRM,
 };

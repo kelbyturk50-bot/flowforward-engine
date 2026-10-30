@@ -3,24 +3,31 @@
 
 const REVIEW_WAIT = 'Another version is waiting for review.';
 const ALREADY_OUT = 'A proposal is already out for this lead. Stop that sequence before writing a new one.';
+const ALREADY_OUT_SEND = 'A proposal is already out for this lead. Stop that sequence first.';
 const RESTORE_OUT = 'Another version is already out for this lead.';
 
-const BLOCKS_NEW_SEND = `status IN ('sent', 'sending', 'manual_review') OR (status = 'stopped' AND stop_reason LIKE 'Needs manual review%')`;
+const BLOCKS_NEW_SEND = `status IN ('sent', 'sending', 'manual_review') OR (status = 'stopped' AND lower(btrim(stop_reason)) LIKE 'needs manual review%')`;
 
 function blocksNewSendSql(alias) {
   const sql = alias ? BLOCKS_NEW_SEND.replace(/\b(status|stop_reason)\b/g, `${alias}.$1`) : BLOCKS_NEW_SEND;
   return `(${sql})`;
 }
 
+function foldedReason(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function isReviewBlock(row) {
   if (!row) return false;
   if (row.status === 'manual_review') return true;
-  return row.status === 'stopped' && String(row.stop_reason || '').startsWith('Needs manual review');
+  return row.status === 'stopped' && foldedReason(row.stop_reason).startsWith('needs manual review');
 }
 
-function siblingBlockMessage(row, { restore = false } = {}) {
+function siblingBlockMessage(row, { restore = false, send = false } = {}) {
   if (isReviewBlock(row)) return REVIEW_WAIT;
-  return restore ? RESTORE_OUT : ALREADY_OUT;
+  if (restore) return RESTORE_OUT;
+  if (send) return ALREADY_OUT_SEND;
+  return ALREADY_OUT;
 }
 
 async function blockingSibling(db, prospectId, exceptId) {
@@ -43,6 +50,7 @@ module.exports = {
   BLOCKS_NEW_SEND,
   REVIEW_WAIT,
   ALREADY_OUT,
+  ALREADY_OUT_SEND,
   RESTORE_OUT,
   blocksNewSendSql,
   isReviewBlock,

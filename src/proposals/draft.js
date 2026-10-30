@@ -17,6 +17,11 @@ const { canonicalizeRecipient } = require('./recipient');
 const { siblingBlockMessage, blockingSibling } = require('./sequence-block');
 
 let client = null;
+let draftTxnGate = null;
+function _setDraftTxnGate(fn) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_setDraftTxnGate is only available when NODE_ENV=test');
+  draftTxnGate = typeof fn === 'function' ? fn : null;
+}
 function claude() {
   if (!client) {
     if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set in Railway Variables.');
@@ -215,6 +220,10 @@ async function draftProposal(prospectId, opts = {}) {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
+    // Hold the prospect across the recheck, the supersede, and the insert so
+    // two processes cannot both write a live draft.
+    await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [lead.id]);
+    if (draftTxnGate) await draftTxnGate({ prospectId: lead.id });
     // The model call already finished. A sibling can have moved into review
     // while that call was in flight, so the block is checked again here.
     const blocked = await blockingSibling(db, lead.id);
@@ -364,4 +373,4 @@ async function rebuildOnepager(proposalId) {
   return upd[0];
 }
 
-module.exports = { rebuildOnepager, normalizeSubmission, submissionProblem, draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, getClient, isRunning: () => running };
+module.exports = { rebuildOnepager, normalizeSubmission, submissionProblem, draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, _setDraftTxnGate, getClient, isRunning: () => running };
