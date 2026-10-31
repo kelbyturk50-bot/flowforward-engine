@@ -25,7 +25,9 @@ function _setDraftTxnGate(fn) {
 }
 function claude() {
   if (!client) {
-    if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set in Railway Variables.');
+    if (!process.env.ANTHROPIC_API_KEY) {
+      throw Object.assign(new Error('ANTHROPIC_API_KEY is not set in Railway Variables.'), { status: 400 });
+    }
     client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   }
   return client;
@@ -134,7 +136,9 @@ async function writeWithClaude({ lead, research, instructions }) {
       if (problem) console.warn(`[proposals] submitted with a thin one-pager after retries: ${problem}`);
       return { output: normalizeSubmission(submitted.input), usage, cost };
     }
-    if (cost > cfg.MAX_COST_PER_LEAD) throw new Error(`Stopped: cost passed the $${cfg.MAX_COST_PER_LEAD} per-lead cap.`);
+    if (cost > cfg.MAX_COST_PER_LEAD) {
+      throw Object.assign(new Error(`Stopped: cost passed the $${cfg.MAX_COST_PER_LEAD} per-lead cap.`), { status: 409 });
+    }
 
     messages.push({ role: 'assistant', content: res.content });
     if (res.stop_reason === 'pause_turn') continue;           // long search turn; resume as-is
@@ -149,7 +153,7 @@ async function writeWithClaude({ lead, research, instructions }) {
     }
     toolChoice = { type: 'tool', name: 'submit_proposal' };
   }
-  throw new Error('Claude did not submit a proposal after several turns.');
+  throw Object.assign(new Error('Claude did not submit a proposal after several turns.'), { status: 502 });
 }
 
 const str = (v) => (typeof v === 'string' ? v.trim() : '');
@@ -360,7 +364,19 @@ async function rebuildOnepager(proposalId) {
   if (isArchivedLead(lead)) throw Object.assign(new Error(`${ARCHIVED_LEAD_REASON}.`), { status: 409 });
   const research = pr.research || await researchLead(lead);
   const row = { ...pr, prospect_id: lead.id };
-  const { output, usage, cost } = await writeWithClaude({ lead, research, instructions: row.instructions });
+  let output;
+  let usage;
+  let cost;
+  try {
+    ({ output, usage, cost } = await writeWithClaude({ lead, research, instructions: row.instructions }));
+  } catch (err) {
+    const { APIConnectionError } = require('@anthropic-ai/sdk');
+    if (err instanceof APIConnectionError) {
+      console.error(`[proposals] rebuild connection failed: ${err && err.code || 'error'}`);
+      throw Object.assign(new Error('Couldn\'t reach Claude. Try again.'), { status: 502 });
+    }
+    throw err;
+  }
   const { onepager } = cleanOutput(output, research, lead);
   if (!onepager.observations.length && !onepager.opportunities.length) {
     throw Object.assign(new Error('Claude returned an empty one-pager again. Try once more.'), { status: 502 });

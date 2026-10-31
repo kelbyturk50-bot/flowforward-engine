@@ -486,88 +486,107 @@ async function revokeDemoOnDiscard(db, proposalId) {
 
 // POST /api/proposals/:id/discard — drop a draft
 router.post('/:id/discard', async (req, res) => {
-  const db = await pool.connect();
   try {
-    await db.query('BEGIN');
-    const { rows } = await db.query(
-      `UPDATE proposals SET status = 'discarded', stop_reason = $2
-        WHERE id = $1 AND status = 'draft' RETURNING *`,
-      [req.params.id, req.body?.reason || 'Discarded by Kelby']
-    );
-    if (!rows.length) {
-      await db.query('ROLLBACK');
-      return res.status(409).json({ error: 'Only drafts can be discarded.' });
-    }
-    await revokeDemoOnDiscard(db, rows[0].id);
-    if (req.body?.disqualify) {
-      const lead = await db.query('SELECT stage FROM prospects WHERE id = $1', [rows[0].prospect_id]);
-      if (lead.rows[0] && lead.rows[0].stage !== 'disqualified') {
-        await db.query('UPDATE prospects SET stage = \'disqualified\' WHERE id = $1', [rows[0].prospect_id]);
-        await db.query(
-          'INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, \'stage_change\', $2)',
-          [rows[0].prospect_id, `${lead.rows[0].stage} → disqualified (from proposal review)`]
+    await withClient('discard', async (db) => {
+      await db.query('BEGIN');
+      try {
+        const { rows } = await db.query(
+          `UPDATE proposals SET status = 'discarded', stop_reason = $2
+            WHERE id = $1 AND status = 'draft' RETURNING *`,
+          [req.params.id, req.body?.reason || 'Discarded by Kelby']
         );
+        if (!rows.length) {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: 'Only drafts can be discarded.' });
+          return;
+        }
+        await revokeDemoOnDiscard(db, rows[0].id);
+        if (req.body?.disqualify) {
+          const lead = await db.query('SELECT stage FROM prospects WHERE id = $1', [rows[0].prospect_id]);
+          if (lead.rows[0] && lead.rows[0].stage !== 'disqualified') {
+            await db.query('UPDATE prospects SET stage = \'disqualified\' WHERE id = $1', [rows[0].prospect_id]);
+            await db.query(
+              'INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, \'stage_change\', $2)',
+              [rows[0].prospect_id, `${lead.rows[0].stage} → disqualified (from proposal review)`]
+            );
+          }
+        }
+        await db.query('COMMIT');
+        const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [rows[0].id]);
+        res.json(withUrl(fresh.rows[0] || rows[0]));
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {});
+        console.error('[proposals] discard failed:', err.message);
+        throw err;
       }
-    }
-    await db.query('COMMIT');
-    const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [rows[0].id]);
-    res.json(withUrl(fresh.rows[0] || rows[0]));
+    });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
-    console.error('[proposals] discard failed:', err.message);
-    res.status(500).json({ error: 'Something went wrong.' });
-  } finally {
-    db.release();
+    if (!res.headersSent) fail(res, err);
   }
 });
 
 // POST /api/proposals/:id/restore — bring a discarded/flagged version back to review
 router.post('/:id/restore', async (req, res) => {
-  const db = await pool.connect();
   try {
-    await db.query('BEGIN');
-    const { rows } = await db.query(
-      `SELECT pr.*, p.company, p.archived_at
-         FROM proposals pr
-         JOIN prospects p ON p.id = pr.prospect_id
-        WHERE pr.id = $1
-        FOR UPDATE OF pr`,
-      [req.params.id]
-    );
-    const p = rows[0];
-    if (!p) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
-    // Same refusal as send. Roll back before any status change.
-    if (isPestCompanyName(p.company)) {
-      await db.query('ROLLBACK');
-      return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
-    }
-    if (isArchivedLead(p)) {
-      await db.query('ROLLBACK');
-      return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
-    }
-    if (!['discarded', 'superseded'].includes(p.status)) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Only discarded or older versions can be restored.' }); }
-    const blocking = await blockingSibling(db, p.prospect_id, p.id);
-    if (blocking) { await db.query('ROLLBACK'); return res.status(409).json({ error: siblingBlockMessage(blocking, { restore: true }) }); }
-    await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [p.prospect_id]);
-    await db.query(
-      `UPDATE proposals
-          SET status = 'draft', stop_reason = NULL, error = NULL, approved_at = NULL,
-              send_attempt_key = NULL, followup_argument_attempts = 0,
-              followup_transient_attempts = 0, first_transient_at = NULL, next_retry_at = NULL
-        WHERE id = $1`,
-      [p.id]);
-    const lead = await db.query(`SELECT stage FROM prospects WHERE id = $1`, [p.prospect_id]);
-    if (lead.rows[0]?.stage === 'disqualified') {
-      await db.query(`UPDATE prospects SET stage = 'found' WHERE id = $1`, [p.prospect_id]);
-      await db.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'stage_change', 'disqualified → found (proposal restored)')`, [p.prospect_id]);
-    }
-    await db.query('COMMIT');
-    const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
-    res.json(withUrl(fresh.rows[0]));
+    await withClient('restore', async (db) => {
+      await db.query('BEGIN');
+      try {
+        const { rows } = await db.query(
+          `SELECT pr.*, p.company, p.archived_at
+             FROM proposals pr
+             JOIN prospects p ON p.id = pr.prospect_id
+            WHERE pr.id = $1
+            FOR UPDATE OF pr`,
+          [req.params.id]
+        );
+        const p = rows[0];
+        if (!p) { await db.query('ROLLBACK'); res.status(404).json({ error: 'Not found' }); return; }
+        // Same refusal as send. Roll back before any status change.
+        if (isPestCompanyName(p.company)) {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+          return;
+        }
+        if (isArchivedLead(p)) {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
+          return;
+        }
+        if (!['discarded', 'superseded'].includes(p.status)) {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: 'Only discarded or older versions can be restored.' });
+          return;
+        }
+        const blocking = await blockingSibling(db, p.prospect_id, p.id);
+        if (blocking) {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: siblingBlockMessage(blocking, { restore: true }) });
+          return;
+        }
+        await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [p.prospect_id]);
+        await db.query(
+          `UPDATE proposals
+              SET status = 'draft', stop_reason = NULL, error = NULL, approved_at = NULL,
+                  send_attempt_key = NULL, followup_argument_attempts = 0,
+                  followup_transient_attempts = 0, first_transient_at = NULL, next_retry_at = NULL
+            WHERE id = $1`,
+          [p.id]);
+        const lead = await db.query(`SELECT stage FROM prospects WHERE id = $1`, [p.prospect_id]);
+        if (lead.rows[0]?.stage === 'disqualified') {
+          await db.query(`UPDATE prospects SET stage = 'found' WHERE id = $1`, [p.prospect_id]);
+          await db.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'stage_change', 'disqualified → found (proposal restored)')`, [p.prospect_id]);
+        }
+        await db.query('COMMIT');
+        const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
+        res.json(withUrl(fresh.rows[0]));
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {});
+        throw err;
+      }
+    });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
-    fail(res, err);
-  } finally { db.release(); }
+    if (!res.headersSent) fail(res, err);
+  }
 });
 
 module.exports = router;

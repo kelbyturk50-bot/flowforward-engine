@@ -7,6 +7,7 @@
 
 const crypto = require('crypto');
 const pool = require('../db/client');
+const { withClient } = require('../db/with-client');
 const cfg  = require('./config');
 const { replySystemPrompt, replyUserPrompt, TRIAGE_TOOL, KINDS, STAGES } = require('./reply-prompt');
 const { isArchivedLead } = require('../db/pest-archive');
@@ -58,34 +59,32 @@ async function insertMessage(db, { prospectId, proposalId, direction, msg, to })
  */
 async function recordInbound(p, kind, msg) {
   if (isArchivedLead(p) || isPestCompanyName(p.company || '')) return null;
-  const db = await pool.connect();
-  let item = null;
-  try {
+  const item = await withClient('inbox', async (db) => {
     await db.query('BEGIN');
-    const m = await insertMessage(db, { prospectId: p.prospect_id, proposalId: p.id, direction: 'in', msg, to: cfg.SENDER.email });
-    if (!m) { await db.query('ROLLBACK'); return null; }
-    let fields;
-    if (kind === 'bounced') {
-      fields = { status: 'fyi', kind: 'bounce', label: 'Bounced', summary: `The email to ${p.to_email} didn't go through.`,
-        notice: 'Follow-ups stopped and the address was cleared from the lead. Find another email or give them a call.' };
-    } else if (kind === 'opted_out') {
-      fields = { status: 'fyi', kind: 'opt_out', label: 'Opted out', summary: 'Asked not to be contacted again.',
-        notice: 'Marked do-not-contact and follow-ups stopped. No reply needed.' };
-    } else {
-      fields = { status: 'queued', kind: kind === 'auto' ? 'auto_reply' : null, label: null, summary: null, notice: null };
+    try {
+      const m = await insertMessage(db, { prospectId: p.prospect_id, proposalId: p.id, direction: 'in', msg, to: cfg.SENDER.email });
+      if (!m) { await db.query('ROLLBACK'); return null; }
+      let fields;
+      if (kind === 'bounced') {
+        fields = { status: 'fyi', kind: 'bounce', label: 'Bounced', summary: `The email to ${p.to_email} didn't go through.`,
+          notice: 'Follow-ups stopped and the address was cleared from the lead. Find another email or give them a call.' };
+      } else if (kind === 'opted_out') {
+        fields = { status: 'fyi', kind: 'opt_out', label: 'Opted out', summary: 'Asked not to be contacted again.',
+          notice: 'Marked do-not-contact and follow-ups stopped. No reply needed.' };
+      } else {
+        fields = { status: 'queued', kind: kind === 'auto' ? 'auto_reply' : null, label: null, summary: null, notice: null };
+      }
+      const { rows } = await db.query(
+        `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status, kind, label, summary, notice)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [p.prospect_id, p.id, m.id, fields.status, fields.kind, fields.label, fields.summary, fields.notice]);
+      await db.query('COMMIT');
+      return rows[0];
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {});
+      throw err;
     }
-    const { rows } = await db.query(
-      `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status, kind, label, summary, notice)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [p.prospect_id, p.id, m.id, fields.status, fields.kind, fields.label, fields.summary, fields.notice]);
-    item = rows[0];
-    await db.query('COMMIT');
-  } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    db.release();
-  }
+  });
   if (item && item.status === 'queued') kick();
   return item;
 }
