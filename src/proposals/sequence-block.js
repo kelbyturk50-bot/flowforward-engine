@@ -6,7 +6,7 @@ const ALREADY_OUT = 'A proposal is already out for this lead. Stop that sequence
 const ALREADY_OUT_SEND = 'A proposal is already out for this lead. Stop that sequence first.';
 const RESTORE_OUT = 'Another version is already out for this lead.';
 
-const BLOCKS_NEW_SEND = `status IN ('sent', 'sending', 'manual_review') OR (status = 'stopped' AND lower(btrim(stop_reason)) LIKE 'needs manual review%')`;
+const BLOCKS_NEW_SEND = `status IN ('sent', 'sending', 'manual_review') OR (status = 'stopped' AND lower(regexp_replace(stop_reason, '^[[:space:]' || chr(160) || ']+|[[:space:]' || chr(160) || ']+$', '', 'g')) LIKE 'needs manual review%')`;
 
 function blocksNewSendSql(alias) {
   const sql = alias ? BLOCKS_NEW_SEND.replace(/\b(status|stop_reason)\b/g, `${alias}.$1`) : BLOCKS_NEW_SEND;

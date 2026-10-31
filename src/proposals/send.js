@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const MailComposer = require('nodemailer/lib/mail-composer');
 const pool = require('../db/client');
+const { withClient } = require('../db/with-client');
 const cfg  = require('./config');
 const { appendCompanyPestExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
@@ -783,38 +784,35 @@ async function approveAndSend(proposalId, options = {}) {
   // Claim the row first so a double-click can't send twice. Lock the prospect
   // first so two drafts cannot both pass the sibling check.
   const attemptKey = crypto.randomBytes(16).toString('hex');
-  const db = await pool.connect();
-  let claimed = false;
-  try {
+  await withClient('approve', async (db) => {
     await db.query('BEGIN');
-    await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [p.prospect_id]);
-    await afterLeadLock(p.prospect_id);
-    const claim = await db.query(
-      `UPDATE proposals AS pr
-          SET status = 'sending', approved_at = NOW(), send_attempt_key = $2, send_attempted_at = NOW()
-        WHERE pr.id = $1 AND pr.status = 'draft'
-          AND NOT EXISTS (
-            SELECT 1 FROM proposals sib
-             WHERE sib.prospect_id = pr.prospect_id
-               AND sib.id <> pr.id
-               AND ${blocksNewSendSql('sib')}
-          )
-        RETURNING pr.id`,
-      [p.id, attemptKey]);
-    if (!claim.rows.length) {
-      const blocking = await blockingSibling(db, p.prospect_id, p.id);
-      await db.query('ROLLBACK');
-      if (blocking) throw Object.assign(new Error(siblingBlockMessage(blocking, { send: true })), { status: 409 });
-      throw Object.assign(new Error('Already sending.'), { status: 409 });
+    try {
+      await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [p.prospect_id]);
+      await afterLeadLock(p.prospect_id);
+      const claim = await db.query(
+        `UPDATE proposals AS pr
+            SET status = 'sending', approved_at = NOW(), send_attempt_key = $2, send_attempted_at = NOW()
+          WHERE pr.id = $1 AND pr.status = 'draft'
+            AND NOT EXISTS (
+              SELECT 1 FROM proposals sib
+               WHERE sib.prospect_id = pr.prospect_id
+                 AND sib.id <> pr.id
+                 AND ${blocksNewSendSql('sib')}
+            )
+          RETURNING pr.id`,
+        [p.id, attemptKey]);
+      if (!claim.rows.length) {
+        const blocking = await blockingSibling(db, p.prospect_id, p.id);
+        await db.query('ROLLBACK');
+        if (blocking) throw Object.assign(new Error(siblingBlockMessage(blocking, { send: true })), { status: 409 });
+        throw Object.assign(new Error('Already sending.'), { status: 409 });
+      }
+      await db.query('COMMIT');
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {});
+      throw err;
     }
-    await db.query('COMMIT');
-    claimed = true;
-  } catch (err) {
-    if (!claimed) await db.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    db.release();
-  }
+  });
 
   // The prototype link's 14 days start when it is first shared.
   try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }

@@ -334,7 +334,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.confirm { border: 1px solid var(--line); border-left: 4px solid var(--juniper); border-radius: var(--radius-s); padding: .9rem 1rem; display: flex; flex-direction: column; gap: .5rem; background: var(--paper); }
+.confirm { position: relative; z-index: 90; border: 1px solid var(--line); border-left: 4px solid var(--juniper); border-radius: var(--radius-s); padding: .9rem 1rem; display: flex; flex-direction: column; gap: .5rem; background: var(--paper); }
 .check { flex-direction: row; align-items: center; gap: .5rem; color: var(--ink); }
 .check input { width: 18px; height: 18px; accent-color: var(--juniper); }
 .review-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 1.5rem; align-items: start; }
@@ -539,7 +539,7 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   position: fixed; left: 50%; bottom: 1.5rem; transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
   background: var(--ink); color: var(--paper); padding: .7rem 1.1rem; border-radius: var(--radius-s); z-index: 80;
   width: max-content;
-  transition: opacity .2s, transform .2s; max-width: calc(100vw - 2rem); box-shadow: var(--shadow);
+  transition: opacity .2s, transform .2s; max-width: min(calc(100vw - 2rem), 36rem); box-shadow: var(--shadow);
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 

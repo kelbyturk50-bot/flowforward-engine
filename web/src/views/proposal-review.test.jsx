@@ -200,6 +200,7 @@ describe('follow-up halt and manual review', () => {
     expect(css).toMatch(/#email-sending\s*\{[^}]*scroll-margin-top:\s*61px/);
     expect(css).toMatch(/\.halt-banner\s*\{[^}]*text-wrap:\s*pretty/);
     expect(css).toMatch(/\.toast\s*\{[^}]*width:\s*max-content/);
+    expect(css).toMatch(/max-width:\s*min\(calc\(100vw - 2rem\), 36rem\)/);
     render(<Settings version={1} onSaved={() => {}} />);
     const card = await screen.findByRole('region', { name: 'Email sending' });
     expect(card).toHaveAttribute('id', 'email-sending');
@@ -221,5 +222,25 @@ describe('follow-up halt and manual review', () => {
     expect(screen.getByText('This draft is marked for another look. Send it only if you mean to.')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Send it' }));
     expect(api.sendProposal).toHaveBeenCalledWith(9, { confirm: true });
+  });
+
+  it('passes confirm when the guarded reason only differs by space or case', async () => {
+    api.sendProposal.mockResolvedValue({ id: 9, status: 'sent' });
+    for (const stop_reason of ['Confirm before sending again ', 'needs manual review: lowercase']) {
+      api.proposal.mockResolvedValue({
+        ...review,
+        status: 'draft',
+        stop_reason,
+        error: null,
+        versions: [],
+        onepager: {},
+      });
+      const view = render(<ProposalDrawer id={9} onClose={() => {}} bump={() => {}} openLead={() => {}} openProposal={() => {}} />);
+      await userEvent.click(await screen.findByRole('button', { name: 'Approve and send' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Send it' }));
+      expect(api.sendProposal).toHaveBeenCalledWith(9, { confirm: true });
+      view.unmount();
+      api.sendProposal.mockClear();
+    }
   });
 });

@@ -2,6 +2,7 @@
 const express = require('express');
 const router  = express.Router();
 const pool    = require('../db/client');
+const { withClient } = require('../db/with-client');
 const cfg     = require('../proposals/config');
 const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
@@ -28,7 +29,11 @@ const VIEWS = {
   closed:  `(pr.status IN ('finished', 'stopped', 'bounced', 'opted_out', 'manual_review') OR (pr.status = 'discarded' AND COALESCE(pr.analysis->>'fit_verdict', '') <> 'disqualify'))`,
 };
 
-const fail = (res, err) => res.status(err.status || 500).json({ error: err.message });
+const fail = (res, err) => {
+  if (err && err.status) return res.status(err.status).json({ error: err.message });
+  console.error(`[api] ${err && err.code || 'error'}`);
+  return res.status(500).json({ error: 'Something went wrong.' });
+};
 const { canonicalizeRecipient } = require('../proposals/recipient');
 
 function proposalIdOrNull(raw) {
@@ -367,9 +372,19 @@ router.post('/:id/replied', async (req, res) => {
 router.post('/:id/mark-sent', async (req, res) => {
   const proposalId = proposalIdOrNull(req.params.id);
   if (proposalId == null) return res.status(400).json({ error: 'Bad request.' });
-  const db = await pool.connect();
   try {
+    await withClient('mark-sent', async (db) => {
     await db.query('BEGIN');
+    try {
+    const found = await db.query('SELECT prospect_id FROM proposals WHERE id = $1', [proposalId]);
+    if (!found.rows.length) {
+      await db.query('ROLLBACK');
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    // Prospect before the proposal row, same order as approve, so the two cannot deadlock.
+    await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [found.rows[0].prospect_id]);
+    await send.afterLeadLock(found.rows[0].prospect_id);
     const { rows } = await db.query(
       `SELECT pr.*, p.company, p.stage, p.archived_at
          FROM proposals pr
@@ -379,33 +394,36 @@ router.post('/:id/mark-sent', async (req, res) => {
       [proposalId]
     );
     const p = rows[0];
-    if (!p) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+    if (!p) { await db.query('ROLLBACK'); res.status(404).json({ error: 'Not found' }); return; }
     // Same refusal as send. Roll back before any status change, prospect
     // update, or follow-up scheduling.
     if (isPestCompanyName(p.company)) {
       await db.query('ROLLBACK');
-      return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+      res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+      return;
     }
     if (isArchivedLead(p)) {
       await db.query('ROLLBACK');
-      return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
+      res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
+      return;
     }
     // Review-row resolve (delivered, confirm_override, not_sent) is issue #123.
     // A missing recipient is still refused before any write.
     if (send.missingRecipient(p.to_email)) {
       await db.query('ROLLBACK');
-      return res.status(400).json({ error: 'Add a recipient email before marking this as sent.' });
+      res.status(400).json({ error: 'Add a recipient email before marking this as sent.' });
+      return;
     }
     if (p.status !== 'draft') {
       await db.query('ROLLBACK');
-      return res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` });
+      res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` });
+      return;
     }
-    await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [p.prospect_id]);
-    await send.afterLeadLock(p.prospect_id);
     const blocking = await blockingSibling(db, p.prospect_id, p.id);
     if (blocking) {
       await db.query('ROLLBACK');
-      return res.status(409).json({ error: siblingBlockMessage(blocking, { send: true }) });
+      res.status(409).json({ error: siblingBlockMessage(blocking, { send: true }) });
+      return;
     }
 
     const now = new Date();
@@ -433,10 +451,14 @@ router.post('/:id/mark-sent', async (req, res) => {
     await db.query('COMMIT');
     const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
     res.json(withUrl(fresh.rows[0]));
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+    });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
-    fail(res, err);
-  } finally { db.release(); }
+    if (!res.headersSent) fail(res, err);
+  }
 });
 
 // Skip demo columns and token rows that this boot has not created yet.

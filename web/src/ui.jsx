@@ -208,12 +208,13 @@ export function ErrorNote({ error, onRetry }) {
 
 let toastSet = null;
 export function toast(msg) { toastSet?.(msg); }
+export function dismissToast() { toastSet?.(null); }
 export function Toaster() {
   const [msg, setMsg] = useState(null);
   useEffect(() => { toastSet = (m) => { setMsg(m); }; return () => { toastSet = null; }; }, []);
   useEffect(() => {
     if (!msg) return;
-    const delay = String(msg).length > 60 ? 8000 : 2600;
+    const delay = String(msg).length > 40 ? 8000 : 2600;
     const t = setTimeout(() => setMsg(null), delay);
     return () => clearTimeout(t);
   }, [msg]);

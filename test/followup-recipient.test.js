@@ -5038,7 +5038,8 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
           }
           await new Promise((r) => setTimeout(r, 15));
         }
-        if (why !== 'peer') { solo = true; return; }
+        if (why === 'lock') { solo = true; return; }
+        if (why !== 'peer') throw new Error('the other checkout did not reach the prospect lock');
       }
       if (solo) return;
       if (n >= 2) release();
@@ -5407,6 +5408,140 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     } finally {
       pool.connect = orig;
       _setTransport(null);
+    }
+  });
+
+  async function backendPid(match) {
+    for (let i = 0; i < 80; i += 1) {
+      const { rows } = await pool.query(
+        `SELECT pid, state, wait_event_type, query
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND pid <> pg_backend_pid()
+            AND query ILIKE '%for update%'
+            AND query ILIKE '%prospects%'`
+      );
+      const hit = rows.find(match);
+      if (hit) return hit.pid;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error('the checkout never showed up');
+  }
+
+  it('round 12: terminating a lock waiter does not crash approve and sends nothing', async () => {
+    const prospect = await lead();
+    const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+term-wait@example.com' });
+    const holder = await pool.connect();
+    const calls = useTransport();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [prospect.id]);
+      const pending = fetch(`${apiBase}/api/proposals/${draft.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      const pid = await backendPid((row) => row.wait_event_type === 'Lock');
+      await pool.query('SELECT pg_terminate_backend($1::int)', [pid]);
+      const res = await pending;
+      const body = await res.json();
+      assert.equal(res.status, 500);
+      assert.equal(body.error, 'Something went wrong.');
+      assert.doesNotMatch(JSON.stringify(body), /terminated|deadlock|ECONNRESET|violates/i);
+      assert.equal(calls.length, 0);
+      assert.equal((await state(draft.id)).status, 'draft');
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {});
+      holder.release();
+      _setTransport(null);
+    }
+  });
+
+  it('round 12: terminating an idle draft checkout does not crash and inserts nothing', async () => {
+    const { draftProposal, _setClient, _setDraftTxnGate } = require('../src/proposals/draft');
+    const { fakeClaude } = require('./fixtures');
+    const prevKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'test-not-a-real-key';
+    _setClient(fakeClaude());
+    let entered;
+    const inside = new Promise((resolve) => { entered = resolve; });
+    _setDraftTxnGate(async () => {
+      entered();
+      await new Promise(() => {});
+    });
+    try {
+      const prospect = await lead();
+      const existing = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+term-idle@example.com' });
+      await pool.query(`UPDATE proposals SET research = $2::jsonb WHERE id = $1`, [existing.id, JSON.stringify({ notes: 'cached' })]);
+      const before = await pool.query('SELECT count(*)::int AS n FROM proposals WHERE prospect_id = $1', [prospect.id]);
+      const pending = draftProposal(prospect.id, { trigger: 'manual' });
+      const pid = await backendPid((row) => row.state === 'idle in transaction');
+      await pool.query('SELECT pg_terminate_backend($1::int)', [pid]);
+      await assert.rejects(pending, (err) => {
+        assert.equal(err.status, 500);
+        assert.equal(err.message, 'Something went wrong.');
+        assert.doesNotMatch(err.message, /terminated|deadlock|ECONNRESET/i);
+        return true;
+      });
+      const after = await pool.query('SELECT count(*)::int AS n FROM proposals WHERE prospect_id = $1', [prospect.id]);
+      assert.equal(after.rows[0].n, before.rows[0].n);
+    } finally {
+      _setDraftTxnGate(null);
+      _setClient(null);
+      if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+    }
+  });
+
+  it('round 12: the same draft does not deadlock mark-sent against approve', async () => {
+    const { approveAndSend, _setSendTxnGate } = require('../src/proposals/send');
+    for (let i = 0; i < 4; i += 1) {
+      const prospect = await lead();
+      const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: `test+same-draft-${i}@example.com` });
+      const calls = useTransport();
+      _setSendTxnGate(overlapGate());
+      const [markResult, approveResult] = await Promise.allSettled([
+        fetch(`${apiBase}/api/proposals/${draft.id}/mark-sent`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+        }).then(async (res) => ({ status: res.status, body: await res.json() })),
+        approveAndSend(draft.id, {}),
+      ]);
+      const mark = markResult.status === 'fulfilled' ? markResult.value : { status: 0, body: {} };
+      assert.notEqual(mark.status, 500, JSON.stringify(mark.body));
+      assert.doesNotMatch(JSON.stringify(mark.body), /deadlock|duplicate key|terminat|violates/i);
+      if (approveResult.status === 'rejected') {
+        assert.equal(approveResult.reason.status, 409);
+        assert.doesNotMatch(String(approveResult.reason.message), /deadlock|terminat|violates/i);
+      }
+      const markOk = mark.status === 200;
+      const approveOk = approveResult.status === 'fulfilled';
+      assert.equal(Number(markOk) + Number(approveOk), 1);
+      assert.equal(calls.length, approveOk ? 1 : 0);
+      assert.equal((await state(draft.id)).status, 'sent');
+      _setSendTxnGate(null);
+    }
+    _setTransport(null);
+  });
+
+  it('round 12: a tab, newline, or nbsp before Needs manual review still blocks', async () => {
+    const calls = useTransport();
+    for (const [tag, reason] of [
+      ['tab', '\tNeeds manual review: tab'],
+      ['nl', '\nNeeds manual review: nl'],
+      ['nbsp', '\u00a0Needs manual review: nbsp'],
+    ]) {
+      const prospect = await lead();
+      const review = await insertProposal(prospect.id, { status: 'sent', toEmail: `test+ws-${tag}@example.com` });
+      await pool.query(
+        `UPDATE proposals SET status = 'stopped', stop_reason = $2, followup1_due_at = NULL, followup2_due_at = NULL WHERE id = $1`,
+        [review.id, reason]
+      );
+      const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: `test+ws-draft-${tag}@example.com` });
+      const res = await fetch(`${apiBase}/api/proposals/${draft.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      const body = await res.json();
+      assert.equal(res.status, 409, `${tag} ${body.error}`);
+      assert.equal(body.error, REVIEW_WAIT);
+      assert.equal(calls.length, 0, tag);
+      assert.equal((await state(draft.id)).status, 'draft');
     }
   });
 

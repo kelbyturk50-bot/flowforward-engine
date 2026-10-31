@@ -5,6 +5,7 @@
 const crypto    = require('crypto');
 const Anthropic = require('@anthropic-ai/sdk');
 const pool      = require('../db/client');
+const { withClient } = require('../db/with-client');
 const cfg       = require('./config');
 const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
@@ -217,9 +218,9 @@ async function draftProposal(prospectId, opts = {}) {
   const { analysis, onepager, email, toEmail } = cleanOutput(output, research, lead);
   const disqualify = analysis.fit_verdict === 'disqualify';
 
-  const db = await pool.connect();
-  try {
+  const inserted = await withClient('draft', async (db) => {
     await db.query('BEGIN');
+    try {
     // Hold the prospect across the recheck, the supersede, and the insert so
     // two processes cannot both write a live draft.
     await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [lead.id]);
@@ -276,12 +277,12 @@ async function draftProposal(prospectId, opts = {}) {
       console.error('[prototype] hook failed:', err && err.code);
     }
     return ins.rows[0];
-  } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    db.release();
-  }
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+  });
+  return inserted;
 }
 
 // ─── Nightly batch ────────────────────────────────────────────────────────

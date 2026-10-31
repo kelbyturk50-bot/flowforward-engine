@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { missingRecipient, recipientHint, trimRecipientEdges } from '../recipient';
 import { TryLiveDemoLink } from '../demo/DemoLinks';
-import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, PROPOSAL_STATUS, proposalStatusCopy, relDate, timeAgo, toast, Stars } from '../ui';
+import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, PROPOSAL_STATUS, proposalStatusCopy, relDate, timeAgo, toast, dismissToast, Stars } from '../ui';
 import { useJobs, elapsed } from '../jobs';
 import PrototypeCard from './PrototypeCard';
 
 function guardedSend(p) {
-  return p.stop_reason === 'Confirm before sending again' || String(p.stop_reason || '').startsWith('Needs manual review');
+  const reason = String(p.stop_reason || '').trim().toLowerCase();
+  return reason === 'confirm before sending again' || reason.startsWith('needs manual review');
 }
 
 function approveHeading(p) {
@@ -109,14 +110,14 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
             disabled={!!busy || noRecipient}
             title={noRecipient ? hint : undefined}
             aria-describedby={noRecipient ? 'mark-sent-needs-email' : undefined}
-            onClick={() => setConfirming(true)}
+            onClick={() => { dismissToast(); setConfirming(true); }}
           >Approve and send</button>
           <button
             className="btn btn-quiet"
             disabled={!!busy || noRecipient}
             title={noRecipient ? hint : undefined}
             aria-describedby={noRecipient ? 'mark-sent-needs-email' : undefined}
-            onClick={() => setConfirmingManual(m => !m)}
+            onClick={() => setConfirmingManual((open) => { if (!open) dismissToast(); return !open; })}
           >Mark as manually sent…</button>
           {noRecipient && (
             <button type="button" id="mark-sent-needs-email" className="recipient-hint" onClick={focusRecipient}>
