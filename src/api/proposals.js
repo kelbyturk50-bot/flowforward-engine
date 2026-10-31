@@ -2,6 +2,7 @@
 const express = require('express');
 const router  = express.Router();
 const pool    = require('../db/client');
+const { withClient } = require('../db/with-client');
 const cfg     = require('../proposals/config');
 const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
@@ -18,15 +19,29 @@ const LIST_COLS = `pr.id, pr.prospect_id, pr.version, pr.status, pr.slug, pr.to_
   pr.analysis->>'fit_verdict' AS fit_verdict, (pr.analysis->>'confidence')::int AS confidence, pr.analysis->>'snapshot' AS snapshot,
   p.company, p.industry, p.city, p.fit_score, p.fit_tier, p.stage, p.phone, p.website`;
 
+const { siblingBlockMessage, blockingSibling } = require('../proposals/sequence-block');
+
 const VIEWS = {
   review:  `pr.status = 'draft'`,
   out:     `pr.status IN ('sent', 'sending')`,
   replied: `pr.status = 'replied'`,
   flagged: `pr.status = 'discarded' AND pr.analysis->>'fit_verdict' = 'disqualify'`,
-  closed:  `(pr.status IN ('finished', 'stopped', 'bounced', 'opted_out') OR (pr.status = 'discarded' AND COALESCE(pr.analysis->>'fit_verdict', '') <> 'disqualify'))`,
+  closed:  `(pr.status IN ('finished', 'stopped', 'bounced', 'opted_out', 'manual_review') OR (pr.status = 'discarded' AND COALESCE(pr.analysis->>'fit_verdict', '') <> 'disqualify'))`,
 };
 
-const fail = (res, err) => res.status(err.status || 500).json({ error: err.message });
+const fail = (res, err) => {
+  if (err && err.status) return res.status(err.status).json({ error: err.message });
+  console.error(`[api] ${err && err.code || 'error'}`);
+  return res.status(500).json({ error: 'Something went wrong.' });
+};
+const { canonicalizeRecipient } = require('../proposals/recipient');
+
+function proposalIdOrNull(raw) {
+  if (typeof raw !== 'string' || !/^\d{1,9}$/.test(raw)) return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 2147483647) return null;
+  return n;
+}
 const withUrl = (p) => p && ({ ...p, onepager_url: send.onepagerUrl(p) });
 
 // GET /api/proposals?view=review|out|replied|flagged|closed  or  ?prospect_id=
@@ -72,7 +87,8 @@ router.get('/summary', async (req, res) => {
     counts.jobs_active = activeJobs.rows[0].n;
     const setup = [];
     if (!cfg.anthropicConfigured()) setup.push('Add ANTHROPIC_API_KEY in Railway Variables so the bot can write drafts.');
-    setup.push(...await send.sendReadiness());
+    const readiness = await send.sendReadiness();
+    setup.push(...readiness);
     const gstatus = await require('../proposals/gmail').status();
     res.json({
       counts, setup, running: isRunning(),
@@ -80,6 +96,7 @@ router.get('/summary', async (req, res) => {
       spend_this_month: spend.rows[0].month,
       chat_demo_this_month: chatSpend.rows[0].month,
       sent_today: sentToday, daily_limit: cfg.SEND_DAILY_LIMIT,
+      halt: readiness.halt || null,
       eligible_leads: eligible.rows[0].n,
       config: {
         model: cfg.MODEL, nightly_count: cfg.NIGHTLY_COUNT, auto_draft: cfg.AUTO_DRAFT, tiers: cfg.TIERS, excluded: cfg.EXCLUDED_INDUSTRIES, cron: cfg.CRON,
@@ -119,8 +136,8 @@ async function startJob(res, { prospectId, kind, sourceProposalId, instructions,
   }
   if (!cfg.anthropicConfigured()) return res.status(400).json({ error: 'Add ANTHROPIC_API_KEY in Railway Variables first.' });
   if (lead.rows[0].do_not_contact) return res.status(409).json({ error: 'This lead asked not to be contacted.' });
-  const out = await pool.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [prospectId]);
-  if (out.rows.length) return res.status(409).json({ error: 'A proposal is already out for this lead. Stop that sequence before writing a new one.' });
+  const blocking = await blockingSibling(pool, prospectId);
+  if (blocking) return res.status(409).json({ error: siblingBlockMessage(blocking) });
   const { job, existing } = await jobs.enqueue({ prospectId, kind, sourceProposalId, instructions, freshResearch });
   res.status(202).json({ job, existing });
 }
@@ -168,6 +185,14 @@ router.post('/gmail/disconnect', async (req, res) => {
 // POST /api/proposals/check-inbox — run the reply check + follow-up sender now
 router.post('/check-inbox', async (req, res) => {
   try {
+    const mode = await send.mailMode();
+    if (!mode) {
+      const st = await gmail.status();
+      const message = st.configured
+        ? 'Gmail is not connected. Go to Settings and click Connect Gmail.'
+        : 'Email is not set up. Go to Settings and click Connect Gmail.';
+      throw Object.assign(new Error(message), { status: 503 });
+    }
     const inbox = await send.checkInbox();
     const followups = await send.sendDueFollowups();
     res.json({ ok: true, inbox, followups });
@@ -263,29 +288,41 @@ router.get('/:id', async (req, res) => {
 // PATCH /api/proposals/:id — edit copy (drafts only) or leave feedback (any time)
 const COPY_FIELDS = ['to_email', 'to_name', 'subject', 'body', 'followup1', 'followup2', 'onepager'];
 router.patch('/:id', async (req, res) => {
+  const proposalId = proposalIdOrNull(req.params.id);
+  if (proposalId == null) return res.status(400).json({ error: 'Bad request.' });
   try {
-    const cur = await pool.query('SELECT status FROM proposals WHERE id = $1', [req.params.id]);
+    const cur = await pool.query('SELECT status FROM proposals WHERE id = $1', [proposalId]);
     if (!cur.rows.length) return res.status(404).json({ error: 'Not found' });
     const b = req.body || {};
+    if (typeof b.to_email === 'string') {
+      const canonical = canonicalizeRecipient(b.to_email);
+      if (!canonical.ok) {
+        if (canonical.reason === 'empty') b.to_email = '';
+        else return res.status(400).json({ error: 'That email address doesn\'t look right.' });
+      } else b.to_email = canonical.value;
+    }
     const updates = [];
     for (const k of COPY_FIELDS) if (b[k] !== undefined) updates.push([k, k === 'onepager' ? b[k] : (b[k] === '' ? null : String(b[k]))]);
     if (updates.length && cur.rows[0].status !== 'draft') {
       return res.status(409).json({ error: 'This version has already gone out, so its copy is locked. Feedback can still be added.' });
     }
-    if (b.to_email && !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(b.to_email)) return res.status(400).json({ error: 'That email address doesn\'t look right.' });
+    if (b.to_email && send.missingRecipient(b.to_email)) return res.status(400).json({ error: 'That email address doesn\'t look right.' });
     if (b.feedback_rating !== undefined) updates.push(['feedback_rating', [1, -1].includes(Number(b.feedback_rating)) ? Number(b.feedback_rating) : null]);
     if (b.feedback_note !== undefined) updates.push(['feedback_note', String(b.feedback_note || '').slice(0, 2000) || null]);
     if (!updates.length) return res.status(400).json({ error: 'No valid fields' });
     const sets = updates.map(([k], i) => `${k} = $${i + 2}`).join(', ');
-    await pool.query(`UPDATE proposals SET ${sets}, error = NULL WHERE id = $1`, [req.params.id, ...updates.map(([, v]) => v)]);
-    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
+    await pool.query(`UPDATE proposals SET ${sets}, error = NULL WHERE id = $1`, [proposalId, ...updates.map(([, v]) => v)]);
+    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [proposalId]);
     res.json(withUrl(rows[0]));
   } catch (err) { fail(res, err); }
 });
 
 // POST /api/proposals/:id/send — approve + send the first email now
 router.post('/:id/send', async (req, res) => {
-  try { res.json(withUrl(await send.approveAndSend(parseInt(req.params.id, 10)))); } catch (err) { fail(res, err); }
+  try {
+    const confirm = !!(req.body && req.body.confirm === true);
+    res.json(withUrl(await send.approveAndSend(parseInt(req.params.id, 10), { confirm })));
+  } catch (err) { fail(res, err); }
 });
 
 // POST /api/proposals/:id/regenerate { instructions, fresh_research }
@@ -341,40 +378,72 @@ router.post('/:id/replied', async (req, res) => {
 
 // POST /api/proposals/:id/mark-sent — record a manual outreach as sent
 router.post('/:id/mark-sent', async (req, res) => {
-  const db = await pool.connect();
+  const proposalId = proposalIdOrNull(req.params.id);
+  if (proposalId == null) return res.status(400).json({ error: 'Bad request.' });
   try {
+    await withClient('mark-sent', async (db) => {
     await db.query('BEGIN');
+    try {
+    const found = await db.query('SELECT prospect_id FROM proposals WHERE id = $1', [proposalId]);
+    if (!found.rows.length) {
+      await db.query('ROLLBACK');
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    // Prospect before the proposal row, same order as approve, so the two cannot deadlock.
+    await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [found.rows[0].prospect_id]);
+    await send.afterLeadLock(found.rows[0].prospect_id);
     const { rows } = await db.query(
       `SELECT pr.*, p.company, p.stage, p.archived_at
          FROM proposals pr
          JOIN prospects p ON p.id = pr.prospect_id
         WHERE pr.id = $1
-        FOR UPDATE`,
-      [req.params.id]
+        FOR UPDATE OF pr`,
+      [proposalId]
     );
     const p = rows[0];
-    if (!p) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+    if (!p) { await db.query('ROLLBACK'); res.status(404).json({ error: 'Not found' }); return; }
     // Same refusal as send. Roll back before any status change, prospect
     // update, or follow-up scheduling.
     if (isPestCompanyName(p.company)) {
       await db.query('ROLLBACK');
-      return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+      res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+      return;
     }
     if (isArchivedLead(p)) {
       await db.query('ROLLBACK');
-      return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
+      res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
+      return;
     }
-    if (p.status !== 'draft') { await db.query('ROLLBACK'); return res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` }); }
+    // Review-row resolve (delivered, confirm_override, not_sent) is issue #123.
+    // A missing recipient is still refused before any write.
+    if (send.missingRecipient(p.to_email)) {
+      await db.query('ROLLBACK');
+      res.status(400).json({ error: 'Add a recipient email before marking this as sent.' });
+      return;
+    }
+    if (p.status !== 'draft') {
+      await db.query('ROLLBACK');
+      res.status(409).json({ error: `Cannot mark as sent — this proposal is ${p.status}.` });
+      return;
+    }
+    const blocking = await blockingSibling(db, p.prospect_id, p.id);
+    if (blocking) {
+      await db.query('ROLLBACK');
+      res.status(409).json({ error: siblingBlockMessage(blocking, { send: true }) });
+      return;
+    }
 
     const now = new Date();
     const fu1 = new Date(now); fu1.setDate(fu1.getDate() + 3);
     const fu2 = new Date(now); fu2.setDate(fu2.getDate() + 10);
     const note = req.body?.note || 'Manual outreach';
-
     await db.query(
       `UPDATE proposals SET status = 'sent', sent_at = $2,
         followup1_due_at = $3, followup2_due_at = $4,
-        stop_reason = NULL, error = NULL
+        stop_reason = NULL, error = NULL, send_attempt_key = NULL,
+        followup_argument_attempts = 0, followup_transient_attempts = 0,
+        first_transient_at = NULL, next_retry_at = NULL
        WHERE id = $1`,
       [p.id, now, fu1, fu2]
     );
@@ -390,10 +459,14 @@ router.post('/:id/mark-sent', async (req, res) => {
     await db.query('COMMIT');
     const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
     res.json(withUrl(fresh.rows[0]));
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+    });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
-    fail(res, err);
-  } finally { db.release(); }
+    if (!res.headersSent) fail(res, err);
+  }
 });
 
 // Skip demo columns and token rows that this boot has not created yet.
@@ -421,82 +494,122 @@ async function revokeDemoOnDiscard(db, proposalId) {
 
 // POST /api/proposals/:id/discard — drop a draft
 router.post('/:id/discard', async (req, res) => {
-  const db = await pool.connect();
   try {
-    await db.query('BEGIN');
-    const { rows } = await db.query(
-      `UPDATE proposals SET status = 'discarded', stop_reason = $2
-        WHERE id = $1 AND status = 'draft' RETURNING *`,
-      [req.params.id, req.body?.reason || 'Discarded by Kelby']
-    );
-    if (!rows.length) {
-      await db.query('ROLLBACK');
-      return res.status(409).json({ error: 'Only drafts can be discarded.' });
-    }
-    await revokeDemoOnDiscard(db, rows[0].id);
-    if (req.body?.disqualify) {
-      const lead = await db.query('SELECT stage FROM prospects WHERE id = $1', [rows[0].prospect_id]);
-      if (lead.rows[0] && lead.rows[0].stage !== 'disqualified') {
-        await db.query('UPDATE prospects SET stage = \'disqualified\' WHERE id = $1', [rows[0].prospect_id]);
-        await db.query(
-          'INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, \'stage_change\', $2)',
-          [rows[0].prospect_id, `${lead.rows[0].stage} → disqualified (from proposal review)`]
+    await withClient('discard', async (db) => {
+      await db.query('BEGIN');
+      try {
+        // Prospect before the proposal row, same order as approve, so discard cannot deadlock a send.
+        const found = await db.query('SELECT prospect_id, status FROM proposals WHERE id = $1', [req.params.id]);
+        if (!found.rows.length || found.rows[0].status !== 'draft') {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: 'Only drafts can be discarded.' });
+          return;
+        }
+        await db.query('SELECT 1 FROM prospects WHERE id = $1 FOR UPDATE', [found.rows[0].prospect_id]);
+        const { rows } = await db.query(
+          `UPDATE proposals SET status = 'discarded', stop_reason = $2
+            WHERE id = $1 AND status = 'draft' RETURNING *`,
+          [req.params.id, req.body?.reason || 'Discarded by Kelby']
         );
+        if (!rows.length) {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: 'Only drafts can be discarded.' });
+          return;
+        }
+        await revokeDemoOnDiscard(db, rows[0].id);
+        if (req.body?.disqualify) {
+          const lead = await db.query('SELECT stage FROM prospects WHERE id = $1', [rows[0].prospect_id]);
+          if (lead.rows[0] && lead.rows[0].stage !== 'disqualified') {
+            await db.query('UPDATE prospects SET stage = \'disqualified\' WHERE id = $1', [rows[0].prospect_id]);
+            await db.query(
+              'INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, \'stage_change\', $2)',
+              [rows[0].prospect_id, `${lead.rows[0].stage} → disqualified (from proposal review)`]
+            );
+          }
+        }
+        await db.query('COMMIT');
+        const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [rows[0].id]);
+        res.json(withUrl(fresh.rows[0] || rows[0]));
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {});
+        console.error('[proposals] discard failed:', err.message);
+        throw err;
       }
-    }
-    await db.query('COMMIT');
-    const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [rows[0].id]);
-    res.json(withUrl(fresh.rows[0] || rows[0]));
+    });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
-    console.error('[proposals] discard failed:', err.message);
-    res.status(500).json({ error: 'Something went wrong.' });
-  } finally {
-    db.release();
+    if (!res.headersSent) fail(res, err);
   }
 });
 
 // POST /api/proposals/:id/restore — bring a discarded/flagged version back to review
 router.post('/:id/restore', async (req, res) => {
-  const db = await pool.connect();
   try {
-    await db.query('BEGIN');
-    const { rows } = await db.query(
-      `SELECT pr.*, p.company, p.archived_at
-         FROM proposals pr
-         JOIN prospects p ON p.id = pr.prospect_id
-        WHERE pr.id = $1
-        FOR UPDATE OF pr`,
-      [req.params.id]
-    );
-    const p = rows[0];
-    if (!p) { await db.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
-    // Same refusal as send. Roll back before any status change.
-    if (isPestCompanyName(p.company)) {
-      await db.query('ROLLBACK');
-      return res.status(409).json({ error: `${PEST_NAME_REASON}.` });
-    }
-    if (isArchivedLead(p)) {
-      await db.query('ROLLBACK');
-      return res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
-    }
-    if (!['discarded', 'superseded'].includes(p.status)) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Only discarded or older versions can be restored.' }); }
-    const out = await db.query(`SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending')`, [p.prospect_id]);
-    if (out.rows.length) { await db.query('ROLLBACK'); return res.status(409).json({ error: 'Another version is already out for this lead.' }); }
-    await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [p.prospect_id]);
-    await db.query(`UPDATE proposals SET status = 'draft', stop_reason = NULL WHERE id = $1`, [p.id]);
-    const lead = await db.query(`SELECT stage FROM prospects WHERE id = $1`, [p.prospect_id]);
-    if (lead.rows[0]?.stage === 'disqualified') {
-      await db.query(`UPDATE prospects SET stage = 'found' WHERE id = $1`, [p.prospect_id]);
-      await db.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'stage_change', 'disqualified → found (proposal restored)')`, [p.prospect_id]);
-    }
-    await db.query('COMMIT');
-    const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
-    res.json(withUrl(fresh.rows[0]));
+    await withClient('restore', async (db) => {
+      await db.query('BEGIN');
+      try {
+        const found = await db.query('SELECT prospect_id FROM proposals WHERE id = $1', [req.params.id]);
+        if (!found.rows.length) {
+          await db.query('ROLLBACK');
+          res.status(404).json({ error: 'Not found' });
+          return;
+        }
+        await db.query('SELECT 1 FROM prospects WHERE id = $1 FOR UPDATE', [found.rows[0].prospect_id]);
+        const { rows } = await db.query(
+          `SELECT pr.*, p.company, p.archived_at
+             FROM proposals pr
+             JOIN prospects p ON p.id = pr.prospect_id
+            WHERE pr.id = $1
+            FOR UPDATE OF pr`,
+          [req.params.id]
+        );
+        const p = rows[0];
+        if (!p) { await db.query('ROLLBACK'); res.status(404).json({ error: 'Not found' }); return; }
+        // Same refusal as send. Roll back before any status change.
+        if (isPestCompanyName(p.company)) {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: `${PEST_NAME_REASON}.` });
+          return;
+        }
+        if (isArchivedLead(p)) {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: `${ARCHIVED_LEAD_REASON}.` });
+          return;
+        }
+        if (!['discarded', 'superseded'].includes(p.status)) {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: 'Only discarded or older versions can be restored.' });
+          return;
+        }
+        const blocking = await blockingSibling(db, p.prospect_id, p.id);
+        if (blocking) {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: siblingBlockMessage(blocking, { restore: true }) });
+          return;
+        }
+        await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [p.prospect_id]);
+        await db.query(
+          `UPDATE proposals
+              SET status = 'draft', stop_reason = NULL, error = NULL, approved_at = NULL,
+                  send_attempt_key = NULL, followup_argument_attempts = 0,
+                  followup_transient_attempts = 0, first_transient_at = NULL, next_retry_at = NULL
+            WHERE id = $1`,
+          [p.id]);
+        const lead = await db.query(`SELECT stage FROM prospects WHERE id = $1`, [p.prospect_id]);
+        if (lead.rows[0]?.stage === 'disqualified') {
+          await db.query(`UPDATE prospects SET stage = 'found' WHERE id = $1`, [p.prospect_id]);
+          await db.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'stage_change', 'disqualified → found (proposal restored)')`, [p.prospect_id]);
+        }
+        await db.query('COMMIT');
+        const fresh = await pool.query('SELECT * FROM proposals WHERE id = $1', [p.id]);
+        res.json(withUrl(fresh.rows[0]));
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {});
+        throw err;
+      }
+    });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
-    fail(res, err);
-  } finally { db.release(); }
+    if (!res.headersSent) fail(res, err);
+  }
 });
 
 module.exports = router;

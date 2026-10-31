@@ -208,10 +208,16 @@ export function ErrorNote({ error, onRetry }) {
 
 let toastSet = null;
 export function toast(msg) { toastSet?.(msg); }
+export function dismissToast() { toastSet?.(null); }
 export function Toaster() {
   const [msg, setMsg] = useState(null);
   useEffect(() => { toastSet = (m) => { setMsg(m); }; return () => { toastSet = null; }; }, []);
-  useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 2600); return () => clearTimeout(t); }, [msg]);
+  useEffect(() => {
+    if (!msg) return;
+    const delay = String(msg).length > 40 ? 8000 : 2600;
+    const t = setTimeout(() => setMsg(null), delay);
+    return () => clearTimeout(t);
+  }, [msg]);
   return <div className={`toast ${msg ? 'show' : ''}`} role="status" aria-live="polite">{msg}</div>;
 }
 
@@ -223,8 +229,102 @@ export const mapsHref = (lead) => 'https://www.google.com/maps/search/?api=1&que
 export const PROPOSAL_STATUS = {
   draft: 'To review', sending: 'Sending', sent: 'Out', replied: 'Replied', bounced: 'Bounced', opted_out: 'Opted out',
   finished: 'No reply', stopped: 'Stopped', discarded: 'Discarded', superseded: 'Older version',
+  manual_review: 'Needs review',
 };
-export function ProposalChip({ status, verdict }) {
+
+export function proposalStatusCopy(p) {
+  if (!p) return '';
+  const blob = `${p.stop_reason || ''} ${p.error || ''}`;
+  if (blob.includes('transient_max_age')) return 'Gmail kept failing for 3 days, so we stopped retrying.';
+  if (p.status === 'manual_review' || String(p.stop_reason || '').startsWith('Needs manual review')) {
+    return 'The send may have gone out. Check Gmail before you retry it.';
+  }
+  return '';
+}
+
+const HALT_COPY = {
+  proposals: {
+    oauth_expired: 'Follow-ups are paused: Gmail access expired. Reconnect Gmail in Settings.',
+    token_missing: 'Follow-ups are paused: Gmail isn\'t connected. Connect Gmail in Settings.',
+    insufficient_permissions: 'Follow-ups are paused: Gmail is missing send permission. Reconnect Gmail in Settings and allow sending.',
+    smtp_auth: 'Follow-ups are paused: the mail server rejected the Gmail login. Update the Gmail address and app password in Railway (GMAIL_USER and GMAIL_APP_PASSWORD).',
+    sender: 'Follow-ups are paused: the mail server rejected the sender address. Fix the sending address in Railway (GMAIL_USER, and SENDER_NAME for the display name). It has to match the Gmail account you send from.',
+    other: 'Follow-ups are paused: mail needs attention before anything else goes out. Open Settings.',
+  },
+  settings: {
+    oauth_expired: 'Follow-ups are paused: Gmail access expired. Reconnect Gmail in Email sending below.',
+    token_missing: 'Follow-ups are paused: Gmail isn\'t connected. Connect Gmail in Email sending below.',
+    insufficient_permissions: 'Follow-ups are paused: Gmail is missing send permission. Reconnect Gmail in Email sending below and allow sending.',
+    smtp_auth: 'Follow-ups are paused: the mail server rejected the Gmail login. Update the Gmail address and app password in Railway (GMAIL_USER and GMAIL_APP_PASSWORD).',
+    sender: 'Follow-ups are paused: the mail server rejected the sender address. Fix the sending address in Railway (GMAIL_USER, and SENDER_NAME for the display name). It has to match the Gmail account you send from.',
+    other: 'Follow-ups are paused: mail needs attention before anything else goes out. See Email sending below.',
+  },
+};
+
+export function followupHaltCause(halt) {
+  if (!halt) return 'other';
+  if (halt.cause && HALT_COPY.proposals[halt.cause]) return halt.cause;
+  if (halt.cause) return 'other';
+  if (halt.error_class === 'sender') return 'sender';
+  if (halt.error_class === 'auth' && halt.provider === 'smtp') return 'smtp_auth';
+  if (halt.error_class === 'auth' && halt.provider === 'gmail') return 'oauth_expired';
+  return 'other';
+}
+
+export function followupHaltCopy(halt, place = 'proposals') {
+  if (!halt) return '';
+  const book = HALT_COPY[place] || HALT_COPY.proposals;
+  return book[followupHaltCause(halt)] || book.other;
+}
+
+function haltLink(text, place) {
+  const settingsAt = text.search(/settings/i);
+  const emailAt = text.indexOf('Email sending');
+  const at = emailAt >= 0 ? emailAt : settingsAt;
+  if (at < 0) return text;
+  const word = emailAt >= 0 ? 'Email sending' : text.slice(at, at + 'settings'.length);
+  const href = place === 'settings' ? '#email-sending' : '#/settings';
+  const onClick = (event) => {
+    if (place === 'settings') {
+      event.preventDefault();
+      const card = document.getElementById('email-sending');
+      if (card) {
+        card.scrollIntoView({ block: 'start' });
+        card.focus();
+      }
+      return;
+    }
+    try { sessionStorage.setItem('ff.scrollEmail', '1'); } catch { /* storage blocked */ }
+  };
+  return (
+    <>
+      {text.slice(0, at)}
+      <a href={href} onClick={onClick}>{word}</a>
+      {text.slice(at + word.length)}
+    </>
+  );
+}
+
+export function FollowupHaltNotice({ halt, place = 'proposals' }) {
+  if (!halt) return null;
+  const text = followupHaltCopy(halt, place);
+  return (
+    <div className="halt-banner" role="status">
+      <strong>{haltLink(text, place)}</strong>
+    </div>
+  );
+}
+
+export function needsReviewStatus(p) {
+  if (!p) return false;
+  return p.status === 'manual_review' || String(p.stop_reason || p.stopReason || '').startsWith('Needs manual review');
+}
+
+export function ProposalChip({ status, verdict, stopReason, stop_reason }) {
+  const reason = stopReason || stop_reason;
+  if (status === 'manual_review' || String(reason || '').startsWith('Needs manual review')) {
+    return <span className="pchip pchip-manual_review">Needs review</span>;
+  }
   const label = status === 'discarded' && verdict === 'disqualify' ? 'Not a fit' : (PROPOSAL_STATUS[status] || status);
   return <span className={`pchip pchip-${status}`}>{label}</span>;
 }

@@ -924,8 +924,12 @@ describe('pilot csv estimate intake', () => {
     const schemaWithoutTagUpgrade = schema.replace(
       /-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/,
       ''
+    ).replace(
+      /ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient;/,
+      ''
     );
     assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
+    assert.match(schema, /DROP CONSTRAINT IF EXISTS sent_requires_recipient/);
     assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutTagUpgrade), false);
     assert.equal(/VALIDATE CONSTRAINT/.test(schema), false);
     assert.match(

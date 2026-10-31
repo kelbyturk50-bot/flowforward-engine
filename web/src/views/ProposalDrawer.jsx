@@ -1,9 +1,24 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
+import { missingRecipient, recipientHint, trimRecipientEdges } from '../recipient';
 import { TryLiveDemoLink } from '../demo/DemoLinks';
-import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, relDate, timeAgo, toast, Stars } from '../ui';
+import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, PROPOSAL_STATUS, proposalStatusCopy, relDate, timeAgo, toast, dismissToast, Stars } from '../ui';
 import { useJobs, elapsed } from '../jobs';
 import PrototypeCard from './PrototypeCard';
+
+function guardedSend(p) {
+  const reason = String(p.stop_reason || '').trim().toLowerCase();
+  return reason === 'confirm before sending again' || reason.startsWith('needs manual review');
+}
+
+function approveHeading(p) {
+  const email = p.to_email == null || p.to_email === 'null' ? '' : String(p.to_email);
+  const name = p.to_name == null || p.to_name === 'null' ? '' : String(p.to_name);
+  if (name && email) return `Send to ${name} <${email}>?`;
+  if (email) return `Send to ${email}?`;
+  if (name) return `Send to ${name}?`;
+  return 'Send this proposal?';
+}
 
 export default function ProposalDrawer({ id, onClose, bump, openLead, openProposal }) {
   const [p, setP] = useState(null);
@@ -30,6 +45,16 @@ export default function ProposalDrawer({ id, onClose, bump, openLead, openPropos
 
 function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   const editable = p.status === 'draft';
+  const needsReview = p.status === 'manual_review' || String(p.stop_reason || '').startsWith('Needs manual review');
+  const reviewCopy = proposalStatusCopy(p);
+  const noRecipient = missingRecipient(p.to_email);
+  const hint = noRecipient ? recipientHint(p.to_email) : '';
+  const focusRecipient = () => {
+    const el = document.getElementById('proposal-to-email');
+    if (!el) return;
+    if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
+    el.focus();
+  };
   const [busy, setBusy] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [confirmingManual, setConfirmingManual] = useState(false);
@@ -58,10 +83,10 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <h2>{p.company}</h2>
           <p className="muted">{p.industry}{p.city ? `, ${p.city}` : ''} <Stars rating={p.rating} reviews={p.review_count} /></p>
           <div className="head-chips">
-            <ProposalChip status={p.status} verdict={a.fit_verdict} />
+            <ProposalChip status={p.status} verdict={a.fit_verdict} stopReason={p.stop_reason} />
             {p.versions?.length > 1 ? (
               <select className="mini-select" value={p.id} onChange={e => openProposal(Number(e.target.value))} aria-label="Version">
-                {p.versions.map(v => <option key={v.id} value={v.id}>v{v.version} · {v.status === 'superseded' ? 'older' : v.status}{v.instructions ? ' · w/ notes' : ''}</option>)}
+                {p.versions.map(v => <option key={v.id} value={v.id}>v{v.version} · {v.status === 'superseded' ? 'older' : (PROPOSAL_STATUS[v.status] || v.status)}{v.instructions ? ' · w/ notes' : ''}</option>)}
               </select>
             ) : <span className="muted small">v{p.version}</span>}
             <span className="muted small">{money2(p.cost_usd)} · drafted {timeAgo(p.created_at)}</span>
@@ -70,14 +95,35 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
         </div>
       </header>
 
-      {p.error && <div className="error-note"><p>{p.error}</p></div>}
-      {p.stop_reason && p.status !== 'draft' && <p className="muted">{p.stop_reason}</p>}
+      {reviewCopy && <div className="error-note" role="status"><p>{reviewCopy}</p></div>}
+      {!reviewCopy && p.error && <div className="error-note"><p>{p.error}</p></div>}
+      {!reviewCopy && p.stop_reason && p.status !== 'draft' && <p className="muted">{p.stop_reason}</p>}
+      {p.status === 'draft' && p.stop_reason === 'Confirm before sending again' && (
+        <p className="muted">This was marked not sent. Approve only if you want to send it.</p>
+      )}
 
       {/* ── Actions ── */}
       <div className="action-bar">
         {editable && <>
-          <button className="btn" disabled={!!busy || !p.to_email} onClick={() => setConfirming(true)}>Approve and send</button>
-          <button className="btn btn-quiet" disabled={!!busy} onClick={() => setConfirmingManual(m => !m)}>Mark as manually sent…</button>
+          <button
+            className="btn"
+            disabled={!!busy || noRecipient}
+            title={noRecipient ? hint : undefined}
+            aria-describedby={noRecipient ? 'mark-sent-needs-email' : undefined}
+            onClick={() => { dismissToast(); setConfirming(true); }}
+          >Approve and send</button>
+          <button
+            className="btn btn-quiet"
+            disabled={!!busy || noRecipient}
+            title={noRecipient ? hint : undefined}
+            aria-describedby={noRecipient ? 'mark-sent-needs-email' : undefined}
+            onClick={() => setConfirmingManual((open) => { if (!open) dismissToast(); return !open; })}
+          >Mark as manually sent…</button>
+          {noRecipient && (
+            <button type="button" id="mark-sent-needs-email" className="recipient-hint" onClick={focusRecipient}>
+              {hint}
+            </button>
+          )}
           <button className="btn btn-quiet" disabled={!!busy || rewriting} onClick={() => setRegen(r => !r)}>{rewriting ? 'Rewriting…' : 'Rewrite…'}</button>
           <a className="btn btn-quiet" href={`${p.onepager_url}?preview=1`} target="_blank" rel="noreferrer">Preview one-pager</a>
           <TryLiveDemoLink className="btn btn-quiet" />
@@ -94,17 +140,18 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
         {['discarded', 'superseded'].includes(p.status) && (
           <button className="btn" disabled={!!busy} onClick={() => act('restore', () => api.restoreProposal(p.id), 'Back in your review queue.')}>Restore to review</button>
         )}
-        {!editable && ['replied', 'finished', 'stopped', 'bounced', 'opted_out'].includes(p.status) && (
+        {!editable && !needsReview && ['replied', 'finished', 'stopped', 'bounced', 'opted_out'].includes(p.status) && (
           <button className="btn btn-quiet" disabled={!!busy || rewriting} onClick={() => setRegen(r => !r)}>{rewriting ? 'Rewriting…' : 'Write a new version…'}</button>
         )}
       </div>
 
       {confirming && (
         <div className="confirm" role="alertdialog" aria-label="Confirm send">
-          <p><strong>Send to {p.to_name ? `${p.to_name} <${p.to_email}>` : p.to_email}?</strong></p>
+          <p><strong>{approveHeading(p)}</strong></p>
+          {guardedSend(p) && <p>This draft is marked for another look. Send it only if you mean to.</p>}
           <p className="muted">“{p.subject}” goes out now from your Gmail. Follow-ups are scheduled for day 3 and day 10 and stop automatically if they reply, book, bounce or opt out.</p>
           <div className="link-row">
-            <button className="btn" disabled={!!busy} onClick={() => act('send', () => api.sendProposal(p.id), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>
+            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => act('send', () => api.sendProposal(p.id, guardedSend(p) ? { confirm: true } : undefined), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>
               {busy === 'send' ? 'Sending…' : 'Send it'}
             </button>
             <button className="btn btn-quiet" onClick={() => setConfirming(false)}>Cancel</button>
@@ -120,7 +167,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
               placeholder="e.g. Sent via Facebook message, emailed through contact form…" />
           </label>
           <div className="link-row">
-            <button className="btn" disabled={!!busy} onClick={() =>
+            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() =>
               act('mark-sent', () => api.markSentProposal(p.id, manualNote || undefined),
                 'Marked as sent. Follow-ups scheduled.',
                 async () => { setConfirmingManual(false); setManualNote(''); await reload(p.id); })}>
@@ -175,7 +222,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
         <section className="review-col">
           <h3 className="col-title">Email sequence</h3>
           <div className="two">
-            <Field label="To (email)" type="email" value={p.to_email} disabled={!editable} onSave={v => save({ to_email: v })} />
+            <Field id="proposal-to-email" label="To (email)" type="email" value={p.to_email} disabled={!editable} onSave={v => save({ to_email: v })} />
             <Field label="First name in greeting" value={p.to_name} disabled={!editable} onSave={v => save({ to_name: v })} />
           </div>
           <Field label="Subject" value={p.subject} disabled={!editable} onSave={v => save({ subject: v }, 'Saved.')} />
@@ -198,11 +245,15 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   );
 }
 
-function Field({ label, value, onSave, type = 'text', disabled, rows }) {
+function Field({ label, value, onSave, type = 'text', disabled, rows, id }) {
   const [v, setV] = useState(value ?? '');
   useEffect(() => setV(value ?? ''), [value]);
-  const commit = () => { if ((value ?? '') !== v) onSave(v); };
-  const props = { className: 'input', value: v, disabled, onChange: e => setV(e.target.value), onBlur: commit };
+  const commit = () => {
+    const next = type === 'email' ? trimRecipientEdges(v) : v;
+    if (next !== v) setV(next);
+    if ((value ?? '') !== next) onSave(next);
+  };
+  const props = { id, className: 'input', value: v, disabled, onChange: e => setV(e.target.value), onBlur: commit };
   return (
     <label>{label}
       {rows ? <textarea rows={rows} {...props} /> : <input type={type} {...props} onKeyDown={e => e.key === 'Enter' && e.currentTarget.blur()} />}
@@ -268,7 +319,7 @@ function ThinOnepager({ p, reload, bump }) {
   const [busy, setBusy] = useState(false);
   const o = p.onepager || {};
   const thin = !(o.observations || []).length && !(o.opportunities || []).length;
-  if (!thin || ['discarded', 'superseded'].includes(p.status)) return null;
+  if (!thin || ['discarded', 'superseded', 'manual_review'].includes(p.status) || String(p.stop_reason || '').startsWith('Needs manual review')) return null;
   const go = async () => {
     setBusy(true);
     try { await api.rebuildOnepager(p.id); toast('One-pager rebuilt. Same link.'); bump(); await reload(p.id); }

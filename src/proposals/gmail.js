@@ -97,10 +97,12 @@ async function disconnect() {
 }
 
 let cache = null;
-async function accessToken() {
-  if (cache && cache.exp > Date.now()) return cache.token;
+async function accessToken(options = {}) {
+  if (!options.force && cache && cache.exp > Date.now()) return cache.token;
   const saved = await getSetting('gmail_oauth');
-  if (!saved?.refresh_token) throw new Error('Gmail is not connected. Go to Settings and click Connect Gmail.');
+  if (!saved?.refresh_token) {
+    throw Object.assign(new Error('Gmail is not connected. Go to Settings and click Connect Gmail.'), { status: 503 });
+  }
   try {
     const tok = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET,
@@ -113,9 +115,10 @@ async function accessToken() {
     const reason = err.response?.data?.error;
     if (reason === 'invalid_grant') {
       await putSetting('gmail_oauth', { ...saved, last_error: 'Google revoked access (expired or removed). Click Connect Gmail again.' });
-      throw new Error('Gmail access expired. Go to Settings and click Connect Gmail again.');
+      throw Object.assign(new Error('Gmail access expired. Go to Settings and click Connect Gmail again.'), { status: 502 });
     }
-    throw new Error(`Couldn't refresh Gmail access: ${reason || err.message}`);
+    console.error(`[gmail] refresh failed: ${err && err.code || 'error'}`);
+    throw Object.assign(new Error('Couldn\'t refresh Gmail access. Try again.'), { status: 502 });
   }
 }
 
@@ -125,28 +128,97 @@ async function gmail(method, path, { data, params } = {}) {
     const res = await axios({ method, url: `${API}${path}`, data, params, timeout: 20000, headers: { Authorization: `Bearer ${token}` } });
     return res.data;
   } catch (err) {
-    const msg = err.response?.data?.error?.message || err.message;
-    throw new Error(`Gmail API: ${msg}`);
+    const body = err.response?.data?.error;
+    const msg = body?.message || err.message;
+    const wrapped = new Error(`Gmail API: ${msg}`);
+    const status = err.response?.status;
+    if (Number.isInteger(status)) wrapped.status = status;
+    else if (body && Number.isInteger(body.code)) wrapped.status = body.code;
+    if (body?.status) wrapped.gmailStatus = String(body.status);
+    const listed = Array.isArray(body?.errors)
+      ? body.errors.map((item) => item && item.reason).find(Boolean)
+      : null;
+    const reason = listed || body?.reason || null;
+    if (reason) wrapped.reason = String(reason);
+    if (Array.isArray(body?.errors)) {
+      wrapped.errors = body.errors.map((item) => ({
+        reason: item && item.reason,
+        message: item && item.message,
+      }));
+    }
+    if (typeof err.code === 'string' && !/^\d{3}$/.test(err.code)) wrapped.code = err.code;
+    throw wrapped;
   }
 }
 
 // ── Sending ───────────────────────────────────────────────────────────────
 function toBase64Url(buf) { return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
 
+function wrapGmailError(err) {
+  const body = err.response?.data?.error;
+  const msg = body?.message || err.message;
+  const wrapped = new Error(`Gmail API: ${msg}`);
+  const status = err.response?.status;
+  if (Number.isInteger(status)) wrapped.status = status;
+  else if (body && Number.isInteger(body.code)) wrapped.status = body.code;
+  if (body?.status) wrapped.gmailStatus = String(body.status);
+  const listed = Array.isArray(body?.errors)
+    ? body.errors.map((item) => item && item.reason).find(Boolean)
+    : null;
+  const reason = listed || body?.reason || null;
+  if (reason) wrapped.reason = String(reason);
+  if (Array.isArray(body?.errors)) {
+    wrapped.errors = body.errors.map((item) => ({
+      reason: item && item.reason,
+      message: item && item.message,
+    }));
+  }
+  if (typeof err.code === 'string' && !/^\d{3}$/.test(err.code)) wrapped.code = err.code;
+  return wrapped;
+}
+
+// Settings, the token refresh, and the MIME build happen here. send() posts
+// the payload that was already built. It does not await anything before that POST.
+async function prepareDelivery(mail) {
+  const saved = await getSetting('gmail_oauth');
+  const token = await module.exports.accessToken({ force: true });
+  const fromAddr = saved?.email || SENDER.email;
+  const from = mail && typeof mail.from === 'object' ? { ...mail.from, address: fromAddr } : fromAddr;
+  const raw = await new MailComposer({ ...mail, from, threadId: undefined }).compile().build();
+  const payload = { raw: toBase64Url(raw), ...(mail && mail.threadId ? { threadId: mail.threadId } : {}) };
+  return {
+    fromAddr,
+    send() {
+      return axios({
+        method: 'post',
+        url: `${API}/messages/send`,
+        data: payload,
+        timeout: 20000,
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((res) => {
+        const sent = res.data;
+        return axios({
+          method: 'get',
+          url: `${API}/messages/${sent.id}`,
+          params: { format: 'metadata', metadataHeaders: 'Message-ID' },
+          timeout: 20000,
+          headers: { Authorization: `Bearer ${token}` },
+        }).then((meta) => ({
+          id: sent.id,
+          threadId: sent.threadId,
+          messageId: (meta.data.payload?.headers || []).find((h) => h.name.toLowerCase() === 'message-id')?.value || null,
+        })).catch(() => ({ id: sent.id, threadId: sent.threadId, messageId: null }));
+      }).catch((err) => {
+        throw wrapGmailError(err);
+      });
+    },
+  };
+}
+
 /** Same shape as nodemailer's sendMail; also accepts threadId. Returns { messageId, threadId, id }. */
 async function sendMail(mail) {
-  const saved = await getSetting('gmail_oauth');
-  const fromAddr = saved?.email || SENDER.email;
-  const from = typeof mail.from === 'object' ? { ...mail.from, address: fromAddr } : fromAddr;
-  const raw = await new MailComposer({ ...mail, from, threadId: undefined }).compile().build();
-  const sent = await gmail('post', '/messages/send', { data: { raw: toBase64Url(raw), ...(mail.threadId ? { threadId: mail.threadId } : {}) } });
-  // Read back the Message-ID Gmail actually used, for threading follow-ups.
-  let messageId = null;
-  try {
-    const meta = await gmail('get', `/messages/${sent.id}`, { params: { format: 'metadata', metadataHeaders: 'Message-ID' } });
-    messageId = (meta.payload?.headers || []).find(h => h.name.toLowerCase() === 'message-id')?.value || null;
-  } catch { /* threading still works via threadId */ }
-  return { id: sent.id, threadId: sent.threadId, messageId };
+  const prepared = await prepareDelivery(mail);
+  return prepared.send();
 }
 
 // ── Reading ───────────────────────────────────────────────────────────────
@@ -230,4 +302,4 @@ async function sentSince(since, max = 100) {
   return out;
 }
 
-module.exports = { status, authUrl, handleCallback, disconnect, sendMail, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText };
+module.exports = { status, authUrl, handleCallback, disconnect, accessToken, prepareDelivery, sendMail, wrapGmailError, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText };

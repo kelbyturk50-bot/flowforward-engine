@@ -152,7 +152,7 @@ describe('inbox', () => {
     const sent = await inbox.sendReply(item.id);
     assert.equal(sent.status, 'sent');
     assert.equal(mails.length, 1);
-    assert.equal(mails[0].to, 'test+dana@wasatch.test');
+    assert.deepEqual(mails[0].to, { address: 'test+dana@wasatch.test' });
     assert.equal(mails[0].inReplyTo, '<reply-1@mail>');
     assert.deepEqual(mails[0].references, ['<reply-1@mail>']);
     assert.equal(mails[0].threadId, 'thr-1');
