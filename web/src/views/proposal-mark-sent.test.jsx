@@ -1,10 +1,11 @@
 import fs from 'fs';
 import path from 'path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { api } from '../api';
 import { installApiDefaults } from '../test/defaults.js';
+import { toast, Toaster } from '../ui';
 import ProposalDrawer from './ProposalDrawer';
 
 const base = {
@@ -71,6 +72,19 @@ describe('mark as sent needs a recipient', () => {
     input.focus();
     await userEvent.tab();
     expect(api.updateProposal).toHaveBeenCalledWith(9, { to_email: 'test+a@peak.test' });
+  });
+
+  it('dismisses the toast when Approve and send opens the confirm dialog', async () => {
+    api.proposal.mockResolvedValue({ ...base, to_email: 'test+a@peak.test' });
+    render(<><Toaster /><ProposalDrawer {...props} /></>);
+    await screen.findByRole('button', { name: 'Approve and send' });
+    act(() => { toast('Hold on before you send this one out'); });
+    expect(document.querySelector('.toast')).toHaveClass('show');
+    expect(document.querySelector('.toast')).toHaveTextContent('Hold on before you send this one out');
+    await userEvent.click(screen.getByRole('button', { name: 'Approve and send' }));
+    expect(screen.getByRole('button', { name: 'Send it' })).toBeInTheDocument();
+    expect(document.querySelector('.toast')).not.toHaveClass('show');
+    expect(document.querySelector('.toast')).not.toHaveTextContent('Hold on before you send');
   });
 
   it('enables both buttons when a recipient email is present', async () => {

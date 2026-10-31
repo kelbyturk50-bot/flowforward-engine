@@ -185,6 +185,14 @@ router.post('/gmail/disconnect', async (req, res) => {
 // POST /api/proposals/check-inbox — run the reply check + follow-up sender now
 router.post('/check-inbox', async (req, res) => {
   try {
+    const mode = await send.mailMode();
+    if (!mode) {
+      const st = await gmail.status();
+      const message = st.configured
+        ? 'Gmail is not connected. Go to Settings and click Connect Gmail.'
+        : 'Email is not set up. Go to Settings and click Connect Gmail.';
+      throw Object.assign(new Error(message), { status: 503 });
+    }
     const inbox = await send.checkInbox();
     const followups = await send.sendDueFollowups();
     res.json({ ok: true, inbox, followups });
@@ -490,6 +498,14 @@ router.post('/:id/discard', async (req, res) => {
     await withClient('discard', async (db) => {
       await db.query('BEGIN');
       try {
+        // Prospect before the proposal row, same order as approve, so discard cannot deadlock a send.
+        const found = await db.query('SELECT prospect_id, status FROM proposals WHERE id = $1', [req.params.id]);
+        if (!found.rows.length || found.rows[0].status !== 'draft') {
+          await db.query('ROLLBACK');
+          res.status(409).json({ error: 'Only drafts can be discarded.' });
+          return;
+        }
+        await db.query('SELECT 1 FROM prospects WHERE id = $1 FOR UPDATE', [found.rows[0].prospect_id]);
         const { rows } = await db.query(
           `UPDATE proposals SET status = 'discarded', stop_reason = $2
             WHERE id = $1 AND status = 'draft' RETURNING *`,
@@ -531,6 +547,13 @@ router.post('/:id/restore', async (req, res) => {
     await withClient('restore', async (db) => {
       await db.query('BEGIN');
       try {
+        const found = await db.query('SELECT prospect_id FROM proposals WHERE id = $1', [req.params.id]);
+        if (!found.rows.length) {
+          await db.query('ROLLBACK');
+          res.status(404).json({ error: 'Not found' });
+          return;
+        }
+        await db.query('SELECT 1 FROM prospects WHERE id = $1 FOR UPDATE', [found.rows[0].prospect_id]);
         const { rows } = await db.query(
           `SELECT pr.*, p.company, p.archived_at
              FROM proposals pr

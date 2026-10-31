@@ -48,7 +48,7 @@ async function mailer() {
     }
     return transport;
   }
-  throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
+  throw Object.assign(new Error('Email is not set up. Go to Settings and click Connect Gmail.'), { status: 503 });
 }
 
 // Status, token refresh, and the raw MIME are resolved here. The caller
@@ -90,7 +90,7 @@ async function prepareOutgoing(mail) {
     send() {
       if (mode === 'gmail_api' && delivery) return delivery.send();
       if (!transportClient || typeof transportClient.sendMail !== 'function') {
-        throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
+        throw Object.assign(new Error('Email is not set up. Go to Settings and click Connect Gmail.'), { status: 503 });
       }
       return transportClient.sendMail(mail);
     },
@@ -746,6 +746,21 @@ function uncertainSend(err) {
   return !!(err && (err.accepted === true || err.uncertain === true || err.code === 'POST_SEND_WRITE'));
 }
 
+// Operator sentences only. A database fault in the status or mail-mode read
+// must not be copied into the HTTP body or the stored error.
+const PUBLIC_SEND_FAILURES = new Set([
+  'Email is not set up. Go to Settings and click Connect Gmail.',
+  'Gmail is not connected. Go to Settings and click Connect Gmail.',
+  'Gmail access expired. Go to Settings and click Connect Gmail again.',
+  'Couldn\'t refresh Gmail access. Try again.',
+]);
+
+function publicSendFailure(err) {
+  const raw = String(err && err.message || '');
+  if (PUBLIC_SEND_FAILURES.has(raw)) return `The email didn't send: ${raw}`;
+  return 'The email didn\'t send. Try again.';
+}
+
 /** Approve a draft and send the first email now. */
 async function approveAndSend(proposalId, options = {}) {
   const stale = await recoverStaleSending(proposalId);
@@ -817,22 +832,24 @@ async function approveAndSend(proposalId, options = {}) {
   // The prototype link's 14 days start when it is first shared.
   try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }
   await attachPrototypeUrl(p);
-  const mail = {
-    from: { name: SENDER.name, address: SENDER.email },
-    to: envelopeTo(p.to_name, toAddress),
-    subject: p.subject.trim(),
-    text: renderMessage(p, 'first'),
-    html: renderMessageHtml(p, 'first'),
-    headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
-  };
   let prepared;
   try {
+    // A render or MIME failure is a prepare failure: the draft goes back, nothing is sent.
+    const mail = {
+      from: { name: SENDER.name, address: SENDER.email },
+      to: envelopeTo(p.to_name, toAddress),
+      subject: p.subject.trim(),
+      text: renderMessage(p, 'first'),
+      html: renderMessageHtml(p, 'first'),
+      headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
+    };
     prepared = await prepareOutgoing(mail);
   } catch (err) {
+    const safe = publicSendFailure(err);
     await pool.query(
       `UPDATE proposals SET status = 'draft', approved_at = NULL, send_attempt_key = NULL, error = $2 WHERE id = $1`,
-      [p.id, `Send failed: ${err.message}`]);
-    throw Object.assign(new Error(`The email didn't send: ${err.message}`), { status: 502 });
+      [p.id, safe]);
+    throw Object.assign(new Error(safe), { status: 502 });
   }
   const gate = await recheckLead(p.prospect_id);
   const block = leadBlocksSend(gate);
@@ -867,10 +884,11 @@ async function approveAndSend(proposalId, options = {}) {
       console.error(`[send] first send for #${p.id} needs manual review: outcome uncertain`);
       throw Object.assign(new Error(MANUAL_REVIEW), { status: 409 });
     }
+    const safe = publicSendFailure(err);
     await pool.query(
       `UPDATE proposals SET status = 'draft', approved_at = NULL, send_attempt_key = NULL, error = $2 WHERE id = $1`,
-      [p.id, `Send failed: ${err.message}`]);
-    throw Object.assign(new Error(`The email didn't send: ${err.message}`), { status: 502 });
+      [p.id, safe]);
+    throw Object.assign(new Error(safe), { status: 502 });
   }
 
   const [d1, d2] = cfg.FOLLOWUP_DAYS;
@@ -1718,7 +1736,8 @@ async function checkInbox() {
       catch (err) { console.error('[inbox] sent check failed:', err.message); }
     }
   } catch (err) {
-    console.error('[inbox] ✗ check failed:', err.message);
+    if (err && err.status) throw err;
+    console.error(`[inbox] check failed: ${err && err.code || 'error'}`);
   } finally {
     checking = false;
   }
@@ -1736,7 +1755,7 @@ async function senderTick() {
 
 module.exports = {
   approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, prepareOutgoing, senderTick, stopSequence, classifyMessage, applyOutcome,
-  missingRecipient, normalizeRecipient, storedRecipient, isPermanentFollowupError, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
+  missingRecipient, normalizeRecipient, storedRecipient, isPermanentFollowupError, isPermanentSmtpRecipient, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
   _beforeFollowupClaim, _beforeTransport, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
   _setRandom, _setAlertHook, _setCredentialCheck, _setSendTxnGate, afterLeadLock,

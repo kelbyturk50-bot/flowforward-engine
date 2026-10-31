@@ -370,18 +370,18 @@ async function sendReply(id) {
   if (!claim.rows.length) throw httpError('Already sending.', 409);
   const subject = String(item.reply_subject || `Re: ${item.message_subject || ''}`).replace(/\r\n|\r|\n/g, '');
   const refs = item.header_message_id ? [item.header_message_id] : undefined;
-  const mail = {
-    from: { name: cfg.SENDER.name, address: cfg.SENDER.email },
-    to: { address: canonicalTo.value },
-    subject,
-    text: body,
-    html: require('./email-html').renderHtml(body, { company: item.company }, { footer: false }),
-    inReplyTo: item.header_message_id || undefined,
-    references: refs,
-    threadId: item.thread_id || undefined,
-  };
   let prepared;
   try {
+    const mail = {
+      from: { name: cfg.SENDER.name, address: cfg.SENDER.email },
+      to: { address: canonicalTo.value },
+      subject,
+      text: body,
+      html: require('./email-html').renderHtml(body, { company: item.company }, { footer: false }),
+      inReplyTo: item.header_message_id || undefined,
+      references: refs,
+      threadId: item.thread_id || undefined,
+    };
     prepared = await s.prepareOutgoing(mail);
   } catch (err) {
     console.error('[inbox] send failed:', errCode(err));

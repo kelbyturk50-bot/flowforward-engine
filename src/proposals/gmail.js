@@ -100,7 +100,9 @@ let cache = null;
 async function accessToken(options = {}) {
   if (!options.force && cache && cache.exp > Date.now()) return cache.token;
   const saved = await getSetting('gmail_oauth');
-  if (!saved?.refresh_token) throw new Error('Gmail is not connected. Go to Settings and click Connect Gmail.');
+  if (!saved?.refresh_token) {
+    throw Object.assign(new Error('Gmail is not connected. Go to Settings and click Connect Gmail.'), { status: 503 });
+  }
   try {
     const tok = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET,
@@ -113,9 +115,10 @@ async function accessToken(options = {}) {
     const reason = err.response?.data?.error;
     if (reason === 'invalid_grant') {
       await putSetting('gmail_oauth', { ...saved, last_error: 'Google revoked access (expired or removed). Click Connect Gmail again.' });
-      throw new Error('Gmail access expired. Go to Settings and click Connect Gmail again.');
+      throw Object.assign(new Error('Gmail access expired. Go to Settings and click Connect Gmail again.'), { status: 502 });
     }
-    throw new Error(`Couldn't refresh Gmail access: ${reason || err.message}`);
+    console.error(`[gmail] refresh failed: ${err && err.code || 'error'}`);
+    throw Object.assign(new Error('Couldn\'t refresh Gmail access. Try again.'), { status: 502 });
   }
 }
 

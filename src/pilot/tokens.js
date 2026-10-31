@@ -197,6 +197,12 @@ async function mintForProposal(proposalId) {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
+    const pre = await db.query('SELECT prospect_id FROM proposals WHERE id = $1', [id]);
+    if (!pre.rows.length) {
+      await db.query('ROLLBACK');
+      return null;
+    }
+    await db.query('SELECT 1 FROM prospects WHERE id = $1 FOR UPDATE', [pre.rows[0].prospect_id]);
     const { rows } = await db.query(
       `SELECT id, prospect_id, status FROM proposals WHERE id = $1 FOR UPDATE`,
       [id]
@@ -256,6 +262,12 @@ async function revokeForProposal(proposalId) {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
+    const pre = await db.query('SELECT prospect_id FROM proposals WHERE id = $1', [id]);
+    if (!pre.rows.length) {
+      await db.query('ROLLBACK');
+      return 0;
+    }
+    await db.query('SELECT 1 FROM prospects WHERE id = $1 FOR UPDATE', [pre.rows[0].prospect_id]);
     const found = await db.query('SELECT id FROM proposals WHERE id = $1 FOR UPDATE', [id]);
     if (!found.rows.length) {
       await db.query('ROLLBACK');
