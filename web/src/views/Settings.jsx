@@ -132,7 +132,15 @@ function ProposalSettings({ version }) {
     catch (err) { toast(err.message); } finally { setSaving(false); }
   };
   const inbox = async () => {
-    try { const r = await api.checkInbox(); toast(`Checked ${r.inbox?.checked || 0} messages, ${r.inbox?.matched || 0} matched. ${r.followups?.sent || 0} follow-ups sent.`); summary.reload(); }
+    try {
+      const r = await api.checkInbox();
+      const read = `Read ${r.inbox?.checked || 0} new messages, ${r.inbox?.matched || 0} matched.`;
+      const rest = r.followups?.held
+        ? ` Follow-ups wait until the inbox is caught up${r.inbox?.backlog ? ` (${r.inbox.backlog} still to read)` : ''}. Try again in a few minutes.`
+        : ` ${r.followups?.sent || 0} follow-ups sent.`;
+      toast(read + rest);
+      summary.reload();
+    }
     catch (err) { toast(err.message); }
   };
 

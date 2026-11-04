@@ -119,14 +119,31 @@ async function accessToken() {
   }
 }
 
+// Google answers a used-up quota with 429, or 403 rateLimitExceeded /
+// userRateLimitExceeded, with "Quota exceeded" in the message.
+function isQuotaError(status, data) {
+  const reasons = (data?.error?.errors || []).map(e => e && e.reason);
+  if (status === 429) return true;
+  if (status === 403 && reasons.some(r => /ratelimitexceeded|quotaexceeded/i.test(String(r)))) return true;
+  return /quota exceeded|rate limit exceeded/i.test(String(data?.error?.message || ''));
+}
+
+let apiOverride = null;
+function _setApiForTests(fn) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_setApiForTests is only available when NODE_ENV=test');
+  apiOverride = fn || null;
+}
+
 async function gmail(method, path, { data, params } = {}) {
+  if (apiOverride) return apiOverride(method, path, { data, params });
   const token = await accessToken();
   try {
     const res = await axios({ method, url: `${API}${path}`, data, params, timeout: 20000, headers: { Authorization: `Bearer ${token}` } });
     return res.data;
   } catch (err) {
+    const status = err.response?.status || 0;
     const msg = err.response?.data?.error?.message || err.message;
-    throw new Error(`Gmail API: ${msg}`);
+    throw Object.assign(new Error(`Gmail API: ${msg}`), { status, quota: isQuotaError(status, err.response?.data) });
   }
 }
 
@@ -165,37 +182,111 @@ function bodyText(payload) {
     .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/[ \t]+/g, ' ');
 }
 
-/** Inbox messages since a date, newest last, in the shape classifyMessage expects. */
-async function inboxSince(since, max = 300) {
-  const after = Math.floor(new Date(since).getTime() / 1000);
+// ── Reading on a quota budget ────────────────────────────────────────────
+// Gmail charges quota units per call and allows 6,000 units per user per
+// minute (developers.google.com/workspace/gmail/api/reference/quota, checked
+// Nov 3, 2026). Reading one message in full costs 60, so re-reading a few
+// hundred messages every 15 minutes used the whole minute and left nothing
+// for sending follow-ups. Now each message is read in full once (its id goes
+// in gmail_scanned_messages), every read is charged to a per-check budget,
+// and a used-up quota stops the scan at once instead of failing every
+// remaining message.
+const COST = Object.freeze({ list: 5, get: 60 });
+const READ_BUDGET = 3600; // leaves 2,400 of the minute's 6,000 for sends
+
+function readBudget(units = READ_BUDGET) { return { units, quotaHit: false }; }
+
+async function scannedIds(ids) {
+  if (!ids.length) return new Set();
+  const { rows } = await pool.query(`SELECT gmail_id FROM gmail_scanned_messages WHERE gmail_id = ANY($1::text[])`, [ids]);
+  return new Set(rows.map(r => r.gmail_id));
+}
+
+/** Record message ids as read, once their outcomes are applied. */
+async function markScanned(entries) {
+  const list = (entries || []).filter(e => e && typeof e.id === 'string' && e.id && (e.box === 'inbox' || e.box === 'sent'));
+  if (!list.length) return 0;
+  const res = await pool.query(
+    `INSERT INTO gmail_scanned_messages (gmail_id, box)
+     SELECT * FROM UNNEST($1::text[], $2::text[])
+     ON CONFLICT (gmail_id) DO NOTHING`,
+    [list.map(e => e.id), list.map(e => e.box)]);
+  return res.rowCount;
+}
+
+async function purgeScanned(days = 120) {
+  await pool.query(`DELETE FROM gmail_scanned_messages WHERE scanned_at < NOW() - make_interval(days => $1)`, [days]);
+}
+
+async function listIds(q, max, budget) {
   const ids = []; let pageToken;
   do {
-    const page = await gmail('get', '/messages', { params: { q: `in:inbox after:${after} -from:me`, maxResults: 100, pageToken } });
+    if (budget.units < COST.list) break;
+    budget.units -= COST.list;
+    let page;
+    try {
+      page = await gmail('get', '/messages', { params: { q, maxResults: 100, pageToken } });
+    } catch (err) {
+      if (err.quota) { budget.quotaHit = true; budget.units = 0; }
+      throw err;
+    }
     ids.push(...(page.messages || []).map(m => m.id));
     pageToken = page.nextPageToken;
   } while (pageToken && ids.length < max);
+  return ids.slice(0, max);
+}
 
-  const out = [];
-  for (const id of ids.slice(0, max).reverse()) {
+// Read the not-yet-scanned ids, oldest first, while the budget lasts.
+// backlog = unread ids left for a later check (budget or quota ran out).
+async function readNew(ids, box, budget, shape) {
+  const seen = await scannedIds(ids);
+  const fresh = ids.filter(id => !seen.has(id)).reverse();
+  const messages = []; const scanned = []; let attempted = 0;
+  for (const id of fresh) {
+    if (budget.units < COST.get) break;
+    budget.units -= COST.get;
+    attempted++;
     try {
       const m = await gmail('get', `/messages/${id}`, { params: { format: 'full' } });
-      const h = m.payload?.headers;
-      const fromHeader = header(h, 'from');
-      out.push({
-        id: m.id,
-        threadId: m.threadId,
-        from: (fromHeader.match(/<([^>]+)>/)?.[1] || fromHeader).trim().toLowerCase(),
-        subject: header(h, 'subject'),
-        date: m.internalDate ? new Date(Number(m.internalDate)) : null,
-        inReplyTo: header(h, 'in-reply-to'),
-        references: header(h, 'references').split(/\s+/).filter(Boolean),
-        messageIdHeader: header(h, 'message-id') || null,
-        auto: isAutoReply(h),
-        text: bodyText(m.payload).slice(0, 20000),
-      });
-    } catch (err) { console.error(`[gmail] skip ${id}: ${err.message}`); }
+      messages.push(await shape(m));
+      scanned.push(id);
+    } catch (err) {
+      if (err.quota) { attempted--; budget.quotaHit = true; budget.units = 0; break; }
+      // Deleted since the list: nothing to read, so don't try again.
+      if (err.status === 404) { scanned.push(id); continue; }
+      console.error(`[gmail] skip ${box} ${id}: ${err.message}`);
+    }
   }
-  return out;
+  return { messages, scanned, backlog: fresh.length - attempted };
+}
+
+function inboxShape(m) {
+  const h = m.payload?.headers;
+  const fromHeader = header(h, 'from');
+  return {
+    id: m.id,
+    threadId: m.threadId,
+    from: (fromHeader.match(/<([^>]+)>/)?.[1] || fromHeader).trim().toLowerCase(),
+    subject: header(h, 'subject'),
+    date: m.internalDate ? new Date(Number(m.internalDate)) : null,
+    inReplyTo: header(h, 'in-reply-to'),
+    references: header(h, 'references').split(/\s+/).filter(Boolean),
+    messageIdHeader: header(h, 'message-id') || null,
+    auto: isAutoReply(h),
+    text: bodyText(m.payload).slice(0, 20000),
+  };
+}
+
+/** New inbox messages since a date, oldest first, within the budget. */
+async function scanInbox(since, budget = readBudget(), max = 300) {
+  const after = Math.floor(new Date(since).getTime() / 1000);
+  const ids = await listIds(`in:inbox after:${after} -from:me`, max, budget);
+  return readNew(ids, 'inbox', budget, inboxShape);
+}
+
+/** Inbox messages since a date, newest last, in the shape classifyMessage expects. */
+async function inboxSince(since, max = 300) {
+  return (await scanInbox(since, readBudget(), max)).messages;
 }
 
 // RFC 3834 Auto-Submitted plus the common vendor headers for vacation replies.
@@ -206,28 +297,33 @@ function isAutoReply(headers) {
   return /auto_reply|auto-reply/i.test(header(headers, 'precedence'));
 }
 
-/** Messages Kelby sent from Gmail since a date (to catch replies he sent outside the CRM). */
-async function sentSince(since, max = 100) {
+/** New messages Kelby sent from Gmail since a date (replies he sent outside the CRM), within the budget. */
+async function scanSent(since, budget = readBudget(), max = 100) {
   const after = Math.floor(new Date(since).getTime() / 1000);
-  const page = await gmail('get', '/messages', { params: { q: `in:sent after:${after}`, maxResults: Math.min(max, 100) } });
-  const out = [];
-  for (const { id } of page.messages || []) {
-    try {
-      const m = await gmail('get', `/messages/${id}`, { params: { format: 'full' } });
-      const h = m.payload?.headers;
-      const toHeader = header(h, 'to');
-      out.push({
-        id: m.id, threadId: m.threadId,
-        from: (await getSetting('gmail_oauth'))?.email || SENDER.email,
-        to: (toHeader.match(/<([^>]+)>/)?.[1] || toHeader).trim().toLowerCase(),
-        subject: header(h, 'subject'),
-        date: m.internalDate ? new Date(Number(m.internalDate)) : null,
-        messageIdHeader: header(h, 'message-id') || null,
-        text: bodyText(m.payload).slice(0, 20000),
-      });
-    } catch (err) { console.error(`[gmail] skip sent ${id}: ${err.message}`); }
-  }
-  return out;
+  const ids = await listIds(`in:sent after:${after}`, Math.min(max, 100), budget);
+  const fromEmail = (await getSetting('gmail_oauth'))?.email || SENDER.email;
+  return readNew(ids, 'sent', budget, (m) => {
+    const h = m.payload?.headers;
+    const toHeader = header(h, 'to');
+    return {
+      id: m.id, threadId: m.threadId,
+      from: fromEmail,
+      to: (toHeader.match(/<([^>]+)>/)?.[1] || toHeader).trim().toLowerCase(),
+      subject: header(h, 'subject'),
+      date: m.internalDate ? new Date(Number(m.internalDate)) : null,
+      messageIdHeader: header(h, 'message-id') || null,
+      text: bodyText(m.payload).slice(0, 20000),
+    };
+  });
 }
 
-module.exports = { status, authUrl, handleCallback, disconnect, sendMail, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText };
+/** Messages Kelby sent from Gmail since a date (to catch replies he sent outside the CRM). */
+async function sentSince(since, max = 100) {
+  return (await scanSent(since, readBudget(), max)).messages;
+}
+
+module.exports = {
+  status, authUrl, handleCallback, disconnect, sendMail, inboxSince, sentSince, scanInbox, scanSent, markScanned, purgeScanned,
+  readBudget, isQuotaError, COST, READ_BUDGET, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES,
+  _bodyText: bodyText, _setApiForTests,
+};

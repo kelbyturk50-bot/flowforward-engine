@@ -169,7 +169,8 @@ router.post('/gmail/disconnect', async (req, res) => {
 router.post('/check-inbox', async (req, res) => {
   try {
     const inbox = await send.checkInbox();
-    const followups = await send.sendDueFollowups();
+    // Same rule as the 15-minute check: no follow-ups while unread replies may be waiting.
+    const followups = send.holdFollowups(inbox) ? { sent: 0, held: true } : await send.sendDueFollowups();
     res.json({ ok: true, inbox, followups });
   } catch (err) { fail(res, err); }
 });

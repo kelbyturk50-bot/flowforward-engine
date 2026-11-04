@@ -345,6 +345,12 @@ async function sendDueFollowups() {
     } catch (err) {
       await pool.query(`UPDATE proposals SET ${which}_sent_at = NULL, error = $2 WHERE id = $1`, [p.id, `Follow-up failed: ${err.message}`]);
       console.error(`[send] ✗ follow-up for #${p.id}: ${err.message}`);
+      // Gmail's per-minute quota is used up: every other send this minute
+      // fails the same way. They stay due and go out on the next check.
+      if (err && err.quota) {
+        console.error('[send] Gmail quota used up for this minute; remaining follow-ups wait for the next check');
+        break;
+      }
     }
   }
   // Sequences with no reply two weeks after the last follow-up are finished.
@@ -565,45 +571,78 @@ async function applyInboxMessages(messages) {
   return { checked: messages.length, matched: outcomes.length, follow_ons: followOns };
 }
 
-/** Look through the inbox for replies, bookings, bounces and opt-outs. */
+/** Look through the inbox for replies, bookings, bounces and opt-outs.
+ *  caught_up is false when, with the Gmail API, unread inbox messages are
+ *  left for a later check (quota budget) or the check failed; follow-ups
+ *  then wait, so nobody gets one after a reply that hasn't been read. */
 async function checkInbox() {
-  if (checking || !(await mailMode()) || (await mailMode()) === 'test') return { checked: 0 };
+  if (checking || !(await mailMode()) || (await mailMode()) === 'test') return { checked: 0, caught_up: true };
   const active = await inboxCandidates();
   const convo = await conversationCandidates();
-  if (!active.length && !convo.length) return { checked: 0 };
+  if (!active.length && !convo.length) return { checked: 0, caught_up: true };
   checking = true;
+  const gmailApi = (await mailMode()) === 'gmail_api';
   let messages = [];
   let outcomes = [];
   let followOns = [];
   let sentHandled = 0;
+  let caughtUp = true;
+  let backlog = 0;
+  const scanned = [];
   try {
     const since = new Date(Math.min(...[...active, ...convo].map(p => new Date(p.sent_at).getTime())) - 86400000);
-    messages = await fetchInbox(since);
+    if (gmailApi) {
+      const budget = gmail.readBudget();
+      const inbox = await gmail.scanInbox(since, budget);
+      messages = inbox.messages;
+      backlog = inbox.backlog;
+      scanned.push(...inbox.scanned.map(id => ({ id, box: 'inbox' })));
+      if (backlog > 0 || budget.quotaHit) caughtUp = false;
+      try {
+        const sent = await gmail.scanSent(since, budget);
+        sentHandled = await require('./inbox').applySentMessages(sent.messages);
+        scanned.push(...sent.scanned.map(id => ({ id, box: 'sent' })));
+      } catch (err) { console.error('[inbox] sent check failed:', err.message); }
+    } else {
+      messages = await fetchInbox(since);
+    }
     outcomes = collectInboxOutcomes(active, messages);
     const taken = new Set(outcomes.map(([, , m]) => m));
     followOns = collectFollowOns(convo, messages, taken);
-    if ((await mailMode()) === 'gmail_api') {
-      try { sentHandled = await require('./inbox').applySentMessages(await gmail.sentSince(since)); }
-      catch (err) { console.error('[inbox] sent check failed:', err.message); }
-    }
   } catch (err) {
     console.error('[inbox] ✗ check failed:', err.message);
+    if (gmailApi) caughtUp = false;
   } finally {
     checking = false;
   }
   for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
   let recorded = 0;
   for (const [p, o, msg] of followOns) if (await applyFollowOn(p, o, msg)) recorded++;
+  if (gmailApi) {
+    // Only after the outcomes above are applied, so a crash re-reads them.
+    try { await gmail.markScanned(scanned); await gmail.purgeScanned(); }
+    catch (err) { console.error('[inbox] could not record scanned messages:', err.message); }
+    console.log(`[inbox] read ${messages.length} new message(s)${backlog ? `, ${backlog} left for the next check` : ''}`);
+  }
   require('./inbox').kick();
-  return { checked: messages.length, matched: outcomes.length, follow_ons: recorded, replied_from_gmail: sentHandled };
+  return { checked: messages.length, matched: outcomes.length, follow_ons: recorded, replied_from_gmail: sentHandled, caught_up: caughtUp, backlog };
 }
 
 async function senderTick() {
-  try { await checkInbox(); } catch (err) { console.error('[sender] inbox:', err.message); }
+  let inbox = null;
+  try { inbox = await checkInbox(); } catch (err) { console.error('[sender] inbox:', err.message); }
+  if (holdFollowups(inbox)) {
+    console.log(`[sender] follow-ups wait: the inbox check isn't caught up${inbox.backlog ? ` (${inbox.backlog} unread)` : ''}`);
+    return { sent: 0, held: true };
+  }
   try { return await sendDueFollowups(); } catch (err) { console.error('[sender] follow-ups:', err.message); }
 }
 
+function holdFollowups(inbox) {
+  return Boolean(inbox && inbox.caught_up === false);
+}
+
 module.exports = {
-  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, holdFollowups, stopSequence, classifyMessage, applyOutcome,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
 };
