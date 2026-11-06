@@ -695,11 +695,11 @@ describe('gmail quota fix round', () => {
     assert.equal(row.rows[0].stop_reason, null);
   });
 
-  function sentMessage(id, threadId, messageId, text) {
+  function sentMessage(id, threadId, messageId, text, internalDate) {
     return {
       id,
       threadId,
-      internalDate: String(Date.now()),
+      internalDate: String(internalDate == null ? Date.now() : internalDate),
       payload: {
         mimeType: 'text/plain',
         headers: [
@@ -731,22 +731,31 @@ describe('gmail quota fix round', () => {
     });
   }
 
-  it('B7 a recorded follow-up 1 in Sent still lets follow-up 2 send', async () => {
+  it('B7 a CRM follow-up already in Sent does not stop follow-up 2', async () => {
     const sends = [];
-    installSent([sentMessage('sfu1', 'thr-b7-fu', '<fu1-b7@mail>', 'Following up on the note.')], sends);
-    const lead = await insertDueFollowup('b7fu', 'test+b7fu@example.com');
+    const lead = await insertDueFollowup('b7hist', 'test+b7hist@example.com');
     await pool.query(
       `UPDATE proposals
-          SET thread_id = 'thr-b7-fu',
-              followup1_sent_at = NOW() - INTERVAL '1 day',
+          SET thread_id = 'thr-hist',
+              message_id = '<msg-hist@test>',
+              followup1_sent_at = NOW() - INTERVAL '2 days',
               followup2_due_at = NOW() - INTERVAL '1 hour'
         WHERE id = $1`,
       [lead.proposal.id]
     );
-    await pool.query(
-      `INSERT INTO proposal_outbound_ids (proposal_id, message_id) VALUES ($1, '<fu1-b7@mail>')`,
+    const { rows: [proposal] } = await pool.query('SELECT sent_at FROM proposals WHERE id = $1', [lead.proposal.id]);
+    const sentAt = new Date(proposal.sent_at).getTime();
+    installSent([
+      sentMessage('sorig', 'thr-hist', '<msg-hist@test>', 'Hi', sentAt - 60 * 1000),
+      sentMessage('sfu1', 'thr-hist', '<fu1-hist@mail>', 'Follow up one', sentAt + 3 * 24 * 60 * 60 * 1000),
+    ], sends);
+    const scanned = await pool.query(`SELECT COUNT(*)::int AS n FROM gmail_scanned_messages`);
+    const stored = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM proposal_outbound_ids WHERE proposal_id = $1',
       [lead.proposal.id]
     );
+    assert.equal(scanned.rows[0].n, 0);
+    assert.equal(stored.rows[0].n, 0);
     const tick = await send.senderTick();
     assert.equal(tick.sent, 1);
     assert.equal(sends.length, 1);
@@ -790,8 +799,8 @@ describe('gmail quota fix round', () => {
     assert.match(row.rows[0].stop_reason, /replied from gmail/i);
   });
 
-  it('B1 a mailbox larger than 10000 ids still reads the oldest first', async () => {
-    const n = 10001;
+  it('B1 a mailbox of 10002 ids still reads the oldest first', async () => {
+    const n = 10002;
     const ids = Array.from({ length: n }, (_, i) => `m${String(n - i).padStart(5, '0')}`);
     installApi({ inboxIds: ids });
     const r = await gmail.scanInbox(new Date('2026-10-01T00:00:00Z'), gmail.readBudget());

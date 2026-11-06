@@ -504,28 +504,51 @@ async function detail(id) {
 
 // ── Replies Kelby sent straight from Gmail ───────────────────────────────
 // A message in the sent folder on the proposal's thread is Kelby writing
-// back outside the CRM, unless its Message-ID is one we stored for that
-// proposal (the first email, or a follow-up). The message date is not used.
-async function isOurOutbound(proposal, headerId) {
-  if (!headerId) return false;
-  const first = String(proposal.message_id || '').trim().toLowerCase();
-  if (first && headerId === first) return true;
-  const { rows } = await pool.query(
-    `SELECT 1 FROM proposal_outbound_ids
-      WHERE proposal_id = $1 AND lower(btrim(message_id)) = $2
-      LIMIT 1`,
-    [proposal.id, headerId]);
-  return rows.length > 0;
+// back outside the CRM, unless it is mail we sent. That is a Message-ID we
+// stored (the first email, or a follow-up recorded at send time), or the
+// text of a follow-up whose sent timestamp is already set. The second case
+// covers a follow-up that went out before those ids were stored and is not
+// in gmail_scanned_messages. The message date is not used.
+function flatMail(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+// A short copy such as "Hi" would swallow an unrelated reply. A real
+// follow-up is a sentence. Twelve characters is enough for "Follow up one".
+function textIsOurCopy(sentText, copy) {
+  const body = flatMail(sentText);
+  const ours = flatMail(copy);
+  if (ours.length < 12) return false;
+  if (body === ours) return true;
+  if (!body.startsWith(ours)) return false;
+  return body.charAt(ours.length) === ' ';
+}
+
+async function isOurOutbound(proposal, msg) {
+  const headerId = String(msg.messageIdHeader || '').trim().toLowerCase();
+  if (headerId) {
+    const first = String(proposal.message_id || '').trim().toLowerCase();
+    if (first && headerId === first) return true;
+    const { rows } = await pool.query(
+      `SELECT 1 FROM proposal_outbound_ids
+        WHERE proposal_id = $1 AND lower(btrim(message_id)) = $2
+        LIMIT 1`,
+      [proposal.id, headerId]);
+    if (rows.length) return true;
+  }
+  if (proposal.followup1_sent_at && textIsOurCopy(msg.text, proposal.followup1)) return true;
+  if (proposal.followup2_sent_at && textIsOurCopy(msg.text, proposal.followup2)) return true;
+  return false;
 }
 
 async function stopFollowupsForSentReply(msg) {
-  const headerId = String(msg.messageIdHeader || '').trim().toLowerCase();
   const { rows } = await pool.query(
-    `SELECT id, message_id, prospect_id FROM proposals
+    `SELECT id, message_id, prospect_id, followup1, followup2, followup1_sent_at, followup2_sent_at
+       FROM proposals
       WHERE status = 'sent' AND thread_id = $1`,
     [msg.threadId]);
   for (const p of rows) {
-    if (await isOurOutbound(p, headerId)) continue;
+    if (await isOurOutbound(p, msg)) continue;
     const stopped = await send().stopSequence(p.id, 'Replied from Gmail');
     if (stopped) await logActivity(p.prospect_id, 'email', 'Replied from Gmail.');
   }
