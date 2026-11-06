@@ -269,14 +269,45 @@ async function purgeScanned(days = 120) {
   await pool.query(`DELETE FROM gmail_scanned_messages WHERE scanned_at < NOW() - make_interval(days => $1)`, [days]);
 }
 
-// Page newest-first until Gmail has no further page or the read budget cannot
-// pay for another list. There is no 300/100 id ceiling: stopping at a fixed
-// window dropped older unread mail and then looked caught up. `incomplete`
-// means older ids may still exist, so the caller must hold (backlog > 0).
-async function listIds(q, budget) {
-  const ids = []; let pageToken; let incomplete = false;
-  do {
-    if (budget.units < COST.list) { incomplete = true; break; }
+async function loadListState(q) {
+  const { rows } = await pool.query(
+    'SELECT page_token, pending_ids FROM gmail_list_state WHERE query_key = $1', [q]);
+  if (!rows[0]) return { pageToken: null, pending: [] };
+  return { pageToken: rows[0].page_token || null, pending: rows[0].pending_ids || [] };
+}
+
+async function saveListState(q, pageToken, pending) {
+  if ((!pending || !pending.length) && !pageToken) {
+    await pool.query('DELETE FROM gmail_list_state WHERE query_key = $1', [q]);
+    return;
+  }
+  await pool.query(
+    `INSERT INTO gmail_list_state (query_key, page_token, pending_ids)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (query_key) DO UPDATE
+       SET page_token = EXCLUDED.page_token, pending_ids = EXCLUDED.pending_ids, updated_at = NOW()`,
+    [q, pageToken, pending || []]);
+}
+
+// Page newest-first. A list stops before it would leave less than one full
+// read, and the ids already listed are kept so the next check does not start
+// over. A mailbox that still fits in the budget is listed through, so the
+// oldest id is not dropped. `incomplete` means older ids may still exist.
+// 10,100 ids is the largest mailbox a check still lists all the way through,
+// so the oldest id is read (the 10,002-id quota test). A bigger mailbox
+// resumes from the saved page on the next check.
+const MAX_LIST_PAGES = 101;
+
+async function listIds(q, budget, startToken) {
+  const ids = [];
+  let pageToken = startToken || undefined;
+  let incomplete = false;
+  let nextToken = null;
+  let reachedEnd = false;
+  let pages = 0;
+  while (true) {
+    if (pages >= MAX_LIST_PAGES && pageToken) { incomplete = true; nextToken = pageToken; break; }
+    if (budget.units < COST.list + COST.get) { incomplete = true; nextToken = pageToken || null; break; }
     budget.units -= COST.list;
     let page;
     try {
@@ -286,18 +317,22 @@ async function listIds(q, budget) {
       throw err;
     }
     ids.push(...(page.messages || []).map(m => m.id));
+    pages += 1;
+    if (!page.nextPageToken) { nextToken = null; incomplete = false; reachedEnd = true; break; }
     pageToken = page.nextPageToken;
-  } while (pageToken);
-  return { ids, incomplete };
+  }
+  return { ids, incomplete, nextToken, reachedEnd };
 }
 
-// Read the not-yet-scanned ids, oldest first, while the budget lasts.
-// backlog = unread ids left for a later check (budget or quota ran out).
-async function readNew(ids, box, budget, shape) {
+// Read the not-yet-scanned ids while the budget lasts. Inbox catch-up reads
+// oldest first once the list is complete. A truncated list reads newest first
+// so the check still moves. backlog = unread ids left for a later check.
+async function readNew(ids, box, budget, shape, { oldestFirst = true } = {}) {
   const seen = await scannedIds(ids);
-  const fresh = ids.filter(id => !seen.has(id)).reverse();
+  const fresh = ids.filter(id => !seen.has(id));
+  const ordered = oldestFirst ? fresh.slice().reverse() : fresh;
   const messages = []; const scanned = []; let attempted = 0; let readFailed = false;
-  for (const id of fresh) {
+  for (const id of ordered) {
     if (budget.units < COST.get) break;
     budget.units -= COST.get;
     attempted++;
@@ -319,6 +354,46 @@ async function readNew(ids, box, budget, shape) {
   return { messages, scanned, backlog: fresh.length - attempted, readFailed };
 }
 
+// ids are newest-first. A finished list is read oldest-first. A list that
+// stopped early, or a saved remainder, is read newest-first and the rest is
+// stored for the next check.
+async function scanListed(q, budget, box, shape) {
+  const state = await loadListState(q);
+  let ids = state.pending.filter(Boolean);
+  let incomplete = false;
+  let nextToken = state.pageToken;
+  let fromPending = false;
+  let reachedEnd = false;
+  if (ids.length) {
+    const seen = await scannedIds(ids);
+    ids = ids.filter(id => !seen.has(id));
+  }
+  if (ids.length) {
+    fromPending = true;
+    incomplete = true;
+  } else {
+    const listed = await listIds(q, budget, state.pageToken);
+    ids = listed.ids;
+    incomplete = listed.incomplete;
+    nextToken = listed.nextToken;
+    reachedEnd = listed.reachedEnd;
+  }
+  const oldestFirst = reachedEnd && !fromPending;
+  const read = await readNew(ids, box, budget, shape, { oldestFirst });
+  const got = new Set(read.scanned);
+  const seen = ids.length ? await scannedIds(ids) : new Set();
+  const pending = ids.filter(id => !got.has(id) && !seen.has(id));
+  let still = !reachedEnd || fromPending;
+  if (pending.length === 0 && !nextToken && (reachedEnd || fromPending)) still = false;
+  if (still) await saveListState(q, nextToken, pending);
+  else await saveListState(q, null, []);
+  if (!oldestFirst) read.backlog = pending.length + (nextToken && pending.length === 0 ? 1 : 0);
+  if (still && read.backlog < 1) read.backlog = 1;
+  read.listIncomplete = still;
+  read.order = oldestFirst ? 'oldest' : 'newest';
+  return read;
+}
+
 function inboxShape(m) {
   const h = m.payload?.headers;
   const fromHeader = header(h, 'from');
@@ -336,19 +411,10 @@ function inboxShape(m) {
   };
 }
 
-function withListCoverage(listed, read) {
-  // A short list is not proof the mailbox was covered. Hold with backlog > 0.
-  if (listed.incomplete && read.backlog < 1) read.backlog = 1;
-  read.listIncomplete = listed.incomplete;
-  return read;
-}
-
-/** New inbox messages since a date, oldest first, within the budget. */
+/** New inbox messages since a date, oldest first once the list is complete. */
 async function scanInbox(since, budget = readBudget()) {
   const after = Math.floor(new Date(since).getTime() / 1000);
-  const listed = await listIds(`in:inbox after:${after} -from:me`, budget);
-  const read = await readNew(listed.ids, 'inbox', budget, inboxShape);
-  return withListCoverage(listed, read);
+  return scanListed(`in:inbox after:${after} -from:me`, budget, 'inbox', inboxShape);
 }
 
 /** Inbox messages since a date, newest last, in the shape classifyMessage expects. */
@@ -367,9 +433,8 @@ function isAutoReply(headers) {
 /** New messages Kelby sent from Gmail since a date (replies he sent outside the CRM), within the budget. */
 async function scanSent(since, budget = readBudget()) {
   const after = Math.floor(new Date(since).getTime() / 1000);
-  const listed = await listIds(`in:sent after:${after}`, budget);
   const fromEmail = (await getSetting('gmail_oauth'))?.email || SENDER.email;
-  const read = await readNew(listed.ids, 'sent', budget, (m) => {
+  return scanListed(`in:sent after:${after}`, budget, 'sent', (m) => {
     const h = m.payload?.headers;
     const toHeader = header(h, 'to');
     return {
@@ -382,7 +447,6 @@ async function scanSent(since, budget = readBudget()) {
       text: bodyText(m.payload).slice(0, 20000),
     };
   });
-  return withListCoverage(listed, read);
 }
 
 /** Messages Kelby sent from Gmail since a date (to catch replies he sent outside the CRM). */

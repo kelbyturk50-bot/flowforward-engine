@@ -220,6 +220,16 @@ CREATE TABLE IF NOT EXISTS gmail_scanned_messages (
   CONSTRAINT gmail_scanned_messages_id_check CHECK (gmail_id ~ '^[A-Za-z0-9_-]{1,64}$')
 );
 
+-- Where a large list left off. pending_ids is the newest-first remainder
+-- already listed but not yet read. page_token is the next Gmail page after
+-- that, so a later check does not list the same pages again.
+CREATE TABLE IF NOT EXISTS gmail_list_state (
+  query_key   TEXT PRIMARY KEY,
+  page_token  TEXT,
+  pending_ids TEXT[] NOT NULL DEFAULT '{}',
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS app_settings (
   key         TEXT PRIMARY KEY,
   value       JSONB,

@@ -57,7 +57,7 @@ function fakeGmail({ count = 0, failGet = () => null } = {}) {
 
 describe('gmail quota budget', () => {
   before(async () => { await resetDb(); });
-  beforeEach(async () => { await pool.query('TRUNCATE gmail_scanned_messages'); });
+  beforeEach(async () => { await pool.query('TRUNCATE gmail_scanned_messages, gmail_list_state'); });
   after(async () => { gmail._setApiForTests(null); send._setTransport(null); await closePool(); });
 
   it('reads within the budget, oldest first, and reads each message only once', async () => {

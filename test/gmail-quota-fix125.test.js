@@ -596,4 +596,114 @@ describe('gmail quota fix round', () => {
       axios.defaults.adapter = previous;
     }
   });
+
+  function threadMessage(id, threadId, text, iso) {
+    return {
+      id,
+      threadId,
+      internalDate: String(Date.parse(iso)),
+      payload: {
+        mimeType: 'text/plain',
+        headers: [
+          { name: 'From', value: 'Owner <test+thread@example.com>' },
+          { name: 'To', value: 'Owner <test+thread@example.com>' },
+          { name: 'Subject', value: 'Re: idea' },
+          { name: 'Message-ID', value: `<${id}@mail>` },
+        ],
+        body: { data: Buffer.from(text).toString('base64url') },
+      },
+    };
+  }
+
+  function installThreads({ inbox = [], sent = [] } = {}) {
+    const byId = new Map([...inbox, ...sent].map((m) => [m.id, m]));
+    gmail._setApiForTests(async (method, path, { params } = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        return { id: 'sent-1', threadId: 'thr-send' };
+      }
+      if (path === '/messages') {
+        const list = (params.q || '').includes('in:sent') ? sent : inbox;
+        const start = params.pageToken ? Number(params.pageToken) : 0;
+        const page = list.slice(start, start + 100);
+        const next = start + 100 < list.length ? String(start + 100) : undefined;
+        return { messages: page.map((m) => ({ id: m.id, threadId: m.threadId })), nextPageToken: next };
+      }
+      return byId.get(path.split('/').pop());
+    });
+  }
+
+  it('B14 a Gmail reply in the same check is applied once the inbox item exists', async () => {
+    const inbox = [threadMessage('in1', 'thr-lead', 'Yes let us talk', '2026-11-06T15:00:00Z')];
+    const sent = [
+      threadMessage('sentB', 'thr-lead', 'Friday is better', '2026-11-06T17:00:00Z'),
+      threadMessage('sentA', 'thr-lead', 'Thursday works', '2026-11-06T16:00:00Z'),
+    ];
+    installThreads({ inbox, sent });
+    const lead = await insertDueFollowup('b14', 'test+thread@example.com');
+    await pool.query(`UPDATE proposals SET thread_id = 'thr-lead' WHERE id = $1`, [lead.proposal.id]);
+    const first = await send.checkInbox();
+    assert.equal(first.replied_from_gmail, 1);
+    const item = await pool.query('SELECT status, handled_note FROM inbox_items WHERE prospect_id = $1', [lead.prospect.id]);
+    assert.equal(item.rows[0].status, 'handled');
+    assert.equal(item.rows[0].handled_note, 'You replied from Gmail');
+    const out = await pool.query(
+      `SELECT body FROM inbox_messages WHERE prospect_id = $1 AND direction = 'out' ORDER BY received_at DESC`,
+      [lead.prospect.id]
+    );
+    assert.equal(out.rows[0].body, 'Friday is better');
+  });
+
+  it('B15 the later Gmail reply is the one stored', async () => {
+    const sent = [
+      threadMessage('sentB', 'thr-b15', 'Friday is better', '2026-11-06T17:00:00Z'),
+      threadMessage('sentA', 'thr-b15', 'Thursday works', '2026-11-06T16:00:00Z'),
+    ];
+    installThreads({ sent });
+    const lead = await insertDueFollowup('b15', 'test+thread@example.com');
+    await pool.query(`UPDATE proposals SET thread_id = 'thr-b15' WHERE id = $1`, [lead.proposal.id]);
+    const { rows: [inbound] } = await pool.query(
+      `INSERT INTO inbox_messages (prospect_id, proposal_id, direction, dedupe_key, thread_id, from_addr, subject, body, received_at)
+       VALUES ($1, $2, 'in', 'b15-in', 'thr-b15', 'test+thread@example.com', 'Re: idea', 'Yes', '2026-11-06T15:00:00Z')
+       RETURNING id`,
+      [lead.prospect.id, lead.proposal.id]
+    );
+    await pool.query(
+      `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status) VALUES ($1, $2, $3, 'failed')`,
+      [lead.prospect.id, lead.proposal.id, inbound.id]
+    );
+    const result = await send.checkInbox();
+    assert.equal(result.replied_from_gmail, 1);
+    const out = await pool.query(
+      `SELECT body FROM inbox_messages WHERE prospect_id = $1 AND direction = 'out'`,
+      [lead.prospect.id]
+    );
+    assert.equal(out.rows.length, 1);
+    assert.equal(out.rows[0].body, 'Friday is better');
+  });
+
+  it('B16 a 70900-id inbox reads on the first check and the hold clears', async () => {
+    const n = 70900;
+    const ids = Array.from({ length: n }, (_, i) => `n${String(n - i).padStart(6, '0')}`);
+    installApi({ inboxIds: ids });
+    const since = new Date('2026-10-01T00:00:00Z');
+    const first = await gmail.scanInbox(since, gmail.readBudget());
+    assert.ok(first.messages.length > 0, 'the first check reads messages');
+    assert.equal(first.messages[0].id, ids[0], 'the newest id is read when the list does not fit');
+    await gmail.markScanned(first.scanned.map((id) => ({ id, box: 'inbox' })));
+    let backlog = first.backlog;
+    let guard = 0;
+    let stuck = 0;
+    while (backlog > 0 && guard < 2000) {
+      const r = await gmail.scanInbox(since, gmail.readBudget());
+      await gmail.markScanned(r.scanned.map((id) => ({ id, box: 'inbox' })));
+      if (r.messages.length === 0 && r.backlog >= backlog) stuck += 1;
+      else stuck = 0;
+      assert.ok(stuck < 8, 'the catch-up stopped making progress');
+      backlog = r.backlog;
+      guard += 1;
+    }
+    assert.equal(backlog, 0);
+    const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM gmail_scanned_messages');
+    assert.equal(rows[0].n, n);
+  });
 });

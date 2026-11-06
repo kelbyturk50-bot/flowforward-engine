@@ -600,6 +600,41 @@ async function applyInboxMessages(messages) {
   return { checked: messages.length, matched: outcomes.length, follow_ons: followOns };
 }
 
+// A Sent id is scanned once applySentMessages has seen an open inbox item,
+// or the message is not newer than the thread. A newer message with no open
+// item stays unread so the next check can apply it.
+// Triage is kicked when an inbound item is queued. Let a fast failure finish
+// before the Sent folder is applied, so it cannot overwrite "handled". A slow
+// triage is left for the next check; the Sent id stays unread until then.
+async function settleNewInboxItems() {
+  const deadline = Date.now() + 50;
+  while (Date.now() < deadline) {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM inbox_items WHERE status IN ('queued', 'triaging') LIMIT 1`);
+    if (!rows.length) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
+async function sentIdsToScan(messages, scannedIds) {
+  const leave = new Set();
+  for (const msg of messages) {
+    if (!msg || !msg.id || !msg.threadId) continue;
+    const open = await pool.query(
+      `SELECT 1 FROM inbox_items i JOIN inbox_messages m ON m.id = i.message_id
+        WHERE m.thread_id = $1 AND i.status = ANY('{queued,ready,failed,fyi}') LIMIT 1`,
+      [msg.threadId]);
+    if (open.rows.length) continue;
+    const last = await pool.query(
+      'SELECT MAX(received_at) AS received_at FROM inbox_messages WHERE thread_id = $1',
+      [msg.threadId]);
+    const lastAt = last.rows[0] && last.rows[0].received_at;
+    const newer = !lastAt || (msg.date && new Date(msg.date) > new Date(lastAt));
+    if (newer) leave.add(msg.id);
+  }
+  return (scannedIds || []).filter(id => !leave.has(id));
+}
+
 function inboxScanBlocked() {
   if (!checking) return null;
   const hung = gmail.clockNow() - scanStartedAt >= SCAN_TIMEOUT_MS;
@@ -626,6 +661,7 @@ async function checkInbox() {
   let outcomes = [];
   let followOns = [];
   let sentHandled = 0;
+  let sentResult = null;
   let caughtUp = true;
   let backlog = 0;
   const scanned = [];
@@ -641,10 +677,8 @@ async function checkInbox() {
         scanned.push(...inbox.scanned.map(id => ({ id, box: 'inbox' })));
         if (backlog > 0 || budget.quotaHit || inbox.readFailed) caughtUp = false;
         try {
-          const sent = await gmail.scanSent(since, budget);
-          sentHandled = await require('./inbox').applySentMessages(sent.messages);
-          scanned.push(...sent.scanned.map(id => ({ id, box: 'sent' })));
-          if (sent.backlog > 0 || budget.quotaHit || sent.readFailed) caughtUp = false;
+          sentResult = await gmail.scanSent(since, budget);
+          if (sentResult.backlog > 0 || budget.quotaHit || sentResult.readFailed) caughtUp = false;
         } catch (err) {
           console.error('[inbox] sent check failed:', err.message);
           caughtUp = false;
@@ -659,10 +693,26 @@ async function checkInbox() {
       console.error('[inbox] ✗ check failed:', err.message);
       caughtUp = false;
     }
-    // Outcomes and markScanned run before `checking` is cleared, so a second
-    // check cannot send or re-fetch these ids while they are still in flight.
+    // Inbox outcomes first, so a reply that arrives in this same check has an
+    // inbox item before the Sent folder is applied. Main re-read Sent next
+    // time; a scanned id would not be read again.
     for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
     for (const [p, o, msg] of followOns) if (await applyFollowOn(p, o, msg)) recorded++;
+    await settleNewInboxItems();
+    if (sentResult) {
+      // scanSent yields oldest-first. Main applied Gmail's newest-first page,
+      // and applySentMessages keeps only the first newer message.
+      const newestFirst = sentResult.order === 'newest'
+        ? sentResult.messages.slice()
+        : sentResult.messages.slice().reverse();
+      try { sentHandled = await require('./inbox').applySentMessages(newestFirst); }
+      catch (err) {
+        console.error('[inbox] sent check failed:', err.message);
+        caughtUp = false;
+      }
+      const keep = await sentIdsToScan(newestFirst, sentResult.scanned);
+      scanned.push(...keep.map(id => ({ id, box: 'sent' })));
+    }
     if (gmailApi) {
       // Only after the outcomes above are applied, so a crash re-reads them.
       try { await gmail.markScanned(scanned); await gmail.purgeScanned(); }
