@@ -600,9 +600,10 @@ async function applyInboxMessages(messages) {
   return { checked: messages.length, matched: outcomes.length, follow_ons: followOns };
 }
 
-// A Sent id is scanned once applySentMessages has seen an open inbox item,
-// or the message is not newer than the thread. A newer message with no open
-// item stays unread so the next check can apply it.
+// A Sent id stays unread only while its proposal thread can still grow an
+// open inbox item: the latest inbound has no item yet, or that item is still
+// triaging, rewriting, or sending. sent, handled, and discarded are finished,
+// so the id is marked read and other follow-ups are not held.
 // Triage is kicked when an inbound item is queued. Let a fast failure finish
 // before the Sent folder is applied, so it cannot overwrite "handled". A slow
 // triage is left for the next check; the Sent id stays unread until then.
@@ -622,28 +623,33 @@ function sameMailId(a, b) {
   return left !== '' && left === norm(b);
 }
 
+const ITEM_STILL_FORMING = new Set(['triaging', 'rewriting', 'sending']);
+
 async function sentIdsToScan(messages, scannedIds) {
   const leave = new Set();
   for (const msg of messages) {
     if (!msg || !msg.id || !msg.threadId) continue;
     const row = await pool.query(
       `SELECT
-         EXISTS (
-           SELECT 1 FROM inbox_items i
-           JOIN inbox_messages m ON m.id = i.message_id
-           WHERE m.thread_id = $1 AND i.status = ANY('{queued,ready,failed,fyi}')
-         ) AS open,
          EXISTS (SELECT 1 FROM proposals WHERE thread_id = $1) AS proposal,
          (SELECT message_id FROM proposals WHERE thread_id = $1 ORDER BY id LIMIT 1) AS proposal_message_id,
-         (SELECT MAX(received_at) FROM inbox_messages WHERE thread_id = $1) AS last_at`,
+         (SELECT MAX(received_at) FROM inbox_messages WHERE thread_id = $1) AS last_at,
+         (
+           SELECT i.status
+             FROM inbox_messages m
+             LEFT JOIN inbox_items i ON i.message_id = m.id
+            WHERE m.thread_id = $1 AND m.direction = 'in'
+            ORDER BY m.received_at DESC, m.id DESC
+            LIMIT 1
+         ) AS latest_status`,
       [msg.threadId]);
     const info = row.rows[0];
-    if (!info || info.open || !info.proposal) continue;
+    if (!info || !info.proposal) continue;
     if (sameMailId(msg.messageIdHeader, info.proposal_message_id)) continue;
-    // The lead already wrote, and the item is not open yet. A newer Sent
-    // message can still be applied once that item exists. First sends and
-    // personal mail have nothing to wait for, so they are marked read.
-    if (info.last_at && msg.date && new Date(msg.date) > new Date(info.last_at)) leave.add(msg.id);
+    if (!(info.last_at && msg.date && new Date(msg.date) > new Date(info.last_at))) continue;
+    // No inbox item yet, or the latest one is still being triaged or sent.
+    // A sent, handled, or discarded item will not open again.
+    if (!info.latest_status || ITEM_STILL_FORMING.has(info.latest_status)) leave.add(msg.id);
   }
   return (scannedIds || []).filter(id => !leave.has(id));
 }

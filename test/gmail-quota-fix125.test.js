@@ -960,10 +960,73 @@ describe('gmail quota fix round', () => {
       `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status) VALUES ($1, $2, $3, 'failed')`,
       [lead.prospect.id, lead.proposal.id, inbound.id]
     );
+    await pool.query(
+      `UPDATE proposals SET followup1_due_at = NOW() + INTERVAL '30 days' WHERE id = $1`,
+      [lead.proposal.id]);
     now += 60 * 1000;
     const second = await send.checkInbox();
     assert.equal(second.replied_from_gmail, 1);
+    const scanned = await pool.query(`SELECT 1 FROM gmail_scanned_messages WHERE gmail_id = 'reply-wait'`);
+    assert.equal(scanned.rows.length, 1, 'the applied reply is marked read in that same check');
+    await insertDueFollowup('defer-next', 'test+defer-next@example.com');
+    now += 60 * 1000;
+    const third = await send.senderTick();
+    assert.equal(third.held, undefined);
+    assert.equal(third.sent, 1, 'the next tick sends the unrelated follow-up');
+    const due = await pool.query(
+      `SELECT followup1_sent_at FROM proposals WHERE to_email = 'test+defer-next@example.com'`);
+    assert.ok(due.rows[0].followup1_sent_at);
   });
+
+  for (const status of ['sent', 'handled', 'discarded']) {
+    it(`B20 a ${status} inbox item does not hold unrelated follow-ups`, async () => {
+      const closed = await insertDueFollowup(`closed-${status}`, `test+closed-${status}@example.com`);
+      await pool.query(
+        `UPDATE proposals SET status = 'replied', thread_id = $2, replied_at = NOW() WHERE id = $1`,
+        [closed.proposal.id, `thr-${status}`]);
+      const { rows: [inbound] } = await pool.query(
+        `INSERT INTO inbox_messages (prospect_id, proposal_id, direction, dedupe_key, thread_id, from_addr, subject, body, received_at)
+         VALUES ($1, $2, 'in', $3, $4, $5, 'Re: idea', 'Thanks', '2026-11-05T15:00:00Z')
+         RETURNING id`,
+        [closed.prospect.id, closed.proposal.id, `in-${status}`, `thr-${status}`, `test+closed-${status}@example.com`]
+      );
+      await pool.query(
+        `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status) VALUES ($1, $2, $3, $4)`,
+        [closed.prospect.id, closed.proposal.id, inbound.id, status]
+      );
+      const due = await insertDueFollowup(`due-${status}`, `test+due-${status}@example.com`);
+      const sentId = `crm-${status}`;
+      let fetches = 0;
+      gmail._setApiForTests(async (method, path, { params } = {}) => {
+        if (method === 'post' && path === '/messages/send') {
+          return { id: `out-${status}`, threadId: 'thr-send' };
+        }
+        if (path === '/messages') {
+          const list = (params.q || '').includes('in:sent')
+            ? [{ id: sentId, threadId: `thr-${status}` }]
+            : [];
+          return { messages: list };
+        }
+        const id = decodeURIComponent(path.slice('/messages/'.length));
+        if (id === sentId) fetches += 1;
+        return threadMessage(id, `thr-${status}`, 'Already answered', '2026-11-06T17:00:00Z');
+      });
+      const ticks = [];
+      for (let i = 0; i < 3; i += 1) {
+        if (i) now += 60 * 1000;
+        ticks.push(await send.senderTick());
+      }
+      assert.equal(fetches, 1, `${status}: later ticks do not fetch the same Sent id`);
+      assert.equal(ticks[0].sent, 1);
+      assert.notEqual(ticks[0].held, true);
+      assert.notEqual(ticks[1].held, true);
+      assert.notEqual(ticks[2].held, true);
+      const row = await pool.query('SELECT followup1_sent_at FROM proposals WHERE id = $1', [due.proposal.id]);
+      assert.ok(row.rows[0].followup1_sent_at);
+      const scanned = await pool.query('SELECT 1 FROM gmail_scanned_messages WHERE gmail_id = $1', [sentId]);
+      assert.equal(scanned.rows.length, 1);
+    });
+  }
 
   it('B19 a 400 on every page token clears the saved cursor and the next check starts at the head', async () => {
     const lead = await insertDueFollowup('wedge', 'test+wedge@example.com');
