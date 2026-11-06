@@ -58,6 +58,7 @@ async function resetDb() {
       campaign_variants,
       campaigns,
       prospects,
+      gmail_scanned_messages,
       app_settings
     RESTART IDENTITY CASCADE
   `);

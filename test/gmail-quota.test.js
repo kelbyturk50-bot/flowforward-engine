@@ -120,7 +120,8 @@ describe('gmail quota budget', () => {
     });
     const r = await gmail.scanInbox(new Date('2026-10-01T00:00:00Z'), gmail.readBudget());
     assert.deepEqual(r.scanned.sort(), ['m0001', 'm0003']);
-    assert.equal(r.backlog, 0, 'an attempted message is not backlog');
+    assert.equal(r.backlog, 1, 'a 500 is still unread backlog');
+    assert.equal(r.readFailed, true);
     assert.equal(await gmail.markScanned(r.scanned.map((id) => ({ id, box: 'inbox' }))), 2);
     assert.equal(await gmail.markScanned([{ id: 'm0001', box: 'inbox' }, { id: 'x', box: 'trash' }]), 0);
   });
@@ -136,8 +137,8 @@ describe('gmail quota budget', () => {
   it('follow-ups wait while the inbox has unread messages', () => {
     assert.equal(send.holdFollowups({ caught_up: false, backlog: 12 }), true);
     assert.equal(send.holdFollowups({ caught_up: true }), false);
-    assert.equal(send.holdFollowups({ checked: 0 }), false);
-    assert.equal(send.holdFollowups(null), false);
+    assert.equal(send.holdFollowups({ checked: 0 }), true);
+    assert.equal(send.holdFollowups(null), true);
   });
 
   it('one quota error stops the follow-up loop; every follow-up stays due', async () => {
@@ -163,8 +164,8 @@ describe('gmail quota budget', () => {
     assert.equal(result.sent, 0);
     assert.equal(attempts.length, 1, 'stopped after the first quota error');
     const { rows } = await pool.query(
-      `SELECT followup1_sent_at, error FROM proposals WHERE id = ANY($1::int[]) ORDER BY id`, [ids]);
-    assert.ok(rows.every((r) => r.followup1_sent_at === null), 'all still due');
+      `SELECT status, followup1_sent_at, error FROM proposals WHERE id = ANY($1::int[]) ORDER BY id`, [ids]);
+    assert.ok(rows.every((r) => r.status === 'sent' && r.followup1_sent_at === null), 'all still sent and due');
     assert.match(rows[0].error, /Quota exceeded/);
     console.log('[gmail-quota] follow-up loop stops on quota and keeps every follow-up due');
   });

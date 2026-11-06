@@ -165,12 +165,18 @@ router.post('/gmail/disconnect', async (req, res) => {
   try { await gmail.disconnect(); res.json({ ok: true }); } catch (err) { fail(res, err); }
 });
 
-// POST /api/proposals/check-inbox — run the reply check + follow-up sender now
+// POST /api/proposals/check-inbox — run the reply check + follow-up sender now.
+// A thrown scan is not caught up. The route does not answer 429; it returns
+// 200 with followups.held when follow-ups wait.
 router.post('/check-inbox', async (req, res) => {
   try {
-    const inbox = await send.checkInbox();
-    // Same rule as the 15-minute check: no follow-ups while unread replies may be waiting.
-    const followups = send.holdFollowups(inbox) ? { sent: 0, held: true } : await send.sendDueFollowups();
+    let inbox;
+    try { inbox = await send.checkInbox(); }
+    catch (err) {
+      console.error('[check-inbox] scan failed:', err.message);
+      inbox = { checked: 0, caught_up: false, failed: true };
+    }
+    const followups = await send.followupsAfterInbox(inbox);
     res.json({ ok: true, inbox, followups });
   } catch (err) { fail(res, err); }
 });

@@ -188,13 +188,39 @@ function bodyText(payload) {
 // Nov 3, 2026). Reading one message in full costs 60, so re-reading a few
 // hundred messages every 15 minutes used the whole minute and left nothing
 // for sending follow-ups. Now each message is read in full once (its id goes
-// in gmail_scanned_messages), every read is charged to a per-check budget,
-// and a used-up quota stops the scan at once instead of failing every
-// remaining message.
+// in gmail_scanned_messages). Reads from the 15-minute scan and from
+// Check inbox now share one per-minute budget, and a used-up quota stops
+// the scan at once instead of failing every remaining message.
 const COST = Object.freeze({ list: 5, get: 60 });
 const READ_BUDGET = 3600; // leaves 2,400 of the minute's 6,000 for sends
+const MINUTE_MS = 60 * 1000;
 
 function readBudget(units = READ_BUDGET) { return { units, quotaHit: false }; }
+
+// The cron scan and POST /api/proposals/check-inbox both charge this object,
+// so two checks in the same minute cannot each spend READ_BUDGET.
+let nowFn = () => Date.now();
+let minuteBucket = null;
+
+function clockNow() { return nowFn(); }
+
+function minuteReadBudget() {
+  const minute = Math.floor(clockNow() / MINUTE_MS);
+  if (!minuteBucket || minuteBucket.minute !== minute) {
+    minuteBucket = { minute, units: READ_BUDGET, quotaHit: false };
+  }
+  return minuteBucket;
+}
+
+function _setClockForTests(fn) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_setClockForTests is only available when NODE_ENV=test');
+  nowFn = typeof fn === 'function' ? fn : () => Date.now();
+}
+
+function resetReadBudgetForTests() {
+  if (process.env.NODE_ENV !== 'test') throw new Error('resetReadBudgetForTests is only available when NODE_ENV=test');
+  minuteBucket = null;
+}
 
 async function scannedIds(ids) {
   if (!ids.length) return new Set();
@@ -202,9 +228,13 @@ async function scannedIds(ids) {
   return new Set(rows.map(r => r.gmail_id));
 }
 
+// Same shape as gmail_scanned_messages_id_check. A bad id is skipped so one
+// row cannot roll back the rest of the batch.
+const GMAIL_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
 /** Record message ids as read, once their outcomes are applied. */
 async function markScanned(entries) {
-  const list = (entries || []).filter(e => e && typeof e.id === 'string' && e.id && (e.box === 'inbox' || e.box === 'sent'));
+  const list = (entries || []).filter(e => e && typeof e.id === 'string' && GMAIL_ID.test(e.id) && (e.box === 'inbox' || e.box === 'sent'));
   if (!list.length) return 0;
   const res = await pool.query(
     `INSERT INTO gmail_scanned_messages (gmail_id, box)
@@ -218,10 +248,14 @@ async function purgeScanned(days = 120) {
   await pool.query(`DELETE FROM gmail_scanned_messages WHERE scanned_at < NOW() - make_interval(days => $1)`, [days]);
 }
 
-async function listIds(q, max, budget) {
-  const ids = []; let pageToken;
+// Page newest-first until Gmail has no further page or the read budget cannot
+// pay for another list. There is no 300/100 id ceiling: stopping at a fixed
+// window dropped older unread mail and then looked caught up. `incomplete`
+// means older ids may still exist, so the caller must hold (backlog > 0).
+async function listIds(q, budget) {
+  const ids = []; let pageToken; let incomplete = false;
   do {
-    if (budget.units < COST.list) break;
+    if (budget.units < COST.list) { incomplete = true; break; }
     budget.units -= COST.list;
     let page;
     try {
@@ -232,8 +266,8 @@ async function listIds(q, max, budget) {
     }
     ids.push(...(page.messages || []).map(m => m.id));
     pageToken = page.nextPageToken;
-  } while (pageToken && ids.length < max);
-  return ids.slice(0, max);
+  } while (pageToken);
+  return { ids, incomplete };
 }
 
 // Read the not-yet-scanned ids, oldest first, while the budget lasts.
@@ -241,7 +275,7 @@ async function listIds(q, max, budget) {
 async function readNew(ids, box, budget, shape) {
   const seen = await scannedIds(ids);
   const fresh = ids.filter(id => !seen.has(id)).reverse();
-  const messages = []; const scanned = []; let attempted = 0;
+  const messages = []; const scanned = []; let attempted = 0; let readFailed = false;
   for (const id of fresh) {
     if (budget.units < COST.get) break;
     budget.units -= COST.get;
@@ -254,10 +288,14 @@ async function readNew(ids, box, budget, shape) {
       if (err.quota) { attempted--; budget.quotaHit = true; budget.units = 0; break; }
       // Deleted since the list: nothing to read, so don't try again.
       if (err.status === 404) { scanned.push(id); continue; }
+      // Any other read error (500, network, and the rest) was not read.
+      // It stays in the backlog so follow-ups are not caught up.
+      attempted--;
+      readFailed = true;
       console.error(`[gmail] skip ${box} ${id}: ${err.message}`);
     }
   }
-  return { messages, scanned, backlog: fresh.length - attempted };
+  return { messages, scanned, backlog: fresh.length - attempted, readFailed };
 }
 
 function inboxShape(m) {
@@ -277,16 +315,24 @@ function inboxShape(m) {
   };
 }
 
+function withListCoverage(listed, read) {
+  // A short list is not proof the mailbox was covered. Hold with backlog > 0.
+  if (listed.incomplete && read.backlog < 1) read.backlog = 1;
+  read.listIncomplete = listed.incomplete;
+  return read;
+}
+
 /** New inbox messages since a date, oldest first, within the budget. */
-async function scanInbox(since, budget = readBudget(), max = 300) {
+async function scanInbox(since, budget = readBudget()) {
   const after = Math.floor(new Date(since).getTime() / 1000);
-  const ids = await listIds(`in:inbox after:${after} -from:me`, max, budget);
-  return readNew(ids, 'inbox', budget, inboxShape);
+  const listed = await listIds(`in:inbox after:${after} -from:me`, budget);
+  const read = await readNew(listed.ids, 'inbox', budget, inboxShape);
+  return withListCoverage(listed, read);
 }
 
 /** Inbox messages since a date, newest last, in the shape classifyMessage expects. */
-async function inboxSince(since, max = 300) {
-  return (await scanInbox(since, readBudget(), max)).messages;
+async function inboxSince(since) {
+  return (await scanInbox(since, readBudget())).messages;
 }
 
 // RFC 3834 Auto-Submitted plus the common vendor headers for vacation replies.
@@ -298,11 +344,11 @@ function isAutoReply(headers) {
 }
 
 /** New messages Kelby sent from Gmail since a date (replies he sent outside the CRM), within the budget. */
-async function scanSent(since, budget = readBudget(), max = 100) {
+async function scanSent(since, budget = readBudget()) {
   const after = Math.floor(new Date(since).getTime() / 1000);
-  const ids = await listIds(`in:sent after:${after}`, Math.min(max, 100), budget);
+  const listed = await listIds(`in:sent after:${after}`, budget);
   const fromEmail = (await getSetting('gmail_oauth'))?.email || SENDER.email;
-  return readNew(ids, 'sent', budget, (m) => {
+  const read = await readNew(listed.ids, 'sent', budget, (m) => {
     const h = m.payload?.headers;
     const toHeader = header(h, 'to');
     return {
@@ -315,15 +361,16 @@ async function scanSent(since, budget = readBudget(), max = 100) {
       text: bodyText(m.payload).slice(0, 20000),
     };
   });
+  return withListCoverage(listed, read);
 }
 
 /** Messages Kelby sent from Gmail since a date (to catch replies he sent outside the CRM). */
-async function sentSince(since, max = 100) {
-  return (await scanSent(since, readBudget(), max)).messages;
+async function sentSince(since) {
+  return (await scanSent(since, readBudget())).messages;
 }
 
 module.exports = {
   status, authUrl, handleCallback, disconnect, sendMail, inboxSince, sentSince, scanInbox, scanSent, markScanned, purgeScanned,
-  readBudget, isQuotaError, COST, READ_BUDGET, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES,
-  _bodyText: bodyText, _setApiForTests,
+  readBudget, minuteReadBudget, isQuotaError, COST, READ_BUDGET, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES,
+  clockNow, _bodyText: bodyText, _setApiForTests, _setClockForTests, resetReadBudgetForTests,
 };
