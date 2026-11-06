@@ -599,6 +599,100 @@ describe('gmail quota fix round', () => {
     assert.equal(row.rows[0].status, 'stopped');
     assert.equal(row.rows[0].followup1_sent_at, null);
     assert.match(row.rows[0].stop_reason, /replied from gmail/i);
+    const dnc = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [lead.prospect.id]);
+    assert.equal(dnc.rows[0].do_not_contact, false);
+  });
+
+  it('B6 a sent reply on an unrelated thread does not stop follow-ups', async () => {
+    const sends = [];
+    gmail._setApiForTests(async (method, path, { params } = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        sends.push(1);
+        return { id: `sent-${sends.length}`, threadId: 'thr-b6-other' };
+      }
+      if (path === '/messages') {
+        if ((params.q || '').includes('in:sent')) return { messages: [{ id: 'sother', threadId: 'thr-unrelated' }] };
+        return { messages: [] };
+      }
+      if (String(path).endsWith('/sother')) {
+        return {
+          id: 'sother',
+          threadId: 'thr-unrelated',
+          internalDate: String(Date.now()),
+          payload: {
+            mimeType: 'text/plain',
+            headers: [
+              { name: 'To', value: 'Owner <test+b6other@example.com>' },
+              { name: 'Subject', value: 'Re: idea' },
+              { name: 'Message-ID', value: '<reply-other@mail>' },
+            ],
+            body: { data: Buffer.from('Different conversation.').toString('base64url') },
+          },
+        };
+      }
+      return { id: 'meta', payload: { headers: [{ name: 'Message-ID', value: '<meta@mail>' }] } };
+    });
+    const lead = await insertDueFollowup('b6other', 'test+b6other@example.com');
+    await pool.query(
+      `UPDATE proposals SET thread_id = 'thr-proposal', message_id = '<msg-b6-other@test>' WHERE id = $1`,
+      [lead.proposal.id]
+    );
+    const tick = await send.senderTick();
+    assert.equal(tick.sent, 1);
+    assert.equal(sends.length, 1);
+    const row = await pool.query(
+      'SELECT status, followup1_sent_at, stop_reason FROM proposals WHERE id = $1',
+      [lead.proposal.id]
+    );
+    assert.equal(row.rows[0].status, 'sent');
+    assert.ok(row.rows[0].followup1_sent_at);
+    assert.equal(row.rows[0].stop_reason, null);
+  });
+
+  it('B6 the original outbound email on the thread does not look like a reply', async () => {
+    const sends = [];
+    gmail._setApiForTests(async (method, path, { params } = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        sends.push(1);
+        return { id: `sent-${sends.length}`, threadId: 'thr-b6-orig' };
+      }
+      if (path === '/messages') {
+        if ((params.q || '').includes('in:sent')) return { messages: [{ id: 'sorig', threadId: 'thr-b6-orig' }] };
+        return { messages: [] };
+      }
+      if (String(path).endsWith('/sorig')) {
+        return {
+          id: 'sorig',
+          threadId: 'thr-b6-orig',
+          internalDate: String(Date.now()),
+          payload: {
+            mimeType: 'text/plain',
+            headers: [
+              { name: 'To', value: 'Owner <test+b6orig@example.com>' },
+              { name: 'Subject', value: 'idea' },
+              { name: 'Message-ID', value: '<msg-b6-orig@test>' },
+            ],
+            body: { data: Buffer.from('The first email we sent.').toString('base64url') },
+          },
+        };
+      }
+      return { id: 'meta', payload: { headers: [{ name: 'Message-ID', value: '<meta@mail>' }] } };
+    });
+    const lead = await insertDueFollowup('b6orig', 'test+b6orig@example.com');
+    await pool.query(
+      `UPDATE proposals SET thread_id = 'thr-b6-orig', message_id = '<msg-b6-orig@test>' WHERE id = $1`,
+      [lead.proposal.id]
+    );
+    const tick = await send.senderTick();
+    assert.equal(tick.sent, 1, 'the original send must not stop the sequence');
+    assert.equal(sends.length, 1);
+    const row = await pool.query(
+      'SELECT status, followup1_sent_at, stop_reason FROM proposals WHERE id = $1',
+      [lead.proposal.id]
+    );
+    assert.equal(row.rows[0].status, 'sent');
+    assert.ok(row.rows[0].followup1_sent_at);
+    assert.equal(row.rows[0].stop_reason, null);
   });
 
   it('B1 a mailbox larger than 10000 ids still reads the oldest first', async () => {
