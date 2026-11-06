@@ -291,7 +291,6 @@ async function approveAndSend(proposalId) {
             followup2_due_at = CASE WHEN COALESCE(followup2, '') <> '' THEN NOW() + make_interval(days => $4) END
       WHERE id = $1 RETURNING *`,
     [p.id, info.messageId || null, d1 ?? 3, d2 ?? 10, info.threadId || null]);
-  await recordSentIdentifiers(p.id, info);
 
   await pool.query(
     `UPDATE prospects SET last_contacted_at = NOW(), email = COALESCE(NULLIF(email, ''), $2),
@@ -306,37 +305,6 @@ async function approveAndSend(proposalId) {
 
 async function logActivity(prospectId, type, body) {
   await pool.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, $2, $3)`, [prospectId, type, body]);
-}
-
-// Strip one pair of angle brackets, trim, and lower-case. `<Id@mail>` and
-// `id@mail` are the same Message-ID. A Gmail API id has no brackets.
-function normalizeMessageId(value) {
-  let id = String(value || '').trim().toLowerCase();
-  if (id.startsWith('<') && id.endsWith('>') && id.length > 2) id = id.slice(1, -1).trim();
-  return id;
-}
-
-// The Message-ID Gmail stored for mail we sent, plus the Gmail API id when
-// the header never came back. A later Sent scan skips these so our own mail
-// is not treated as a reply. Blank ids are not stored. A failure is logged
-// by code only and does not fail the send.
-async function recordOutboundMessageId(proposalId, messageId) {
-  const id = normalizeMessageId(messageId);
-  if (!id || id.length > 998) return;
-  try {
-    await pool.query(
-      `INSERT INTO proposal_outbound_ids (proposal_id, message_id) VALUES ($1, $2)
-       ON CONFLICT (proposal_id, message_id) DO NOTHING`,
-      [proposalId, id]);
-  } catch (err) {
-    console.error('[send] could not record outbound message id:', err.code || 'error');
-  }
-}
-
-async function recordSentIdentifiers(proposalId, info) {
-  if (!info) return;
-  await recordOutboundMessageId(proposalId, info.messageId);
-  await recordOutboundMessageId(proposalId, info.id);
 }
 
 async function stopSequence(proposalId, reason, status = 'stopped') {
@@ -399,7 +367,6 @@ async function sendDueFollowups() {
         headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
       });
       sent++;
-      await recordSentIdentifiers(p.id, info);
       if (info && typeof info.id === 'string') {
         try { await gmail.markScanned([{ id: info.id, box: 'sent' }]); } catch (err) { console.error('[gmail] could not record sent id:', err.code || 'error'); }
       }
@@ -747,6 +714,6 @@ function _resetFollowupHoldForTests() {
 
 module.exports = {
   approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, holdFollowups, followupsAfterInbox, stopSequence, classifyMessage, applyOutcome,
-  renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport, normalizeMessageId,
+  renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
   HOLD_ALERT_AFTER_TICKS, SCAN_TIMEOUT_MS, _resetFollowupHoldForTests,
 };
