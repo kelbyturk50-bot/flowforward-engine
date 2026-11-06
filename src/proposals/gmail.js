@@ -157,12 +157,16 @@ async function sendMail(mail) {
   const from = typeof mail.from === 'object' ? { ...mail.from, address: fromAddr } : fromAddr;
   const raw = await new MailComposer({ ...mail, from, threadId: undefined }).compile().build();
   const sent = await gmail('post', '/messages/send', { data: { raw: toBase64Url(raw), ...(mail.threadId ? { threadId: mail.threadId } : {}) } });
-  // Read back the Message-ID Gmail actually used, for threading follow-ups.
+  // Read back the Message-ID Gmail actually used. The header is sometimes
+  // missing on the first metadata read, so try a few times before giving up.
+  // Threading still works via threadId when every read comes back empty.
   let messageId = null;
-  try {
-    const meta = await gmail('get', `/messages/${sent.id}`, { params: { format: 'metadata', metadataHeaders: 'Message-ID' } });
-    messageId = (meta.payload?.headers || []).find(h => h.name.toLowerCase() === 'message-id')?.value || null;
-  } catch { /* threading still works via threadId */ }
+  for (let attempt = 0; attempt < 3 && !messageId; attempt++) {
+    try {
+      const meta = await gmail('get', `/messages/${sent.id}`, { params: { format: 'metadata', metadataHeaders: 'Message-ID' } });
+      messageId = (meta.payload?.headers || []).find(h => h.name.toLowerCase() === 'message-id')?.value || null;
+    } catch { /* try again */ }
+  }
   return { id: sent.id, threadId: sent.threadId, messageId };
 }
 

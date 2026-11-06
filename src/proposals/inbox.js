@@ -504,48 +504,53 @@ async function detail(id) {
 
 // ── Replies Kelby sent straight from Gmail ───────────────────────────────
 // A message in the sent folder on the proposal's thread is Kelby writing
-// back outside the CRM, unless it is mail we sent. That is a Message-ID we
-// stored (the first email, or a follow-up recorded at send time), or the
-// text of a follow-up whose sent timestamp is already set. The second case
-// covers a follow-up that went out before those ids were stored and is not
-// in gmail_scanned_messages. The message date is not used.
+// back outside the CRM, unless it is mail we sent. That is a Message-ID or
+// Gmail id we stored, or an exact match of the rendered follow-up (the text
+// that actually went out). A prefix of that text is still a reply. The
+// message date is not used.
 function flatMail(text) {
   return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-// A short copy such as "Hi" would swallow an unrelated reply. A real
-// follow-up is a sentence. Twelve characters is enough for "Follow up one".
-function textIsOurCopy(sentText, copy) {
-  const body = flatMail(sentText);
-  const ours = flatMail(copy);
-  if (ours.length < 12) return false;
-  if (body === ours) return true;
-  if (!body.startsWith(ours)) return false;
-  return body.charAt(ours.length) === ' ';
+async function idsWeSent(proposal) {
+  const ids = new Set();
+  const first = send().normalizeMessageId(proposal.message_id);
+  if (first) ids.add(first);
+  const { rows } = await pool.query(
+    `SELECT message_id FROM proposal_outbound_ids WHERE proposal_id = $1`,
+    [proposal.id]);
+  for (const row of rows) {
+    const id = send().normalizeMessageId(row.message_id);
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+async function renderedFollowup(proposal, which) {
+  const draft = { ...proposal };
+  await send().attachPrototypeUrl(draft);
+  return flatMail(send().renderMessage(draft, which));
 }
 
 async function isOurOutbound(proposal, msg) {
-  const headerId = String(msg.messageIdHeader || '').trim().toLowerCase();
-  if (headerId) {
-    const first = String(proposal.message_id || '').trim().toLowerCase();
-    if (first && headerId === first) return true;
-    const { rows } = await pool.query(
-      `SELECT 1 FROM proposal_outbound_ids
-        WHERE proposal_id = $1 AND lower(btrim(message_id)) = $2
-        LIMIT 1`,
-      [proposal.id, headerId]);
-    if (rows.length) return true;
-  }
-  if (proposal.followup1_sent_at && textIsOurCopy(msg.text, proposal.followup1)) return true;
-  if (proposal.followup2_sent_at && textIsOurCopy(msg.text, proposal.followup2)) return true;
+  const headerId = send().normalizeMessageId(msg.messageIdHeader);
+  const gmailId = send().normalizeMessageId(msg.id);
+  const known = await idsWeSent(proposal);
+  if ((headerId && known.has(headerId)) || (gmailId && known.has(gmailId))) return true;
+  const text = flatMail(msg.text);
+  if (!text) return false;
+  if (proposal.followup1_sent_at && text === await renderedFollowup(proposal, 'followup1')) return true;
+  if (proposal.followup2_sent_at && text === await renderedFollowup(proposal, 'followup2')) return true;
   return false;
 }
 
 async function stopFollowupsForSentReply(msg) {
   const { rows } = await pool.query(
-    `SELECT id, message_id, prospect_id, followup1, followup2, followup1_sent_at, followup2_sent_at
-       FROM proposals
-      WHERE status = 'sent' AND thread_id = $1`,
+    `SELECT pr.id, pr.message_id, pr.prospect_id, pr.slug, pr.subject, pr.body, pr.followup1, pr.followup2,
+            pr.followup1_sent_at, pr.followup2_sent_at, p.company
+       FROM proposals pr
+       JOIN prospects p ON p.id = pr.prospect_id
+      WHERE pr.status = 'sent' AND pr.thread_id = $1`,
     [msg.threadId]);
   for (const p of rows) {
     if (await isOurOutbound(p, msg)) continue;

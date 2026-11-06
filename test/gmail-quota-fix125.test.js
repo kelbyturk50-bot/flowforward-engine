@@ -743,11 +743,12 @@ describe('gmail quota fix round', () => {
         WHERE id = $1`,
       [lead.proposal.id]
     );
-    const { rows: [proposal] } = await pool.query('SELECT sent_at FROM proposals WHERE id = $1', [lead.proposal.id]);
+    const { rows: [proposal] } = await pool.query('SELECT * FROM proposals WHERE id = $1', [lead.proposal.id]);
     const sentAt = new Date(proposal.sent_at).getTime();
+    const rendered = send.renderMessage(proposal, 'followup1');
     installSent([
       sentMessage('sorig', 'thr-hist', '<msg-hist@test>', 'Hi', sentAt - 60 * 1000),
-      sentMessage('sfu1', 'thr-hist', '<fu1-hist@mail>', 'Follow up one', sentAt + 3 * 24 * 60 * 60 * 1000),
+      sentMessage('sfu1', 'thr-hist', '<fu1-hist@mail>', rendered, sentAt + 3 * 24 * 60 * 60 * 1000),
     ], sends);
     const scanned = await pool.query(`SELECT COUNT(*)::int AS n FROM gmail_scanned_messages`);
     const stored = await pool.query(
@@ -797,6 +798,275 @@ describe('gmail quota fix round', () => {
     assert.equal(row.rows[0].status, 'stopped');
     assert.equal(row.rows[0].followup2_sent_at, null);
     assert.match(row.rows[0].stop_reason, /replied from gmail/i);
+  });
+
+  async function dueFollowup2(tag, threadId, messageId) {
+    const lead = await insertDueFollowup(tag, `test+${tag}@example.com`);
+    await pool.query(
+      `UPDATE proposals
+          SET thread_id = $2, message_id = $3,
+              followup1_sent_at = NOW() - INTERVAL '2 days',
+              followup2_due_at = NOW() - INTERVAL '1 hour'
+        WHERE id = $1`,
+      [lead.proposal.id, threadId, messageId]
+    );
+    const { rows: [proposal] } = await pool.query(
+      `SELECT pr.*, p.company FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`,
+      [lead.proposal.id]
+    );
+    return { lead, proposal };
+  }
+
+  it('B8 a rendered follow-up with an expanded one-pager link does not stop follow-up 2', async () => {
+    const sends = [];
+    const { lead, proposal } = await dueFollowup2('b8render', 'thr-b8', '<msg-b8@test>');
+    await pool.query(`UPDATE proposals SET followup1 = $2 WHERE id = $1`, [
+      proposal.id,
+      'The detail is on {{ONEPAGER_URL}} whenever you want it.',
+    ]);
+    const { rows: [fresh] } = await pool.query(
+      `SELECT pr.*, p.company FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`,
+      [proposal.id]
+    );
+    await send.attachPrototypeUrl(fresh);
+    const rendered = send.renderMessage(fresh, 'followup1');
+    assert.ok(rendered.includes(`/p/${fresh.slug}`));
+    assert.equal(rendered.includes('{{ONEPAGER_URL}}'), false);
+    const sentAt = new Date(fresh.sent_at).getTime();
+    installSent([
+      sentMessage('sorig', 'thr-b8', '<msg-b8@test>', 'Hi', sentAt - 60 * 1000),
+      sentMessage('sfu1', 'thr-b8', '<fu1-b8@mail>', rendered, sentAt + 3 * 24 * 60 * 60 * 1000),
+    ], sends);
+    const stored = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM proposal_outbound_ids WHERE proposal_id = $1',
+      [lead.proposal.id]
+    );
+    assert.equal(stored.rows[0].n, 0);
+    const tick = await send.senderTick();
+    assert.equal(tick.sent, 1);
+    assert.equal(sends.length, 1);
+    const row = await pool.query(
+      'SELECT status, followup2_sent_at, stop_reason FROM proposals WHERE id = $1',
+      [lead.proposal.id]
+    );
+    assert.equal(row.rows[0].status, 'sent');
+    assert.ok(row.rows[0].followup2_sent_at);
+    assert.equal(row.rows[0].stop_reason, null);
+  });
+
+  it('B8 a reply that only prefixes the follow-up text still stops', async () => {
+    const sends = [];
+    const { lead, proposal } = await dueFollowup2('b8prefix', 'thr-b8p', '<msg-b8p@test>');
+    await send.attachPrototypeUrl(proposal);
+    const rendered = send.renderMessage(proposal, 'followup1');
+    const sentAt = new Date(proposal.sent_at).getTime();
+    installSent([
+      sentMessage('sfu1', 'thr-b8p', '<fu1-b8p@mail>', rendered, sentAt + 3 * 24 * 60 * 60 * 1000),
+      sentMessage('smanual', 'thr-b8p', '<manual-b8p@mail>', 'Follow up one more thought from the owner.', sentAt + 4 * 24 * 60 * 60 * 1000),
+    ], sends);
+    const tick = await send.senderTick();
+    assert.equal(tick.sent, 0);
+    assert.equal(sends.length, 0);
+    const row = await pool.query(
+      'SELECT status, followup2_sent_at, stop_reason FROM proposals WHERE id = $1',
+      [lead.proposal.id]
+    );
+    assert.equal(row.rows[0].status, 'stopped');
+    assert.equal(row.rows[0].followup2_sent_at, null);
+    assert.match(row.rows[0].stop_reason, /replied from gmail/i);
+  });
+
+  it('B8 a bracketed outbound id matches a bare Message-ID', async () => {
+    const sends = [];
+    const { lead } = await dueFollowup2('b8norm', 'thr-b8n', '<msg-b8n@test>');
+    await pool.query(
+      `INSERT INTO proposal_outbound_ids (proposal_id, message_id) VALUES ($1, '<Fu-Norm@mail>')`,
+      [lead.proposal.id]
+    );
+    installSent([
+      sentMessage('sfu1', 'thr-b8n', 'fu-norm@mail', 'Follow up one more thought from the owner.'),
+    ], sends);
+    const tick = await send.senderTick();
+    assert.equal(tick.sent, 1);
+    assert.equal(sends.length, 1);
+    const row = await pool.query('SELECT status, stop_reason FROM proposals WHERE id = $1', [lead.proposal.id]);
+    assert.equal(row.rows[0].status, 'sent');
+    assert.equal(row.rows[0].stop_reason, null);
+  });
+
+  it('B9 a missing Message-ID is read on retry and follow-up 1 still sends', async () => {
+    const p = await insertProspect({
+      company: 'TEST: Fix125 b9retry',
+      industry: 'HVAC',
+      city: 'Lehi',
+      state: 'UT',
+      google_place_id: 'test-place-fix125-b9retry',
+      website: null,
+      email: 'test+b9retry@example.com',
+    });
+    const { rows: [draft] } = await pool.query(
+      `INSERT INTO proposals (prospect_id, version, status, slug, to_email, subject, body, followup1, followup2)
+       VALUES ($1, 1, 'draft', $2, $3, 'idea', 'Hi there', 'Follow up one', 'Follow up two')
+       RETURNING *`,
+      [p.id, `test-fix125-b9retry-${Date.now()}`, 'test+b9retry@example.com']
+    );
+    let metaHits = 0;
+    const sends = [];
+    gmail._setApiForTests(async (method, path, { params } = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        sends.push(1);
+        return { id: 'gfirst', threadId: 'thr-b9' };
+      }
+      if (String(path).endsWith('/gfirst') && params && params.format === 'metadata') {
+        metaHits += 1;
+        if (metaHits < 3) return { id: 'gfirst', payload: { headers: [] } };
+        return { id: 'gfirst', payload: { headers: [{ name: 'Message-ID', value: '<First-B9@mail>' }] } };
+      }
+      if (path === '/messages') {
+        if ((params.q || '').includes('in:sent') && sends.length) {
+          return { messages: [{ id: 'gscan', threadId: 'thr-b9' }] };
+        }
+        return { messages: [] };
+      }
+      if (String(path).endsWith('/gscan')) {
+        return sentMessage('gscan', 'thr-b9', 'first-b9@mail', 'Not the template we sent.');
+      }
+      return { id: 'meta', payload: { headers: [{ name: 'Message-ID', value: '<meta@mail>' }] } };
+    });
+    const sentRow = await send.approveAndSend(draft.id);
+    assert.equal(metaHits, 3);
+    assert.equal(sentRow.message_id, '<First-B9@mail>');
+    await pool.query(
+      `UPDATE proposals SET followup1_due_at = NOW() - INTERVAL '1 hour' WHERE id = $1`,
+      [draft.id]
+    );
+    const tick = await send.senderTick();
+    assert.equal(tick.sent, 1);
+    assert.equal(sends.length, 2);
+    const row = await pool.query(
+      'SELECT status, followup1_sent_at, stop_reason FROM proposals WHERE id = $1',
+      [draft.id]
+    );
+    assert.equal(row.rows[0].status, 'sent');
+    assert.ok(row.rows[0].followup1_sent_at);
+    assert.equal(row.rows[0].stop_reason, null);
+  });
+
+  it('B9 a send with no Message-ID still recognizes the Gmail id', async () => {
+    const p = await insertProspect({
+      company: 'TEST: Fix125 b9id',
+      industry: 'HVAC',
+      city: 'Lehi',
+      state: 'UT',
+      google_place_id: 'test-place-fix125-b9id',
+      website: null,
+      email: 'test+b9id@example.com',
+    });
+    const { rows: [draft] } = await pool.query(
+      `INSERT INTO proposals (prospect_id, version, status, slug, to_email, subject, body, followup1, followup2)
+       VALUES ($1, 1, 'draft', $2, $3, 'idea', 'Hi there', 'Follow up one', 'Follow up two')
+       RETURNING *`,
+      [p.id, `test-fix125-b9id-${Date.now()}`, 'test+b9id@example.com']
+    );
+    let metaHits = 0;
+    const sends = [];
+    gmail._setApiForTests(async (method, path, { params } = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        sends.push(path === '/messages/send' ? 1 : 0);
+        return { id: 'gnoid', threadId: 'thr-b9b' };
+      }
+      if (String(path).endsWith('/gnoid') && params && params.format === 'metadata') {
+        metaHits += 1;
+        return { id: 'gnoid', payload: { headers: [] } };
+      }
+      if (path === '/messages') {
+        if ((params.q || '').includes('in:sent') && sends.length) {
+          return { messages: [{ id: 'gnoid', threadId: 'thr-b9b' }] };
+        }
+        return { messages: [] };
+      }
+      if (String(path).endsWith('/gnoid') && !(params && params.format === 'metadata')) {
+        return sentMessage('gnoid', 'thr-b9b', '<never-stored@mail>', 'Not the template we sent.');
+      }
+      return { id: 'meta', payload: { headers: [{ name: 'Message-ID', value: '<meta@mail>' }] } };
+    });
+    const sentRow = await send.approveAndSend(draft.id);
+    assert.equal(metaHits, 3);
+    assert.equal(sentRow.message_id, null);
+    const stored = await pool.query(
+      'SELECT message_id FROM proposal_outbound_ids WHERE proposal_id = $1',
+      [draft.id]
+    );
+    assert.ok(stored.rows.some((r) => r.message_id === 'gnoid'));
+    await pool.query(
+      `UPDATE proposals SET followup1_due_at = NOW() - INTERVAL '1 hour' WHERE id = $1`,
+      [draft.id]
+    );
+    const tick = await send.senderTick();
+    assert.equal(tick.sent, 1);
+    assert.equal(sends.length, 2);
+    const row = await pool.query(
+      'SELECT status, followup1_sent_at, stop_reason FROM proposals WHERE id = $1',
+      [draft.id]
+    );
+    assert.equal(row.rows[0].status, 'sent');
+    assert.ok(row.rows[0].followup1_sent_at);
+    assert.equal(row.rows[0].stop_reason, null);
+  });
+
+  it('B9 a follow-up Message-ID recorded at send is what the next scan trusts', async () => {
+    const sends = [];
+    let phase = 'first';
+    gmail._setApiForTests(async (method, path, { params } = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        sends.push(1);
+        return { id: 'gfu', threadId: 'thr-b9c' };
+      }
+      if (String(path).endsWith('/gfu') && params && params.format === 'metadata') {
+        return { id: 'gfu', payload: { headers: [{ name: 'Message-ID', value: '<Fu-Keep@mail>' }] } };
+      }
+      if (path === '/messages') {
+        if ((params.q || '').includes('in:sent')) {
+          const ids = phase === 'first'
+            ? [{ id: 'sorig', threadId: 'thr-b9c' }]
+            : [{ id: 'sorig', threadId: 'thr-b9c' }, { id: 'gfu', threadId: 'thr-b9c' }];
+          return { messages: ids };
+        }
+        return { messages: [] };
+      }
+      if (String(path).endsWith('/sorig')) {
+        return sentMessage('sorig', 'thr-b9c', '<msg-b9c@test>', 'Hi');
+      }
+      if (String(path).endsWith('/gfu')) {
+        return sentMessage('gfu', 'thr-b9c', '<fu-keep@mail>', 'Follow up one more thought from the owner.');
+      }
+      return { id: 'meta', payload: { headers: [{ name: 'Message-ID', value: '<meta@mail>' }] } };
+    });
+    const { lead } = await dueFollowup2('b9keep', 'thr-b9c', '<msg-b9c@test>');
+    await pool.query(
+      `UPDATE proposals SET followup1_sent_at = NULL, followup1_due_at = NOW() - INTERVAL '1 hour',
+              followup2_due_at = NOW() - INTERVAL '1 hour'
+        WHERE id = $1`,
+      [lead.proposal.id]
+    );
+    const first = await send.senderTick();
+    assert.equal(first.sent, 1);
+    const stored = await pool.query(
+      'SELECT message_id FROM proposal_outbound_ids WHERE proposal_id = $1',
+      [lead.proposal.id]
+    );
+    assert.ok(stored.rows.some((r) => r.message_id === 'fu-keep@mail'));
+    phase = 'second';
+    await pool.query(
+      `UPDATE proposals SET followup2_due_at = NOW() - INTERVAL '1 hour' WHERE id = $1`,
+      [lead.proposal.id]
+    );
+    const second = await send.senderTick();
+    assert.equal(second.sent, 1);
+    assert.equal(sends.length, 2);
+    const row = await pool.query('SELECT status, stop_reason FROM proposals WHERE id = $1', [lead.proposal.id]);
+    assert.equal(row.rows[0].status, 'sent');
+    assert.equal(row.rows[0].stop_reason, null);
   });
 
   it('B1 a mailbox of 10002 ids still reads the oldest first', async () => {
