@@ -197,19 +197,40 @@ const MINUTE_MS = 60 * 1000;
 
 function readBudget(units = READ_BUDGET) { return { units, quotaHit: false }; }
 
-// The cron scan and POST /api/proposals/check-inbox both charge this object,
-// so two checks in the same minute cannot each spend READ_BUDGET.
+// The cron scan and POST /api/proposals/check-inbox both charge the bucket
+// for the wall-clock minute of each call. A scan that starts in one minute
+// and continues into the next is charged to the new minute from then on,
+// and a later check in that minute sees what the scan already spent.
 let nowFn = () => Date.now();
 let minuteBucket = null;
 
 function clockNow() { return nowFn(); }
 
-function minuteReadBudget() {
+function currentMinuteBucket() {
   const minute = Math.floor(clockNow() / MINUTE_MS);
   if (!minuteBucket || minuteBucket.minute !== minute) {
     minuteBucket = { minute, units: READ_BUDGET, quotaHit: false };
   }
   return minuteBucket;
+}
+
+// A live view. listIds and readNew keep one object for the whole scan, and
+// every read of units or quotaHit follows the clock into the current minute.
+function minuteReadBudget() {
+  const view = {};
+  Object.defineProperties(view, {
+    units: {
+      enumerable: true,
+      get() { return currentMinuteBucket().units; },
+      set(value) { currentMinuteBucket().units = value; },
+    },
+    quotaHit: {
+      enumerable: true,
+      get() { return currentMinuteBucket().quotaHit; },
+      set(value) { currentMinuteBucket().quotaHit = value; },
+    },
+  });
+  return view;
 }
 
 function _setClockForTests(fn) {

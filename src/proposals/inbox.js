@@ -503,11 +503,31 @@ async function detail(id) {
 }
 
 // ── Replies Kelby sent straight from Gmail ───────────────────────────────
-/** Mark open items handled when Kelby already replied in the same Gmail thread. */
+// A later message in the sent folder on the proposal's thread is Kelby
+// writing back outside the CRM. Stop follow-ups. The first email we sent
+// (same Message-ID, or dated at or before sent_at) is not that reply.
+async function stopFollowupsForSentReply(msg) {
+  const headerId = String(msg.messageIdHeader || '').trim().toLowerCase();
+  const { rows } = await pool.query(
+    `SELECT id, message_id, sent_at, prospect_id FROM proposals
+      WHERE status = 'sent' AND thread_id = $1`,
+    [msg.threadId]);
+  for (const p of rows) {
+    const stored = String(p.message_id || '').trim().toLowerCase();
+    if (headerId && stored && headerId === stored) continue;
+    if (msg.date && p.sent_at && new Date(msg.date) <= new Date(p.sent_at)) continue;
+    const stopped = await send().stopSequence(p.id, 'Replied from Gmail');
+    if (stopped) await logActivity(p.prospect_id, 'email', 'Replied from Gmail.');
+  }
+}
+
+/** Mark open items handled when Kelby already replied in the same Gmail thread.
+ *  Also stops follow-ups on a sent proposal in that thread. */
 async function applySentMessages(sentMessages) {
   let handled = 0;
   for (const msg of sentMessages) {
     if (!msg.threadId) continue;
+    await stopFollowupsForSentReply(msg);
     const { rows } = await pool.query(
       `SELECT i.id, i.prospect_id, i.proposal_id, m.received_at FROM inbox_items i JOIN inbox_messages m ON m.id = i.message_id
         WHERE m.thread_id = $1 AND i.status = ANY('{queued,ready,failed,fyi}') ORDER BY m.received_at DESC LIMIT 1`, [msg.threadId]);

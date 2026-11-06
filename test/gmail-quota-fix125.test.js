@@ -59,7 +59,7 @@ function installApi({ inboxIds = [], sentIds = [], failGet = null, hangGet = nul
   let inbox = inboxIds.slice();
   let sent = sentIds.slice();
   gmail._setApiForTests(async (method, path, { data, params } = {}) => {
-    const call = { method, path, params, data };
+    const call = { method, path, params, data, at: gmail.clockNow() };
     calls.push(call);
     if (method === 'post' && path === '/messages/send') {
       sends.push({ data, params });
@@ -522,6 +522,92 @@ describe('gmail quota fix round', () => {
     await resetDb();
     const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM gmail_scanned_messages');
     assert.equal(rows[0].n, 0);
+  });
+
+  it('B5 a scan that crosses a minute cannot push the next check over 6000 units', async () => {
+    now = Date.parse('2026-11-06T18:00:50Z');
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let seen;
+    const started = new Promise((r) => { seen = r; });
+    let hung = false;
+    const api = installApi({
+      inboxIds: newestFirstIds(150),
+      hangGet: async (id) => {
+        if (!hung && id === 'm0001') { hung = true; seen(); await gate; }
+      },
+    });
+    await insertDueFollowup('b5-minute');
+    const inflight = send.checkInbox();
+    try {
+      await started;
+      now = Date.parse('2026-11-06T18:01:01Z');
+    } finally {
+      release();
+      await inflight.catch(() => {});
+    }
+    await send.checkInbox();
+    const minuteKey = Math.floor(Date.parse('2026-11-06T18:01:01Z') / 60000);
+    const spent = api.calls
+      .filter((c) => Math.floor(c.at / 60000) === minuteKey)
+      .reduce((n, c) => n + countUnits(c), 0);
+    assert.ok(spent <= 6000, `the new minute spent ${spent} units`);
+    assert.equal(api.sends.length, 0);
+  });
+
+  it('B6 a sent-folder reply on the proposal thread stops follow-ups', async () => {
+    const sends = [];
+    gmail._setApiForTests(async (method, path, { params } = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        sends.push(1);
+        return { id: `sent-${sends.length}`, threadId: 'thr-b6' };
+      }
+      if (path === '/messages') {
+        if ((params.q || '').includes('in:sent')) return { messages: [{ id: 'sreply1', threadId: 'thr-b6' }] };
+        return { messages: [] };
+      }
+      if (String(path).endsWith('/sreply1')) {
+        return {
+          id: 'sreply1',
+          threadId: 'thr-b6',
+          internalDate: String(Date.now()),
+          payload: {
+            mimeType: 'text/plain',
+            headers: [
+              { name: 'To', value: 'Owner <test+b6sent@example.com>' },
+              { name: 'Subject', value: 'Re: idea' },
+              { name: 'Message-ID', value: '<reply-b6@mail>' },
+            ],
+            body: { data: Buffer.from('Sounds good, talk soon.').toString('base64url') },
+          },
+        };
+      }
+      return { id: 'meta', payload: { headers: [{ name: 'Message-ID', value: '<meta@mail>' }] } };
+    });
+    const lead = await insertDueFollowup('b6sent', 'test+b6sent@example.com');
+    await pool.query(
+      `UPDATE proposals SET thread_id = 'thr-b6', message_id = '<msg-b6@test>' WHERE id = $1`,
+      [lead.proposal.id]
+    );
+    const tick = await send.senderTick();
+    assert.equal(tick.sent, 0);
+    assert.equal(sends.length, 0);
+    const row = await pool.query(
+      'SELECT status, followup1_sent_at, stop_reason FROM proposals WHERE id = $1',
+      [lead.proposal.id]
+    );
+    assert.equal(row.rows[0].status, 'stopped');
+    assert.equal(row.rows[0].followup1_sent_at, null);
+    assert.match(row.rows[0].stop_reason, /replied from gmail/i);
+  });
+
+  it('B1 a mailbox larger than 10000 ids still reads the oldest first', async () => {
+    const n = 10001;
+    const ids = Array.from({ length: n }, (_, i) => `m${String(n - i).padStart(5, '0')}`);
+    installApi({ inboxIds: ids });
+    const r = await gmail.scanInbox(new Date('2026-10-01T00:00:00Z'), gmail.readBudget());
+    assert.equal(r.messages[0].id, 'm00001');
+    assert.ok(r.backlog > 0);
   });
 
   it('gmail axios catch marks a 429 and a 403 rateLimitExceeded as quota', async () => {

@@ -355,7 +355,7 @@ async function sendDueFollowups() {
     if (!claim.rows.length) continue;
     await attachPrototypeUrl(p);
     try {
-      await (await mailer()).sendMail({
+      const info = await (await mailer()).sendMail({
         threadId: p.thread_id || undefined,
         from: { name: SENDER.name, address: SENDER.email },
         to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
@@ -367,6 +367,9 @@ async function sendDueFollowups() {
         headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
       });
       sent++;
+      if (info && typeof info.id === 'string') {
+        try { await gmail.markScanned([{ id: info.id, box: 'sent' }]); } catch (err) { console.error('[gmail] could not record sent id:', err.code || 'error'); }
+      }
       await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
       await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${p.to_email}.`);
     } catch (err) {
