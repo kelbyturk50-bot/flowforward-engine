@@ -695,6 +695,101 @@ describe('gmail quota fix round', () => {
     assert.equal(row.rows[0].stop_reason, null);
   });
 
+  function sentMessage(id, threadId, messageId, text) {
+    return {
+      id,
+      threadId,
+      internalDate: String(Date.now()),
+      payload: {
+        mimeType: 'text/plain',
+        headers: [
+          { name: 'To', value: 'Owner <test+b7@example.com>' },
+          { name: 'Subject', value: 'Re: idea' },
+          { name: 'Message-ID', value: messageId },
+        ],
+        body: { data: Buffer.from(text).toString('base64url') },
+      },
+    };
+  }
+
+  function installSent(messages, sends) {
+    const byId = new Map(messages.map((m) => [m.id, m]));
+    gmail._setApiForTests(async (method, path, { params } = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        sends.push(1);
+        return { id: `sent-${sends.length}`, threadId: messages[0].threadId };
+      }
+      if (path === '/messages') {
+        if ((params.q || '').includes('in:sent')) {
+          return { messages: messages.map((m) => ({ id: m.id, threadId: m.threadId })) };
+        }
+        return { messages: [] };
+      }
+      const id = String(path).split('/').pop();
+      if (byId.has(id)) return byId.get(id);
+      return { id, payload: { headers: [{ name: 'Message-ID', value: `<${id}@mail>` }] } };
+    });
+  }
+
+  it('B7 a recorded follow-up 1 in Sent still lets follow-up 2 send', async () => {
+    const sends = [];
+    installSent([sentMessage('sfu1', 'thr-b7-fu', '<fu1-b7@mail>', 'Following up on the note.')], sends);
+    const lead = await insertDueFollowup('b7fu', 'test+b7fu@example.com');
+    await pool.query(
+      `UPDATE proposals
+          SET thread_id = 'thr-b7-fu',
+              followup1_sent_at = NOW() - INTERVAL '1 day',
+              followup2_due_at = NOW() - INTERVAL '1 hour'
+        WHERE id = $1`,
+      [lead.proposal.id]
+    );
+    await pool.query(
+      `INSERT INTO proposal_outbound_ids (proposal_id, message_id) VALUES ($1, '<fu1-b7@mail>')`,
+      [lead.proposal.id]
+    );
+    const tick = await send.senderTick();
+    assert.equal(tick.sent, 1);
+    assert.equal(sends.length, 1);
+    const row = await pool.query(
+      'SELECT status, followup2_sent_at, stop_reason FROM proposals WHERE id = $1',
+      [lead.proposal.id]
+    );
+    assert.equal(row.rows[0].status, 'sent');
+    assert.ok(row.rows[0].followup2_sent_at);
+    assert.equal(row.rows[0].stop_reason, null);
+  });
+
+  it('B7 a manual reply after follow-up 1 stops the sequence', async () => {
+    const sends = [];
+    installSent([
+      sentMessage('sfu1', 'thr-b7-manual', '<fu1-b7b@mail>', 'Following up on the note.'),
+      sentMessage('smanual', 'thr-b7-manual', '<manual-b7@mail>', 'Sounds good, I will call you.'),
+    ], sends);
+    const lead = await insertDueFollowup('b7manual', 'test+b7manual@example.com');
+    await pool.query(
+      `UPDATE proposals
+          SET thread_id = 'thr-b7-manual',
+              followup1_sent_at = NOW() - INTERVAL '1 day',
+              followup2_due_at = NOW() - INTERVAL '1 hour'
+        WHERE id = $1`,
+      [lead.proposal.id]
+    );
+    await pool.query(
+      `INSERT INTO proposal_outbound_ids (proposal_id, message_id) VALUES ($1, '<fu1-b7b@mail>')`,
+      [lead.proposal.id]
+    );
+    const tick = await send.senderTick();
+    assert.equal(tick.sent, 0);
+    assert.equal(sends.length, 0);
+    const row = await pool.query(
+      'SELECT status, followup2_sent_at, stop_reason FROM proposals WHERE id = $1',
+      [lead.proposal.id]
+    );
+    assert.equal(row.rows[0].status, 'stopped');
+    assert.equal(row.rows[0].followup2_sent_at, null);
+    assert.match(row.rows[0].stop_reason, /replied from gmail/i);
+  });
+
   it('B1 a mailbox larger than 10000 ids still reads the oldest first', async () => {
     const n = 10001;
     const ids = Array.from({ length: n }, (_, i) => `m${String(n - i).padStart(5, '0')}`);

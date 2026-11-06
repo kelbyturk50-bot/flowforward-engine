@@ -291,6 +291,7 @@ async function approveAndSend(proposalId) {
             followup2_due_at = CASE WHEN COALESCE(followup2, '') <> '' THEN NOW() + make_interval(days => $4) END
       WHERE id = $1 RETURNING *`,
     [p.id, info.messageId || null, d1 ?? 3, d2 ?? 10, info.threadId || null]);
+  await recordOutboundMessageId(p.id, info && info.messageId);
 
   await pool.query(
     `UPDATE prospects SET last_contacted_at = NOW(), email = COALESCE(NULLIF(email, ''), $2),
@@ -305,6 +306,22 @@ async function approveAndSend(proposalId) {
 
 async function logActivity(prospectId, type, body) {
   await pool.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, $2, $3)`, [prospectId, type, body]);
+}
+
+// The Message-ID Gmail stored for mail we sent. A later Sent scan skips these
+// so a follow-up is not treated as a reply typed in Gmail. Blank ids are not
+// stored. A failure is logged by code only and does not fail the send.
+async function recordOutboundMessageId(proposalId, messageId) {
+  const id = String(messageId || '').trim();
+  if (!id || id.length > 998) return;
+  try {
+    await pool.query(
+      `INSERT INTO proposal_outbound_ids (proposal_id, message_id) VALUES ($1, $2)
+       ON CONFLICT (proposal_id, message_id) DO NOTHING`,
+      [proposalId, id]);
+  } catch (err) {
+    console.error('[send] could not record outbound message id:', err.code || 'error');
+  }
 }
 
 async function stopSequence(proposalId, reason, status = 'stopped') {
@@ -367,6 +384,7 @@ async function sendDueFollowups() {
         headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
       });
       sent++;
+      await recordOutboundMessageId(p.id, info && info.messageId);
       if (info && typeof info.id === 'string') {
         try { await gmail.markScanned([{ id: info.id, box: 'sent' }]); } catch (err) { console.error('[gmail] could not record sent id:', err.code || 'error'); }
       }

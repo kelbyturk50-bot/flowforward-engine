@@ -503,19 +503,29 @@ async function detail(id) {
 }
 
 // ── Replies Kelby sent straight from Gmail ───────────────────────────────
-// A later message in the sent folder on the proposal's thread is Kelby
-// writing back outside the CRM. Stop follow-ups. The first email we sent
-// (same Message-ID, or dated at or before sent_at) is not that reply.
+// A message in the sent folder on the proposal's thread is Kelby writing
+// back outside the CRM, unless its Message-ID is one we stored for that
+// proposal (the first email, or a follow-up). The message date is not used.
+async function isOurOutbound(proposal, headerId) {
+  if (!headerId) return false;
+  const first = String(proposal.message_id || '').trim().toLowerCase();
+  if (first && headerId === first) return true;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM proposal_outbound_ids
+      WHERE proposal_id = $1 AND lower(btrim(message_id)) = $2
+      LIMIT 1`,
+    [proposal.id, headerId]);
+  return rows.length > 0;
+}
+
 async function stopFollowupsForSentReply(msg) {
   const headerId = String(msg.messageIdHeader || '').trim().toLowerCase();
   const { rows } = await pool.query(
-    `SELECT id, message_id, sent_at, prospect_id FROM proposals
+    `SELECT id, message_id, prospect_id FROM proposals
       WHERE status = 'sent' AND thread_id = $1`,
     [msg.threadId]);
   for (const p of rows) {
-    const stored = String(p.message_id || '').trim().toLowerCase();
-    if (headerId && stored && headerId === stored) continue;
-    if (msg.date && p.sent_at && new Date(msg.date) <= new Date(p.sent_at)) continue;
+    if (await isOurOutbound(p, headerId)) continue;
     const stopped = await send().stopSequence(p.id, 'Replied from Gmail');
     if (stopped) await logActivity(p.prospect_id, 'email', 'Replied from Gmail.');
   }

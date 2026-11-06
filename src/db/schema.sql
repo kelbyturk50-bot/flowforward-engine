@@ -229,6 +229,16 @@ CREATE TABLE IF NOT EXISTS app_settings (
 -- Gmail API sending: thread id of the first email so follow-ups land in the same thread
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS thread_id TEXT;
 
+-- Message-IDs of mail this app sent for a proposal: the first email and each
+-- follow-up. A Sent message whose Message-ID is here is our outbound, not a
+-- reply typed in Gmail. The match does not use the message date.
+CREATE TABLE IF NOT EXISTS proposal_outbound_ids (
+  proposal_id INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+  message_id  TEXT NOT NULL,
+  PRIMARY KEY (proposal_id, message_id),
+  CONSTRAINT proposal_outbound_ids_message_len CHECK (char_length(btrim(message_id)) BETWEEN 1 AND 998)
+);
+
 -- Background drafting jobs (single-lead drafts and rewrites) so the CRM doesn't
 -- have to wait on a long request. reviewed_at marks a draft as opened in the CRM.
 CREATE TABLE IF NOT EXISTS proposal_jobs (

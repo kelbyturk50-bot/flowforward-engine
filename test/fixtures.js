@@ -47,6 +47,7 @@ async function resetDb() {
       pilot_tokens,
       proposal_jobs,
       proposal_runs,
+      proposal_outbound_ids,
       proposals,
       prospect_activities,
       prospect_brands,
