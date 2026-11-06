@@ -290,15 +290,14 @@ async function saveListState(q, pageToken, pending) {
 }
 
 // Page newest-first. A list stops before it would leave less than one full
-// read, and the ids already listed are kept so the next check does not start
-// over. A mailbox that still fits in the budget is listed through, so the
-// oldest id is not dropped. `incomplete` means older ids may still exist.
-// 10,100 ids is the largest mailbox a check still lists all the way through,
-// so the oldest id is read (the 10,002-id quota test). A bigger mailbox
-// resumes from the saved page on the next check.
+// read. A mailbox that still fits is listed through, so the oldest id is not
+// dropped. `incomplete` means older ids may still exist. 10,100 ids is the
+// largest mailbox a check still lists all the way through, so the oldest id
+// is read (the 10,002-id quota test). A bigger mailbox keeps a page token for
+// the older tail. The head is listed again on the next check.
 const MAX_LIST_PAGES = 101;
 
-async function listIds(q, budget, startToken) {
+async function listIds(q, budget, startToken, maxPages = MAX_LIST_PAGES) {
   const ids = [];
   let pageToken = startToken || undefined;
   let incomplete = false;
@@ -306,14 +305,19 @@ async function listIds(q, budget, startToken) {
   let reachedEnd = false;
   let pages = 0;
   while (true) {
-    if (pages >= MAX_LIST_PAGES && pageToken) { incomplete = true; nextToken = pageToken; break; }
+    if (pages >= maxPages && pageToken) { incomplete = true; nextToken = pageToken; break; }
     if (budget.units < COST.list + COST.get) { incomplete = true; nextToken = pageToken || null; break; }
     budget.units -= COST.list;
     let page;
     try {
       page = await gmail('get', '/messages', { params: { q, maxResults: 100, pageToken } });
     } catch (err) {
-      if (err.quota) { budget.quotaHit = true; budget.units = 0; }
+      if (err.quota) { budget.quotaHit = true; budget.units = 0; throw err; }
+      // A bad cursor drops the rest of this list. Ids already collected stay,
+      // and the caller does not keep the token.
+      if (pageToken && staleCursor(err)) {
+        return { ids, incomplete: true, nextToken: null, reachedEnd: false, stale: true };
+      }
       throw err;
     }
     ids.push(...(page.messages || []).map(m => m.id));
@@ -321,7 +325,12 @@ async function listIds(q, budget, startToken) {
     if (!page.nextPageToken) { nextToken = null; incomplete = false; reachedEnd = true; break; }
     pageToken = page.nextPageToken;
   }
-  return { ids, incomplete, nextToken, reachedEnd };
+  return { ids, incomplete, nextToken, reachedEnd, stale: false };
+}
+
+function staleCursor(err) {
+  const status = err && err.status;
+  return status === 400 || status === 404;
 }
 
 // Read the not-yet-scanned ids while the budget lasts. Inbox catch-up reads
@@ -354,40 +363,95 @@ async function readNew(ids, box, budget, shape, { oldestFirst = true } = {}) {
   return { messages, scanned, backlog: fresh.length - attempted, readFailed };
 }
 
-// ids are newest-first. A finished list is read oldest-first. A list that
-// stopped early, or a saved remainder, is read newest-first and the rest is
-// stored for the next check.
-async function scanListed(q, budget, box, shape) {
+function mergeRead(read, more) {
+  if (!more) return;
+  read.messages.push(...more.messages);
+  read.scanned.push(...more.scanned);
+  if (more.readFailed) read.readFailed = true;
+}
+
+// Every check lists from the mailbox head. The saved token is only the older
+// tail, and it stays on a page until that page is in gmail_scanned_messages,
+// so a crash before markScanned reads the same ids again. When the tail page
+// is the end of the mailbox, the head is listed once more before the check
+// is caught up. A 400 or 404 drops the token and leaves this check incomplete.
+async function scanListed(q, budget, box, shape, { forceNewest = false } = {}) {
   const state = await loadListState(q);
-  let ids = state.pending.filter(Boolean);
-  let incomplete = false;
-  let nextToken = state.pageToken;
-  let fromPending = false;
-  let reachedEnd = false;
-  if (ids.length) {
-    const seen = await scannedIds(ids);
-    ids = ids.filter(id => !seen.has(id));
+  const head = await listIds(q, budget, null);
+  let stale = !!head.stale;
+  let tailToken = stale ? null : (state.pageToken || null);
+  if (!stale && tailToken && budget.units >= COST.list + COST.get) {
+    const probe = await listIds(q, budget, tailToken, 1);
+    if (probe.stale) { stale = true; tailToken = null; }
   }
-  if (ids.length) {
-    fromPending = true;
-    incomplete = true;
-  } else {
-    const listed = await listIds(q, budget, state.pageToken);
-    ids = listed.ids;
-    incomplete = listed.incomplete;
-    nextToken = listed.nextToken;
-    reachedEnd = listed.reachedEnd;
-  }
-  const oldestFirst = reachedEnd && !fromPending;
-  const read = await readNew(ids, box, budget, shape, { oldestFirst });
+  const oldestFirst = head.reachedEnd && !forceNewest && !stale;
+  const read = await readNew(head.ids, box, budget, shape, { oldestFirst });
   const got = new Set(read.scanned);
-  const seen = ids.length ? await scannedIds(ids) : new Set();
-  const pending = ids.filter(id => !got.has(id) && !seen.has(id));
-  let still = !reachedEnd || fromPending;
-  if (pending.length === 0 && !nextToken && (reachedEnd || fromPending)) still = false;
-  if (still) await saveListState(q, nextToken, pending);
+  const seen = head.ids.length ? await scannedIds(head.ids) : new Set();
+  const headFresh = head.ids.filter(id => !got.has(id) && !seen.has(id));
+
+  const pending = (state.pending || []).filter(Boolean);
+  const pendingSeen = pending.length ? await scannedIds(pending) : new Set();
+  const pendingUnread = pending.filter(id => !pendingSeen.has(id));
+  if (pendingUnread.length && budget.units >= COST.get) {
+    mergeRead(read, await readNew(pendingUnread, box, budget, shape, { oldestFirst: false }));
+  }
+
+  let nextToken = null;
+  let confirmToken = null;
+  let walkedToEnd = false;
+  if (!head.reachedEnd && !stale && headFresh.length === 0 && pendingUnread.length === 0) {
+    let token = tailToken || head.nextToken;
+    while (token && budget.units >= COST.list + COST.get) {
+      const page = await listIds(q, budget, token, 1);
+      if (page.stale) { stale = true; token = null; break; }
+      const pageSeen = page.ids.length ? await scannedIds(page.ids) : new Set();
+      const notDurable = page.ids.filter(id => !pageSeen.has(id));
+      if (notDurable.length) {
+        mergeRead(read, await readNew(page.ids, box, budget, shape, { oldestFirst: false }));
+        break;
+      }
+      if (page.reachedEnd) {
+        confirmToken = token;
+        token = null;
+        walkedToEnd = true;
+        break;
+      }
+      token = page.nextToken;
+    }
+    nextToken = token;
+  } else if (!head.reachedEnd && !stale) {
+    nextToken = tailToken || head.nextToken;
+  }
+
+  let headSafe = true;
+  if (walkedToEnd && !stale) {
+    if (budget.units < COST.list + COST.get) {
+      headSafe = false;
+      nextToken = confirmToken;
+    } else {
+      const again = await listIds(q, budget, null, 1);
+      if (again.stale) {
+        stale = true;
+        headSafe = false;
+        nextToken = confirmToken;
+      } else {
+        const againSeen = again.ids.length ? await scannedIds(again.ids) : new Set();
+        const arrived = again.ids.filter(id => !againSeen.has(id) && !got.has(id));
+        if (arrived.length) {
+          mergeRead(read, await readNew(again.ids, box, budget, shape, { oldestFirst: false }));
+          headSafe = false;
+          nextToken = confirmToken;
+        }
+      }
+    }
+  }
+
+  const still = stale || headFresh.length > 0 || pendingUnread.length > 0
+    || (!head.reachedEnd && (!walkedToEnd || !headSafe));
+  if (still) await saveListState(q, nextToken, pendingUnread);
   else await saveListState(q, null, []);
-  if (!oldestFirst) read.backlog = pending.length + (nextToken && pending.length === 0 ? 1 : 0);
+  if (!oldestFirst) read.backlog = headFresh.length + pendingUnread.length + (nextToken ? 1 : 0);
   if (still && read.backlog < 1) read.backlog = 1;
   read.listIncomplete = still;
   read.order = oldestFirst ? 'oldest' : 'newest';
@@ -446,7 +510,7 @@ async function scanSent(since, budget = readBudget()) {
       messageIdHeader: header(h, 'message-id') || null,
       text: bodyText(m.payload).slice(0, 20000),
     };
-  });
+  }, { forceNewest: true });
 }
 
 /** Messages Kelby sent from Gmail since a date (to catch replies he sent outside the CRM). */

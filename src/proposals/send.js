@@ -616,21 +616,34 @@ async function settleNewInboxItems() {
   }
 }
 
+function sameMailId(a, b) {
+  const norm = (s) => String(s || '').replace(/[<>]/g, '').trim().toLowerCase();
+  const left = norm(a);
+  return left !== '' && left === norm(b);
+}
+
 async function sentIdsToScan(messages, scannedIds) {
   const leave = new Set();
   for (const msg of messages) {
     if (!msg || !msg.id || !msg.threadId) continue;
-    const open = await pool.query(
-      `SELECT 1 FROM inbox_items i JOIN inbox_messages m ON m.id = i.message_id
-        WHERE m.thread_id = $1 AND i.status = ANY('{queued,ready,failed,fyi}') LIMIT 1`,
+    const row = await pool.query(
+      `SELECT
+         EXISTS (
+           SELECT 1 FROM inbox_items i
+           JOIN inbox_messages m ON m.id = i.message_id
+           WHERE m.thread_id = $1 AND i.status = ANY('{queued,ready,failed,fyi}')
+         ) AS open,
+         EXISTS (SELECT 1 FROM proposals WHERE thread_id = $1) AS proposal,
+         (SELECT message_id FROM proposals WHERE thread_id = $1 ORDER BY id LIMIT 1) AS proposal_message_id,
+         (SELECT MAX(received_at) FROM inbox_messages WHERE thread_id = $1) AS last_at`,
       [msg.threadId]);
-    if (open.rows.length) continue;
-    const last = await pool.query(
-      'SELECT MAX(received_at) AS received_at FROM inbox_messages WHERE thread_id = $1',
-      [msg.threadId]);
-    const lastAt = last.rows[0] && last.rows[0].received_at;
-    const newer = !lastAt || (msg.date && new Date(msg.date) > new Date(lastAt));
-    if (newer) leave.add(msg.id);
+    const info = row.rows[0];
+    if (!info || info.open || !info.proposal) continue;
+    if (sameMailId(msg.messageIdHeader, info.proposal_message_id)) continue;
+    // The lead already wrote, and the item is not open yet. A newer Sent
+    // message can still be applied once that item exists. First sends and
+    // personal mail have nothing to wait for, so they are marked read.
+    if (info.last_at && msg.date && new Date(msg.date) > new Date(info.last_at)) leave.add(msg.id);
   }
   return (scannedIds || []).filter(id => !leave.has(id));
 }
@@ -700,8 +713,6 @@ async function checkInbox() {
     for (const [p, o, msg] of followOns) if (await applyFollowOn(p, o, msg)) recorded++;
     await settleNewInboxItems();
     if (sentResult) {
-      // scanSent yields oldest-first. Main applied Gmail's newest-first page,
-      // and applySentMessages keeps only the first newer message.
       const newestFirst = sentResult.order === 'newest'
         ? sentResult.messages.slice()
         : sentResult.messages.slice().reverse();
@@ -711,6 +722,7 @@ async function checkInbox() {
         caughtUp = false;
       }
       const keep = await sentIdsToScan(newestFirst, sentResult.scanned);
+      if (keep.length < (sentResult.scanned || []).length) caughtUp = false;
       scanned.push(...keep.map(id => ({ id, box: 'sent' })));
     }
     if (gmailApi) {

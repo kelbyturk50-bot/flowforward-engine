@@ -175,9 +175,20 @@ describe('gmail quota fix round', () => {
 
   it('B1 sent ids past the old 100 ceiling are still read', async () => {
     installApi({ sentIds: newestFirstIds(101, 's') });
-    const r = await gmail.scanSent(new Date('2026-10-01T00:00:00Z'), gmail.readBudget());
-    assert.equal(r.messages[0].id, 's0001');
-    assert.ok(r.backlog > 0);
+    const since = new Date('2026-10-01T00:00:00Z');
+    const first = await gmail.scanSent(since, gmail.readBudget());
+    assert.equal(first.messages[0].id, 's0101', 'the newest Sent id is read first');
+    assert.ok(first.backlog > 0);
+    await gmail.markScanned(first.scanned.map((id) => ({ id, box: 'sent' })));
+    let sawOldest = false;
+    let backlog = first.backlog;
+    for (let i = 0; backlog > 0 && i < 5; i += 1) {
+      const r = await gmail.scanSent(since, gmail.readBudget());
+      if (r.messages.some((m) => m.id === 's0001') || r.scanned.includes('s0001')) sawOldest = true;
+      await gmail.markScanned(r.scanned.map((id) => ({ id, box: 'sent' })));
+      backlog = r.backlog;
+    }
+    assert.equal(sawOldest, true, 'the id past the old 100 ceiling is still read');
   });
 
   it('B1 a list that stops because the read budget is spent is not caught up', async () => {
@@ -705,5 +716,347 @@ describe('gmail quota fix round', () => {
     assert.equal(backlog, 0);
     const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM gmail_scanned_messages');
     assert.equal(rows[0].n, n);
+  });
+
+  it('B17 ordinary Sent mail does not hide a later Gmail reply', async () => {
+    const lead = await insertDueFollowup('b17', 'test+b17@example.com');
+    await pool.query(`UPDATE proposals SET thread_id = 'thr-open' WHERE id = $1`, [lead.proposal.id]);
+    const { rows: [inbound] } = await pool.query(
+      `INSERT INTO inbox_messages (prospect_id, proposal_id, direction, dedupe_key, thread_id, from_addr, subject, body, received_at)
+       VALUES ($1, $2, 'in', 'b17-in', 'thr-open', 'test+b17@example.com', 'Re: idea', 'Thursday?', '2026-11-06T15:00:00Z')
+       RETURNING id`,
+      [lead.prospect.id, lead.proposal.id]
+    );
+    await pool.query(
+      `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status) VALUES ($1, $2, $3, 'failed')`,
+      [lead.prospect.id, lead.proposal.id, inbound.id]
+    );
+    const ordinary = Array.from({ length: 79 }, (_, i) => threadMessage(
+      `old-${String(i + 1).padStart(3, '0')}`, `thr-old-${i + 1}`, 'shipping note', '2026-11-01T00:00:00Z'
+    ));
+    const reply = threadMessage('reply-new', 'thr-open', 'Friday is better', '2026-11-07T00:00:00Z');
+    const sent = [reply, ...ordinary];
+    installThreads({ sent });
+    let tick;
+    let stored = 0;
+    for (let i = 0; i < 4; i += 1) {
+      now += i === 0 ? 0 : 60 * 1000;
+      tick = await send.senderTick();
+      const out = await pool.query(
+        `SELECT body FROM inbox_messages WHERE direction = 'out' AND thread_id = 'thr-open'`
+      );
+      stored = out.rows.length;
+      if (stored) break;
+    }
+    assert.equal(stored, 1, 'the newest Gmail reply is applied');
+    for (let i = 0; i < 4 && (!tick || tick.sent !== 1); i += 1) {
+      now += 60 * 1000;
+      tick = await send.senderTick();
+    }
+    assert.equal(tick.sent, 1, 'the due follow-up sends once ordinary Sent mail is covered');
+  });
+
+  it('B18 a new opt-out during a resumed scan is applied before a follow-up sends', async () => {
+    const lead = await insertDueFollowup('b18', 'owner-NEWREPLY@gmail.com');
+    const ids = newestFirstIds(10150);
+    const arrived = [];
+    gmail._setApiForTests(async (method, path, opts = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        return { id: 'sent-1', threadId: 'th-sent-1' };
+      }
+      if (method === 'get' && path === '/messages') {
+        const q = String(opts.params?.q || '');
+        const all = q.includes('in:sent') ? [] : [...arrived, ...ids];
+        const start = Number(opts.params?.pageToken || 0);
+        const slice = all.slice(start, start + 100);
+        const next = start + 100;
+        return {
+          messages: slice.map((id) => ({ id })),
+          nextPageToken: next < all.length ? String(next) : undefined,
+        };
+      }
+      if (method === 'get' && path.startsWith('/messages/')) {
+        const id = decodeURIComponent(path.slice('/messages/'.length));
+        const text = id === 'NEWREPLY' ? 'please unsubscribe' : 'hello';
+        return fakeMessage(id, text);
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    const first = await send.checkInbox();
+    assert.equal(first.caught_up, false);
+    arrived.unshift('NEWREPLY');
+    let sentBefore = false;
+    let opted = false;
+    for (let i = 0; i < 8; i += 1) {
+      now += 60 * 1000;
+      const tick = await send.senderTick();
+      const row = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [lead.prospect.id]);
+      if (tick.sent === 1 && !row.rows[0].do_not_contact) sentBefore = true;
+      if (row.rows[0].do_not_contact) { opted = true; break; }
+    }
+    assert.equal(sentBefore, false, 'a follow-up must not send while the new opt-out is unread');
+    assert.equal(opted, true);
+    const scanned = await pool.query(
+      `SELECT 1 FROM gmail_scanned_messages WHERE gmail_id = 'NEWREPLY'`
+    );
+    assert.equal(scanned.rows.length, 1);
+  });
+
+  it('B19 an invalid page token is dropped and the next check starts at the head', async () => {
+    const lead = await insertDueFollowup('b19', 'test+b19@example.com');
+    const since = new Date(new Date(lead.proposal.sent_at).getTime() - 24 * 60 * 60 * 1000);
+    const q = `in:inbox after:${Math.floor(since.getTime() / 1000)} -from:me`;
+    await pool.query(
+      `INSERT INTO gmail_list_state (query_key, page_token, pending_ids) VALUES ($1, 'bad-token', '{}')`,
+      [q]);
+    const tokens = [];
+    const ids = newestFirstIds(10150);
+    gmail._setApiForTests(async (method, path, opts = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        return { id: 'sent-1', threadId: 'th-sent-1' };
+      }
+      if (method === 'get' && path === '/messages') {
+        const token = opts.params?.pageToken || null;
+        tokens.push(token);
+        if (token === 'bad-token' || token === 'missing-page') {
+          const err = new Error('Gmail API: Invalid pageToken');
+          err.status = token === 'missing-page' ? 404 : 400;
+          throw err;
+        }
+        const start = Number(token || 0);
+        const slice = ids.slice(start, start + 100);
+        const next = start + 100;
+        return {
+          messages: slice.map((id) => ({ id })),
+          nextPageToken: next < ids.length ? String(next) : undefined,
+        };
+      }
+      if (method === 'get' && path.startsWith('/messages/')) {
+        const id = decodeURIComponent(path.slice('/messages/'.length));
+        return fakeMessage(id);
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    const first = await send.checkInbox();
+    assert.equal(first.caught_up, false);
+    const row = await pool.query('SELECT page_token FROM gmail_list_state WHERE query_key = $1', [q]);
+    assert.ok(!row.rows.length || row.rows[0].page_token !== 'bad-token');
+    assert.equal(tokens.filter((token) => token === 'bad-token').length, 1, 'the bad token is requested once');
+    now += 60 * 1000;
+    tokens.length = 0;
+    const second = await send.checkInbox();
+    assert.equal(tokens.includes('bad-token'), false);
+    assert.equal(tokens[0], null, 'the next check lists from the head');
+    assert.equal(second.caught_up, false, 'a large mailbox stays held until it is covered');
+    await pool.query(
+      `INSERT INTO gmail_list_state (query_key, page_token, pending_ids) VALUES ($1, 'missing-page', '{}')
+       ON CONFLICT (query_key) DO UPDATE SET page_token = 'missing-page', pending_ids = '{}'`,
+      [q]);
+    now += 60 * 1000;
+    tokens.length = 0;
+    const third = await send.checkInbox();
+    assert.equal(third.caught_up, false);
+    assert.equal(tokens.filter((token) => token === 'missing-page').length, 1);
+    const after404 = await pool.query('SELECT page_token FROM gmail_list_state WHERE query_key = $1', [q]);
+    assert.ok(!after404.rows.length || after404.rows[0].page_token !== 'missing-page');
+    now += 60 * 1000;
+    tokens.length = 0;
+    await send.checkInbox();
+    assert.equal(tokens.includes('missing-page'), false);
+  });
+
+  it('B18 an opt-out at the head during the last tail page blocks the send', async () => {
+    const lead = await insertDueFollowup('endopt', 'owner-endopt@gmail.com');
+    const since = new Date(new Date(lead.proposal.sent_at).getTime() - 24 * 60 * 60 * 1000);
+    const q = `in:inbox after:${Math.floor(since.getTime() / 1000)} -from:me`;
+    const ids = newestFirstIds(10200);
+    await pool.query(
+      `INSERT INTO gmail_scanned_messages (gmail_id, box)
+       SELECT id, 'inbox' FROM UNNEST($1::text[]) AS id`,
+      [ids]);
+    await pool.query(
+      `INSERT INTO gmail_list_state (query_key, page_token, pending_ids) VALUES ($1, '10100', '{}')`,
+      [q]);
+    let seenTail = false;
+    const sends = [];
+    gmail._setApiForTests(async (method, path, opts = {}) => {
+      if (method === 'post' && path === '/messages/send') {
+        sends.push(opts.data);
+        return { id: 'sent-1', threadId: 'th-sent-1' };
+      }
+      if (method === 'get' && path === '/messages') {
+        const token = opts.params?.pageToken || null;
+        const qtext = String(opts.params?.q || '');
+        if (token === '10100') seenTail = true;
+        const source = (!qtext.includes('in:sent') && token == null && seenTail)
+          ? ['endopt', ...ids]
+          : (qtext.includes('in:sent') ? [] : ids);
+        const start = Number(token || 0);
+        const slice = source.slice(start, start + 100);
+        const next = start + 100;
+        return {
+          messages: slice.map((id) => ({ id })),
+          nextPageToken: next < source.length ? String(next) : undefined,
+        };
+      }
+      if (method === 'get' && path.startsWith('/messages/')) {
+        const id = decodeURIComponent(path.slice('/messages/'.length));
+        return fakeMessage(id, id === 'endopt' ? 'please unsubscribe' : 'hello');
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    const first = await send.senderTick();
+    assert.equal(first.sent, 0);
+    assert.equal(sends.length, 0);
+    const mid = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [lead.prospect.id]);
+    now += 60 * 1000;
+    const second = await send.senderTick();
+    assert.equal(second.sent, 0);
+    assert.equal(sends.length, 0);
+    const row = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [lead.prospect.id]);
+    assert.equal(row.rows[0].do_not_contact, true);
+    assert.equal(mid.rows[0].do_not_contact || row.rows[0].do_not_contact, true);
+  });
+
+  it('B17 unmatched Sent mail is marked read and the hold clears', async () => {
+    await insertDueFollowup('plain', 'test+plain@example.com');
+    const sent = Array.from({ length: 80 }, (_, i) => threadMessage(
+      `pers-${String(i + 1).padStart(3, '0')}`,
+      `pers-thr-${i}`,
+      'personal note',
+      '2026-11-01T00:00:00Z'
+    ));
+    installThreads({ sent });
+    let tick;
+    for (let i = 0; i < 4; i += 1) {
+      now += i === 0 ? 0 : 60 * 1000;
+      tick = await send.senderTick();
+      if (tick && tick.sent === 1) break;
+    }
+    const scanned = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM gmail_scanned_messages WHERE box = 'sent' AND gmail_id LIKE 'pers-%'`);
+    assert.equal(scanned.rows[0].n, 80);
+    assert.equal(tick.sent, 1);
+  });
+
+  it('B14 a newer Sent reply waits only while its proposal inbound has no open item', async () => {
+    const lead = await insertDueFollowup('defer', 'test+defer@example.com');
+    await pool.query(`UPDATE proposals SET thread_id = 'thr-defer' WHERE id = $1`, [lead.proposal.id]);
+    const { rows: [inbound] } = await pool.query(
+      `INSERT INTO inbox_messages (prospect_id, proposal_id, direction, dedupe_key, thread_id, from_addr, subject, body, received_at)
+       VALUES ($1, $2, 'in', 'defer-in', 'thr-defer', 'test+defer@example.com', 'Re: idea', 'Thursday?', '2026-11-06T15:00:00Z')
+       RETURNING id`,
+      [lead.prospect.id, lead.proposal.id]
+    );
+    installThreads({
+      sent: [threadMessage('reply-wait', 'thr-defer', 'Friday is better', '2026-11-07T00:00:00Z')],
+    });
+    const first = await send.checkInbox();
+    assert.equal(first.replied_from_gmail, 0);
+    assert.equal(first.caught_up, false);
+    const waiting = await pool.query(`SELECT 1 FROM gmail_scanned_messages WHERE gmail_id = 'reply-wait'`);
+    assert.equal(waiting.rows.length, 0);
+    await pool.query(
+      `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status) VALUES ($1, $2, $3, 'failed')`,
+      [lead.prospect.id, lead.proposal.id, inbound.id]
+    );
+    now += 60 * 1000;
+    const second = await send.checkInbox();
+    assert.equal(second.replied_from_gmail, 1);
+  });
+
+  it('B19 a 400 on every page token clears the saved cursor and the next check starts at the head', async () => {
+    const lead = await insertDueFollowup('wedge', 'test+wedge@example.com');
+    const ids = newestFirstIds(10200);
+    let reject = false;
+    const tokens = [];
+    gmail._setApiForTests(async (method, path, opts = {}) => {
+      if (method === 'post' && path === '/messages/send') return { id: 'sent-1', threadId: 'th-sent-1' };
+      if (method === 'get' && path === '/messages') {
+        const token = opts.params?.pageToken || null;
+        tokens.push(token);
+        if (reject && token) {
+          const err = new Error('Gmail API: Invalid pageToken');
+          err.status = 400;
+          throw err;
+        }
+        const qtext = String(opts.params?.q || '');
+        const source = qtext.includes('in:sent') ? [] : ids;
+        const start = Number(token || 0);
+        const slice = source.slice(start, start + 100);
+        const next = start + 100;
+        return {
+          messages: slice.map((id) => ({ id })),
+          nextPageToken: next < source.length ? String(next) : undefined,
+        };
+      }
+      if (method === 'get' && path.startsWith('/messages/')) {
+        return fakeMessage(decodeURIComponent(path.slice('/messages/'.length)));
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    const first = await send.checkInbox();
+    assert.equal(first.caught_up, false);
+    const saved = await pool.query('SELECT page_token FROM gmail_list_state');
+    assert.ok(saved.rows.some((row) => row.page_token));
+    const deep = saved.rows.map((row) => row.page_token).filter(Boolean);
+    reject = true;
+    now += 60 * 1000;
+    tokens.length = 0;
+    const held = await send.checkInbox();
+    assert.equal(held.caught_up, false);
+    assert.equal(tokens[0], null);
+    assert.equal(tokens.filter((token) => deep.includes(token)).length, 0);
+    assert.equal(tokens.filter(Boolean).length, 1, 'one bad cursor is enough to stop the list');
+    const cleared = await pool.query('SELECT page_token FROM gmail_list_state');
+    for (const row of cleared.rows) assert.equal(deep.includes(row.page_token), false);
+    reject = false;
+    now += 60 * 1000;
+    const recovered = await send.checkInbox();
+    assert.ok(recovered.checked > 0, 'the next check reads from the head');
+    assert.equal(recovered.caught_up, false);
+    void lead;
+  });
+
+  it('B16 a 150000-id inbox keeps reading past the first window', async () => {
+    const n = 150000;
+    const ids = Array.from({ length: n }, (_, i) => `n${String(n - i).padStart(6, '0')}`);
+    installApi({ inboxIds: ids });
+    const since = new Date('2026-10-01T00:00:00Z');
+    const first = await gmail.scanInbox(since, gmail.readBudget());
+    assert.ok(first.messages.length > 0);
+    assert.equal(first.messages[0].id, ids[0]);
+    await gmail.markScanned(first.scanned.map((id) => ({ id, box: 'inbox' })));
+    let scanned = first.scanned.length;
+    let guard = 0;
+    while (scanned < 11000 && guard < 400) {
+      const r = await gmail.scanInbox(since, gmail.readBudget());
+      assert.ok(r.messages.length > 0, 'a zero-read re-walk is not progress');
+      await gmail.markScanned(r.scanned.map((id) => ({ id, box: 'inbox' })));
+      const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM gmail_scanned_messages');
+      assert.ok(rows[0].n > scanned);
+      scanned = rows[0].n;
+      guard += 1;
+    }
+    assert.ok(scanned > 10100, 'the catch-up leaves the first listed window');
+  });
+
+  it('resume state keeps ids that were read but not marked scanned', async () => {
+    installApi({ inboxIds: ['only-one'] });
+    const since = new Date('2026-10-01T00:00:00Z');
+    const after = Math.floor(since.getTime() / 1000);
+    await pool.query(
+      `INSERT INTO gmail_list_state (query_key, page_token, pending_ids)
+       VALUES ($1, NULL, '{keep-me}')`,
+      [`in:inbox after:${after} -from:me`]);
+    const first = await gmail.scanInbox(since, gmail.readBudget());
+    assert.ok(first.scanned.includes('keep-me'));
+    const mid = await pool.query(`SELECT pending_ids FROM gmail_list_state`);
+    assert.ok(mid.rows.some((row) => (row.pending_ids || []).includes('keep-me')));
+    const second = await gmail.scanInbox(since, gmail.readBudget());
+    assert.ok(second.scanned.includes('keep-me'));
+    await gmail.markScanned(second.scanned.map((id) => ({ id, box: 'inbox' })));
+    const third = await gmail.scanInbox(since, gmail.readBudget());
+    assert.equal(third.scanned.includes('keep-me'), false);
   });
 });
