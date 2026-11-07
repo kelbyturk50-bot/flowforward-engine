@@ -129,7 +129,7 @@ router.delete('/facts', async (req, res) => {
 router.get('/voice', async (req, res) => {
   try {
     const config = voiceConfig();
-    const today = await voiceStore.dayUsage(new Date());
+    const today = await voiceStore.dayUsage(require('../voicedemo/public').voiceNow());
     res.json({
       configured: Boolean(config),
       daily_minutes: config ? config.dailyMinutes : null,

@@ -138,6 +138,11 @@ function _setClockForTests(fn) {
   clock = fn || (() => new Date());
 }
 
+// The clock calls are reserved on, so the CRM's "today" is the same day.
+function voiceNow() {
+  return clock();
+}
+
 // ---- /api/public/prototypes/:token/voice -----------------------------------
 
 const prototypeVoiceRouter = express.Router({ mergeParams: true });
@@ -321,6 +326,7 @@ async function sweepOverdue(now = new Date()) {
 
 module.exports = {
   prototypeVoiceRouter,
+  voiceNow,
   webhookRouter,
   sweepOverdue,
   callSeconds,
