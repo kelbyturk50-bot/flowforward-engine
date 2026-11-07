@@ -5,6 +5,7 @@
 const crypto    = require('crypto');
 const Anthropic = require('@anthropic-ai/sdk');
 const pool      = require('../db/client');
+const { withClient } = require('../db/with-client');
 const cfg       = require('./config');
 const { appendDraftExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
@@ -13,19 +14,20 @@ const { fsmDetectedFromResearch } = require('./servicetitan');
 const { rescore } = require('../scoring/fit');
 const { systemPrompt, userPrompt, SUBMIT_TOOL } = require('./prompt');
 const { attachPrototype } = require('../prototypes/store');
-const { lockLeadForUpdate, isDeadlock, DEADLOCK_ATTEMPTS } = require('./lead-lock');
+const { canonicalizeRecipient } = require('./recipient');
+const { siblingBlockMessage, blockingSibling } = require('./sequence-block');
 
 let client = null;
-let draftTxGate = null;
-function _setDraftTxGate(fn) {
-  if (process.env.NODE_ENV !== 'test') {
-    throw new Error('_setDraftTxGate is only available when NODE_ENV=test');
-  }
-  draftTxGate = fn || null;
+let draftTxnGate = null;
+function _setDraftTxnGate(fn) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_setDraftTxnGate is only available when NODE_ENV=test');
+  draftTxnGate = typeof fn === 'function' ? fn : null;
 }
 function claude() {
   if (!client) {
-    if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set in Railway Variables.');
+    if (!process.env.ANTHROPIC_API_KEY) {
+      throw Object.assign(new Error('ANTHROPIC_API_KEY is not set in Railway Variables.'), { status: 400 });
+    }
     client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   }
   return client;
@@ -134,7 +136,9 @@ async function writeWithClaude({ lead, research, instructions }) {
       if (problem) console.warn(`[proposals] submitted with a thin one-pager after retries: ${problem}`);
       return { output: normalizeSubmission(submitted.input), usage, cost };
     }
-    if (cost > cfg.MAX_COST_PER_LEAD) throw new Error(`Stopped: cost passed the $${cfg.MAX_COST_PER_LEAD} per-lead cap.`);
+    if (cost > cfg.MAX_COST_PER_LEAD) {
+      throw Object.assign(new Error(`Stopped: cost passed the $${cfg.MAX_COST_PER_LEAD} per-lead cap.`), { status: 409 });
+    }
 
     messages.push({ role: 'assistant', content: res.content });
     if (res.stop_reason === 'pause_turn') continue;           // long search turn; resume as-is
@@ -149,7 +153,7 @@ async function writeWithClaude({ lead, research, instructions }) {
     }
     toolChoice = { type: 'tool', name: 'submit_proposal' };
   }
-  throw new Error('Claude did not submit a proposal after several turns.');
+  throw Object.assign(new Error('Claude did not submit a proposal after several turns.'), { status: 502 });
 }
 
 const str = (v) => (typeof v === 'string' ? v.trim() : '');
@@ -177,8 +181,12 @@ function cleanOutput(out, research, lead) {
   };
   const email = { to_name: str(e.to_name), subject: str(e.subject), body: str(e.body), followup1: str(e.followup1), followup2: str(e.followup2) };
 
-  const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(x || '');
-  const toEmail = [analysis.best_email, lead.email, ...(research.site?.emails || [])].find(validEmail) || null;
+  const toEmail = [analysis.best_email, lead.email, ...(research.site?.emails || [])]
+    .map((value) => {
+      const canonical = canonicalizeRecipient(value);
+      return canonical.ok ? canonical.value : '';
+    })
+    .find(Boolean) || null;
   return { analysis, onepager, email, toEmail };
 }
 
@@ -203,11 +211,9 @@ async function draftProposal(prospectId, opts = {}) {
   const prev = await pool.query(
     'SELECT id, version, research, status FROM proposals WHERE prospect_id = $1 ORDER BY version DESC LIMIT 1', [lead.id]);
   const last = prev.rows[0];
-  if (lead.do_not_contact) {
-    throw Object.assign(new Error(`${lead.company} is marked do-not-contact.`), { status: 409 });
-  }
-  if (last && ['sent', 'sending'].includes(last.status)) {
-    throw Object.assign(new Error('A proposal is already out for this lead. Stop that sequence before drafting a new one.'), { status: 409 });
+  const blockedEarly = await blockingSibling(pool, lead.id);
+  if (blockedEarly) {
+    throw Object.assign(new Error(siblingBlockMessage(blockedEarly)), { status: 409 });
   }
 
   const reuse = opts.reuseResearch !== false && last?.research;
@@ -216,33 +222,27 @@ async function draftProposal(prospectId, opts = {}) {
   const { analysis, onepager, email, toEmail } = cleanOutput(output, research, lead);
   const disqualify = analysis.fit_verdict === 'disqualify';
 
-  let saved = null;
-  for (let attempt = 1; attempt <= DEADLOCK_ATTEMPTS; attempt++) {
-  const db = await pool.connect();
-  let opened = false;
-  try {
+  const inserted = await withClient('draft', async (db) => {
     await db.query('BEGIN');
-    opened = true;
-    // All of this lead's proposals, then the prospect. The draft UPDATE below
-    // already holds those proposal locks. The flag and the open-sequence
-    // check run on those locked rows, after the model call, so a retry does
-    // not call the model again.
-    await lockLeadForUpdate(db, lead.id);
-    if (draftTxGate) await draftTxGate(db, lead.id);
-    const fresh = await db.query('SELECT do_not_contact FROM prospects WHERE id = $1', [lead.id]);
-    if (fresh.rows[0] && fresh.rows[0].do_not_contact) {
+    try {
+    // Hold the prospect across the recheck, the supersede, and the insert so
+    // two processes cannot both write a live draft.
+    const locked = await db.query('SELECT id, do_not_contact FROM prospects WHERE id = $1 FOR UPDATE', [lead.id]);
+    if (draftTxnGate) await draftTxnGate({ prospectId: lead.id });
+    // The lead can be flagged (manual route or inbox opt-out) while the model
+    // call ran. FOR UPDATE returns the latest committed row, so a flag that
+    // committed first is seen here and no draft is written (#113).
+    const flagged = locked.rows[0];
+    if (flagged && flagged.do_not_contact) {
       await db.query('ROLLBACK');
-      opened = false;
       throw Object.assign(new Error(`${lead.company} is marked do-not-contact.`), { status: 409 });
     }
-    const open = await db.query(
-      `SELECT 1 FROM proposals WHERE prospect_id = $1 AND status IN ('sent', 'sending') LIMIT 1`,
-      [lead.id]
-    );
-    if (open.rows.length) {
+    // The model call already finished. A sibling can have moved into review
+    // while that call was in flight, so the block is checked again here.
+    const blocked = await blockingSibling(db, lead.id);
+    if (blocked) {
       await db.query('ROLLBACK');
-      opened = false;
-      throw Object.assign(new Error('A proposal is already out for this lead. Stop that sequence before drafting a new one.'), { status: 409 });
+      throw Object.assign(new Error(siblingBlockMessage(blocked)), { status: 409 });
     }
     await db.query(`UPDATE proposals SET status = 'superseded' WHERE prospect_id = $1 AND status = 'draft'`, [lead.id]);
     const version = (last?.version || 0) + 1;
@@ -279,27 +279,22 @@ async function draftProposal(prospectId, opts = {}) {
         [lead.id, `${lead.stage} → disqualified (proposal bot)`]);
     }
     await db.query('COMMIT');
-    opened = false;
-    saved = ins.rows[0];
-    break;
-  } catch (err) {
-    if (opened) await db.query('ROLLBACK').catch(() => {});
-    if (!err.status && isDeadlock(err) && attempt < DEADLOCK_ATTEMPTS) continue;
-    throw err;
-  } finally {
-    db.release();
-  }
-  }
-  // Score from the cache just written. rescore does not fetch.
-  await rescore([lead.id]);
-  // After the draft is committed. A prototype failure must not fail the draft.
-  // Flag off returns before any prototype write. No fetch, send, or job enqueue.
-  try {
-    await attachPrototype({ prospectId: lead.id, research });
-  } catch (err) {
-    console.error('[prototype] hook failed:', err && err.code);
-  }
-  return saved;
+    // Score from the cache just written. rescore does not fetch.
+    await rescore([lead.id]);
+    // After the draft is committed. A prototype failure must not fail the draft.
+    // Flag off returns before any prototype write. No fetch, send, or job enqueue.
+    try {
+      await attachPrototype({ prospectId: lead.id, research });
+    } catch (err) {
+      console.error('[prototype] hook failed:', err && err.code);
+    }
+    return ins.rows[0];
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+  });
+  return inserted;
 }
 
 // ─── Nightly batch ────────────────────────────────────────────────────────
@@ -377,7 +372,19 @@ async function rebuildOnepager(proposalId) {
   if (isArchivedLead(lead)) throw Object.assign(new Error(`${ARCHIVED_LEAD_REASON}.`), { status: 409 });
   const research = pr.research || await researchLead(lead);
   const row = { ...pr, prospect_id: lead.id };
-  const { output, usage, cost } = await writeWithClaude({ lead, research, instructions: row.instructions });
+  let output;
+  let usage;
+  let cost;
+  try {
+    ({ output, usage, cost } = await writeWithClaude({ lead, research, instructions: row.instructions }));
+  } catch (err) {
+    const { APIConnectionError } = require('@anthropic-ai/sdk');
+    if (err instanceof APIConnectionError) {
+      console.error(`[proposals] rebuild connection failed: ${err && err.code || 'error'}`);
+      throw Object.assign(new Error('Couldn\'t reach Claude. Try again.'), { status: 502 });
+    }
+    throw err;
+  }
   const { onepager } = cleanOutput(output, research, lead);
   if (!onepager.observations.length && !onepager.opportunities.length) {
     throw Object.assign(new Error('Claude returned an empty one-pager again. Try once more.'), { status: 502 });
@@ -391,4 +398,4 @@ async function rebuildOnepager(proposalId) {
   return upd[0];
 }
 
-module.exports = { rebuildOnepager, normalizeSubmission, submissionProblem, draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, _setDraftTxGate, getClient, isRunning: () => running };
+module.exports = { rebuildOnepager, normalizeSubmission, submissionProblem, draftProposal, runProposalBatch, pickLeads, getSetting, cleanOutput, makeSlug, _setClient, _setDraftTxnGate, getClient, isRunning: () => running };

@@ -97,10 +97,12 @@ async function disconnect() {
 }
 
 let cache = null;
-async function accessToken() {
-  if (cache && cache.exp > Date.now()) return cache.token;
+async function accessToken(options = {}) {
+  if (!options.force && cache && cache.exp > Date.now()) return cache.token;
   const saved = await getSetting('gmail_oauth');
-  if (!saved?.refresh_token) throw new Error('Gmail is not connected. Go to Settings and click Connect Gmail.');
+  if (!saved?.refresh_token) {
+    throw Object.assign(new Error('Gmail is not connected. Go to Settings and click Connect Gmail.'), { setup: true, status: 503 });
+  }
   try {
     const tok = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET,
@@ -113,84 +115,122 @@ async function accessToken() {
     const reason = err.response?.data?.error;
     if (reason === 'invalid_grant') {
       await putSetting('gmail_oauth', { ...saved, last_error: 'Google revoked access (expired or removed). Click Connect Gmail again.' });
-      throw new Error('Gmail access expired. Go to Settings and click Connect Gmail again.');
+      throw Object.assign(new Error('Gmail access expired. Go to Settings and click Connect Gmail again.'), { setup: true, status: 502 });
     }
-    throw new Error(`Couldn't refresh Gmail access: ${reason || err.message}`);
+    console.error(`[gmail] refresh failed: ${err && err.code || 'error'}`);
+    throw Object.assign(new Error('Couldn\'t refresh Gmail access. Try again.'), { setup: true, status: 502 });
   }
 }
 
+// Google answers a used-up quota with 429, or 403 rateLimitExceeded /
+// userRateLimitExceeded, with "Quota exceeded" in the message.
+function isQuotaError(status, data) {
+  const reasons = (data?.error?.errors || []).map(e => e && e.reason);
+  if (status === 429) return true;
+  if (status === 403 && reasons.some(r => /ratelimitexceeded|quotaexceeded/i.test(String(r)))) return true;
+  return /quota exceeded|rate limit exceeded/i.test(String(data?.error?.message || ''));
+}
+
+let apiOverride = null;
+function _setApiForTests(fn) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_setApiForTests is only available when NODE_ENV=test');
+  apiOverride = fn || null;
+}
+
 async function gmail(method, path, { data, params } = {}) {
+  if (apiOverride) return apiOverride(method, path, { data, params });
   const token = await accessToken();
   try {
     const res = await axios({ method, url: `${API}${path}`, data, params, timeout: 20000, headers: { Authorization: `Bearer ${token}` } });
     return res.data;
   } catch (err) {
-    const msg = err.response?.data?.error?.message || err.message;
-    throw new Error(`Gmail API: ${msg}`);
+    throw wrapGmailError(err);
   }
 }
 
 // ── Sending ───────────────────────────────────────────────────────────────
 function toBase64Url(buf) { return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
 
-// Settings, the from address, the raw message, and the access token all
-// resolve here. send() does not read settings or refresh a token.
-async function prepare(mail) {
+function wrapGmailError(err) {
+  const body = err.response?.data?.error;
+  const msg = body?.message || err.message;
+  const wrapped = new Error(`Gmail API: ${msg}`);
+  const status = err.response?.status;
+  if (Number.isInteger(status)) wrapped.status = status;
+  else if (body && Number.isInteger(body.code)) wrapped.status = body.code;
+  if (body?.status) wrapped.gmailStatus = String(body.status);
+  const listed = Array.isArray(body?.errors)
+    ? body.errors.map((item) => item && item.reason).find(Boolean)
+    : null;
+  const reason = listed || body?.reason || null;
+  if (reason) wrapped.reason = String(reason);
+  if (Array.isArray(body?.errors)) {
+    wrapped.errors = body.errors.map((item) => ({
+      reason: item && item.reason,
+      message: item && item.message,
+    }));
+  }
+  if (typeof err.code === 'string' && !/^\d{3}$/.test(err.code)) wrapped.code = err.code;
+  // #125: a used-up per-minute quota stops the scan and the follow-up loop.
+  wrapped.quota = isQuotaError(Number.isInteger(wrapped.status) ? wrapped.status : 0, err.response?.data);
+  return wrapped;
+}
+
+// Settings, the token refresh, and the MIME build happen here. send() posts
+// the payload that was already built. It does not await anything before that POST.
+async function prepareDelivery(mail) {
   const saved = await getSetting('gmail_oauth');
+  // Tests that swap the Gmail API (_setApiForTests) get the same prepare and
+  // send shape without a token refresh or a network call.
+  const token = apiOverride ? null : await module.exports.accessToken({ force: true });
   const fromAddr = saved?.email || SENDER.email;
-  const from = typeof mail.from === 'object' ? { ...mail.from, address: fromAddr } : fromAddr;
+  const from = mail && typeof mail.from === 'object' ? { ...mail.from, address: fromAddr } : fromAddr;
   const raw = await new MailComposer({ ...mail, from, threadId: undefined }).compile().build();
-  const token = await accessToken();
-  const data = { raw: toBase64Url(raw), ...(mail.threadId ? { threadId: mail.threadId } : {}) };
+  const payload = { raw: toBase64Url(raw), ...(mail && mail.threadId ? { threadId: mail.threadId } : {}) };
   return {
+    fromAddr,
     send() {
-      return issuePreparedSend(token, data);
+      if (apiOverride) {
+        const api = apiOverride;
+        return Promise.resolve(api('post', '/messages/send', { data: payload })).then((sent) =>
+          Promise.resolve(api('get', `/messages/${sent.id}`, { params: { format: 'metadata', metadataHeaders: 'Message-ID' } }))
+            .then((meta) => ({
+              id: sent.id,
+              threadId: sent.threadId,
+              messageId: (meta?.payload?.headers || []).find((h) => h.name.toLowerCase() === 'message-id')?.value || null,
+            }))
+            .catch(() => ({ id: sent.id, threadId: sent.threadId, messageId: null })));
+      }
+      return axios({
+        method: 'post',
+        url: `${API}/messages/send`,
+        data: payload,
+        timeout: 20000,
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((res) => {
+        const sent = res.data;
+        return axios({
+          method: 'get',
+          url: `${API}/messages/${sent.id}`,
+          params: { format: 'metadata', metadataHeaders: 'Message-ID' },
+          timeout: 20000,
+          headers: { Authorization: `Bearer ${token}` },
+        }).then((meta) => ({
+          id: sent.id,
+          threadId: sent.threadId,
+          messageId: (meta.data.payload?.headers || []).find((h) => h.name.toLowerCase() === 'message-id')?.value || null,
+        })).catch(() => ({ id: sent.id, threadId: sent.threadId, messageId: null }));
+      }).catch((err) => {
+        throw wrapGmailError(err);
+      });
     },
   };
 }
 
-// The POST starts on this call. Nothing is awaited before it. The request
-// itself can still be in flight when an opt-out commits; that window cannot
-// be closed without pulling the message back.
-function issuePreparedSend(token, data) {
-  const pending = axios({
-    method: 'post',
-    url: `${API}/messages/send`,
-    data,
-    timeout: 20000,
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  return pending.then(async (res) => {
-    const sent = res.data;
-    let messageId = null;
-    try {
-      const meta = await axios({
-        method: 'get',
-        url: `${API}/messages/${sent.id}`,
-        params: { format: 'metadata', metadataHeaders: 'Message-ID' },
-        timeout: 20000,
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      messageId = (meta.data.payload?.headers || []).find((h) => h.name.toLowerCase() === 'message-id')?.value || null;
-    } catch { /* threading still works via threadId */ }
-    return { id: sent.id, threadId: sent.threadId, messageId };
-  }).catch((err) => {
-    const msg = err.response?.data?.error?.message || err.message;
-    throw new Error(`Gmail API: ${msg}`);
-  });
-}
-
-/** prepare(), then send(). Same return shape as nodemailer's sendMail. */
+/** Same shape as nodemailer's sendMail; also accepts threadId. Returns { messageId, threadId, id }. */
 async function sendMail(mail) {
-  const prepared = await prepare(mail);
+  const prepared = await prepareDelivery(mail);
   return prepared.send();
-}
-
-function _resetCacheForTests() {
-  if (process.env.NODE_ENV !== 'test') {
-    throw new Error('_resetCacheForTests is only available when NODE_ENV=test');
-  }
-  cache = null;
 }
 
 // ── Reading ───────────────────────────────────────────────────────────────
@@ -209,37 +249,324 @@ function bodyText(payload) {
     .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/[ \t]+/g, ' ');
 }
 
-/** Inbox messages since a date, newest last, in the shape classifyMessage expects. */
-async function inboxSince(since, max = 300) {
-  const after = Math.floor(new Date(since).getTime() / 1000);
-  const ids = []; let pageToken;
-  do {
-    const page = await gmail('get', '/messages', { params: { q: `in:inbox after:${after} -from:me`, maxResults: 100, pageToken } });
-    ids.push(...(page.messages || []).map(m => m.id));
-    pageToken = page.nextPageToken;
-  } while (pageToken && ids.length < max);
+// ── Reading on a quota budget ────────────────────────────────────────────
+// Gmail charges quota units per call and allows 6,000 units per user per
+// minute (developers.google.com/workspace/gmail/api/reference/quota, checked
+// Nov 3, 2026). Reading one message in full costs 60, so re-reading a few
+// hundred messages every 15 minutes used the whole minute and left nothing
+// for sending follow-ups. Now each message is read in full once (its id goes
+// in gmail_scanned_messages). Reads from the 15-minute scan and from
+// Check inbox now share one per-minute budget, and a used-up quota stops
+// the scan at once instead of failing every remaining message.
+const COST = Object.freeze({ list: 5, get: 60 });
+const READ_BUDGET = 3600; // leaves 2,400 of the minute's 6,000 for sends
+const MINUTE_MS = 60 * 1000;
 
-  const out = [];
-  for (const id of ids.slice(0, max).reverse()) {
+function readBudget(units = READ_BUDGET) { return { units, quotaHit: false }; }
+
+// The cron scan and POST /api/proposals/check-inbox both charge the bucket
+// for the wall-clock minute of each call. A scan that starts in one minute
+// and continues into the next is charged to the new minute from then on,
+// and a later check in that minute sees what the scan already spent.
+let nowFn = () => Date.now();
+let minuteBucket = null;
+
+function clockNow() { return nowFn(); }
+
+function currentMinuteBucket() {
+  const minute = Math.floor(clockNow() / MINUTE_MS);
+  if (!minuteBucket || minuteBucket.minute !== minute) {
+    minuteBucket = { minute, units: READ_BUDGET, quotaHit: false };
+  }
+  return minuteBucket;
+}
+
+// A live view. listIds and readNew keep one object for the whole scan, and
+// every read of units or quotaHit follows the clock into the current minute.
+function minuteReadBudget() {
+  const view = {};
+  Object.defineProperties(view, {
+    units: {
+      enumerable: true,
+      get() { return currentMinuteBucket().units; },
+      set(value) { currentMinuteBucket().units = value; },
+    },
+    quotaHit: {
+      enumerable: true,
+      get() { return currentMinuteBucket().quotaHit; },
+      set(value) { currentMinuteBucket().quotaHit = value; },
+    },
+  });
+  return view;
+}
+
+function _setClockForTests(fn) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_setClockForTests is only available when NODE_ENV=test');
+  nowFn = typeof fn === 'function' ? fn : () => Date.now();
+}
+
+function resetReadBudgetForTests() {
+  if (process.env.NODE_ENV !== 'test') throw new Error('resetReadBudgetForTests is only available when NODE_ENV=test');
+  minuteBucket = null;
+}
+
+async function scannedIds(ids) {
+  if (!ids.length) return new Set();
+  const { rows } = await pool.query(`SELECT gmail_id FROM gmail_scanned_messages WHERE gmail_id = ANY($1::text[])`, [ids]);
+  return new Set(rows.map(r => r.gmail_id));
+}
+
+// Same shape as gmail_scanned_messages_id_check. A bad id is skipped so one
+// row cannot roll back the rest of the batch.
+const GMAIL_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Record message ids as read, once their outcomes are applied. */
+async function markScanned(entries) {
+  const list = (entries || []).filter(e => e && typeof e.id === 'string' && GMAIL_ID.test(e.id) && (e.box === 'inbox' || e.box === 'sent'));
+  if (!list.length) return 0;
+  const res = await pool.query(
+    `INSERT INTO gmail_scanned_messages (gmail_id, box)
+     SELECT * FROM UNNEST($1::text[], $2::text[])
+     ON CONFLICT (gmail_id) DO NOTHING`,
+    [list.map(e => e.id), list.map(e => e.box)]);
+  return res.rowCount;
+}
+
+async function purgeScanned(days = 120) {
+  await pool.query(`DELETE FROM gmail_scanned_messages WHERE scanned_at < NOW() - make_interval(days => $1)`, [days]);
+}
+
+async function loadListState(q) {
+  const { rows } = await pool.query(
+    'SELECT page_token, pending_ids FROM gmail_list_state WHERE query_key = $1', [q]);
+  if (!rows[0]) return { pageToken: null, pending: [] };
+  return { pageToken: rows[0].page_token || null, pending: rows[0].pending_ids || [] };
+}
+
+async function saveListState(q, pageToken, pending) {
+  if ((!pending || !pending.length) && !pageToken) {
+    await pool.query('DELETE FROM gmail_list_state WHERE query_key = $1', [q]);
+    return;
+  }
+  await pool.query(
+    `INSERT INTO gmail_list_state (query_key, page_token, pending_ids)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (query_key) DO UPDATE
+       SET page_token = EXCLUDED.page_token, pending_ids = EXCLUDED.pending_ids, updated_at = NOW()`,
+    [q, pageToken, pending || []]);
+}
+
+// Page newest-first. A list stops before it would leave less than one full
+// read. A mailbox that still fits is listed through, so the oldest id is not
+// dropped. `incomplete` means older ids may still exist. 10,100 ids is the
+// largest mailbox a check still lists all the way through, so the oldest id
+// is read (the 10,002-id quota test). A bigger mailbox keeps a page token for
+// the older tail. The head is listed again on the next check.
+const MAX_LIST_PAGES = 101;
+
+async function listIds(q, budget, startToken, maxPages = MAX_LIST_PAGES) {
+  const ids = [];
+  let pageToken = startToken || undefined;
+  let incomplete = false;
+  let nextToken = null;
+  let reachedEnd = false;
+  let pages = 0;
+  while (true) {
+    if (pages >= maxPages && pageToken) { incomplete = true; nextToken = pageToken; break; }
+    if (budget.units < COST.list + COST.get) { incomplete = true; nextToken = pageToken || null; break; }
+    budget.units -= COST.list;
+    let page;
+    try {
+      page = await gmail('get', '/messages', { params: { q, maxResults: 100, pageToken } });
+    } catch (err) {
+      if (err.quota) { budget.quotaHit = true; budget.units = 0; throw err; }
+      // A bad cursor drops the rest of this list. Ids already collected stay,
+      // and the caller does not keep the token.
+      if (pageToken && staleCursor(err)) {
+        return { ids, incomplete: true, nextToken: null, reachedEnd: false, stale: true };
+      }
+      throw err;
+    }
+    ids.push(...(page.messages || []).map(m => m.id));
+    pages += 1;
+    if (!page.nextPageToken) { nextToken = null; incomplete = false; reachedEnd = true; break; }
+    pageToken = page.nextPageToken;
+  }
+  return { ids, incomplete, nextToken, reachedEnd, stale: false };
+}
+
+function staleCursor(err) {
+  const status = err && err.status;
+  return status === 400 || status === 404;
+}
+
+// Read the not-yet-scanned ids while the budget lasts. Inbox catch-up reads
+// oldest first once the list is complete. A truncated list reads newest first
+// so the check still moves. backlog = unread ids left for a later check.
+async function readNew(ids, box, budget, shape, { oldestFirst = true } = {}) {
+  const seen = await scannedIds(ids);
+  const fresh = ids.filter(id => !seen.has(id));
+  const ordered = oldestFirst ? fresh.slice().reverse() : fresh;
+  const messages = []; const scanned = []; let attempted = 0; let readFailed = false;
+  for (const id of ordered) {
+    if (budget.units < COST.get) break;
+    budget.units -= COST.get;
+    attempted++;
     try {
       const m = await gmail('get', `/messages/${id}`, { params: { format: 'full' } });
-      const h = m.payload?.headers;
-      const fromHeader = header(h, 'from');
-      out.push({
-        id: m.id,
-        threadId: m.threadId,
-        from: (fromHeader.match(/<([^>]+)>/)?.[1] || fromHeader).trim().toLowerCase(),
-        subject: header(h, 'subject'),
-        date: m.internalDate ? new Date(Number(m.internalDate)) : null,
-        inReplyTo: header(h, 'in-reply-to'),
-        references: header(h, 'references').split(/\s+/).filter(Boolean),
-        messageIdHeader: header(h, 'message-id') || null,
-        auto: isAutoReply(h),
-        text: bodyText(m.payload).slice(0, 20000),
-      });
-    } catch (err) { console.error(`[gmail] skip ${id}: ${err.message}`); }
+      messages.push(await shape(m));
+      scanned.push(id);
+    } catch (err) {
+      if (err.quota) { attempted--; budget.quotaHit = true; budget.units = 0; break; }
+      // Deleted since the list: nothing to read, so don't try again.
+      if (err.status === 404) { scanned.push(id); continue; }
+      // Any other read error (500, network, and the rest) was not read.
+      // It stays in the backlog so follow-ups are not caught up.
+      attempted--;
+      readFailed = true;
+      console.error(`[gmail] skip ${box} ${id}: ${err.message}`);
+    }
   }
-  return out;
+  return { messages, scanned, backlog: fresh.length - attempted, readFailed };
+}
+
+function mergeRead(read, more) {
+  if (!more) return;
+  read.messages.push(...more.messages);
+  read.scanned.push(...more.scanned);
+  if (more.readFailed) read.readFailed = true;
+}
+
+// Every check lists from the mailbox head. The saved token is only the older
+// tail, and it stays on a page until that page is in gmail_scanned_messages,
+// so a crash before markScanned reads the same ids again. When the tail page
+// is the end of the mailbox, the head is listed once more before the check
+// is caught up. A 400 or 404 drops the token and leaves this check incomplete.
+async function scanListed(q, budget, box, shape, { forceNewest = false } = {}) {
+  const state = await loadListState(q);
+  const head = await listIds(q, budget, null);
+  let stale = !!head.stale;
+  let tailToken = stale ? null : (state.pageToken || null);
+  if (!stale && tailToken && budget.units >= COST.list + COST.get) {
+    const probe = await listIds(q, budget, tailToken, 1);
+    if (probe.stale) { stale = true; tailToken = null; }
+  }
+  const oldestFirst = head.reachedEnd && !forceNewest && !stale;
+  const read = await readNew(head.ids, box, budget, shape, { oldestFirst });
+  const got = new Set(read.scanned);
+  const seen = head.ids.length ? await scannedIds(head.ids) : new Set();
+  const headFresh = head.ids.filter(id => !got.has(id) && !seen.has(id));
+  const inHead = new Set(head.ids);
+
+  // Every id this check lists stays in pending_ids until it is in
+  // gmail_scanned_messages, read this check or not. The head is only the
+  // newest 10,100 ids and the saved token only reaches older pages, so an id
+  // kept nowhere else could fall between the two when newer mail arrives.
+  const keep = [];
+  const kept = new Set();
+  const hold = (id) => { if (id && !kept.has(id)) { kept.add(id); keep.push(id); } };
+  for (const id of head.ids) if (!seen.has(id)) hold(id);
+
+  const pending = (state.pending || []).filter(Boolean);
+  const pendingSeen = pending.length ? await scannedIds(pending) : new Set();
+  const pendingOpen = pending.filter(id => !pendingSeen.has(id) && !inHead.has(id));
+  for (const id of pendingOpen) hold(id);
+  if (pendingOpen.length && budget.units >= COST.get) {
+    mergeRead(read, await readNew(pendingOpen, box, budget, shape, { oldestFirst: false }));
+  }
+  const readNow = () => new Set(read.scanned);
+  const pendingUnread = pendingOpen.filter(id => !readNow().has(id));
+
+  let nextToken = null;
+  let confirmToken = null;
+  let walkedToEnd = false;
+  if (!head.reachedEnd && !stale && headFresh.length === 0 && pendingUnread.length === 0) {
+    let token = tailToken || head.nextToken;
+    while (token && budget.units >= COST.list + COST.get) {
+      const page = await listIds(q, budget, token, 1);
+      if (page.stale) { stale = true; token = null; break; }
+      const pageSeen = page.ids.length ? await scannedIds(page.ids) : new Set();
+      const notDurable = page.ids.filter(id => !pageSeen.has(id));
+      if (notDurable.length) {
+        for (const id of notDurable) hold(id);
+        mergeRead(read, await readNew(page.ids, box, budget, shape, { oldestFirst: false }));
+        break;
+      }
+      if (page.reachedEnd) {
+        confirmToken = token;
+        token = null;
+        walkedToEnd = true;
+        break;
+      }
+      token = page.nextToken;
+    }
+    nextToken = token;
+  } else if (!head.reachedEnd && !stale) {
+    nextToken = tailToken || head.nextToken;
+  }
+
+  let headSafe = true;
+  if (walkedToEnd && !stale) {
+    if (budget.units < COST.list + COST.get) {
+      headSafe = false;
+      nextToken = confirmToken;
+    } else {
+      const again = await listIds(q, budget, null, 1);
+      if (again.stale) {
+        stale = true;
+        headSafe = false;
+        nextToken = confirmToken;
+      } else {
+        const againSeen = again.ids.length ? await scannedIds(again.ids) : new Set();
+        const arrived = again.ids.filter(id => !againSeen.has(id) && !got.has(id));
+        for (const id of again.ids) if (!againSeen.has(id)) hold(id);
+        if (arrived.length) {
+          mergeRead(read, await readNew(again.ids, box, budget, shape, { oldestFirst: false }));
+          headSafe = false;
+          nextToken = confirmToken;
+        }
+      }
+    }
+  }
+
+  const done = readNow();
+  const unread = keep.filter(id => !done.has(id));
+  const still = stale || unread.length > 0
+    || (!head.reachedEnd && (!walkedToEnd || !headSafe));
+  await saveListState(q, still ? nextToken : null, keep);
+  read.backlog = unread.length + (nextToken ? 1 : 0);
+  if (still && read.backlog < 1) read.backlog = 1;
+  read.listIncomplete = still;
+  read.order = oldestFirst ? 'oldest' : 'newest';
+  return read;
+}
+
+function inboxShape(m) {
+  const h = m.payload?.headers;
+  const fromHeader = header(h, 'from');
+  return {
+    id: m.id,
+    threadId: m.threadId,
+    from: (fromHeader.match(/<([^>]+)>/)?.[1] || fromHeader).trim().toLowerCase(),
+    subject: header(h, 'subject'),
+    date: m.internalDate ? new Date(Number(m.internalDate)) : null,
+    inReplyTo: header(h, 'in-reply-to'),
+    references: header(h, 'references').split(/\s+/).filter(Boolean),
+    messageIdHeader: header(h, 'message-id') || null,
+    auto: isAutoReply(h),
+    text: bodyText(m.payload).slice(0, 20000),
+  };
+}
+
+/** New inbox messages since a date, oldest first once the list is complete. */
+async function scanInbox(since, budget = readBudget()) {
+  const after = Math.floor(new Date(since).getTime() / 1000);
+  return scanListed(`in:inbox after:${after} -from:me`, budget, 'inbox', inboxShape);
+}
+
+/** Inbox messages since a date, newest last, in the shape classifyMessage expects. */
+async function inboxSince(since) {
+  return (await scanInbox(since, readBudget())).messages;
 }
 
 // RFC 3834 Auto-Submitted plus the common vendor headers for vacation replies.
@@ -250,28 +577,33 @@ function isAutoReply(headers) {
   return /auto_reply|auto-reply/i.test(header(headers, 'precedence'));
 }
 
-/** Messages Kelby sent from Gmail since a date (to catch replies he sent outside the CRM). */
-async function sentSince(since, max = 100) {
+/** New messages Kelby sent from Gmail since a date (replies he sent outside the CRM), within the budget. */
+async function scanSent(since, budget = readBudget()) {
   const after = Math.floor(new Date(since).getTime() / 1000);
-  const page = await gmail('get', '/messages', { params: { q: `in:sent after:${after}`, maxResults: Math.min(max, 100) } });
-  const out = [];
-  for (const { id } of page.messages || []) {
-    try {
-      const m = await gmail('get', `/messages/${id}`, { params: { format: 'full' } });
-      const h = m.payload?.headers;
-      const toHeader = header(h, 'to');
-      out.push({
-        id: m.id, threadId: m.threadId,
-        from: (await getSetting('gmail_oauth'))?.email || SENDER.email,
-        to: (toHeader.match(/<([^>]+)>/)?.[1] || toHeader).trim().toLowerCase(),
-        subject: header(h, 'subject'),
-        date: m.internalDate ? new Date(Number(m.internalDate)) : null,
-        messageIdHeader: header(h, 'message-id') || null,
-        text: bodyText(m.payload).slice(0, 20000),
-      });
-    } catch (err) { console.error(`[gmail] skip sent ${id}: ${err.message}`); }
-  }
-  return out;
+  const fromEmail = (await getSetting('gmail_oauth'))?.email || SENDER.email;
+  return scanListed(`in:sent after:${after}`, budget, 'sent', (m) => {
+    const h = m.payload?.headers;
+    const toHeader = header(h, 'to');
+    return {
+      id: m.id, threadId: m.threadId,
+      from: fromEmail,
+      to: (toHeader.match(/<([^>]+)>/)?.[1] || toHeader).trim().toLowerCase(),
+      subject: header(h, 'subject'),
+      date: m.internalDate ? new Date(Number(m.internalDate)) : null,
+      messageIdHeader: header(h, 'message-id') || null,
+      text: bodyText(m.payload).slice(0, 20000),
+    };
+  }, { forceNewest: true });
 }
 
-module.exports = { status, authUrl, handleCallback, disconnect, prepare, sendMail, inboxSince, sentSince, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES, _bodyText: bodyText, _resetCacheForTests };
+/** Messages Kelby sent from Gmail since a date (to catch replies he sent outside the CRM). */
+async function sentSince(since) {
+  return (await scanSent(since, readBudget())).messages;
+}
+
+module.exports = {
+  status, authUrl, handleCallback, disconnect, accessToken, prepareDelivery, sendMail, wrapGmailError,
+  inboxSince, sentSince, scanInbox, scanSent, markScanned, purgeScanned,
+  readBudget, minuteReadBudget, isQuotaError, COST, READ_BUDGET, isAutoReply, clientConfigured, REDIRECT_PATH, redirectUri, SCOPES,
+  clockNow, _bodyText: bodyText, _setApiForTests, _setClockForTests, resetReadBudgetForTests,
+};

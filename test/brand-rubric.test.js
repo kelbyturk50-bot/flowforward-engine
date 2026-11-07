@@ -970,12 +970,15 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     const schema = fs.readFileSync(path.join(ROOT, 'src/db/schema.sql'), 'utf8');
     const repair = fs.readFileSync(path.join(ROOT, 'src/db/brand-constraints.sql'), 'utf8');
     // Comments are stripped first. Each statement below is exact and may
-    // appear once. The first two are this change. The rest are the idempotent
+    // appear once. The first two are #113, then the facts-tag upgrade (#117)
+    // and the sent_requires_recipient drop (#120). The rest are the idempotent
     // trigger and column drops already in schema.sql. Any other DROP of a
     // constraint, column, trigger, table, or index fails.
     const allowedDrops = [
       'ALTER TABLE prospects DROP CONSTRAINT IF EXISTS prospects_do_not_contact_source_check;',
       'ALTER TABLE chat_demo_sessions DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check;',
+      'ALTER TABLE prototype_facts DROP CONSTRAINT IF EXISTS prototype_facts_tag_check;',
+      'ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient;',
       'DROP TRIGGER IF EXISTS prospects_updated_at ON prospects;',
       'DROP TRIGGER IF EXISTS projects_updated_at ON projects;',
       'DROP TRIGGER IF EXISTS proposals_updated_at ON proposals;',
@@ -1047,6 +1050,13 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     assert.equal(dropKind.test(schemaScanned), false);
     const repairScanned = stripSqlComments(repair);
     assert.equal(dropKind.test(repairScanned), false);
+    // The facts tag upgrade drops and re-adds that one check and nothing else.
+    const factsUpgrade = schema.match(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/);
+    assert.ok(factsUpgrade);
+    assert.deepEqual(
+      [...factsUpgrade[0].matchAll(/DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+(\w+)/gi)].map((m) => m[1]),
+      ['prototype_facts_tag_check']
+    );
     assert.match(repair, /NOT VALID/);
     assert.match(repair, /VALIDATE CONSTRAINT prospect_brands_name_strict/);
     assert.match(repair, /VALIDATE CONSTRAINT prospect_brands_logo_https/);

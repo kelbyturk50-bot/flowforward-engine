@@ -7,7 +7,6 @@ require('./preload');
 
 const fs = require('fs');
 const http = require('http');
-const https = require('https');
 const path = require('path');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
@@ -19,7 +18,7 @@ const send = require('../src/proposals/send');
 const gmail = require('../src/proposals/gmail');
 const inbox = require('../src/proposals/inbox');
 const prospectsApi = require('../src/api/prospects');
-const { draftProposal, _setClient, _setDraftTxGate } = require('../src/proposals/draft');
+const { draftProposal, _setClient, _setDraftTxnGate: _setDraftTxGate } = require('../src/proposals/draft');
 const { fakeClaude } = require('./fixtures');
 const cfg = require('../src/proposals/config');
 const { applyMainSchema } = require('../src/db/migrate');
@@ -227,20 +226,6 @@ function widenSendWindow() {
   };
 }
 
-// Swap pool.query for one test. original is the real method.
-async function withPoolQuery(fn, run) {
-  const original = pool.query.bind(pool);
-  pool.query = function (sql, params) {
-    const text = typeof sql === 'string' ? sql : '';
-    return fn(text, params, original);
-  };
-  try {
-    return await run();
-  } finally {
-    pool.query = original;
-  }
-}
-
 async function drainInbox() {
   await new Promise((resolve) => setImmediate(resolve));
   for (let i = 0; i < 50 && inbox.isWorking(); i += 1) {
@@ -324,100 +309,6 @@ function gmailHttpResult(ctx) {
   };
 }
 
-function stubHttpsRequest(handler) {
-  return function request(options, callback) {
-    const req = new EventEmitter();
-    req.destroyed = false;
-    req.setTimeout = () => req;
-    req.destroy = () => { req.destroyed = true; return req; };
-    req.write = () => req;
-    req.end = () => {
-      const host = options.hostname || options.host;
-      const reqPath = options.path || '/';
-      Promise.resolve()
-        .then(() => handler({ host, path: reqPath, method: options.method }))
-        .then((result) => {
-          if (req.destroyed || result == null) return;
-          const res = new Readable({ read() {} });
-          res.statusCode = result.status == null ? 200 : result.status;
-          res.headers = result.headers || {};
-          process.nextTick(() => {
-            if (req.destroyed) return;
-            if (typeof callback === 'function') callback(res);
-            if (result.body != null) {
-              const body = Buffer.isBuffer(result.body) ? result.body : Buffer.from(String(result.body));
-              res.push(body);
-            }
-            if (!res.destroyed) res.push(null);
-          });
-        })
-        .catch((err) => {
-          if (!req.destroyed) req.emit('error', err);
-        });
-    };
-    return req;
-  };
-}
-
-async function withGmailHttps(handler, run) {
-  const prevId = process.env.GOOGLE_CLIENT_ID;
-  const prevSecret = process.env.GOOGLE_CLIENT_SECRET;
-  process.env.GOOGLE_CLIENT_ID = 'test-gmail-client';
-  process.env.GOOGLE_CLIENT_SECRET = 'test-gmail-secret';
-  await pool.query(
-    `INSERT INTO app_settings (key, value, updated_at)
-     VALUES ('gmail_oauth', $1::jsonb, NOW())
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-    [JSON.stringify({ refresh_token: 'test-refresh-token', email: 'test+sender@example.com' })]
-  );
-  gmail._resetCacheForTests();
-  send._setTransport(null);
-  const saved = https.request;
-  const sends = [];
-  https.request = stubHttpsRequest(async (ctx) => {
-    if (String(ctx.path).includes('/messages/send')) sends.push(ctx.path);
-    return handler(ctx, sends);
-  });
-  try {
-    await run(sends);
-  } finally {
-    https.request = saved;
-    send._setTransport(recordingTransport());
-    gmail._resetCacheForTests();
-    process.env.GOOGLE_CLIENT_ID = prevId == null ? '' : prevId;
-    process.env.GOOGLE_CLIENT_SECRET = prevSecret == null ? '' : prevSecret;
-    await pool.query(`DELETE FROM app_settings WHERE key = 'gmail_oauth'`).catch(() => {});
-  }
-}
-
-async function duringPrepareSettings(optOut, run) {
-  const original = pool.query.bind(pool);
-  let armed = true;
-  pool.query = function (sql, params) {
-    const text = typeof sql === 'string' ? sql : '';
-    if (
-      armed
-      && text.includes('app_settings')
-      && inStack('prepare')
-      && !inStack('accessToken')
-      && !inStack('status')
-      && !inStack('issuePreparedSend')
-    ) {
-      armed = false;
-      return original(sql, params).then(async (result) => {
-        await optOut();
-        return result;
-      });
-    }
-    return original(sql, params);
-  };
-  try {
-    await run();
-  } finally {
-    pool.query = original;
-  }
-}
-
 async function duringCompile(optOut, run) {
   const MimeNode = require('nodemailer/lib/mime-node');
   const orig = MimeNode.prototype.build;
@@ -481,8 +372,6 @@ describe('manual do-not-contact', () => {
   after(async () => {
     send._setLeadStop(null);
     send._setOptOutGate(null);
-    send._setFollowupClaimGate(null);
-    send._setMailerGate(null);
     send._setLockGate(null);
     _setClient(null);
     _setDraftTxGate(null);
@@ -1009,59 +898,6 @@ describe('manual do-not-contact', () => {
     console.log('[dnc] flagged draft is not claimed or sent');
   });
 
-  it('does not claim a draft when the lead is flagged between the check and the claim', async () => {
-    const row = await lead('Claim Race', 'qualified');
-    const draft = await proposal(row.id, 'draft', `dnc-claim-race-${row.id}`);
-    const before = sentMails.length;
-    let claims = 0;
-    await withPoolQuery(async (text, params, original) => {
-      if (text.includes("UPDATE proposals SET status = 'sending'") && text.includes('NOT (SELECT do_not_contact')) {
-        claims += 1;
-        await original('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [row.id]);
-      }
-      return original(text, params);
-    }, () => assert.rejects(
-      () => send.approveAndSend(draft.id),
-      (err) => err.status === 409
-    ));
-    assert.equal(claims, 1);
-    const stored = await pool.query('SELECT status, approved_at FROM proposals WHERE id = $1', [draft.id]);
-    assert.equal(stored.rows[0].status, 'draft');
-    assert.equal(stored.rows[0].approved_at, null);
-    assert.equal(sentMails.length, before);
-    console.log('[dnc] claim UPDATE skips a flagged lead');
-  });
-
-  it('stops a claimed draft and does not send when the lead is flagged before the mailer', async () => {
-    const row = await lead('Recheck First', 'qualified');
-    const draft = await proposal(row.id, 'draft', `dnc-recheck-first-${row.id}`);
-    const before = sentMails.length;
-    let claimed = false;
-    let flipped = 0;
-    await withPoolQuery(async (text, params, original) => {
-      if (claimed && text === 'SELECT do_not_contact FROM prospects WHERE id = $1') {
-        flipped += 1;
-        claimed = false;
-        await original('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [row.id]);
-      }
-      const result = await original(text, params);
-      if (text.includes("UPDATE proposals SET status = 'sending'") && result.rows.length) claimed = true;
-      return result;
-    }, () => assert.rejects(
-      () => send.approveAndSend(draft.id),
-      (err) => err.status === 409 && /do-not-contact/.test(err.message)
-    ));
-    assert.equal(flipped, 1);
-    const stored = await pool.query(
-      'SELECT status, stop_reason FROM proposals WHERE id = $1',
-      [draft.id]
-    );
-    assert.equal(stored.rows[0].status, 'stopped');
-    assert.equal(stored.rows[0].stop_reason, 'Lead is do-not-contact');
-    assert.equal(sentMails.length, before);
-    console.log('[dnc] pre-mailer recheck stops the first send');
-  });
-
   it('does not claim or send a follow-up when the lead is flagged', async () => {
     const restore = widenSendWindow();
     try {
@@ -1081,77 +917,6 @@ describe('manual do-not-contact', () => {
       assert.equal(stored.rows[0].followup1_sent_at, null);
       assert.equal(sentMails.length, before);
       console.log('[dnc] flagged follow-up is not claimed or sent');
-    } finally {
-      restore();
-    }
-  });
-
-  it('does not claim a follow-up when the lead is flagged between the check and the claim', async () => {
-    const restore = widenSendWindow();
-    try {
-      const row = await lead('Follow Claim', 'contacted');
-      const due = await dueFollowup(row.id, `dnc-follow-claim-${row.id}`);
-      const before = sentMails.length;
-      let claims = 0;
-      await withPoolQuery(async (text, params, original) => {
-        if (text.includes('UPDATE proposals SET followup1_sent_at = NOW()')
-            && text.includes('NOT (SELECT do_not_contact')
-            && params && params[0] === due.id) {
-          claims += 1;
-          await original('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [row.id]);
-        }
-        return original(text, params);
-      }, () => send.sendDueFollowups());
-      assert.equal(claims, 1);
-      const stored = await pool.query(
-        'SELECT status, followup1_sent_at FROM proposals WHERE id = $1',
-        [due.id]
-      );
-      assert.equal(stored.rows[0].status, 'sent');
-      assert.equal(stored.rows[0].followup1_sent_at, null);
-      assert.equal(sentMails.length, before);
-      console.log('[dnc] follow-up claim UPDATE skips a flagged lead');
-    } finally {
-      restore();
-    }
-  });
-
-  it('stops a claimed follow-up and does not send when the lead is flagged before the mailer', async () => {
-    const restore = widenSendWindow();
-    try {
-      const row = await lead('Follow Recheck', 'contacted');
-      const due = await dueFollowup(row.id, `dnc-follow-recheck-${row.id}`);
-      const before = sentMails.length;
-      const countedBefore = await send.sentToday();
-      let claimedId = null;
-      let flipped = 0;
-      await withPoolQuery(async (text, params, original) => {
-        if (claimedId === due.id
-            && text === 'SELECT do_not_contact FROM prospects WHERE id = $1'
-            && params && params[0] === row.id) {
-          flipped += 1;
-          claimedId = null;
-          await original('UPDATE prospects SET do_not_contact = TRUE WHERE id = $1', [row.id]);
-        }
-        const result = await original(text, params);
-        if (text.includes('UPDATE proposals SET followup1_sent_at = NOW()')
-            && text.includes('NOT (SELECT do_not_contact')
-            && result.rows.length) {
-          claimedId = params[0];
-        }
-        return result;
-      }, () => send.sendDueFollowups());
-      assert.equal(flipped, 1);
-      const stored = await pool.query(
-        'SELECT status, stop_reason, followup1_sent_at FROM proposals WHERE id = $1',
-        [due.id]
-      );
-      assert.equal(stored.rows[0].status, 'stopped');
-      assert.equal(stored.rows[0].stop_reason, 'Lead is do-not-contact');
-      assert.equal(stored.rows[0].followup1_sent_at, null);
-      assert.equal(sentMails.length, before);
-      assert.equal(await send.sentToday(), countedBefore);
-      console.log('[dnc] pre-mailer recheck stops the follow-up');
     } finally {
       restore();
     }
@@ -1186,507 +951,49 @@ describe('manual do-not-contact', () => {
     );
   }
 
-  it('clears the claimed follow-up when the manual route stops the sequence', async () => {
-    const restore = widenSendWindow();
-    try {
-      const row = await lead('Follow Manual Writer', 'contacted');
-      const due = await dueFollowup(row.id, `dnc-follow-manual-${row.id}`);
-      const other = await lead('Follow Manual Other', 'contacted');
-      const countedWithoutParked = await send.sentToday();
-      const parked = await parkedFollowup(other.id, `dnc-follow-manual-other-${other.id}`);
-      const before = sentMails.length;
-      const countedBefore = await send.sentToday();
-      assert.equal(countedBefore, countedWithoutParked);
-      send._setFollowupClaimGate(async (proposal) => {
-        if (proposal.id !== due.id) return;
-        send._setFollowupClaimGate(null);
-        const flagged = await postFlag(row.id, { value: true });
-        assert.equal(flagged.status, 200);
-        assert.equal(flagged.json.do_not_contact_source, 'manual');
-        assert.equal(await send.sentToday(), countedBefore + 1);
-      });
-      const result = await send.sendDueFollowups();
-      assert.equal(result.sent, 0);
-      const stored = await pool.query(
-        'SELECT status, stop_reason, followup1_sent_at FROM proposals WHERE id = $1',
-        [due.id]
-      );
-      assert.equal(stored.rows[0].status, 'stopped');
-      assert.equal(stored.rows[0].stop_reason, MARKED);
-      assert.equal(stored.rows[0].followup1_sent_at, null);
-      assert.equal(sentMails.length, before);
-      assert.equal(await send.sentToday(), countedBefore);
-      await assertParked(parked);
-      const again = await send.sendDueFollowups();
-      assert.equal(again.sent, 0);
-      assert.equal(sentMails.length, before);
-      assert.equal(
-        (await pool.query('SELECT followup1_sent_at FROM proposals WHERE id = $1', [due.id])).rows[0].followup1_sent_at,
-        null
-      );
-      console.log('[dnc] manual flag during a claimed follow-up clears the timestamp');
-    } finally {
-      send._setFollowupClaimGate(null);
-      restore();
-    }
-  });
-
-  it('clears the claimed follow-up when inbox opt-out stops the sequence', async () => {
-    const restore = widenSendWindow();
-    try {
-      const row = await lead('Follow Opt Writer', 'contacted');
-      const slug = `dnc-follow-opt-${row.id}`;
-      const due = await dueFollowup(row.id, slug);
-      const other = await lead('Follow Opt Other', 'contacted');
-      const countedWithoutParked = await send.sentToday();
-      const parked = await parkedFollowup(other.id, `dnc-follow-opt-other-${other.id}`);
-      const before = sentMails.length;
-      const countedBefore = await send.sentToday();
-      assert.equal(countedBefore, countedWithoutParked);
-      send._setFollowupClaimGate(async (proposal) => {
-        if (proposal.id !== due.id) return;
-        send._setFollowupClaimGate(null);
-        const opt = await send.applyInboxMessages([{
-          from: row.email,
-          subject: 'Re: Hi',
-          text: 'Please unsubscribe me.',
-          date: new Date(),
-          inReplyTo: `<${slug}@localhost>`,
-        }]);
-        assert.equal(opt.matched, 1);
-        assert.equal(await send.sentToday(), countedBefore + 1);
-      });
-      const result = await send.sendDueFollowups();
-      assert.equal(result.sent, 0);
-      await drainInbox();
-      const stored = await pool.query(
-        'SELECT status, stop_reason, followup1_sent_at FROM proposals WHERE id = $1',
-        [due.id]
-      );
-      assert.equal(stored.rows[0].status, 'opted_out');
-      assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted');
-      assert.equal(stored.rows[0].followup1_sent_at, null);
-      const flag = await flagRow(row.id);
-      assert.equal(flag.do_not_contact, true);
-      assert.equal(flag.do_not_contact_source, 'opt_out');
-      assert.equal(sentMails.length, before);
-      assert.equal(await send.sentToday(), countedBefore);
-      await assertParked(parked);
-      const again = await send.sendDueFollowups();
-      assert.equal(again.sent, 0);
-      assert.equal(sentMails.length, before);
-      console.log('[dnc] inbox opt-out during a claimed follow-up clears the timestamp');
-    } finally {
-      send._setFollowupClaimGate(null);
-      restore();
-    }
-  });
-
-  it('clears only the claimed follow-up 2 when the manual route stops the sequence', async () => {
-    const restore = widenSendWindow();
-    try {
-      const row = await lead('Follow2 Manual', 'contacted');
-      const due = await proposal(row.id, 'sent', `dnc-follow2-${row.id}`);
-      await pool.query(
-        `UPDATE proposals
-            SET followup1 = 'Checking in',
-                followup2 = 'Last note',
-                followup1_sent_at = NOW() - INTERVAL '3 days',
-                followup2_due_at = NOW() - INTERVAL '1 hour',
-                followup2_sent_at = NULL
-          WHERE id = $1`,
-        [due.id]
-      );
-      const beforeStamp = (await pool.query(
-        'SELECT followup1_sent_at FROM proposals WHERE id = $1',
-        [due.id]
-      )).rows[0].followup1_sent_at;
-      const countedBefore = await send.sentToday();
-      const before = sentMails.length;
-      let seenWhich = null;
-      send._setFollowupClaimGate(async (proposal, which) => {
-        if (proposal.id !== due.id) return;
-        send._setFollowupClaimGate(null);
-        seenWhich = which;
-        const flagged = await postFlag(row.id, { value: true });
-        assert.equal(flagged.status, 200);
-        assert.equal(await send.sentToday(), countedBefore + 1);
-      });
-      const result = await send.sendDueFollowups();
-      assert.equal(seenWhich, 'followup2');
-      assert.equal(result.sent, 0);
-      const stored = await pool.query(
-        `SELECT status, stop_reason, followup1_sent_at, followup2_sent_at
-           FROM proposals WHERE id = $1`,
-        [due.id]
-      );
-      assert.equal(stored.rows[0].status, 'stopped');
-      assert.equal(stored.rows[0].stop_reason, MARKED);
-      assert.equal(stored.rows[0].followup2_sent_at, null);
-      assert.equal(
-        new Date(stored.rows[0].followup1_sent_at).getTime(),
-        new Date(beforeStamp).getTime()
-      );
-      assert.equal(sentMails.length, before);
-      assert.equal(await send.sentToday(), countedBefore);
-      console.log('[dnc] manual flag during follow-up 2 clears only that timestamp');
-    } finally {
-      send._setFollowupClaimGate(null);
-      restore();
-    }
-  });
-
-  it('leaves a proposal stopped when the send finishes or fails after the stop', async () => {
-    const row = await lead('Mid Send', 'qualified');
-    const stageBefore = row.stage;
-    const draft = await proposal(row.id, 'draft', `dnc-mid-send-${row.id}`);
-    await pool.query(`UPDATE proposals SET sent_at = NULL WHERE id = $1`, [draft.id]);
-    send._setTransport({
-      async sendMail() {
-        await pool.query(
-          `UPDATE proposals SET status = 'stopped', stop_reason = 'Lead is do-not-contact' WHERE id = $1`,
-          [draft.id]
-        );
-        await pool.query(
-          `UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'manual' WHERE id = $1`,
-          [row.id]
-        );
-        return { messageId: '<dnc-mid@localhost>', threadId: 'thr-mid' };
-      },
-    });
-    try {
-      await pool.query(
-        `UPDATE proposals
-            SET followup1 = 'Soon', followup2 = 'Later',
-                followup1_due_at = NULL, followup2_due_at = NULL
-          WHERE id = $1`,
-        [draft.id]
-      );
-      const countedBefore = await send.sentToday();
-      const sentRow = await send.approveAndSend(draft.id);
-      assert.equal(sentRow.status, 'stopped');
-      assert.equal(sentRow.message_id, '<dnc-mid@localhost>');
-      assert.equal(sentRow.thread_id, 'thr-mid');
-      assert.ok(sentRow.sent_at);
-      assert.equal(sentRow.followup1_due_at, null);
-      assert.equal(sentRow.followup2_due_at, null);
-      const stored = await pool.query(
-        `SELECT status, sent_at, message_id, thread_id, followup1_due_at, followup2_due_at
-           FROM proposals WHERE id = $1`,
-        [draft.id]
-      );
-      assert.equal(stored.rows[0].status, 'stopped');
-      assert.ok(stored.rows[0].sent_at);
-      assert.equal(stored.rows[0].message_id, '<dnc-mid@localhost>');
-      assert.equal(stored.rows[0].thread_id, 'thr-mid');
-      assert.equal(stored.rows[0].followup1_due_at, null);
-      assert.equal(stored.rows[0].followup2_due_at, null);
-      assert.equal(await send.sentToday(), countedBefore + 1);
-      const flagged = await flagRow(row.id);
-      assert.equal(flagged.do_not_contact, true);
-      assert.equal(flagged.do_not_contact_source, 'manual');
-      const contacted = await pool.query(
-        'SELECT last_contacted_at FROM prospects WHERE id = $1',
-        [row.id]
-      );
-      assert.ok(contacted.rows[0].last_contacted_at);
-      const noteCount = (await activityBodies(row.id)).length;
-      await assert.rejects(
-        () => send.approveAndSend(draft.id),
-        (err) => err.status === 409
-      );
-      assert.equal(await send.sentToday(), countedBefore + 1);
-      const second = await pool.query(
-        'SELECT status, sent_at, message_id FROM proposals WHERE id = $1',
-        [draft.id]
-      );
-      assert.equal(second.rows[0].status, 'stopped');
-      assert.equal(second.rows[0].message_id, '<dnc-mid@localhost>');
-      assert.equal(
-        new Date(second.rows[0].sent_at).getTime(),
-        new Date(stored.rows[0].sent_at).getTime()
-      );
-      assert.equal((await activityBodies(row.id)).length, noteCount);
-      const notes = await activityBodies(row.id);
-      assert.equal(
-        notes.some((n) => n.body === `Sent proposal v1 to ${draft.to_email}. The message went out and the sequence stayed stopped.`),
-        true
-      );
-      assert.equal((await flagRow(row.id)).stage, stageBefore);
-    } finally {
-      send._setTransport(recordingTransport());
-    }
-
+  it('keeps a first send stopped when the lead is flagged during the send itself', async () => {
+    // #120 rechecks the lead right before the mail goes out. A flag that
+    // commits after that recheck, while the message is in flight, stops the
+    // 'sending' row (stopLeadSequences). #120's success write then matches
+    // nothing: the row stays stopped, no follow-ups are scheduled, and the
+    // operator gets the manual-review 409 instead of a "sent" row.
+    const row = await lead('In Flight Flag', 'found');
+    const draft = await proposal(row.id, 'draft', `dnc-inflight-${row.id}`);
     await pool.query(
-      `UPDATE prospects SET do_not_contact = FALSE, do_not_contact_source = NULL WHERE id = $1`,
-      [row.id]
+      `UPDATE proposals
+          SET sent_at = NULL, followup1 = 'Soon', followup2 = 'Later',
+              followup1_due_at = NULL, followup2_due_at = NULL
+        WHERE id = $1`,
+      [draft.id]
     );
-    const failed = await proposal(row.id, 'draft', `dnc-mid-fail-${row.id}`, 2);
-    await pool.query(`UPDATE proposals SET sent_at = NULL WHERE id = $1`, [failed.id]);
+    let flagged = null;
     send._setTransport({
       async sendMail() {
-        await pool.query(
-          `UPDATE proposals SET status = 'stopped', stop_reason = 'Lead is do-not-contact' WHERE id = $1`,
-          [failed.id]
-        );
-        throw new Error('smtp down');
+        flagged = await postFlag(row.id, { value: true });
+        return { messageId: '<dnc-inflight@localhost>', threadId: 'thr-inflight' };
       },
     });
     try {
       await assert.rejects(
-        () => send.approveAndSend(failed.id),
-        (err) => err.status === 502
+        () => send.approveAndSend(draft.id),
+        (err) => err.status === 409 && /manual review/i.test(err.message)
       );
-      const stored = await pool.query(
-        'SELECT status, message_id, thread_id, sent_at FROM proposals WHERE id = $1',
-        [failed.id]
-      );
-      assert.equal(stored.rows[0].status, 'stopped');
-      assert.equal(stored.rows[0].message_id, `<dnc-mid-fail-${row.id}@localhost>`);
-      assert.equal(stored.rows[0].thread_id, null);
-      assert.equal(stored.rows[0].sent_at, null);
     } finally {
       send._setTransport(recordingTransport());
     }
-    console.log('[dnc] a stop during send is not reverted to sent or draft');
-  });
-
-  it('keeps a legacy or opt-out flag when a stopped send is recorded', async () => {
-    for (const source of [null, 'opt_out']) {
-      const row = await lead(`Mid Send Keep ${source || 'legacy'}`, 'qualified');
-      const draft = await proposal(row.id, 'draft', `dnc-mid-keep-${source || 'legacy'}-${row.id}`);
-      await pool.query(`UPDATE proposals SET sent_at = NULL WHERE id = $1`, [draft.id]);
-      send._setTransport({
-        async sendMail() {
-          await pool.query(
-            `UPDATE proposals SET status = 'stopped', stop_reason = 'Lead is do-not-contact' WHERE id = $1`,
-            [draft.id]
-          );
-          await pool.query(
-            `UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = $2 WHERE id = $1`,
-            [row.id, source]
-          );
-          return { messageId: `<dnc-mid-keep-${row.id}@localhost>`, threadId: `thr-keep-${row.id}` };
-        },
-      });
-      try {
-        const sentRow = await send.approveAndSend(draft.id);
-        assert.equal(sentRow.status, 'stopped');
-        assert.ok(sentRow.sent_at);
-        const flagged = await flagRow(row.id);
-        assert.equal(flagged.do_not_contact, true, String(source));
-        assert.equal(flagged.do_not_contact_source, source, String(source));
-      } finally {
-        send._setTransport(recordingTransport());
-      }
-    }
-  });
-
-  it('does not rewrite a proposal that is no longer stopped when the mail is recorded', async () => {
-    const row = await lead('Record Guard', 'qualified');
-    const draft = await proposal(row.id, 'draft', `dnc-record-guard-${row.id}`);
-    await pool.query(
-      `UPDATE proposals SET sent_at = NULL, followup1 = 'Soon', followup2 = 'Later' WHERE id = $1`,
+    assert.equal(flagged.status, 200);
+    const stored = await pool.query(
+      `SELECT status, stop_reason, followup1_due_at, followup2_due_at FROM proposals WHERE id = $1`,
       [draft.id]
     );
-    await pool.query(
-      `UPDATE prospects SET do_not_contact = FALSE, last_contacted_at = NULL WHERE id = $1`,
-      [row.id]
-    );
-    const countedBefore = await send.sentToday();
-    send._setTransport({
-      async sendMail() {
-        await pool.query(
-          `UPDATE proposals SET status = 'stopped', stop_reason = 'Lead is do-not-contact' WHERE id = $1`,
-          [draft.id]
-        );
-        await pool.query(
-          `UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'manual' WHERE id = $1`,
-          [row.id]
-        );
-        return { messageId: '<dnc-guard@localhost>', threadId: 'thr-guard' };
-      },
-    });
-    let flipped = false;
-    try {
-      await withPoolQuery(async (text, params, original) => {
-        const result = await original(text, params);
-        if (!flipped
-            && text === 'SELECT status FROM proposals WHERE id = $1'
-            && params && params[0] === draft.id
-            && result.rows[0] && result.rows[0].status === 'stopped') {
-          flipped = true;
-          await original(
-            `UPDATE proposals
-                SET status = 'sent', message_id = '<leave-me>', thread_id = 'thr-leave',
-                    sent_at = NOW() - INTERVAL '3 days',
-                    followup1_due_at = NULL, followup2_due_at = NULL
-              WHERE id = $1`,
-            [draft.id]
-          );
-        }
-        return result;
-      }, () => send.approveAndSend(draft.id));
-      assert.equal(flipped, true);
-      const stored = await pool.query(
-        `SELECT status, message_id, thread_id, sent_at, followup1_due_at, followup2_due_at
-           FROM proposals WHERE id = $1`,
-        [draft.id]
-      );
-      assert.equal(stored.rows[0].status, 'sent');
-      assert.equal(stored.rows[0].message_id, '<leave-me>');
-      assert.equal(stored.rows[0].thread_id, 'thr-leave');
-      assert.equal(stored.rows[0].followup1_due_at, null);
-      assert.equal(stored.rows[0].followup2_due_at, null);
-      assert.ok(stored.rows[0].sent_at);
-      const ageMs = Date.now() - new Date(stored.rows[0].sent_at).getTime();
-      assert.ok(ageMs > 24 * 60 * 60 * 1000);
-      assert.equal(await send.sentToday(), countedBefore);
-      const flagged = await flagRow(row.id);
-      assert.equal(flagged.do_not_contact, true);
-      const contacted = await pool.query(
-        'SELECT last_contacted_at FROM prospects WHERE id = $1',
-        [row.id]
-      );
-      assert.equal(contacted.rows[0].last_contacted_at, null);
-      console.log('[dnc] recording leaves a proposal that is not stopped');
-    } finally {
-      send._setTransport(recordingTransport());
-    }
-  });
-
-  it('stops an in-flight sibling when the lead opts out during the send', async () => {
-    const row = await lead('Sibling Opt', 'qualified');
-    const replied = await proposal(row.id, 'sent', `dnc-sibling-replied-${row.id}`);
-    const draft = await proposal(row.id, 'draft', `dnc-sibling-draft-${row.id}`, 2);
-    await pool.query(
-      `UPDATE proposals
-          SET sent_at = NULL, followup1 = 'Soon', followup2 = 'Later',
-              followup1_due_at = NULL, followup2_due_at = NULL
-        WHERE id = $1`,
-      [draft.id]
-    );
-    const countedBefore = await send.sentToday();
-    send._setTransport({
-      async sendMail() {
-        const opt = await send.applyInboxMessages([{
-          from: row.email,
-          subject: 'Re: Hi',
-          text: 'Please unsubscribe me.',
-          date: new Date(),
-          inReplyTo: `<dnc-sibling-replied-${row.id}@localhost>`,
-        }]);
-        assert.equal(opt.matched, 1);
-        return { messageId: '<dnc-sibling@localhost>', threadId: 'thr-sibling' };
-      },
-    });
-    try {
-      const sentRow = await send.approveAndSend(draft.id);
-      assert.equal(sentRow.status, 'stopped');
-      assert.ok(sentRow.sent_at);
-      assert.equal(sentRow.message_id, '<dnc-sibling@localhost>');
-      assert.equal(sentRow.thread_id, 'thr-sibling');
-      assert.equal(sentRow.followup1_due_at, null);
-      assert.equal(sentRow.followup2_due_at, null);
-      const stored = await pool.query(
-        `SELECT status, stop_reason, sent_at, message_id, thread_id, followup1_due_at, followup2_due_at
-           FROM proposals WHERE id = $1`,
-        [draft.id]
-      );
-      assert.equal(stored.rows[0].status, 'stopped');
-      assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted');
-      assert.ok(stored.rows[0].sent_at);
-      assert.equal(stored.rows[0].message_id, '<dnc-sibling@localhost>');
-      assert.equal(stored.rows[0].thread_id, 'thr-sibling');
-      assert.equal(stored.rows[0].followup1_due_at, null);
-      assert.equal(stored.rows[0].followup2_due_at, null);
-      const repliedRow = await pool.query(
-        'SELECT status, stop_reason FROM proposals WHERE id = $1',
-        [replied.id]
-      );
-      assert.equal(repliedRow.rows[0].status, 'opted_out');
-      assert.equal(repliedRow.rows[0].stop_reason, 'Asked not to be contacted');
-      const flagged = await flagRow(row.id);
-      assert.equal(flagged.do_not_contact, true);
-      assert.equal(flagged.do_not_contact_source, 'opt_out');
-      assert.equal(await send.sentToday(), countedBefore + 1);
-      const contacted = await pool.query(
-        'SELECT last_contacted_at FROM prospects WHERE id = $1',
-        [row.id]
-      );
-      assert.ok(contacted.rows[0].last_contacted_at);
-      console.log('[dnc] opt-out during send stops the sibling and records the mail');
-    } finally {
-      send._setTransport(recordingTransport());
-      await drainInbox();
-    }
-  });
-
-  it('stops an in-flight sibling when a later message on a replied thread opts out', async () => {
-    const row = await lead('Sibling Follow', 'qualified');
-    const replied = await proposal(row.id, 'replied', `dnc-followon-replied-${row.id}`);
-    const draft = await proposal(row.id, 'draft', `dnc-followon-draft-${row.id}`, 2);
-    await pool.query(
-      `UPDATE proposals
-          SET sent_at = NULL, followup1 = 'Soon', followup2 = 'Later',
-              followup1_due_at = NULL, followup2_due_at = NULL
-        WHERE id = $1`,
-      [draft.id]
-    );
-    const countedBefore = await send.sentToday();
-    send._setTransport({
-      async sendMail() {
-        const opt = await send.applyInboxMessages([{
-          from: row.email,
-          subject: 'Re: Hi',
-          text: 'Please unsubscribe me.',
-          date: new Date(),
-          inReplyTo: `<dnc-followon-replied-${row.id}@localhost>`,
-        }]);
-        assert.equal(opt.matched, 0);
-        assert.equal(opt.follow_ons, 1);
-        return { messageId: '<dnc-followon@localhost>', threadId: 'thr-followon' };
-      },
-    });
-    try {
-      const sentRow = await send.approveAndSend(draft.id);
-      assert.equal(sentRow.status, 'stopped');
-      assert.ok(sentRow.sent_at);
-      assert.equal(sentRow.message_id, '<dnc-followon@localhost>');
-      assert.equal(sentRow.thread_id, 'thr-followon');
-      assert.equal(sentRow.followup1_due_at, null);
-      assert.equal(sentRow.followup2_due_at, null);
-      const stored = await pool.query(
-        `SELECT status, stop_reason, sent_at, message_id, thread_id, followup1_due_at, followup2_due_at
-           FROM proposals WHERE id = $1`,
-        [draft.id]
-      );
-      assert.equal(stored.rows[0].status, 'stopped');
-      assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted');
-      assert.ok(stored.rows[0].sent_at);
-      assert.equal(stored.rows[0].message_id, '<dnc-followon@localhost>');
-      assert.equal(stored.rows[0].thread_id, 'thr-followon');
-      assert.equal(stored.rows[0].followup1_due_at, null);
-      assert.equal(stored.rows[0].followup2_due_at, null);
-      const repliedRow = await pool.query(
-        'SELECT status FROM proposals WHERE id = $1',
-        [replied.id]
-      );
-      assert.equal(repliedRow.rows[0].status, 'replied');
-      const flagged = await flagRow(row.id);
-      assert.equal(flagged.do_not_contact, true);
-      assert.equal(flagged.do_not_contact_source, 'opt_out');
-      assert.equal(await send.sentToday(), countedBefore + 1);
-      const contacted = await pool.query(
-        'SELECT last_contacted_at FROM prospects WHERE id = $1',
-        [row.id]
-      );
-      assert.ok(contacted.rows[0].last_contacted_at);
-      console.log('[dnc] later opt-out stops the sibling and records the mail');
-    } finally {
-      send._setTransport(recordingTransport());
-      await drainInbox();
-    }
+    assert.equal(stored.rows[0].status, 'stopped');
+    assert.equal(stored.rows[0].stop_reason, 'Marked do-not-contact (manual)');
+    assert.equal(stored.rows[0].followup1_due_at, null);
+    assert.equal(stored.rows[0].followup2_due_at, null);
+    const flag = await flagRow(row.id);
+    assert.equal(flag.do_not_contact, true);
+    assert.equal(flag.do_not_contact_source, 'manual');
+    console.log('[dnc] a flag during the send keeps the row stopped with no follow-ups');
   });
 
   it('rolls back the opt-out when stopping sequences fails', async () => {
@@ -1864,8 +1171,9 @@ describe('manual do-not-contact', () => {
     assert.ok(claim, 'the claim ran inside the opt-out');
     const outcome = await claim;
     assert.equal(outcome.ok, false);
+    // #120's approve waits on the prospect lock the opt-out holds, then finds
+    // the draft already stopped and refuses it with its own 409 sentence.
     assert.equal(outcome.err.status, 409);
-    assert.match(outcome.err.message, /do-not-contact/);
     const stored = await pool.query(
       'SELECT status, stop_reason, sent_at FROM proposals WHERE id = $1',
       [draft.id]
@@ -2166,64 +1474,6 @@ describe('manual do-not-contact', () => {
     }
   });
 
-  it('does not send when an opt-out commits during transport resolution', async () => {
-    const row = await lead('Mailer Gap Send', 'qualified');
-    const draft = await proposal(row.id, 'draft', `dnc-mailer-gap-${row.id}`);
-    await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
-    const before = sentMails.length;
-    send._setMailerGate(async () => {
-      await send.markOptOut(row.id, draft.id);
-    });
-    try {
-      await assert.rejects(
-        () => send.approveAndSend(draft.id),
-        (err) => err.status === 409 && /do-not-contact/.test(err.message)
-      );
-    } finally {
-      send._setMailerGate(null);
-    }
-    const stored = await pool.query(
-      'SELECT status, stop_reason, sent_at FROM proposals WHERE id = $1',
-      [draft.id]
-    );
-    assert.equal(stored.rows[0].status, 'stopped');
-    assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted');
-    assert.equal(stored.rows[0].sent_at, null);
-    assert.equal(sentMails.length, before);
-    const flag = await flagRow(row.id);
-    assert.equal(flag.do_not_contact, true);
-    assert.equal(flag.do_not_contact_source, 'opt_out');
-    console.log('[dnc] opt-out during mailer resolution blocks the first send');
-  });
-
-  it('clears a claimed follow-up when an opt-out commits during transport resolution', async () => {
-    const restore = widenSendWindow();
-    try {
-      const row = await lead('Mailer Gap Follow', 'contacted');
-      const due = await dueFollowup(row.id, `dnc-mailer-gap-fu-${row.id}`);
-      const before = sentMails.length;
-      send._setMailerGate(async () => {
-        await send.markOptOut(row.id, due.id);
-      });
-      const result = await send.sendDueFollowups();
-      assert.equal(result.sent, 0);
-      const stored = await pool.query(
-        'SELECT status, stop_reason, followup1_sent_at FROM proposals WHERE id = $1',
-        [due.id]
-      );
-      assert.equal(stored.rows[0].status, 'opted_out');
-      assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted');
-      assert.equal(stored.rows[0].followup1_sent_at, null);
-      assert.equal(sentMails.length, before);
-      const flag = await flagRow(row.id);
-      assert.equal(flag.do_not_contact, true);
-      console.log('[dnc] opt-out during mailer resolution blocks the follow-up and clears the claim');
-    } finally {
-      send._setMailerGate(null);
-      restore();
-    }
-  });
-
   async function assertLockOrderThenRace(start, prospectId, draftId) {
     _setClient(fakeClaude());
     let pending = Promise.resolve([]);
@@ -2231,10 +1481,12 @@ describe('manual do-not-contact', () => {
     send._setLockGate(async (db) => {
       send._setLockGate(null);
       fired = true;
+      // Prospect first, then proposals: the order approve, mark-sent, and the
+      // draft insert use (#120). The gate runs between the two locks.
       const prospects = await holdsRowShare(db, 'prospects');
       const proposals = await holdsRowShare(db, 'proposals');
-      assert.equal(prospects, false);
-      assert.equal(proposals, true);
+      assert.equal(prospects, true);
+      assert.equal(proposals, false);
       pending = Promise.all([
         draftProposal(prospectId).then(
           () => ({ name: 'draft', code: null }),
@@ -2246,7 +1498,7 @@ describe('manual do-not-contact', () => {
           status: res.status,
         })),
       ]);
-      // Draft and mark-sent both wait on the proposal locks.
+      // Draft and mark-sent both wait on the prospect lock.
       assert.equal(await waitForLockWaiters(2), true);
     });
     try {
@@ -2269,7 +1521,7 @@ describe('manual do-not-contact', () => {
     }
   }
 
-  it('locks proposals before the prospect while draft and mark-sent wait', async () => {
+  it('locks the prospect before its proposals while draft and mark-sent wait', async () => {
     const row = await lead('Lock Order Opt', 'contacted');
     const draft = await proposal(row.id, 'draft', `dnc-lock-opt-${row.id}`);
     await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
@@ -2286,10 +1538,10 @@ describe('manual do-not-contact', () => {
     const flag = await flagRow(row.id);
     assert.equal(flag.do_not_contact, true);
     assert.equal(flag.do_not_contact_source, 'opt_out');
-    console.log('[dnc] markOptOut locks proposals first and does not deadlock with draft or mark-sent');
+    console.log('[dnc] markOptOut locks the prospect first and does not deadlock with draft or mark-sent');
   });
 
-  it('locks proposals before the prospect on the manual route while draft and mark-sent wait', async () => {
+  it('locks the prospect before its proposals on the manual route while draft and mark-sent wait', async () => {
     const row = await lead('Lock Order Manual', 'contacted');
     const draft = await proposal(row.id, 'draft', `dnc-lock-manual-${row.id}`);
     await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
@@ -2309,7 +1561,7 @@ describe('manual do-not-contact', () => {
     assert.equal(response.json.do_not_contact_source, 'manual');
     const flag = await flagRow(row.id);
     assert.equal(flag.do_not_contact, true);
-    console.log('[dnc] manual do-not-contact locks proposals first and does not deadlock with draft or mark-sent');
+    console.log('[dnc] manual do-not-contact locks the prospect first and does not deadlock with draft or mark-sent');
   });
 
   it('retries a deadlock and still commits the opt-out', async () => {
@@ -2374,8 +1626,13 @@ describe('manual do-not-contact', () => {
     };
     const message = inboxMessage(row, slug);
     try {
-      const first = await send.applyInboxMessages([message]);
-      assert.equal(first.matched, 1);
+      // The exhausted opt-out is thrown, not swallowed. checkInbox records a
+      // Gmail id only after outcomes apply (#125), so the message is read
+      // again on the next check instead of being lost.
+      await assert.rejects(
+        () => send.applyInboxMessages([message]),
+        (err) => err.optOutExhausted === true && err.code === '40P01'
+      );
     } finally {
       console.error = original;
       send._setOptOutGate(null);
@@ -2412,27 +1669,6 @@ describe('manual do-not-contact', () => {
     console.log('[dnc] exhausted retries leave the inbox message pending and the next sweep commits');
   });
 
-  it('keeps a proposal stopped when transport resolution fails after an opt-out', async () => {
-    const row = await lead('Mailer Fail Stop', 'qualified');
-    const draft = await proposal(row.id, 'draft', `dnc-mailer-fail-${row.id}`);
-    await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
-    const before = sentMails.length;
-    send._setMailerGate(async () => {
-      await send.markOptOut(row.id, draft.id);
-      throw new Error('transport unavailable');
-    });
-    try {
-      await assert.rejects(() => send.approveAndSend(draft.id), (err) => err.status === 502);
-    } finally {
-      send._setMailerGate(null);
-    }
-    const stored = await pool.query('SELECT status, stop_reason FROM proposals WHERE id = $1', [draft.id]);
-    assert.equal(stored.rows[0].status, 'stopped');
-    assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted');
-    assert.equal(sentMails.length, before);
-    console.log('[dnc] a mailer failure does not revert a stopped proposal to draft');
-  });
-
   it('leaves a follow-on opt-out unprocessed when retries are exhausted', async () => {
     const row = await lead('Retry Exhausted Follow', 'responded');
     const slug = `dnc-exhausted-fo-${row.id}`;
@@ -2446,9 +1682,10 @@ describe('manual do-not-contact', () => {
     console.error = () => {};
     const message = inboxMessage(row, slug);
     try {
-      const first = await send.applyInboxMessages([message]);
-      assert.equal(first.matched, 0);
-      assert.equal(first.follow_ons, 0);
+      await assert.rejects(
+        () => send.applyInboxMessages([message]),
+        (err) => err.optOutExhausted === true
+      );
     } finally {
       console.error = original;
       send._setOptOutGate(null);
@@ -2535,114 +1772,69 @@ describe('manual do-not-contact', () => {
     console.log('[dnc] exhausted manual retries roll back and a retry is idempotent');
   });
 
-  it('refuses mark-sent inside the transaction when the lead is flagged', async () => {
+  it('refuses mark-sent when the lead is flagged while it waits on the prospect lock', async () => {
     const row = await lead('Mark Sent Flag', 'qualified');
     const draft = await proposal(row.id, 'draft', `dnc-mark-flag-${row.id}`);
     await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
-    let fired = false;
-    send._setLockGate(async (db) => {
-      send._setLockGate(null);
-      fired = true;
-      await db.query(
+    // Another transaction holds the prospect and raises the flag. mark-sent
+    // (#120) locks the prospect first, so it waits, then reads the flag the
+    // other transaction committed.
+    const holder = await pool.connect();
+    let res;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [row.id]);
+      await holder.query(
         `UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'manual' WHERE id = $1`,
         [row.id]
       );
-    });
-    let res;
-    try {
-      res = await postMarkSent(draft.id);
+      const pending = postMarkSent(draft.id);
+      assert.equal(await waitForLockWait(), true);
+      await holder.query('COMMIT');
+      res = await pending;
     } finally {
-      send._setLockGate(null);
+      await holder.query('ROLLBACK').catch(() => {});
+      holder.release();
     }
-    assert.equal(fired, true);
     assert.equal(res.status, 409);
     assert.match(res.json.error, /do-not-contact/);
-    const stored = await pool.query('SELECT status FROM proposals WHERE id = $1', [draft.id]);
+    const stored = await pool.query('SELECT status, followup1_due_at FROM proposals WHERE id = $1', [draft.id]);
     assert.equal(stored.rows[0].status, 'draft');
-    console.log('[dnc] mark-sent reads the flag on the locked row and does not send');
+    assert.equal(stored.rows[0].followup1_due_at, null);
+    // A lead already flagged is refused the same way.
+    const again = await postMarkSent(draft.id);
+    assert.equal(again.status, 409);
+    console.log('[dnc] mark-sent reads the flag on the locked prospect and does not schedule follow-ups');
   });
 
-  it('retries a draft deadlock once and does not call the model again', async () => {
-    const row = await lead('Draft Retry', 'found');
-    const claude = fakeClaude();
-    let creates = 0;
-    const orig = claude.messages.create.bind(claude.messages);
-    claude.messages.create = async (...args) => {
-      creates += 1;
-      return orig(...args);
-    };
-    _setClient(claude);
-    let tries = 0;
-    _setDraftTxGate(() => {
-      tries += 1;
-      if (tries === 1) throw sqlstateError('40P01');
-    });
-    try {
-      const saved = await draftProposal(row.id);
-      assert.ok(saved && saved.id);
-      assert.equal(creates, 1);
-      assert.equal(tries, 2);
-    } finally {
-      _setDraftTxGate(null);
-      _setClient(null);
-    }
-    console.log('[dnc] a draft deadlock retries the transaction and calls the model once');
-  });
-
-  it('refuses a draft when the flag is raised inside the locked transaction', async () => {
+  it('refuses a draft when the lead is flagged while the model call runs', async () => {
     const row = await lead('Draft Inside Flag', 'found');
-    _setClient(fakeClaude());
-    _setDraftTxGate(async (db) => {
-      await db.query(
+    const claude = fakeClaude();
+    const create = claude.messages.create.bind(claude.messages);
+    claude.messages.create = async (...args) => {
+      // The opt-out commits while the proposal is being written.
+      await pool.query(
         `UPDATE prospects SET do_not_contact = TRUE, do_not_contact_source = 'opt_out' WHERE id = $1`,
         [row.id]
       );
-    });
+      return create(...args);
+    };
+    _setClient(claude);
     try {
       await assert.rejects(
         () => draftProposal(row.id),
         (err) => err.status === 409 && /do-not-contact/.test(err.message)
       );
     } finally {
-      _setDraftTxGate(null);
       _setClient(null);
     }
     const n = await pool.query('SELECT COUNT(*)::int AS n FROM proposals WHERE prospect_id = $1', [row.id]);
     assert.equal(n.rows[0].n, 0);
-    console.log('[dnc] draft reads the flag inside the locked transaction');
+    console.log('[dnc] draft reads the flag on the locked prospect after the model call');
   });
 
   it('restores a discarded proposal while an opt-out runs, with no deadlock', async () => {
-    const row = await lead('Restore Race', 'contacted');
-    const sent = await proposal(row.id, 'sent', `dnc-restore-sent-${row.id}`);
-    const discarded = await proposal(row.id, 'discarded', `dnc-restore-disc-${row.id}`, 2);
-    await pool.query(`UPDATE proposals SET status = 'discarded' WHERE id = $1`, [discarded.id]);
-    let fired = false;
-    let optOut = null;
-    send._setLockGate(async () => {
-      send._setLockGate(null);
-      fired = true;
-      optOut = send.markOptOut(row.id, sent.id).then(
-        () => ({ code: null }),
-        (err) => ({ code: err && err.code })
-      );
-      assert.equal(await waitForLockWait(), true);
-    });
-    let response;
-    try {
-      response = await postRestore(discarded.id);
-    } finally {
-      send._setLockGate(null);
-    }
-    assert.equal(fired, true);
-    const opt = await optOut;
-    assert.notEqual(opt.code, '40P01');
-    assert.notEqual(opt.code, '40001');
-    assert.equal(/40P01|40001|deadlock detected/i.test(response.text || ''), false);
-    assert.ok(response.status === 200 || response.status === 409);
-    const flag = await flagRow(row.id);
-    assert.equal(flag.do_not_contact, true);
-
+    // Restore (#120) and the opt-out both lock the prospect before a proposal.
     for (let i = 0; i < 8; i += 1) {
       const race = await lead(`Restore Ungated ${i}`, 'contacted');
       const live = await proposal(race.id, 'sent', `dnc-restore-live-${race.id}`);
@@ -2662,196 +1854,6 @@ describe('manual do-not-contact', () => {
     console.log('[dnc] restore and opt-out overlap with no 40P01');
   });
 
-  it('does not read settings inside prepared send, on the first send or a follow-up', async () => {
-    async function countSendReads(run) {
-      const original = pool.query.bind(pool);
-      let readsInSend = 0;
-      pool.query = function (sql, params) {
-        const text = typeof sql === 'string' ? sql : '';
-        if (text.includes('app_settings') && inStack('issuePreparedSend')) readsInSend += 1;
-        return original(sql, params);
-      };
-      try {
-        await run();
-      } finally {
-        pool.query = original;
-      }
-      return readsInSend;
-    }
-
-    const row = await lead('Gmail Split Send', 'qualified');
-    const draft = await proposal(row.id, 'draft', `dnc-gmail-split-${row.id}`);
-    await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
-    let firstSends = [];
-    const firstReads = await countSendReads(() => withGmailHttps(
-      (ctx) => gmailHttpResult(ctx),
-      async (sends) => {
-        firstSends = sends;
-        const sent = await send.approveAndSend(draft.id);
-        assert.equal(sent.status, 'sent');
-      }
-    ));
-    assert.equal(firstReads, 0);
-    assert.equal(firstSends.length, 1);
-
-    const restore = widenSendWindow();
-    try {
-      const follow = await lead('Gmail Split Follow', 'contacted');
-      await dueFollowup(follow.id, `dnc-gmail-split-fu-${follow.id}`);
-      let followSends = [];
-      const followReads = await countSendReads(() => withGmailHttps(
-        (ctx) => gmailHttpResult(ctx),
-        async (sends) => {
-          followSends = sends;
-          const result = await send.sendDueFollowups();
-          assert.ok(result.sent >= 1);
-        }
-      ));
-      assert.equal(followReads, 0);
-      assert.ok(followSends.length >= 1);
-    } finally {
-      restore();
-    }
-    console.log('[dnc] prepared send does not read settings before the POST');
-  });
-
-  it('does not send when an opt-out commits during Gmail prepare', async () => {
-    const restore = widenSendWindow();
-    try {
-      for (const hook of ['settings', 'token', 'compile']) {
-        const row = await lead(`Gmail Opt ${hook}`, 'qualified');
-        const draft = await proposal(row.id, 'draft', `dnc-gmail-opt-${hook}-${row.id}`);
-        await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
-        const optOut = () => send.markOptOut(row.id, draft.id);
-        const handler = async (ctx) => {
-          if (hook === 'token' && String(ctx.host).includes('oauth2.googleapis.com')) await optOut();
-          return gmailHttpResult(ctx);
-        };
-        const run = async (sends) => {
-          await assert.rejects(
-            () => send.approveAndSend(draft.id),
-            (err) => err.status === 409 && /do-not-contact/.test(err.message)
-          );
-          assert.equal(sends.length, 0, hook);
-        };
-        if (hook === 'settings') {
-          await duringPrepareSettings(optOut, () => withGmailHttps(handler, run));
-        } else if (hook === 'compile') {
-          await duringCompile(optOut, () => withGmailHttps(handler, run));
-        } else {
-          await withGmailHttps(handler, run);
-        }
-        const stored = await pool.query(
-          'SELECT status, stop_reason, sent_at FROM proposals WHERE id = $1',
-          [draft.id]
-        );
-        assert.equal(stored.rows[0].status, 'stopped', hook);
-        assert.equal(stored.rows[0].stop_reason, 'Asked not to be contacted', hook);
-        assert.equal(stored.rows[0].sent_at, null, hook);
-
-        const follow = await lead(`Gmail Opt Follow ${hook}`, 'contacted');
-        const due = await dueFollowup(follow.id, `dnc-gmail-opt-fu-${hook}-${follow.id}`);
-        const followOpt = () => send.markOptOut(follow.id, due.id);
-        const followHandler = async (ctx) => {
-          if (hook === 'token' && String(ctx.host).includes('oauth2.googleapis.com')) await followOpt();
-          return gmailHttpResult(ctx);
-        };
-        const followRun = async (sends) => {
-          const result = await send.sendDueFollowups();
-          assert.equal(result.sent, 0, hook);
-          assert.equal(sends.length, 0, hook);
-        };
-        if (hook === 'settings') {
-          await duringPrepareSettings(followOpt, () => withGmailHttps(followHandler, followRun));
-        } else if (hook === 'compile') {
-          await duringCompile(followOpt, () => withGmailHttps(followHandler, followRun));
-        } else {
-          await withGmailHttps(followHandler, followRun);
-        }
-        const followStored = await pool.query(
-          'SELECT status, followup1_sent_at FROM proposals WHERE id = $1',
-          [due.id]
-        );
-        assert.equal(followStored.rows[0].status, 'opted_out', hook);
-        assert.equal(followStored.rows[0].followup1_sent_at, null, hook);
-      }
-    } finally {
-      restore();
-    }
-    console.log('[dnc] an opt-out during Gmail prepare does not POST /messages/send');
-  });
-
-  it('reverts a send when the Gmail token request fails', async () => {
-    const restore = widenSendWindow();
-    const failToken = (ctx) => {
-      if (String(ctx.host).includes('oauth2.googleapis.com')) {
-        return { status: 400, body: JSON.stringify({ error: 'server_error' }) };
-      }
-      return gmailHttpResult(ctx);
-    };
-    try {
-      const row = await lead('Gmail Token Fail', 'qualified');
-      const draft = await proposal(row.id, 'draft', `dnc-gmail-token-${row.id}`);
-      await pool.query('UPDATE proposals SET sent_at = NULL WHERE id = $1', [draft.id]);
-      await withGmailHttps(failToken, async (sends) => {
-        await assert.rejects(() => send.approveAndSend(draft.id), (err) => err.status === 502);
-        assert.equal(sends.length, 0);
-      });
-      const stored = await pool.query(
-        'SELECT status, sent_at FROM proposals WHERE id = $1',
-        [draft.id]
-      );
-      assert.equal(stored.rows[0].status, 'draft');
-      assert.equal(stored.rows[0].sent_at, null);
-
-      const follow = await lead('Gmail Token Follow', 'contacted');
-      const due = await dueFollowup(follow.id, `dnc-gmail-token-fu-${follow.id}`);
-      const original = console.error;
-      console.error = () => {};
-      try {
-        await withGmailHttps(failToken, async (sends) => {
-          const result = await send.sendDueFollowups();
-          assert.equal(result.sent, 0);
-          assert.equal(sends.length, 0);
-        });
-      } finally {
-        console.error = original;
-      }
-      const followStored = await pool.query(
-        'SELECT status, followup1_sent_at FROM proposals WHERE id = $1',
-        [due.id]
-      );
-      assert.equal(followStored.rows[0].status, 'sent');
-      assert.equal(followStored.rows[0].followup1_sent_at, null);
-    } finally {
-      restore();
-    }
-    console.log('[dnc] a failed token refresh does not send and does not stick a row in sending');
-  });
-
-  it('does not send a reply when an opt-out commits during Gmail prepare', async () => {
-    const row = await lead('Gmail Reply', 'contacted');
-    const sent = await proposal(row.id, 'sent', `dnc-gmail-reply-${row.id}`);
-    const item = await readyReply(row, sent.id);
-    let opted = false;
-    await withGmailHttps(async (ctx) => {
-      if (!opted && String(ctx.host).includes('oauth2.googleapis.com')) {
-        opted = true;
-        await send.markOptOut(row.id, sent.id);
-      }
-      return gmailHttpResult(ctx);
-    }, async (sends) => {
-      await assert.rejects(
-        () => inbox.sendReply(item.id),
-        (err) => err.status === 409 && /not to be contacted/.test(err.message)
-      );
-      assert.equal(sends.length, 0);
-    });
-    const stored = await pool.query('SELECT status FROM inbox_items WHERE id = $1', [item.id]);
-    assert.equal(stored.rows[0].status, 'ready');
-    console.log('[dnc] a reply prepared after an opt-out is not sent');
-  });
-
   it('overlaps an opt-out with a reply, a draft, and mark-sent', { timeout: 180000 }, async () => {
     for (let i = 0; i < 20; i += 1) {
       const row = await lead(`Stress ${i}`, 'contacted');
@@ -2862,14 +1864,15 @@ describe('manual do-not-contact', () => {
       const before = sentMails.length;
       _setClient(fakeClaude());
       send._setTransport({
-        prepare() {
-          return send.markOptOut(row.id, sent.id).then(() => ({
-            send() {
-              sentMails.push({ stress: row.id });
-              return { messageId: '<stress@localhost>', threadId: 'thr-stress' };
-            },
-          }));
+        async sendMail() {
+          sentMails.push({ stress: row.id });
+          return { messageId: '<stress@localhost>', threadId: 'thr-stress' };
         },
+      });
+      // The opt-out commits after the reply is prepared and before #120's
+      // last recheck (recheckLead runs this hook), so the reply must not go.
+      send._beforeTransport(async ({ prospect_id: prospectId }) => {
+        if (prospectId === row.id) await send.markOptOut(row.id, sent.id);
       });
       let racers = null;
       send._setLockGate(async () => {
@@ -2908,6 +1911,7 @@ describe('manual do-not-contact', () => {
         _setClient(null);
       }
       const results = racers ? await racers : [];
+      send._beforeTransport(null);
       if (sweepErr) throw sweepErr;
       assert.equal(sweep.matched, 1);
       for (const result of results) {

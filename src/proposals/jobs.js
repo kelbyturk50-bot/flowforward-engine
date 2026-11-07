@@ -32,6 +32,8 @@ async function work() {
       const job = rows[0];
       if (!job) break;
       try {
+        // draftProposal checks again inside the insert transaction, so a sibling
+        // that goes into review during the model call does not become a new draft.
         const p = await draftProposal(job.prospect_id, {
           instructions: job.instructions, reuseResearch: !job.fresh_research, trigger: 'manual',
         });

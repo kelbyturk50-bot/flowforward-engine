@@ -7,12 +7,13 @@
 
 const crypto = require('crypto');
 const pool = require('../db/client');
+const { withClient } = require('../db/with-client');
 const cfg  = require('./config');
 const { replySystemPrompt, replyUserPrompt, TRIAGE_TOOL, KINDS, STAGES } = require('./reply-prompt');
 const { isArchivedLead } = require('../db/pest-archive');
 const { isPestCompanyName } = require('../scoring/industry');
-const { lockLeadForUpdate, isDeadlock, DEADLOCK_ATTEMPTS } = require('./lead-lock');
 
+const { canonicalizeRecipient } = require('./recipient');
 const send  = () => require('./send');   // lazy: send.js requires this file too
 const draft = () => require('./draft');
 
@@ -56,65 +57,34 @@ async function insertMessage(db, { prospectId, proposalId, direction, msg, to })
  * Returns the item, or null if this message was already recorded or the lead
  * is archived / out of scope.
  */
-// Proposals first, then the prospect, then the insert. The foreign keys would
-// otherwise key-share the prospect before the proposal.
-async function withLeadTransaction(prospectId, fn) {
-  let last;
-  for (let attempt = 1; attempt <= DEADLOCK_ATTEMPTS; attempt++) {
-    const db = await pool.connect();
-    try {
-      await db.query('BEGIN');
-      if (prospectId != null) await lockLeadForUpdate(db, prospectId);
-      const result = await fn(db);
-      await db.query('COMMIT');
-      return result;
-    } catch (err) {
-      await db.query('ROLLBACK').catch(() => {});
-      last = err;
-      if (!isDeadlock(err) || attempt === DEADLOCK_ATTEMPTS) {
-        if (isDeadlock(err)) err.inboundExhausted = true;
-        throw err;
-      }
-    } finally {
-      db.release();
-    }
-  }
-  throw last;
-}
-
-// Insert on a client that already holds the lead locks. No BEGIN here.
-async function insertInbound(db, p, kind, msg) {
-  if (isArchivedLead(p) || isPestCompanyName(p.company || '')) return null;
-  const m = await insertMessage(db, { prospectId: p.prospect_id, proposalId: p.id, direction: 'in', msg, to: cfg.SENDER.email });
-  if (!m) return null;
-  let fields;
-  if (kind === 'bounced') {
-    fields = { status: 'fyi', kind: 'bounce', label: 'Bounced', summary: `The email to ${p.to_email} didn't go through.`,
-      notice: 'Follow-ups stopped and the address was cleared from the lead. Find another email or give them a call.' };
-  } else if (kind === 'opted_out') {
-    fields = { status: 'fyi', kind: 'opt_out', label: 'Opted out', summary: 'Asked not to be contacted again.',
-      notice: 'Marked do-not-contact and follow-ups stopped. No reply needed.' };
-  } else {
-    fields = { status: 'queued', kind: kind === 'auto' ? 'auto_reply' : null, label: null, summary: null, notice: null };
-  }
-  const { rows } = await db.query(
-    `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status, kind, label, summary, notice)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [p.prospect_id, p.id, m.id, fields.status, fields.kind, fields.label, fields.summary, fields.notice]);
-  return rows[0] || null;
-}
-
 async function recordInbound(p, kind, msg) {
   if (isArchivedLead(p) || isPestCompanyName(p.company || '')) return null;
-  let item;
-  try {
-    item = await withLeadTransaction(p.prospect_id, (db) => insertInbound(db, p, kind, msg));
-  } catch (err) {
-    if (err && err.inboundExhausted) {
-      console.error(`[inbox] record retries exhausted prospect ${p.prospect_id} proposal ${p.id} sqlstate ${err.code}`);
+  const item = await withClient('inbox', async (db) => {
+    await db.query('BEGIN');
+    try {
+      const m = await insertMessage(db, { prospectId: p.prospect_id, proposalId: p.id, direction: 'in', msg, to: cfg.SENDER.email });
+      if (!m) { await db.query('ROLLBACK'); return null; }
+      let fields;
+      if (kind === 'bounced') {
+        fields = { status: 'fyi', kind: 'bounce', label: 'Bounced', summary: `The email to ${p.to_email} didn't go through.`,
+          notice: 'Follow-ups stopped and the address was cleared from the lead. Find another email or give them a call.' };
+      } else if (kind === 'opted_out') {
+        fields = { status: 'fyi', kind: 'opt_out', label: 'Opted out', summary: 'Asked not to be contacted again.',
+          notice: 'Marked do-not-contact and follow-ups stopped. No reply needed.' };
+      } else {
+        fields = { status: 'queued', kind: kind === 'auto' ? 'auto_reply' : null, label: null, summary: null, notice: null };
+      }
+      const { rows } = await db.query(
+        `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status, kind, label, summary, notice)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [p.prospect_id, p.id, m.id, fields.status, fields.kind, fields.label, fields.summary, fields.notice]);
+      await db.query('COMMIT');
+      return rows[0];
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {});
+      throw err;
     }
-    throw err;
-  }
+  });
   if (item && item.status === 'queued') kick();
   return item;
 }
@@ -263,7 +233,9 @@ async function triage(item) {
   // A rewrite Kelby asked for always comes back as a draft to review.
   if (item.status === 'rewriting' && t.reply_body && t.kind !== 'auto_reply') t.needs_reply = true;
   const automated = AUTOMATED_FROM.test(message.from_addr || '');
-  const replyTo = automated ? (proposal?.to_email || lead.email) : message.from_addr;
+  const rawReply = automated ? (proposal?.to_email || lead.email) : message.from_addr;
+  const canonicalReply = canonicalizeRecipient(rawReply);
+  const replyTo = canonicalReply.ok ? canonicalReply.value : null;
   const subjectBase = message.subject || proposal?.subject || '';
   const subject = t.reply_subject || (/^re:/i.test(subjectBase) ? subjectBase : `Re: ${subjectBase}`);
 
@@ -361,7 +333,11 @@ async function update(id, patch) {
     // A subject is a mail header. CR or LF would inject another header.
     if (k === 'reply_subject') v = v.replace(/\r\n|\r|\n/g, '');
     v = v.slice(0, k === 'reply_body' ? 8000 : 300);
-    if (k === 'reply_to' && !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(v)) throw httpError("That email address doesn't look right.", 400);
+    if (k === 'reply_to') {
+      const canonical = canonicalizeRecipient(v);
+      if (!canonical.ok) throw httpError("That email address doesn't look right.", 400);
+      v = canonical.value;
+    }
     vals.push(v); sets.push(`${k} = $${vals.length}`);
   }
   if (!sets.length) throw httpError('No valid fields', 400);
@@ -374,7 +350,6 @@ function placeholdersIn(text) { return String(text || '').match(PLACEHOLDER) || 
 // Fixed sentence. The inbox toast and the stored error both show it, and it
 // does not include the transport error text.
 const SEND_FAILED_MESSAGE = "The reply didn't send. Try again.";
-const RECORD_FAILED_MESSAGE = 'The reply was sent. Recording it failed. Do not send it again.';
 
 async function sendReply(id) {
   const item = await getItem(id);
@@ -386,7 +361,8 @@ async function sendReply(id) {
   if (!body) throw httpError('The reply is empty.', 400);
   const holes = placeholdersIn(body);
   if (holes.length) throw httpError(`Fill in ${holes.join(', ')} before sending.`, 400);
-  if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(item.reply_to || '')) throw httpError('Add a valid "To" address.', 400);
+  const canonicalTo = canonicalizeRecipient(item.reply_to);
+  if (!canonicalTo.ok || canonicalTo.value !== String(item.reply_to || '')) throw httpError('Add a valid "To" address.', 400);
   const s = send();
   if (!(await s.mailMode())) throw httpError('Email is not set up. Go to Settings and click Connect Gmail.', 400);
 
@@ -394,63 +370,53 @@ async function sendReply(id) {
   if (!claim.rows.length) throw httpError('Already sending.', 409);
   const subject = String(item.reply_subject || `Re: ${item.message_subject || ''}`).replace(/\r\n|\r|\n/g, '');
   const refs = item.header_message_id ? [item.header_message_id] : undefined;
-  const mail = {
-    from: { name: cfg.SENDER.name, address: cfg.SENDER.email },
-    to: item.reply_to,
-    subject,
-    text: body,
-    html: require('./email-html').renderHtml(body, { company: item.company }, { footer: false }),
-    inReplyTo: item.header_message_id || undefined,
-    references: refs,
-    threadId: item.thread_id || undefined,
-  };
   let prepared;
   try {
-    prepared = await (await s.mailer()).prepare(mail);
+    const mail = {
+      from: { name: cfg.SENDER.name, address: cfg.SENDER.email },
+      to: { address: canonicalTo.value },
+      subject,
+      text: body,
+      html: require('./email-html').renderHtml(body, { company: item.company }, { footer: false }),
+      inReplyTo: item.header_message_id || undefined,
+      references: refs,
+      threadId: item.thread_id || undefined,
+    };
+    prepared = await s.prepareOutgoing(mail);
   } catch (err) {
     console.error('[inbox] send failed:', errCode(err));
-    await pool.query(`UPDATE inbox_items SET status = 'ready', error = $2 WHERE id = $1 AND status = 'sending'`, [id, SEND_FAILED_MESSAGE]);
+    await pool.query(`UPDATE inbox_items SET status = 'ready', error = $2 WHERE id = $1`, [id, SEND_FAILED_MESSAGE]);
     const wrapped = httpError(SEND_FAILED_MESSAGE, 500);
     wrapped.code = err && err.code;
     throw wrapped;
   }
-  const beforeSend = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [item.prospect_id]);
-  if (beforeSend.rows[0] && beforeSend.rows[0].do_not_contact) {
-    await pool.query(`UPDATE inbox_items SET status = 'ready', error = NULL WHERE id = $1 AND status = 'sending'`, [id]);
-    throw httpError('This lead asked not to be contacted.', 409);
+  const gate = await s.recheckLead(item.prospect_id);
+  // Stage "responded" is set when their reply arrives. This send is the answer,
+  // so only do-not-contact and an opt-out stage block it.
+  if (gate && (gate.archived_at || gate.do_not_contact || gate.stage === 'lost' || gate.stage === 'disqualified')) {
+    await pool.query(`UPDATE inbox_items SET status = 'ready' WHERE id = $1 AND status = 'sending'`, [id]);
+    throw httpError(gate.do_not_contact ? 'This lead asked not to be contacted.' : 'This lead is no longer a send.', 409);
   }
   let info;
   try {
-    // prepare() finished every settings, token, and compile step. send()
-    // starts the request with no await before it.
     info = await prepared.send();
   } catch (err) {
     console.error('[inbox] send failed:', errCode(err));
-    await pool.query(`UPDATE inbox_items SET status = 'ready', error = $2 WHERE id = $1 AND status = 'sending'`, [id, SEND_FAILED_MESSAGE]);
+    await pool.query(`UPDATE inbox_items SET status = 'ready', error = $2 WHERE id = $1`, [id, SEND_FAILED_MESSAGE]);
     const wrapped = httpError(SEND_FAILED_MESSAGE, 500);
     wrapped.code = err && err.code;
     throw wrapped;
   }
-  try {
-    await withLeadTransaction(item.prospect_id, async (db) => {
-      const out = await insertMessage(db, {
-        prospectId: item.prospect_id, proposalId: item.proposal_id, direction: 'out', to: item.reply_to,
-        msg: { id: info.id || null, key: info.id ? null : `out:${crypto.randomUUID()}`, threadId: info.threadId || item.thread_id,
-          messageIdHeader: info.messageId || null, from: cfg.SENDER.email, subject, text: body, date: new Date() },
-      });
-      await db.query(`UPDATE inbox_items SET status = 'sent', sent_at = NOW(), sent_message_id = $2, error = NULL, reviewed_at = COALESCE(reviewed_at, NOW()) WHERE id = $1`,
-        [id, out?.id || null]);
-      await db.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [item.prospect_id]);
-      await db.query(`UPDATE prospects SET next_action = NULL, next_action_at = NULL WHERE id = $1 AND next_action = 'Reply to their email'`, [item.prospect_id]);
-      await db.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'email', $2)`,
-        [item.prospect_id, `Replied to ${item.reply_to}: "${(item.reply_subject || '').slice(0, 120)}".`]);
-      return out;
-    });
-  } catch (err) {
-    console.error(`[inbox] reply record failed item ${id} prospect ${item.prospect_id} proposal ${item.proposal_id == null ? 'none' : item.proposal_id} sqlstate ${err.code || 'error'}`);
-    await pool.query(`UPDATE inbox_items SET status = 'failed', error = $2 WHERE id = $1 AND status = 'sending'`, [id, RECORD_FAILED_MESSAGE]);
-    throw httpError(RECORD_FAILED_MESSAGE, 500);
-  }
+  const out = await insertMessage(pool, {
+    prospectId: item.prospect_id, proposalId: item.proposal_id, direction: 'out', to: item.reply_to,
+    msg: { id: info.id || null, key: info.id ? null : `out:${crypto.randomUUID()}`, threadId: info.threadId || item.thread_id,
+      messageIdHeader: info.messageId || null, from: cfg.SENDER.email, subject, text: body, date: new Date() },
+  });
+  await pool.query(`UPDATE inbox_items SET status = 'sent', sent_at = NOW(), sent_message_id = $2, error = NULL, reviewed_at = COALESCE(reviewed_at, NOW()) WHERE id = $1`,
+    [id, out?.id || null]);
+  await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [item.prospect_id]);
+  await pool.query(`UPDATE prospects SET next_action = NULL, next_action_at = NULL WHERE id = $1 AND next_action = 'Reply to their email'`, [item.prospect_id]);
+  await logActivity(item.prospect_id, 'email', `Replied to ${item.reply_to}: "${(item.reply_subject || '').slice(0, 120)}".`);
   return getItem(id);
 }
 
@@ -572,21 +538,17 @@ async function applySentMessages(sentMessages) {
         WHERE m.thread_id = $1 AND i.status = ANY('{queued,ready,failed,fyi}') ORDER BY m.received_at DESC LIMIT 1`, [msg.threadId]);
     const it = rows[0];
     if (!it || (msg.date && new Date(msg.date) <= new Date(it.received_at))) continue;
-    const out = await withLeadTransaction(it.prospect_id, async (db) => {
-      const inserted = await insertMessage(db, { prospectId: it.prospect_id, proposalId: it.proposal_id, direction: 'out', msg, to: msg.to || null });
-      if (!inserted) return null;
-      await db.query(`UPDATE inbox_items SET status = 'handled', handled_note = 'You replied from Gmail', reviewed_at = COALESCE(reviewed_at, NOW()) WHERE id = $1`, [it.id]);
-      await db.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'email', 'Replied from Gmail.')`, [it.prospect_id]);
-      return inserted;
-    });
+    const out = await insertMessage(pool, { prospectId: it.prospect_id, proposalId: it.proposal_id, direction: 'out', msg, to: msg.to || null });
     if (!out) continue; // already recorded (e.g. sent from the CRM)
+    await pool.query(`UPDATE inbox_items SET status = 'handled', handled_note = 'You replied from Gmail', reviewed_at = COALESCE(reviewed_at, NOW()) WHERE id = $1`, [it.id]);
+    await logActivity(it.prospect_id, 'email', 'Replied from Gmail.');
     handled++;
   }
   return handled;
 }
 
 module.exports = {
-  recordInbound, insertInbound, alreadyRecorded, dedupeKey, threadFor, work, recover, kick, list, counts, detail, update, sendReply,
+  recordInbound, alreadyRecorded, dedupeKey, threadFor, work, recover, kick, list, counts, detail, update, sendReply,
   SEND_FAILED_MESSAGE,
   setStatus, reopen, rewrite, applySuggestion, markSeen, applySentMessages, cleanTriage, placeholdersIn,
   isWorking: () => working,

@@ -236,7 +236,8 @@ router.post('/:id/do-not-contact', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Proposals first, then the prospect. Same order as draft and mark-sent.
+    // Prospect first, then its proposals. Same order as approve, mark-sent,
+    // and the draft insert.
     await lockLeadForUpdate(client, id, { between: true });
     const found = await client.query('SELECT * FROM prospects WHERE id = $1 FOR UPDATE', [id]);
     if (!found.rows.length) {
@@ -394,6 +395,10 @@ router.delete('/:id', async (req, res) => {
     await pool.query('DELETE FROM prospects WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
   } catch (err) {
+    // lead_offers references prospects with ON DELETE RESTRICT.
+    if (err && err.code === '23503') {
+      return res.status(409).json({ error: 'This lead has offer records. Archive it instead of deleting it.' });
+    }
     res.status(500).json({ error: err.message });
   }
 });

@@ -108,8 +108,14 @@ const flagsApi = require('./api/flags');
 app.use('/api/flags', flagsApi.requireFlagApiKey);
 const campaignsApi = require('./api/campaigns');
 app.use('/api/campaigns', campaignsApi.flagGate);
+// Offer routes. Closed unless FF_OFFER_TRACKING is exactly "true". They sit
+// after requireApiKey, and a closed path is skipped, so it answers exactly
+// like an unknown /api path (401 without a key, 404 with one).
+const offersApi = require('./api/offers');
 app.use('/api', requireApiKey);
 app.use('/api/prospects', require('./api/prospects'));
+app.use('/api/offers',    offersApi.gated(offersApi.router));
+app.use('/api/leads',     offersApi.gated(offersApi.leadsRouter));
 app.use('/api/projects',  projects);
 app.use('/api/tasks',     tasks);
 app.use('/api/focus',     require('./api/focus'));

@@ -7,27 +7,28 @@
 // (weekdays, 8am–5pm Denver) unless the lead replies, books on Calendly,
 // bounces, opts out, or Kelby moves them forward/stops the sequence.
 
+const crypto = require('crypto');
 const nodemailer = require('nodemailer');
+const MailComposer = require('nodemailer/lib/mail-composer');
 const pool = require('../db/client');
+const { withClient } = require('../db/with-client');
 const cfg  = require('./config');
 const { appendCompanyPestExclusion, isPestCompanyName, PEST_NAME_REASON } = require('../scoring/industry');
 const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 
+const { canonicalizeRecipient, missingRecipient, normalizeRecipient } = require('./recipient');
+const { blocksNewSendSql, siblingBlockMessage, blockingSibling } = require('./sequence-block');
+const { lockLeadForUpdate, isDeadlock, DEADLOCK_ATTEMPTS, _setLockGate } = require('./lead-lock');
 const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const GENERIC_DOMAINS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'aol.com', 'live.com', 'msn.com', 'comcast.net', 'me.com', 'protonmail.com'];
 
 const gmail = require('./gmail');
-const { lockLeadForUpdate, _setLockGate } = require('./lead-lock');
 
 // How mail goes out: the Gmail API (HTTPS) when Gmail is connected in Settings;
 // otherwise SMTP with an app password (only works on Railway Pro, which allows SMTP).
 let transport = null;
 let testTransport = null;
-// Runs after mailMode resolves and before mailer returns the transport.
-// An opt-out that commits here is visible to the do-not-contact recheck,
-// which is the next await in the send paths.
-let mailerGate = null;
 async function mailMode() {
   if (testTransport) return 'test';
   if ((await gmail.status()).connected) return 'gmail_api';
@@ -36,12 +37,7 @@ async function mailMode() {
 }
 async function mailer() {
   const mode = await mailMode();
-  if (mailerGate) {
-    const gate = mailerGate;
-    mailerGate = null;
-    await gate();
-  }
-  if (mode === 'test') return withPrepare(testTransport);
+  if (mode === 'test') return testTransport;
   if (mode === 'gmail_api') return gmail;
   if (mode === 'smtp') {
     if (!transport) {
@@ -51,41 +47,63 @@ async function mailer() {
         connectionTimeout: 20000,
       });
     }
-    return withPrepare(transport);
+    return transport;
   }
-  throw new Error('Email is not set up. Go to Settings and click Connect Gmail.');
+  throw Object.assign(new Error('Email is not set up. Go to Settings and click Connect Gmail.'), { status: 503 });
 }
 
-// A legacy transport only has sendMail. prepare() returns an object whose
-// send() calls it immediately, with no await before that call.
-function withPrepare(transport) {
-  if (!transport || typeof transport.prepare === 'function') return transport;
+// Status, token refresh, and the raw MIME are resolved here. The caller
+// rechecks the lead after this returns, then calls send() with no await between
+// that recheck and the POST.
+function smtpTransport() {
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+    connectionTimeout: 20000,
+  });
+}
+
+async function compileOutgoing(mail) {
+  if (!mail) return;
+  await new MailComposer({ ...mail, threadId: undefined }).compile().build();
+}
+
+async function prepareOutgoing(mail) {
+  const status = await gmail.status();
+  const mode = await mailMode();
+  let delivery = null;
+  if (mode === 'gmail_api' && status && status.connected && typeof gmail.prepareDelivery === 'function') {
+    delivery = await gmail.prepareDelivery(mail);
+  } else {
+    if (status && status.connected && typeof gmail.accessToken === 'function') {
+      await gmail.accessToken({ force: true });
+    }
+    await compileOutgoing(mail);
+  }
+  let transportClient = null;
+  if (mode === 'test') transportClient = testTransport;
+  else if (mode === 'smtp') {
+    if (!transport) transport = smtpTransport();
+    transportClient = transport;
+  }
   return {
-    prepare(mail) {
-      return Promise.resolve({
-        send() {
-          return transport.sendMail(mail);
-        },
-      });
-    },
-    sendMail(mail) {
-      return transport.sendMail(mail);
+    mode,
+    send() {
+      if (mode === 'gmail_api' && delivery) return delivery.send();
+      if (!transportClient || typeof transportClient.sendMail !== 'function') {
+        throw Object.assign(new Error('Email is not set up. Go to Settings and click Connect Gmail.'), { status: 503 });
+      }
+      return transportClient.sendMail(mail);
     },
   };
 }
+
 // Tests swap in a fake transport. Refuses to run outside the test process.
 function _setTransport(t) {
   if (process.env.NODE_ENV !== 'test') {
     throw new Error('_setTransport is only available when NODE_ENV=test');
   }
   testTransport = t;
-}
-
-function _setMailerGate(fn) {
-  if (process.env.NODE_ENV !== 'test') {
-    throw new Error('_setMailerGate is only available when NODE_ENV=test');
-  }
-  mailerGate = fn || null;
 }
 
 const onepagerUrl = (p) => `${cfg.PUBLIC_BASE_URL}/p/${p.slug}`;
@@ -229,6 +247,47 @@ async function sentToday() {
   return Number(rows[0].n);
 }
 
+function haltView(row) {
+  if (!row || row.event !== HALT_EVENT) return null;
+  return {
+    event: HALT_EVENT,
+    error_class: row.error_class,
+    provider: row.provider,
+    cause: row.cause || null,
+    first_seen: row.first_seen,
+    halted_ticks: Number(row.halted_ticks) || 0,
+  };
+}
+
+async function loadHalt() {
+  const { rows } = await pool.query('SELECT value FROM app_settings WHERE key = $1', [HALT_KEY]);
+  return rows[0] ? rows[0].value : null;
+}
+
+// A hold that lasts this many sender ticks is logged once and shown in the
+// CRM setup list. It does not release follow-ups.
+const HOLD_ALERT_AFTER_TICKS = 3;
+// A scan still inside this window is "running". Past it, the scan is hung.
+// Either way follow-ups stay held. The flag is in memory, so a restart clears it.
+const SCAN_TIMEOUT_MS = 2 * 60 * 1000;
+let consecutiveHolds = 0;
+let holdAlerted = false;
+let checking = false;
+let scanStartedAt = 0;
+
+function noteFollowupHold() {
+  consecutiveHolds += 1;
+  if (consecutiveHolds >= HOLD_ALERT_AFTER_TICKS && !holdAlerted) {
+    holdAlerted = true;
+    console.error(`[sender] alert: follow-ups held for ${consecutiveHolds} consecutive checks; inbox is not caught up`);
+  }
+}
+
+function clearFollowupHold() {
+  consecutiveHolds = 0;
+  holdAlerted = false;
+}
+
 async function sendReadiness() {
   const problems = [];
   const mode = await mailMode();
@@ -238,13 +297,503 @@ async function sendReadiness() {
       : 'Set up Gmail sending: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Railway, then click Connect Gmail in Settings.');
   }
   if (!SENDER.address) problems.push('Add SENDER_ADDRESS (a mailing address for the email footer; the law requires one).');
+  problems.halt = haltView(await loadHalt());
+  if (consecutiveHolds >= HOLD_ALERT_AFTER_TICKS) {
+    problems.push('Follow-ups are on hold: the inbox check is not caught up.');
+  }
   return problems;
 }
 
-const validEmail = (x) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(x || '');
+const MANUAL_REVIEW = 'Needs manual review: the send outcome is uncertain';
+const RESEND_CONFIRM = 'Confirm before sending again';
+const TRANSIENT_MAX_AGE = 'transient_max_age';
+const MANUAL_REVIEW_STATUS = 'manual_review';
+const STALE_SENDING = '15 minutes';
+const ATTEMPT_CAP = 3;
+const FOLLOWUP_SWEEP_LOCK = 89089017;
+const FOLLOWUP_BACKOFF_CAP_MS = 60 * 60 * 1000;
+const FOLLOWUP_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+const BACKOFF_CAP_MS = FOLLOWUP_BACKOFF_CAP_MS;
+const SENDER_ALERT_KEY = 'sender_alert';
+const HALT_KEY = 'followups.halted';
+const HALT_EVENT = 'followups.halted';
+const OUTAGE_LABELS = new Set(['quota', 'server', 'network', 'smtp']);
+
+let beforeFollowupClaim = null;
+let beforeTransport = null;
+let failNextRelease = false;
+let failNextPostSend = false;
+
+function testOnly(name) {
+  if (process.env.NODE_ENV !== 'test') throw new Error(`${name} is only available when NODE_ENV=test`);
+}
+
+function _beforeFollowupClaim(fn) {
+  testOnly('_beforeFollowupClaim');
+  beforeFollowupClaim = fn;
+}
+
+function _beforeTransport(fn) {
+  testOnly('_beforeTransport');
+  beforeTransport = fn;
+}
+
+function _failNextRelease() {
+  testOnly('_failNextRelease');
+  failNextRelease = true;
+}
+
+function _failNextPostSend() {
+  testOnly('_failNextPostSend');
+  failNextPostSend = true;
+}
+
+let randomSource = null;
+let alertHook = null;
+
+function _setRandom(fn) {
+  testOnly('_setRandom');
+  randomSource = typeof fn === 'function' ? fn : null;
+}
+
+function _setAlertHook(fn) {
+  testOnly('_setAlertHook');
+  alertHook = typeof fn === 'function' ? fn : null;
+}
+
+let credentialOverride = null;
+let sendTxnGate = null;
+function _setSendTxnGate(fn) {
+  testOnly('_setSendTxnGate');
+  sendTxnGate = typeof fn === 'function' ? fn : null;
+}
+async function afterLeadLock(prospectId) {
+  if (sendTxnGate) await sendTxnGate({ prospectId });
+}
+function _setCredentialCheck(fn) {
+  testOnly('_setCredentialCheck');
+  credentialOverride = typeof fn === 'function' ? fn : null;
+}
+
+function _resetSendTestHooks() {
+  testOnly('_resetSendTestHooks');
+  beforeFollowupClaim = null;
+  beforeTransport = null;
+  failNextRelease = false;
+  failNextPostSend = false;
+  randomSource = null;
+  alertHook = null;
+  credentialOverride = null;
+  sendTxnGate = null;
+}
+
+function unitRandom(rand) {
+  const raw = rand == null ? (randomSource ? randomSource() : Math.random()) : rand;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+// Minutes: clamp(min(60, 15 * 2^(n-1)) * U(0.8, 1.2), 15, 60).
+// n is the transient attempt in the current streak. U comes from _setRandom.
+function backoffDelayMinutes(attempt, rand) {
+  const n = Math.max(1, Number(attempt) || 1);
+  const u = 0.8 + unitRandom(rand) * 0.4;
+  const slot = Math.min(60, 15 * (2 ** (n - 1)));
+  const raw = Math.round((slot * u) * 1e6) / 1e6;
+  return Math.min(60, Math.max(15, raw));
+}
+
+function backoffDelayMs(attempt, rand) {
+  return backoffDelayMinutes(attempt, rand) * 60 * 1000;
+}
+
+function envelopeTo(name, address) {
+  const to = { address };
+  const label = name == null ? '' : String(name).trim();
+  if (label) to.name = label;
+  return to;
+}
+
+function storedRecipient(email) {
+  const text = email == null ? '' : String(email);
+  const canonical = canonicalizeRecipient(email);
+  if (!canonical.ok || canonical.value !== text) return null;
+  return canonical.value;
+}
+
+const NETWORK_CODES = new Set([
+  'EAI_AGAIN', 'ECONNABORTED', 'ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH',
+  'ENETUNREACH', 'ENOTFOUND', 'EPIPE', 'ESOCKETTIMEDOUT', 'ETIMEDOUT',
+]);
+const QUOTA_REASONS = ['quotaexceeded', 'ratelimitexceeded', 'userratelimitexceeded', 'dailylimitexceeded'];
+
+function httpStatus(err) {
+  if (!err || typeof err !== 'object') return null;
+  const nested = err.response && err.response.data && err.response.data.error;
+  const candidates = [
+    err.status, err.statusCode,
+    err.response && err.response.status,
+    nested && typeof nested === 'object' ? nested.code : null,
+  ];
+  for (const value of candidates) {
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599) return value;
+    if (typeof value === 'string' && /^\d{3}$/.test(value)) return Number(value);
+  }
+  // googleapis puts the HTTP status on err.code. Nodemailer's SMTP status is
+  // responseCode, and a string code is a network or envelope error.
+  if (err.responseCode == null && typeof err.code === 'number' && Number.isInteger(err.code) && err.code >= 100 && err.code <= 599) {
+    return err.code;
+  }
+  return null;
+}
+
+function reasonTokens(err) {
+  const out = new Set();
+  const add = (value) => {
+    if (value == null) return;
+    const text = String(value).trim();
+    if (!text) return;
+    out.add(text.toLowerCase());
+  };
+  if (!err || typeof err !== 'object') return out;
+  add(err.reason);
+  add(err.gmailStatus);
+  const nested = err.response && err.response.data && err.response.data.error;
+  if (typeof nested === 'string') add(nested);
+  if (nested && typeof nested === 'object') {
+    add(nested.status);
+    add(nested.reason);
+    if (Array.isArray(nested.errors)) {
+      for (const item of nested.errors) {
+        if (!item) continue;
+        add(item.reason);
+        add(item.status);
+      }
+    }
+  }
+  if (Array.isArray(err.errors)) {
+    for (const item of err.errors) {
+      if (!item) continue;
+      add(item.reason);
+    }
+  }
+  return out;
+}
+
+function hasReason(err, names) {
+  const tokens = reasonTokens(err);
+  return names.some((name) => tokens.has(String(name).toLowerCase()));
+}
+
+function errorBlob(err) {
+  if (!err || typeof err !== 'object') return String(err || '');
+  const bits = [];
+  if (err.message) bits.push(String(err.message));
+  if (err.gmailStatus) bits.push(String(err.gmailStatus));
+  if (err.reason) bits.push(String(err.reason));
+  const nested = err.response && err.response.data && err.response.data.error;
+  if (nested) {
+    if (nested.message) bits.push(String(nested.message));
+    if (nested.status) bits.push(String(nested.status));
+    if (Array.isArray(nested.errors)) {
+      for (const item of nested.errors) {
+        if (!item) continue;
+        if (item.message) bits.push(String(item.message));
+        if (item.reason) bits.push(String(item.reason));
+      }
+    }
+  }
+  if (Array.isArray(err.errors)) {
+    for (const item of err.errors) {
+      if (!item) continue;
+      if (item.message) bits.push(String(item.message));
+      if (item.reason) bits.push(String(item.reason));
+    }
+  }
+  return bits.join(' ');
+}
+
+function isNetworkFollowupError(err) {
+  const code = err && err.code;
+  if (typeof code === 'string' && NETWORK_CODES.has(code)) return true;
+  // Nodemailer reports a socket drop after DATA as ECONNECTION with command CONN.
+  if (code === 'ECONNECTION') return true;
+  if ((atCommand(err, 'DATA') || atCommand(err, 'CONN')) && /connection closed|server closed the connection|unexpectedly closed/i.test(errorBlob(err))) return true;
+  return /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|socket hang up|network error|getaddrinfo|timeout of \d+ms exceeded/i.test(errorBlob(err));
+}
+
+function isQuotaReason(err) {
+  return hasReason(err, QUOTA_REASONS) || hasReason(err, ['resource_exhausted']);
+}
+
+function smtpCode(err) {
+  const code = err && err.responseCode;
+  if (typeof code === 'number' && Number.isInteger(code) && code >= 400 && code <= 599) return code;
+  return null;
+}
+
+function smtpCommand(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function atCommand(err, command) {
+  if (!err || typeof err !== 'object') return false;
+  if (smtpCommand(err.command) === command) return true;
+  return Array.isArray(err.rejectedErrors) && err.rejectedErrors.some((item) => item && smtpCommand(item.command) === command);
+}
+
+function replyTexts(err) {
+  const out = [];
+  if (!err || typeof err !== 'object') return out;
+  if (typeof err.response === 'string') out.push(err.response);
+  if (typeof err.message === 'string') out.push(err.message);
+  if (Array.isArray(err.rejectedErrors)) {
+    for (const item of err.rejectedErrors) {
+      if (!item) continue;
+      if (typeof item.response === 'string') out.push(item.response);
+      if (typeof item.message === 'string') out.push(item.message);
+    }
+  }
+  return out;
+}
+
+function serverReply(text) {
+  return String(text || '').replace(/^(?:(?:Can't send mail - )?all recipients were rejected|Data command failed|Message failed for recipient [^\n:]*|Message failed|Invalid login):\s*/i, '');
+}
+
+function anchoredEnhanced(text, responseCode) {
+  // Only the start of the server's own reply line. A code quoted later,
+  // including after nodemailer's prefix, is not this reply's status.
+  const first = serverReply(text).split(/\r?\n/)[0];
+  const start = first.match(/^\s*(\d{3})(?:[ \t]+|-)(5\.\d{1,3}\.\d{1,3})\b/);
+  if (!start) return [];
+  const code = Number(start[1]);
+  if (responseCode != null && code !== responseCode) return [];
+  return [{ code, enhanced: start[2] }];
+}
+
+function firstAnchoredEnhanced(err) {
+  const code = smtpCode(err);
+  for (const text of replyTexts(err)) {
+    const pairs = anchoredEnhanced(text, code);
+    if (pairs.length) return pairs[0];
+  }
+  return null;
+}
+
+const PERMANENT_ENHANCED = new Set(['5.1.0', '5.1.1', '5.1.2', '5.1.3', '5.1.10']);
+
+function isTemporarySmtp(err) {
+  const code = smtpCode(err);
+  if (code != null && code >= 400 && code < 500) return true;
+  for (const text of replyTexts(err)) {
+    const lead = leadingSmtpReply(text);
+    if (lead && lead.code >= 400 && lead.code < 500) return true;
+  }
+  return false;
+}
+
+function isPermanentSmtpRecipient(err) {
+  if (!atCommand(err, 'RCPT TO')) return false;
+  // MAIL FROM is sender/config even when the text looks like a recipient bounce.
+  if (atCommand(err, 'MAIL FROM')) return false;
+  let code = smtpCode(err);
+  let enhanced = null;
+  if (code == null) {
+    const lead = leadingSmtpReply(err && err.message);
+    if (!lead) return false;
+    code = lead.code;
+    enhanced = lead.enhanced;
+  } else {
+    const anchored = firstAnchoredEnhanced(err);
+    if (anchored && anchored.code === code) enhanced = anchored.enhanced;
+  }
+  if (code === 553 && enhanced !== '5.1.8') return true;
+  if (code == null || code < 500) return false;
+  if (enhanced === '5.1.8') return false;
+  return !!(enhanced && PERMANENT_ENHANCED.has(enhanced));
+}
+
+function isSenderWording(text) {
+  return /invalid\s+(?:from|reply-to|sender)\s+(?:header|address)|invalid address in from header|invalid address:\s*reply-to|sender address rejected/i.test(String(text || ''));
+}
+
+function isSenderConfig(err) {
+  // A 4xx at MAIL FROM is an outage, not a sender stop.
+  if (isTemporarySmtp(err)) return false;
+  if (atCommand(err, 'MAIL FROM')) return true;
+  if (isSenderWording(errorBlob(err))) return true;
+  // 5.1.8 at the start of the reply halts at RCPT TO the same way it does at MAIL FROM.
+  const anchored = firstAnchoredEnhanced(err);
+  return !!(anchored && anchored.enhanced === '5.1.8' && atCommand(err, 'RCPT TO'));
+}
+
+function leadingSmtpReply(text) {
+  const match = serverReply(text).match(/^\s*(\d{3})(?:[ \t]+(5\.\d{1,3}\.\d{1,3}))?\b/);
+  if (!match) return null;
+  return { code: Number(match[1]), enhanced: match[2] || null };
+}
+
+function namesRecipient(err) {
+  const text = errorBlob(err);
+  if (/invalid from header|\bfrom address\b/i.test(text)) return false;
+  return /recipient address required|no recipients defined|missing recipient|invalid recipient|invalid to header/i.test(text);
+}
+
+function gmailRecipientReply(err) {
+  const status = httpStatus(err);
+  if (status !== 400 && status !== 403) return false;
+  return replyTexts(err).some((text) => {
+    const line = String(text || '').replace(/^(?:Gmail API:[ \t]*)+/, '').split(/\r?\n/, 1)[0];
+    return /^\s*550[ \t]+5\.1\.(?:0|1|2|3|10)\b/.test(line);
+  });
+}
+
+function isGmailPermanentRecipient(err) {
+  const status = httpStatus(err);
+  if (status != null && status !== 400 && status !== 403) return false;
+  if (/invalid from header|\bfrom address\b/i.test(errorBlob(err))) return false;
+  if (status === 403) return /invalid to header|invalid recipient/i.test(errorBlob(err)) || gmailRecipientReply(err);
+  return namesRecipient(err) || (status === 400 && gmailRecipientReply(err));
+}
+
+const ARGUMENT_ATTEMPTS = ATTEMPT_CAP;
+
+function isAuthFollowupError(err) {
+  if (hasReason(err, ['invalid_grant', 'authError', 'insufficientPermissions'])) return true;
+  const code = smtpCode(err);
+  if (code === 535 || code === 530) return true;
+  for (const text of replyTexts(err)) {
+    const lead = leadingSmtpReply(text);
+    if (lead && (lead.code === 535 || lead.code === 530)) return true;
+  }
+  if (httpStatus(err) === 401) return true;
+  return /invalid_grant|access expired|insufficient permissions|gmail is not connected|token(?:\s+is)?\s+missing/i.test(errorBlob(err));
+}
+
+function classifyFollowupError(err) {
+  const status = httpStatus(err);
+  if (isSenderConfig(err)) return { kind: 'transient', label: 'sender', sweep: true };
+  if (isTemporarySmtp(err)) return { kind: 'transient', label: 'smtp' };
+  if (isAuthFollowupError(err)) return { kind: 'transient', label: 'auth', sweep: true };
+  if (isPermanentSmtpRecipient(err)) return { kind: 'permanent', label: 'recipient' };
+  if (isGmailPermanentRecipient(err)) return { kind: 'permanent', label: 'recipient' };
+  if (status != null && status >= 500 && status <= 599) return { kind: 'transient', label: 'server' };
+  if (status === 429 || ((status === 400 || status === 403) && isQuotaReason(err))) {
+    return { kind: 'transient', label: 'quota' };
+  }
+  if (status === 413) return { kind: 'transient', label: 'payload' };
+  if (isNetworkFollowupError(err)) return { kind: 'transient', label: 'network' };
+  if (status === 400 || hasReason(err, [
+    'badRequest', 'invalidArgument', 'failedPrecondition',
+    'INVALID_ARGUMENT', 'FAILED_PRECONDITION', 'BAD_REQUEST',
+  ])) {
+    return { kind: 'transient', label: 'argument' };
+  }
+  if (status == null && /quota exceeded|rate limit exceeded|too many requests/i.test(errorBlob(err))) {
+    return { kind: 'transient', label: 'quota' };
+  }
+  return { kind: 'transient', label: 'later' };
+}
+
+function isPermanentFollowupError(err) {
+  return classifyFollowupError(err).kind === 'permanent';
+}
+
+function permanentFollowupReason(err) {
+  const text = errorBlob(err);
+  if (/recipient address required|no recipients defined|missing recipient/i.test(text)) {
+    return 'Follow-up stopped: recipient address required';
+  }
+  if (/address rejected|recipients were rejected|recipient rejected|5\.1\.[013]\b|user unknown|mailbox (not found|unavailable|does not exist)/i.test(text)
+      || (Array.isArray(err && err.rejected) && err.rejected.length > 0)) {
+    return 'Follow-up stopped: address rejected';
+  }
+  return 'Follow-up stopped: invalid recipient';
+}
+
+function transientFollowupLabel(err) {
+  return classifyFollowupError(err).label;
+}
+
+function followupSentColumn(which) {
+  if (which === 'followup1') return 'followup1_sent_at';
+  if (which === 'followup2') return 'followup2_sent_at';
+  throw new Error('Unknown follow-up');
+}
+
+async function recoverStaleSending(proposalId) {
+  const params = [MANUAL_REVIEW];
+  let extra = '';
+  if (proposalId != null) {
+    params.push(proposalId);
+    extra = ` AND id = $${params.length}`;
+  }
+  const { rows } = await pool.query(
+    `UPDATE proposals
+        SET status = 'stopped', stop_reason = $1, error = $1
+      WHERE status = 'sending'
+        AND approved_at IS NOT NULL
+        AND approved_at < NOW() - INTERVAL '${STALE_SENDING}'
+        ${extra}
+      RETURNING id`,
+    params);
+  for (const row of rows) {
+    console.error(`[send] first send for #${row.id} needs manual review: outcome uncertain`);
+  }
+  return rows;
+}
+
+async function claimFollowupAttempt(id, cap) {
+  const { rows } = await pool.query(
+    `UPDATE proposals
+        SET followup_argument_attempts = followup_argument_attempts + 1
+      WHERE id = $1 AND followup_argument_attempts < $2
+      RETURNING followup_argument_attempts`,
+    [id, cap]);
+  return rows.length ? Number(rows[0].followup_argument_attempts) : null;
+}
+
+function attemptCap(klass) {
+  return klass && klass.cap ? klass.cap : ATTEMPT_CAP;
+}
+
+function capStopReason(label) {
+  if (label === 'argument') return 'Follow-up stopped: Gmail rejected the message';
+  if (label === 'payload') return 'Follow-up stopped: the message was too large';
+  if (label === 'later') return 'Follow-up stopped: later retry limit reached';
+  return `Follow-up stopped: ${label} retry limit reached`;
+}
+
+function isOutageClass(klass) {
+  return !!(klass && !klass.sweep && OUTAGE_LABELS.has(klass.label));
+}
+
+function uncertainSend(err) {
+  return !!(err && (err.accepted === true || err.uncertain === true || err.code === 'POST_SEND_WRITE'));
+}
+
+// Operator sentences only. A database fault in the status or mail-mode read
+// must not be copied into the HTTP body or the stored error.
+const PUBLIC_SEND_FAILURES = new Set([
+  'Email is not set up. Go to Settings and click Connect Gmail.',
+  'Gmail is not connected. Go to Settings and click Connect Gmail.',
+  'Gmail access expired. Go to Settings and click Connect Gmail again.',
+  'Couldn\'t refresh Gmail access. Try again.',
+]);
+
+function publicSendFailure(err) {
+  const raw = String(err && err.message || '');
+  if (PUBLIC_SEND_FAILURES.has(raw)) return `The email didn't send: ${raw}`;
+  return 'The email didn\'t send. Try again.';
+}
 
 /** Approve a draft and send the first email now. */
-async function approveAndSend(proposalId) {
+async function approveAndSend(proposalId, options = {}) {
+  const stale = await recoverStaleSending(proposalId);
+  if (stale.length) throw Object.assign(new Error(MANUAL_REVIEW), { status: 409 });
+
   const { rows } = await pool.query(
     `SELECT pr.*, p.company, p.stage, p.do_not_contact, p.archived_at FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.id = $1`,
     [proposalId]);
@@ -262,125 +811,147 @@ async function approveAndSend(proposalId) {
   const problems = await sendReadiness();
   if (problems.length) throw Object.assign(new Error(problems.join(' ')), { status: 400 });
   if (p.status !== 'draft') throw Object.assign(new Error(`This version is ${p.status}; only drafts can be sent.`), { status: 409 });
+  const reasonKey = String(p.stop_reason || '').trim().toLowerCase();
+  const heldBack = reasonKey === RESEND_CONFIRM.toLowerCase() || reasonKey.startsWith('needs manual review');
+  if (heldBack && options.confirm !== true) {
+    throw Object.assign(new Error('Confirm this send before it goes out again.'), { status: 409 });
+  }
   if (p.do_not_contact) throw Object.assign(new Error(`${p.company} is marked do-not-contact.`), { status: 409 });
-  if (!validEmail(p.to_email)) throw Object.assign(new Error('Add a valid "To" email before sending.'), { status: 400 });
+  const toAddress = storedRecipient(p.to_email);
+  if (!toAddress) throw Object.assign(new Error('Add a valid "To" email before sending.'), { status: 400 });
   if (!p.subject?.trim() || !p.body?.trim()) throw Object.assign(new Error('Subject and email body are required.'), { status: 400 });
   if (await sentToday() >= cfg.SEND_DAILY_LIMIT) {
     throw Object.assign(new Error(`Daily send limit (${cfg.SEND_DAILY_LIMIT}) reached. Try again tomorrow.`), { status: 429 });
   }
 
-  // Claim the row first so a double-click can't send twice.
-  // A flagged lead is not claimable, even if the earlier read was stale.
-  const claim = await pool.query(
-    `UPDATE proposals SET status = 'sending', approved_at = NOW()
-      WHERE id = $1 AND status = 'draft'
-        AND NOT (SELECT do_not_contact FROM prospects WHERE id = proposals.prospect_id)
-      RETURNING id`,
-    [p.id]
-  );
-  if (!claim.rows.length) {
-    const blocked = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [p.prospect_id]);
-    if (blocked.rows[0] && blocked.rows[0].do_not_contact) {
-      throw Object.assign(new Error(`${p.company} is marked do-not-contact.`), { status: 409 });
+  // Claim the row first so a double-click can't send twice. Lock the prospect
+  // first so two drafts cannot both pass the sibling check.
+  const attemptKey = crypto.randomBytes(16).toString('hex');
+  await withClient('approve', async (db) => {
+    await db.query('BEGIN');
+    try {
+      await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [p.prospect_id]);
+      await afterLeadLock(p.prospect_id);
+      const claim = await db.query(
+        `UPDATE proposals AS pr
+            SET status = 'sending', approved_at = NOW(), send_attempt_key = $2, send_attempted_at = NOW()
+          WHERE pr.id = $1 AND pr.status = 'draft'
+            AND NOT EXISTS (
+              SELECT 1 FROM proposals sib
+               WHERE sib.prospect_id = pr.prospect_id
+                 AND sib.id <> pr.id
+                 AND ${blocksNewSendSql('sib')}
+            )
+          RETURNING pr.id`,
+        [p.id, attemptKey]);
+      if (!claim.rows.length) {
+        const blocking = await blockingSibling(db, p.prospect_id, p.id);
+        await db.query('ROLLBACK');
+        if (blocking) throw Object.assign(new Error(siblingBlockMessage(blocking, { send: true })), { status: 409 });
+        throw Object.assign(new Error('Already sending.'), { status: 409 });
+      }
+      await db.query('COMMIT');
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {});
+      throw err;
     }
-    throw Object.assign(new Error('Already sending.'), { status: 409 });
-  }
+  });
 
   // The prototype link's 14 days start when it is first shared.
   try { await require('../prototypes/store').restartClock(p.prospect_id); } catch (err) { console.error('[prototype] clock restart failed:', err && err.code); }
   await attachPrototypeUrl(p);
-
-  // mailer() and prepare() both yield. They finish before the recheck, so an
-  // opt-out that commits during either one is visible below. The recheck is
-  // the last await before prepared.send(). A failure while the row is still
-  // 'sending' returns it to draft. A stop that already landed is left alone.
-  const firstMail = {
-    from: { name: SENDER.name, address: SENDER.email },
-    to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
-    subject: p.subject.trim(),
-    text: renderMessage(p, 'first'),
-    html: renderMessageHtml(p, 'first'),
-    headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
-  };
-  let transport;
   let prepared;
   try {
-    transport = await mailer();
-    prepared = await transport.prepare(firstMail);
+    // A render or MIME failure is a prepare failure: the draft goes back, nothing is sent.
+    const mail = {
+      from: { name: SENDER.name, address: SENDER.email },
+      to: envelopeTo(p.to_name, toAddress),
+      subject: p.subject.trim(),
+      text: renderMessage(p, 'first'),
+      html: renderMessageHtml(p, 'first'),
+      headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
+    };
+    prepared = await prepareOutgoing(mail);
   } catch (err) {
+    const safe = publicSendFailure(err);
     await pool.query(
-      `UPDATE proposals SET status = 'draft', approved_at = NULL, error = $2
-        WHERE id = $1 AND status = 'sending'`,
-      [p.id, `Send failed: ${err.message}`]
-    );
-    throw Object.assign(new Error(`The email didn't send: ${err.message}`), { status: 502 });
+      `UPDATE proposals SET status = 'draft', approved_at = NULL, send_attempt_key = NULL, error = $2 WHERE id = $1`,
+      [p.id, safe]);
+    throw Object.assign(new Error(safe), { status: 502 });
   }
-
-  const beforeSend = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [p.prospect_id]);
-  if (beforeSend.rows[0] && beforeSend.rows[0].do_not_contact) {
+  const gate = await recheckLead(p.prospect_id);
+  const block = leadBlocksSend(gate);
+  if (block) {
     await pool.query(
-      `UPDATE proposals SET status = 'stopped', stop_reason = $2 WHERE id = $1 AND status = 'sending'`,
-      [p.id, 'Lead is do-not-contact']
-    );
-    throw Object.assign(new Error(`${p.company} is marked do-not-contact.`), { status: 409 });
+      `UPDATE proposals
+          SET status = 'draft', approved_at = NULL, send_attempt_key = NULL
+        WHERE id = $1 AND status = 'sending' AND send_attempt_key = $2`,
+      [p.id, attemptKey]);
+    const message = block === 'do_not_contact'
+      ? `${p.company} is marked do-not-contact.`
+      : `Lead moved to ${gate && gate.stage}.`;
+    throw Object.assign(new Error(message), { status: 409 });
   }
 
   let info;
+  let mailed = false;
   try {
-    // The only window left is this request. prepared.send() starts it with
-    // no await before the POST or the SMTP write.
     info = await prepared.send();
+    mailed = true;
+    if (failNextPostSend) {
+      failNextPostSend = false;
+      const fault = new Error('post-send write failed');
+      fault.code = 'POST_SEND_WRITE';
+      throw fault;
+    }
   } catch (err) {
-    // A stop during the send leaves the row stopped. This revert matches
-    // 'sending' only, so it cannot put a stopped proposal back to draft.
+    if (mailed || uncertainSend(err)) {
+      await pool.query(
+        `UPDATE proposals SET status = 'stopped', stop_reason = $2, error = $2 WHERE id = $1`,
+        [p.id, MANUAL_REVIEW]);
+      console.error(`[send] first send for #${p.id} needs manual review: outcome uncertain`);
+      throw Object.assign(new Error(MANUAL_REVIEW), { status: 409 });
+    }
+    const safe = publicSendFailure(err);
     await pool.query(
-      `UPDATE proposals SET status = 'draft', approved_at = NULL, error = $2
-        WHERE id = $1 AND status = 'sending'`,
-      [p.id, `Send failed: ${err.message}`]
-    );
-    throw Object.assign(new Error(`The email didn't send: ${err.message}`), { status: 502 });
+      `UPDATE proposals SET status = 'draft', approved_at = NULL, send_attempt_key = NULL, error = $2 WHERE id = $1`,
+      [p.id, safe]);
+    throw Object.assign(new Error(safe), { status: 502 });
   }
 
   const [d1, d2] = cfg.FOLLOWUP_DAYS;
-  const { rows: updated } = await pool.query(
-    `UPDATE proposals SET status = 'sent', sent_at = NOW(), message_id = $2, thread_id = $5, error = NULL,
-            followup1_due_at = CASE WHEN COALESCE(followup1, '') <> '' THEN NOW() + make_interval(days => $3) END,
-            followup2_due_at = CASE WHEN COALESCE(followup2, '') <> '' THEN NOW() + make_interval(days => $4) END
-      WHERE id = $1 AND status = 'sending' RETURNING *`,
-    [p.id, info.messageId || null, d1 ?? 3, d2 ?? 10, info.threadId || null]);
-  if (!updated.length) {
-    const current = await pool.query('SELECT status FROM proposals WHERE id = $1', [p.id]);
-    if (current.rows[0] && current.rows[0].status === 'stopped') {
-      // The message went out. Keep stopped: no sent status and no follow-up
-      // dates. sent_at counts toward the daily cap. A row that is no longer
-      // stopped is left alone, including its sent_at and message ids.
-      const { rows: tracked } = await pool.query(
-        `UPDATE proposals
-            SET sent_at = NOW(), message_id = $2, thread_id = $3, error = NULL
-          WHERE id = $1 AND status = 'stopped'
-          RETURNING *`,
-        [p.id, info.messageId || null, info.threadId || null]
-      );
-      if (!tracked.length) return current.rows[0];
+  let updated;
+  try {
+    const result = await pool.query(
+      `UPDATE proposals SET status = 'sent', sent_at = NOW(), message_id = $2, thread_id = $5, error = NULL,
+              stop_reason = NULL, send_attempt_key = NULL, followup_argument_attempts = 0,
+              followup1_due_at = CASE WHEN COALESCE(followup1, '') <> '' THEN NOW() + make_interval(days => $3) END,
+              followup2_due_at = CASE WHEN COALESCE(followup2, '') <> '' THEN NOW() + make_interval(days => $4) END
+        WHERE id = $1 AND status = 'sending' AND send_attempt_key = $6
+        RETURNING *`,
+      [p.id, info.messageId || null, d1 ?? 3, d2 ?? 10, info.threadId || null, attemptKey]);
+    if (!result.rowCount) {
+      console.error(`[send] first send success write matched 0 rows for #${p.id}`);
       await pool.query(
-        `UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`,
-        [p.prospect_id]
-      );
-      await logActivity(
-        p.prospect_id,
-        'email',
-        `Sent proposal v${p.version} to ${p.to_email}. The message went out and the sequence stayed stopped.`
-      );
-      console.log('[send] delivered after the proposal was stopped');
-      return tracked[0];
+        `UPDATE proposals SET status = 'stopped', stop_reason = $2, error = $2 WHERE id = $1 AND status = 'sending'`,
+        [p.id, MANUAL_REVIEW]);
+      throw Object.assign(new Error(MANUAL_REVIEW), { status: 409 });
     }
-    return current.rows[0] || null;
+    updated = result.rows;
+  } catch (err) {
+    if (err && err.status === 409) throw err;
+    console.error(`[send] first send success write failed: ${err && err.code || 'error'}`);
+    await pool.query(
+      `UPDATE proposals SET status = 'stopped', stop_reason = $2, error = $2 WHERE id = $1 AND status = 'sending'`,
+      [p.id, MANUAL_REVIEW]);
+    throw Object.assign(new Error(MANUAL_REVIEW), { status: 409 });
   }
+  await clearSenderAlert();
 
   await pool.query(
     `UPDATE prospects SET last_contacted_at = NOW(), email = COALESCE(NULLIF(email, ''), $2),
             stage = CASE WHEN stage IN ('found', 'qualified') THEN 'contacted' ELSE stage END
-      WHERE id = $1`, [p.prospect_id, p.to_email]);
+      WHERE id = $1`, [p.prospect_id, toAddress]);
   if (['found', 'qualified'].includes(p.stage)) {
     await logActivity(p.prospect_id, 'stage_change', `${p.stage} → contacted (proposal email sent)`);
   }
@@ -399,14 +970,17 @@ async function stopSequence(proposalId, reason, status = 'stopped', db = pool) {
   return rows[0] || null;
 }
 
-// Same status and stop_reason write as stopSequence, and also 'sending'.
-// db is the caller's client so the route can keep this inside its transaction.
+// Stops every live sequence for a lead on the caller's client, so the manual
+// do-not-contact route and the inbox opt-out stop them in the same
+// transaction as the flag. 'sending' is a first send in flight: #120's
+// approve then finds the row stopped, records nothing, and answers 409.
 let leadStop = null;
 async function stopLeadSequences(db, prospectId, reason) {
   if (leadStop) return leadStop(db, prospectId, reason);
   const { rows } = await db.query(
     `SELECT id, status FROM proposals
       WHERE prospect_id = $1 AND status IN ('sent', 'draft', 'sending')
+      ORDER BY id
       FOR UPDATE`,
     [prospectId]
   );
@@ -423,29 +997,20 @@ async function stopLeadSequences(db, prospectId, reason) {
 }
 
 function _setLeadStop(fn) {
-  if (process.env.NODE_ENV !== 'test') {
-    throw new Error('_setLeadStop is only available when NODE_ENV=test');
-  }
+  if (process.env.NODE_ENV !== 'test') throw new Error('_setLeadStop is only available when NODE_ENV=test');
   leadStop = fn || null;
 }
 
-// Opt-out raises the flag in its own transaction. Proposals are locked first
-// (id order), then the prospect, matching draft and mark-sent. Sequence stops
-// run on this client after the flag write. A failure rolls the flag back.
-// proposalId, when set, is the replied proposal and becomes opted_out before
-// siblings are stopped, so it is not rewritten to stopped.
-// A deadlock (40P01) or serialization failure (40001) is tried 3 times. Any
-// other SQLSTATE is not retried. When the 3 attempts are exhausted the error
-// is logged with the prospect id and proposal id and rethrown so the inbox
-// sweep can leave that message unprocessed.
-const OPT_OUT_ATTEMPTS = 3;
-const OPT_OUT_RETRYABLE = new Set(['40P01', '40001']);
+// An inbox opt-out raises the flag (source opt_out, stage lost) and stops the
+// lead's sequences in one transaction, prospect locked first. proposalId,
+// when set, is the replied proposal: it becomes opted_out before siblings
+// are stopped. A deadlock (40P01) or serialization failure (40001) is tried
+// DEADLOCK_ATTEMPTS times; any other error, or the last of those, is thrown.
+// The inbox check then does not mark the message read, so the next check
+// applies the opt-out again (the writes are idempotent).
 let optOutGate = null;
-// Runs after a follow-up claim commits and before the do-not-contact recheck.
-// Tests use it to call the real flag route or the inbox opt-out.
-let followupClaimGate = null;
-async function markOptOut(prospectId, proposalId, inbound = null) {
-  for (let attempt = 1; attempt <= OPT_OUT_ATTEMPTS; attempt++) {
+async function markOptOut(prospectId, proposalId) {
+  for (let attempt = 1; attempt <= DEADLOCK_ATTEMPTS; attempt++) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -455,31 +1020,18 @@ async function markOptOut(prospectId, proposalId, inbound = null) {
         `UPDATE prospects
             SET do_not_contact = TRUE, do_not_contact_source = 'opt_out', stage = 'lost'
           WHERE id = $1`,
-        [prospectId]
-      );
+        [prospectId]);
       if (proposalId != null) {
         await stopSequence(proposalId, 'Asked not to be contacted', 'opted_out', client);
       }
       await stopLeadSequences(client, prospectId, 'Asked not to be contacted');
-      // Same transaction and the same lock order. The inbox row is not a
-      // second transaction that locks the prospect before the proposal.
-      if (inbound && inbound.msg) {
-        await require('./inbox').insertInbound(client, {
-          prospect_id: prospectId,
-          id: proposalId,
-          company: inbound.company,
-          archived_at: inbound.archived_at,
-        }, inbound.kind || 'opted_out', inbound.msg);
-      }
       await client.query('COMMIT');
       return;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
-      const retryable = !!(err && OPT_OUT_RETRYABLE.has(err.code));
-      if (retryable && attempt < OPT_OUT_ATTEMPTS) continue;
-      if (retryable) {
-        const proposalLabel = proposalId == null ? 'none' : String(proposalId);
-        console.error(`[opt-out] retries exhausted prospect ${prospectId} proposal ${proposalLabel} sqlstate ${err.code}`);
+      if (isDeadlock(err) && attempt < DEADLOCK_ATTEMPTS) continue;
+      if (isDeadlock(err)) {
+        console.error(`[opt-out] retries exhausted prospect ${prospectId} proposal ${proposalId == null ? 'none' : proposalId} sqlstate ${err.code}`);
         err.optOutExhausted = true;
       }
       throw err;
@@ -490,23 +1042,12 @@ async function markOptOut(prospectId, proposalId, inbound = null) {
 }
 
 function _setOptOutGate(fn) {
-  if (process.env.NODE_ENV !== 'test') {
-    throw new Error('_setOptOutGate is only available when NODE_ENV=test');
-  }
+  if (process.env.NODE_ENV !== 'test') throw new Error('_setOptOutGate is only available when NODE_ENV=test');
   optOutGate = fn || null;
 }
 
-function _setFollowupClaimGate(fn) {
-  if (process.env.NODE_ENV !== 'test') {
-    throw new Error('_setFollowupClaimGate is only available when NODE_ENV=test');
-  }
-  followupClaimGate = fn || null;
-}
-
-/** Send any follow-ups that are due. Called every 15 minutes. */
-async function sendDueFollowups() {
-  if (!(await mailMode()) || !SENDER.address || !inSendWindow()) return { sent: 0 };
-  // Exclude pest names in SQL. A JS skip after LIMIT 25 would fill the batch
+async function loadDueFollowups() {
+  // Exclude pest names in SQL. A JS skip after LIMIT 100 would fill the batch
   // with rows that are never sent and starve every other sequence. The
   // predicate does not update those rows.
   const params = [];
@@ -518,85 +1059,560 @@ async function sendDueFollowups() {
             (pr.followup1_sent_at IS NOT NULL AND pr.followup2_sent_at IS NULL AND pr.followup2_due_at <= NOW()))
         AND ${nameSql}
         AND p.archived_at IS NULL
-      ORDER BY pr.sent_at LIMIT 25`,
+        AND (pr.next_retry_at IS NULL OR pr.next_retry_at <= NOW())
+      ORDER BY pr.sent_at LIMIT 100`,
     params);
-  let sent = 0;
-  for (const p of rows) {
-    // A sequence created before the name gate can still be due. Skip it
-    // without claiming the row or calling the transport. The log has no name,
-    // address, or id.
-    if (isPestCompanyName(p.company)) {
-      console.error('[send] skipped follow-up: company name matches pest control');
-      continue;
-    }
-    if (isArchivedLead(p)) {
-      console.error('[send] skipped follow-up: lead is archived');
-      continue;
-    }
-    if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
-      await stopSequence(p.id, p.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${p.stage}`);
-      continue;
-    }
-    if (await sentToday() >= cfg.SEND_DAILY_LIMIT) break;
-    const which = p.followup1_sent_at ? 'followup2' : 'followup1';
-    const claim = await pool.query(
-      `UPDATE proposals SET ${which}_sent_at = NOW()
-        WHERE id = $1 AND ${which}_sent_at IS NULL AND status = 'sent'
-          AND NOT (SELECT do_not_contact FROM prospects WHERE id = proposals.prospect_id)
-        RETURNING id`,
-      [p.id]
-    );
-    if (!claim.rows.length) continue;
-    if (followupClaimGate) await followupClaimGate(p, which);
-    await attachPrototypeUrl(p);
-    // Same order as the first send: mailer(), then prepare(), then the
-    // recheck. The recheck is the last await before prepared.send().
-    const followMail = {
-      threadId: p.thread_id || undefined,
-      from: { name: SENDER.name, address: SENDER.email },
-      to: p.to_name ? { name: p.to_name, address: p.to_email } : p.to_email,
-      subject: /^re:/i.test(p.subject) ? p.subject : `Re: ${p.subject}`,
-      text: renderMessage(p, which),
-      html: renderMessageHtml(p, which),
-      inReplyTo: p.message_id || undefined,
-      references: p.message_id ? [p.message_id] : undefined,
-      headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
+  return rows;
+}
+
+function unusableRecipientReason(email) {
+  const text = email == null ? '' : String(email);
+  const outsideAscii = text.replace(/[\u0000-\u007F]/g, '');
+  if (outsideAscii && /[\p{L}\p{N}]/u.test(outsideAscii)) return 'Unsupported recipient email';
+  return 'No recipient email';
+}
+
+async function stopUnusableRecipient(p) {
+  if (!missingRecipient(p.to_email)) return false;
+  const reason = unusableRecipientReason(p.to_email);
+  const stopped = await stopSequence(p.id, reason);
+  if (stopped) {
+    const logged = reason === 'No recipient email' ? 'no recipient email' : reason;
+    console.info(`[send] skipped follow-up for #${p.id}: ${logged}; sequence stopped`);
+  }
+  return true;
+}
+
+function logFollowupSkip(p, err) {
+  console.error(`[send] follow-up for #${p.id} skipped: ${err && err.code || 'error'}`);
+}
+
+async function reloadFollowup(id) {
+  const { rows } = await pool.query(
+    `SELECT pr.*, p.company, p.stage, p.do_not_contact, p.archived_at
+       FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
+      WHERE pr.id = $1`,
+    [id]);
+  return rows[0] || null;
+}
+
+async function claimFollowupSend(p, sentColumn) {
+  const key = crypto.randomBytes(16).toString('hex');
+  const { rows } = await pool.query(
+    `UPDATE proposals AS pr
+        SET send_attempt_key = $2, send_attempted_at = NOW()
+       FROM prospects p
+      WHERE pr.id = $1
+        AND p.id = pr.prospect_id
+        AND pr.status = 'sent'
+        AND pr.${sentColumn} IS NULL
+        AND pr.send_attempt_key IS NULL
+        AND pr.followup_argument_attempts < $3
+        AND COALESCE(p.do_not_contact, FALSE) = FALSE
+        AND (p.stage IS NULL OR NOT (p.stage = ANY($4::text[])))
+        AND p.archived_at IS NULL
+      RETURNING pr.id`,
+    [p.id, key, ATTEMPT_CAP, ACTIVE_STAGES_TO_STOP]);
+  return rows.length ? key : null;
+}
+
+async function markManualReview(id, sentColumn, key) {
+  const res = await pool.query(
+    `UPDATE proposals
+        SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL
+      WHERE id = $1 AND send_attempt_key = $3 AND status IN ('sent', 'sending')
+      RETURNING id`,
+    [id, MANUAL_REVIEW, key]);
+  if (!res.rowCount) {
+    console.error(`[send] manual review matched 0 rows for #${id}`);
+    return false;
+  }
+  console.error(`[send] follow-up for #${id} needs manual review: outcome uncertain`);
+  return true;
+}
+
+async function recheckLead(prospectId) {
+  if (beforeTransport) await beforeTransport({ prospect_id: prospectId });
+  const { rows } = await pool.query(
+    `SELECT do_not_contact, stage, archived_at FROM prospects WHERE id = $1`,
+    [prospectId]);
+  return rows[0] || null;
+}
+
+function leadBlocksSend(row) {
+  if (!row) return 'missing';
+  if (row.archived_at) return 'archived';
+  if (row.do_not_contact) return 'do_not_contact';
+  if (ACTIVE_STAGES_TO_STOP.includes(row.stage)) return 'stage';
+  return null;
+}
+
+function haltProvider(err) {
+  if (smtpCode(err) != null) return 'smtp';
+  if (err && typeof err.command === 'string' && /AUTH/i.test(err.command)) return 'smtp';
+  return 'gmail';
+}
+
+function haltCause(klass, err) {
+  if (klass && klass.label === 'sender') return 'sender';
+  const code = smtpCode(err);
+  for (const text of replyTexts(err)) {
+    const lead = leadingSmtpReply(text);
+    if (lead && (lead.code === 535 || lead.code === 530)) return 'smtp_auth';
+  }
+  if (code === 535 || code === 530) return 'smtp_auth';
+  if (hasReason(err, ['insufficientPermissions']) || /insufficient permissions/i.test(errorBlob(err))) {
+    return 'insufficient_permissions';
+  }
+  if (/token(?:\s+is)?\s+missing|gmail is not connected/i.test(errorBlob(err))) return 'token_missing';
+  if (hasReason(err, ['invalid_grant']) || /invalid_grant|access expired/i.test(errorBlob(err)) || httpStatus(err) === 401) {
+    return 'oauth_expired';
+  }
+  return 'other';
+}
+
+async function saveHalt(state) {
+  await pool.query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [HALT_KEY, JSON.stringify(state)]);
+}
+
+async function emitHalt(state) {
+  const payload = {
+    event: HALT_EVENT,
+    error_class: state.error_class,
+    provider: state.provider,
+    cause: state.cause,
+    first_seen: state.first_seen,
+    halted_ticks: state.halted_ticks,
+  };
+  const reason = state.error_class === 'auth' ? 'gmail auth' : 'sender configuration';
+  console.error(`[send] [ALERT] ${state.provider} ${state.cause || state.error_class} halted sweep`);
+  console.error(`[send] [ALERT] followups.halted ${JSON.stringify(payload)}`);
+  if (alertHook) await alertHook(payload);
+  await pool.query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [SENDER_ALERT_KEY, JSON.stringify({ at: state.first_seen, reason })]);
+}
+
+async function recordHalt(klass, err) {
+  const now = new Date();
+  const existing = await loadHalt();
+  const errorClass = klass && klass.label === 'sender' ? 'sender' : 'auth';
+  const provider = haltProvider(err);
+  const cause = haltCause(klass, err);
+  const identity = errorClass === 'sender' ? currentSenderIdentity() : null;
+  if (!existing || existing.event !== HALT_EVENT) {
+    const state = {
+      event: HALT_EVENT,
+      error_class: errorClass,
+      provider,
+      cause,
+      first_seen: now.toISOString(),
+      halted_ticks: 1,
+      last_event_at: now.toISOString(),
     };
-    let transport;
-    let prepared;
-    try {
-      transport = await mailer();
-      prepared = await transport.prepare(followMail);
-    } catch (err) {
-      await pool.query(`UPDATE proposals SET ${which}_sent_at = NULL, error = $2 WHERE id = $1`, [p.id, `Follow-up failed: ${err.message}`]);
-      console.error(`[send] ✗ follow-up for #${p.id}: ${err.code || 'error'}`);
-      continue;
+    if (identity) {
+      state.sender_email = identity.email;
+      state.sender_name = identity.name;
     }
-    const beforeSend = await pool.query('SELECT do_not_contact FROM prospects WHERE id = $1', [p.prospect_id]);
-    if (beforeSend.rows[0] && beforeSend.rows[0].do_not_contact) {
-      // One row. The claim timestamp is always cleared. Status and
-      // stop_reason change only while the row is still sent, so a stopped
-      // or opted_out row keeps that status. SET reads the old status.
-      await pool.query(
+    await saveHalt(state);
+    await emitHalt(state);
+    return;
+  }
+  const state = {
+    event: HALT_EVENT,
+    error_class: errorClass,
+    provider,
+    cause,
+    first_seen: existing.first_seen,
+    halted_ticks: (Number(existing.halted_ticks) || 0) + 1,
+    last_event_at: existing.last_event_at || existing.first_seen,
+  };
+  if (identity) {
+    state.sender_email = existing.sender_email || identity.email;
+    state.sender_name = existing.sender_name || identity.name;
+  }
+  const last = Date.parse(state.last_event_at);
+  if (!Number.isFinite(last) || now.getTime() - last >= 60 * 60 * 1000) {
+    state.last_event_at = now.toISOString();
+    await saveHalt(state);
+    await emitHalt(state);
+  } else {
+    await saveHalt(state);
+  }
+}
+
+async function clearSenderAlert() {
+  await pool.query('DELETE FROM app_settings WHERE key = ANY($1::text[])', [[SENDER_ALERT_KEY, HALT_KEY]]);
+}
+
+function currentSenderIdentity() {
+  return {
+    email: process.env.GMAIL_USER || SENDER.email,
+    name: process.env.SENDER_NAME || SENDER.name,
+  };
+}
+
+function senderIdentityChanged(halt) {
+  if (!halt || halt.error_class !== 'sender') return false;
+  if (!halt.sender_email) return false;
+  return halt.sender_email !== (process.env.GMAIL_USER || SENDER.email);
+}
+
+async function credentialsPass() {
+  if (credentialOverride) return credentialOverride();
+  let status;
+  try {
+    status = await gmail.status();
+  } catch (err) {
+    console.error(`[send] credential check did not pass: ${err && err.code || 'error'}`);
+    return false;
+  }
+  if (status && status.connected) {
+    try {
+      await gmail.accessToken({ force: true });
+      return true;
+    } catch (err) {
+      console.error(`[send] credential check did not pass: ${err && err.code || 'auth'}`);
+      return false;
+    }
+  }
+  if (cfg.mailConfigured()) {
+    try {
+      await smtpTransport().verify();
+      return true;
+    } catch (err) {
+      console.error(`[send] credential check did not pass: ${err && err.code || 'smtp'}`);
+      return false;
+    }
+  }
+  return false;
+}
+
+async function releaseOwnedClaim(id, sentColumn, key) {
+  const res = await pool.query(
+    `UPDATE proposals
+        SET send_attempt_key = NULL, ${sentColumn} = NULL
+      WHERE id = $1 AND send_attempt_key = $2
+      RETURNING id`,
+    [id, key]);
+  if (!res.rowCount) console.error(`[send] follow-up release matched 0 rows for #${id}`);
+  return res.rowCount;
+}
+
+async function recordOutage(p, sentColumn, key, klass) {
+  const bumped = await pool.query(
+    `UPDATE proposals
+        SET followup_transient_attempts = followup_transient_attempts + 1,
+            first_transient_at = COALESCE(first_transient_at, NOW()),
+            send_attempt_key = NULL,
+            ${sentColumn} = NULL,
+            error = $2
+      WHERE id = $1 AND send_attempt_key = $3
+      RETURNING followup_transient_attempts`,
+    [p.id, `Follow-up will retry: ${klass.label}`, key]);
+  if (!bumped.rowCount) {
+    console.error(`[send] follow-up backoff matched 0 rows for #${p.id}`);
+    return;
+  }
+  const attempt = Number(bumped.rows[0].followup_transient_attempts);
+  const seconds = Math.round(backoffDelayMinutes(attempt) * 60);
+  const scheduled = await pool.query(
+    `UPDATE proposals
+        SET next_retry_at = NOW() + make_interval(secs => $2)
+      WHERE id = $1 AND send_attempt_key IS NULL
+      RETURNING next_retry_at`,
+    [p.id, seconds]);
+  const next = scheduled.rows[0] && scheduled.rows[0].next_retry_at;
+  console.error(`[send] follow-up for #${p.id} will retry: ${klass.label} attempt ${attempt} next ${next ? new Date(next).toISOString() : 'unscheduled'}`);
+}
+
+async function reapExpiredFollowupLeases() {
+  await pool.query(
+    `UPDATE proposals
+        SET status = 'stopped', stop_reason = $1, error = $1, send_attempt_key = NULL
+      WHERE status = 'sent'
+        AND send_attempt_key IS NOT NULL
+        AND send_attempted_at IS NOT NULL
+        AND send_attempted_at < NOW() - INTERVAL '${STALE_SENDING}'`,
+    [MANUAL_REVIEW]);
+}
+
+async function recordTransient(p, sentColumn, klass, key) {
+  const cap = attemptCap(klass);
+  const bump = async () => {
+    if (failNextRelease) {
+      failNextRelease = false;
+      const err = new Error('release failed');
+      err.code = '55P03';
+      throw err;
+    }
+    return claimFollowupAttempt(p.id, cap);
+  };
+  let next;
+  try {
+    next = await bump();
+  } catch (err) {
+    console.error(`[send] follow-up release failed: ${err && err.code || 'error'}`);
+    try {
+      next = await claimFollowupAttempt(p.id, cap);
+    } catch (err2) {
+      console.error(`[send] follow-up release failed: ${err2 && err2.code || 'error'}`);
+      await markManualReview(p.id, sentColumn, key);
+      return;
+    }
+  }
+  if (next == null || next >= cap) {
+    const reason = capStopReason(klass.label);
+    await pool.query(
+      `UPDATE proposals
+          SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL, send_attempt_key = NULL
+        WHERE id = $1 AND send_attempt_key = $3 AND status IN ('sent', 'sending')`,
+      [p.id, reason, key]);
+    const note = klass.label === 'argument' ? 'Gmail invalid argument (not the recipient)' : reason;
+    console.error(`[send] stopped follow-up for #${p.id}: ${note}`);
+    return;
+  }
+  const released = await pool.query(
+    `UPDATE proposals
+        SET send_attempt_key = NULL, ${sentColumn} = NULL, error = $2,
+            status = CASE WHEN status = 'sending' THEN 'sent' ELSE status END
+      WHERE id = $1 AND send_attempt_key = $3
+      RETURNING id`,
+    [p.id, `Follow-up will retry: ${klass.label} (${next}/${cap})`, key]);
+  if (!released.rowCount) {
+    console.error(`[send] follow-up retry write matched 0 rows for #${p.id}`);
+    return;
+  }
+  if (klass.label === 'argument') {
+    console.error(`[send] follow-up for #${p.id} will retry: Gmail invalid argument (not the recipient) (${next}/${cap})`);
+  } else {
+    console.error(`[send] follow-up for #${p.id} will retry: ${klass.label} (${next}/${cap})`);
+  }
+}
+
+/** Send any follow-ups that are due. Called every 15 minutes and from check-inbox. */
+async function sendDueFollowups() {
+  // The lock is session-level. Acquire and release it on the same client.
+  // pool.query would check the lock out on one connection and unlock on another.
+  // A terminated backend emits 'error'. Without a listener that crashes the
+  // process. A failed unlock destroys the client so the lock cannot stay on a
+  // pooled session.
+  const client = await pool.connect();
+  let held = false;
+  let failed = null;
+  const onError = (err) => {
+    failed = err || new Error('follow-up sweep client error');
+    console.error(`[send] follow-up sweep client error: ${err && err.code || 'error'}`);
+  };
+  client.on('error', onError);
+  try {
+    const locked = await client.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', [FOLLOWUP_SWEEP_LOCK]);
+    held = !!(locked.rows[0] && locked.rows[0].ok);
+    if (!held) return { sent: 0, skipped: true };
+    return await sendDueFollowupsLocked();
+  } finally {
+    if (held && !failed) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1::bigint)', [FOLLOWUP_SWEEP_LOCK]);
+      } catch (err) {
+        failed = err || new Error('follow-up sweep unlock failed');
+        console.error(`[send] follow-up sweep unlock failed: ${err && err.code || 'error'}`);
+      }
+    }
+    client.removeListener('error', onError);
+    if (failed) client.release(failed instanceof Error ? failed : new Error('follow-up sweep client failed'));
+    else client.release();
+  }
+}
+
+async function sendDueFollowupsLocked() {
+  await recoverStaleSending();
+  await reapExpiredFollowupLeases();
+  const rows = await loadDueFollowups();
+  const ready = [];
+  // Stop a sequence with no usable address before the mail and send-window
+  // gate. Otherwise a row stays due all weekend, and whenever Gmail is unset.
+  for (const p of rows) {
+    try {
+      // A sequence created before the name gate can still be due. Skip it
+      // without claiming the row or calling the transport. The log has no name,
+      // address, or id.
+      if (isPestCompanyName(p.company)) {
+        console.error('[send] skipped follow-up: company name matches pest control');
+        continue;
+      }
+      if (isArchivedLead(p)) {
+        console.error('[send] skipped follow-up: lead is archived');
+        continue;
+      }
+      if (await stopUnusableRecipient(p)) continue;
+      ready.push(p);
+    } catch (err) {
+      logFollowupSkip(p, err);
+    }
+  }
+  if (!(await mailMode()) || !SENDER.address || !inSendWindow()) return { sent: 0 };
+  let sent = 0;
+  let halted = false;
+  for (const p of ready) {
+    try {
+      if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
+        await stopSequence(p.id, p.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${p.stage}`);
+        continue;
+      }
+      if (await sentToday() >= cfg.SEND_DAILY_LIMIT) break;
+      if (await stopUnusableRecipient(p)) continue;
+      const which = p.followup1_sent_at ? 'followup2' : 'followup1';
+      const sentColumn = followupSentColumn(which);
+      const toAddress = storedRecipient(p.to_email);
+      if (!toAddress) {
+        await stopUnusableRecipient(p);
+        continue;
+      }
+      const aged = await pool.query(
         `UPDATE proposals
-            SET ${which}_sent_at = NULL,
-                status = CASE WHEN status = 'sent' THEN 'stopped' ELSE status END,
-                stop_reason = CASE WHEN status = 'sent' THEN $2 ELSE stop_reason END
-          WHERE id = $1`,
-        [p.id, 'Lead is do-not-contact']
-      );
-      continue;
-    }
-    try {
-      // prepared.send() starts the request with no await before it.
-      await prepared.send();
-      sent++;
-      await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
-      await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${p.to_email}.`);
+            SET status = $2, stop_reason = $3, error = $3, next_retry_at = NULL
+          WHERE id = $1 AND status = 'sent' AND send_attempt_key IS NULL
+            AND first_transient_at IS NOT NULL
+            AND first_transient_at <= NOW() - INTERVAL '72 hours'
+          RETURNING id`,
+        [p.id, MANUAL_REVIEW_STATUS, TRANSIENT_MAX_AGE]);
+      if (aged.rowCount) {
+        console.error(`[send] follow-up for #${p.id} reached transient_max_age`);
+        continue;
+      }
+      if (beforeFollowupClaim) await beforeFollowupClaim(p);
+      const attemptKey = await claimFollowupSend(p, sentColumn);
+      if (!attemptKey) {
+        const fresh = await reloadFollowup(p.id);
+        if (fresh && fresh.send_attempt_key) continue;
+        if (fresh && (fresh.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(fresh.stage))) {
+          await stopSequence(p.id, fresh.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${fresh.stage}`);
+        }
+        continue;
+      }
+      let mailed = false;
+      let stopSweep = false;
+      try {
+        await attachPrototypeUrl(p);
+        const mail = {
+          threadId: p.thread_id || undefined,
+          from: { name: SENDER.name, address: SENDER.email },
+          to: envelopeTo(p.to_name, toAddress),
+          subject: /^re:/i.test(p.subject) ? p.subject : `Re: ${p.subject}`,
+          text: renderMessage(p, which),
+          html: renderMessageHtml(p, which),
+          inReplyTo: p.message_id || undefined,
+          references: p.message_id ? [p.message_id] : undefined,
+          headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
+        };
+        const prepared = await prepareOutgoing(mail);
+        const gate = await recheckLead(p.prospect_id);
+        const block = leadBlocksSend(gate);
+        if (block) {
+          await releaseOwnedClaim(p.id, sentColumn, attemptKey);
+          if (block === 'do_not_contact' || block === 'stage') {
+            await stopSequence(p.id, block === 'do_not_contact' ? 'Lead is do-not-contact' : `Lead moved to ${gate.stage}`);
+          }
+          continue;
+        }
+        const info = await prepared.send();
+        mailed = true;
+        if (failNextPostSend) {
+          failNextPostSend = false;
+          const fault = new Error('post-send write failed');
+          fault.code = 'POST_SEND_WRITE';
+          throw fault;
+        }
+        const wrote = await pool.query(
+          `UPDATE proposals
+              SET ${sentColumn} = NOW(), error = NULL, followup_argument_attempts = 0, send_attempt_key = NULL,
+                  followup_transient_attempts = 0, first_transient_at = NULL, next_retry_at = NULL
+            WHERE id = $1 AND status = 'sent' AND send_attempt_key = $2
+            RETURNING id`,
+          [p.id, attemptKey]);
+        if (!wrote.rowCount) {
+          console.error(`[send] follow-up success write matched 0 rows for #${p.id}`);
+          await markManualReview(p.id, sentColumn, attemptKey);
+        } else {
+          sent++;
+          // #125: the inbox check reads each Gmail message once. Our own
+          // follow-up is recorded so the Sent scan does not spend a read on it.
+          if (info && typeof info.id === 'string') {
+            try { await gmail.markScanned([{ id: info.id, box: 'sent' }]); }
+            catch (err) { console.error('[gmail] could not record sent id:', err && err.code || 'error'); }
+          }
+          await clearSenderAlert();
+          await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
+          await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${toAddress}.`);
+        }
+      } catch (err) {
+        if (mailed || uncertainSend(err)) {
+          await markManualReview(p.id, sentColumn, attemptKey);
+        } else if (isPermanentFollowupError(err)) {
+          const reason = permanentFollowupReason(err);
+          const stopped = await pool.query(
+            `UPDATE proposals
+                SET status = 'stopped', stop_reason = $2, error = $2, ${sentColumn} = NULL, send_attempt_key = NULL
+              WHERE id = $1 AND send_attempt_key = $3 AND status IN ('sent', 'sending')
+              RETURNING id`,
+            [p.id, reason, attemptKey]);
+          if (!stopped.rowCount) console.error(`[send] follow-up stop matched 0 rows for #${p.id}`);
+          else console.info(`[send] stopped follow-up for #${p.id}: ${reason}`);
+        } else {
+          const klass = classifyFollowupError(err);
+          if (klass.sweep) {
+            const released = await pool.query(
+              `UPDATE proposals
+                  SET send_attempt_key = NULL, ${sentColumn} = NULL, error = $2
+                WHERE id = $1 AND send_attempt_key = $3
+                RETURNING id`,
+              [p.id, `Follow-up will retry: ${klass.label}`, attemptKey]);
+            if (!released.rowCount) console.error(`[send] follow-up release matched 0 rows for #${p.id}`);
+            await recordHalt(klass, err);
+            stopSweep = true;
+            halted = true;
+          } else if (isOutageClass(klass)) {
+            const agedNow = await pool.query(
+              `UPDATE proposals
+                  SET status = $2, stop_reason = $3, error = $3, send_attempt_key = NULL,
+                      ${sentColumn} = NULL, next_retry_at = NULL
+                WHERE id = $1 AND send_attempt_key = $4
+                  AND first_transient_at IS NOT NULL
+                  AND first_transient_at <= NOW() - INTERVAL '72 hours'
+                RETURNING id`,
+              [p.id, MANUAL_REVIEW_STATUS, TRANSIENT_MAX_AGE, attemptKey]);
+            if (agedNow.rowCount) console.error(`[send] follow-up for #${p.id} reached transient_max_age`);
+            else await recordOutage(p, sentColumn, attemptKey, klass);
+          } else {
+            await recordTransient(p, sentColumn, klass, attemptKey);
+          }
+          // #125: Gmail's per-minute quota is used up, so every other send
+          // this minute fails the same way. Stop here; the rest stay due.
+          // err.quota is set by the Gmail wrapper (gmail.js isQuotaError) on
+          // every real Gmail API quota answer.
+          if (err && err.quota === true) {
+            console.error('[send] Gmail quota used up for this minute; remaining follow-ups wait for the next check');
+            stopSweep = true;
+          }
+        }
+      }
+      if (stopSweep) break;
     } catch (err) {
-      await pool.query(`UPDATE proposals SET ${which}_sent_at = NULL, error = $2 WHERE id = $1`, [p.id, `Follow-up failed: ${err.message}`]);
-      console.error(`[send] ✗ follow-up for #${p.id}: ${err.message}`);
+      logFollowupSkip(p, err);
     }
+  }
+  const openHalt = await loadHalt();
+  if (!halted && openHalt && openHalt.error_class === 'sender') {
+    // verify() does not try the from-address. A sender halt stays until a real
+    // send succeeds, or the sending address changes.
+    if (senderIdentityChanged(openHalt)) await clearSenderAlert();
+  } else if (!halted && await credentialsPass()) {
+    await clearSenderAlert();
   }
   // Sequences with no reply two weeks after the last follow-up are finished.
   // Archived leads stay sent. This update does not write their status or
@@ -653,24 +1669,12 @@ function classifyMessage(msg, p) {
 }
 
 async function applyOutcome(p, outcome, msg) {
-  try {
-    await applyOutcomeEffects(p, outcome, msg);
-  } catch (err) {
-    // Retries are exhausted. Do not record the message or mark it handled.
-    // The next inbox sweep still sees this sent proposal and tries again.
-    if (outcome && outcome.kind === 'opted_out' && err && err.optOutExhausted) return null;
-    throw err;
-  }
+  await applyOutcomeEffects(p, outcome, msg);
   // Keep the whole message and open an inbox item (Claude reads it and drafts a reply).
-  if (outcome.kind === 'opted_out') return;
   try {
     await require('./inbox').recordInbound(p, outcome.kind, { ...msg, auto: msg.auto || outcome.kind === 'auto' });
   } catch (err) {
-    if (err && err.inboundExhausted) {
-      console.error(`[inbox] record retries exhausted prospect ${p.prospect_id} proposal ${p.id} sqlstate ${err.code}`);
-      return;
-    }
-    console.error('[inbox] could not record message:', err.code || 'error');
+    console.error('[inbox] could not record message:', err.message);
   }
 }
 
@@ -687,9 +1691,7 @@ async function applyOutcomeEffects(p, outcome, msg) {
     return;
   }
   if (kind === 'opted_out') {
-    await markOptOut(p.prospect_id, p.id, {
-      kind, msg, company: p.company, archived_at: p.archived_at,
-    });
+    await markOptOut(p.prospect_id, p.id);
     await logActivity(p.prospect_id, 'email', `Replied asking not to be contacted${snippet ? `: "${snippet}"` : ''}. Marked do-not-contact.`);
     return;
   }
@@ -741,7 +1743,6 @@ async function fetchInbox(since) {
   return out;
 }
 
-let checking = false;
 // Sent proposals, including archived leads. Opt-outs and bounces are still
 // recorded while a lead is archived. A reply or booking is not: that would
 // write status and next_action, which stay with the finisher and the send path.
@@ -769,16 +1770,8 @@ async function applyFollowOn(p, outcome, msg) {
   const inbox = require('./inbox');
   if (await inbox.alreadyRecorded(msg)) return false;
   if (outcome.kind === 'opted_out') {
-    try {
-      await markOptOut(p.prospect_id, p.id, {
-        kind: 'opted_out', msg, company: p.company, archived_at: p.archived_at,
-      });
-    } catch (err) {
-      if (err && err.optOutExhausted) return false;
-      throw err;
-    }
+    await markOptOut(p.prospect_id, p.id);
     await logActivity(p.prospect_id, 'email', 'Asked not to be contacted. Marked do-not-contact.');
-    return true;
   } else if (outcome.kind === 'replied' || outcome.kind === 'booked') {
     await pool.query(`UPDATE prospects SET next_action = $2, next_action_at = CURRENT_DATE WHERE id = $1`,
       [p.prospect_id, outcome.kind === 'booked' ? 'Prep for the consultation call' : 'Reply to their email']);
@@ -837,45 +1830,209 @@ async function applyInboxMessages(messages) {
   return { checked: messages.length, matched: outcomes.length, follow_ons: followOns };
 }
 
-/** Look through the inbox for replies, bookings, bounces and opt-outs. */
+// A Sent id stays unread only while its proposal thread can still grow an
+// open inbox item: the latest inbound has no item yet, or that item is still
+// triaging, waiting to be rewritten (rewrite_queued, also what a restart
+// leaves a cut-off rewrite as), rewriting, or sending. sent, handled, and
+// discarded are finished, so the id is marked read and other follow-ups are
+// not held.
+// Triage is kicked when an inbound item is queued. Let a fast failure finish
+// before the Sent folder is applied, so it cannot overwrite "handled". A slow
+// triage is left for the next check; the Sent id stays unread until then.
+async function settleNewInboxItems() {
+  const deadline = Date.now() + 50;
+  while (Date.now() < deadline) {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM inbox_items WHERE status IN ('queued', 'triaging') LIMIT 1`);
+    if (!rows.length) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
+function sameMailId(a, b) {
+  const norm = (s) => String(s || '').replace(/[<>]/g, '').trim().toLowerCase();
+  const left = norm(a);
+  return left !== '' && left === norm(b);
+}
+
+const ITEM_STILL_FORMING = new Set(['triaging', 'rewrite_queued', 'rewriting', 'sending']);
+
+async function sentIdsToScan(messages, scannedIds) {
+  const leave = new Set();
+  for (const msg of messages) {
+    if (!msg || !msg.id || !msg.threadId) continue;
+    const row = await pool.query(
+      `SELECT
+         EXISTS (SELECT 1 FROM proposals WHERE thread_id = $1) AS proposal,
+         (SELECT message_id FROM proposals WHERE thread_id = $1 ORDER BY id LIMIT 1) AS proposal_message_id,
+         (SELECT MAX(received_at) FROM inbox_messages WHERE thread_id = $1) AS last_at,
+         (
+           SELECT i.status
+             FROM inbox_messages m
+             LEFT JOIN inbox_items i ON i.message_id = m.id
+            WHERE m.thread_id = $1 AND m.direction = 'in'
+            ORDER BY m.received_at DESC, m.id DESC
+            LIMIT 1
+         ) AS latest_status`,
+      [msg.threadId]);
+    const info = row.rows[0];
+    if (!info || !info.proposal) continue;
+    if (sameMailId(msg.messageIdHeader, info.proposal_message_id)) continue;
+    if (!(info.last_at && msg.date && new Date(msg.date) > new Date(info.last_at))) continue;
+    // No inbox item yet, or the latest one is still being triaged, rewritten, or sent.
+    // A sent, handled, or discarded item will not open again.
+    if (!info.latest_status || ITEM_STILL_FORMING.has(info.latest_status)) leave.add(msg.id);
+  }
+  return (scannedIds || []).filter(id => !leave.has(id));
+}
+
+function inboxScanBlocked() {
+  if (!checking) return null;
+  const hung = gmail.clockNow() - scanStartedAt >= SCAN_TIMEOUT_MS;
+  return { checked: 0, caught_up: false, scanning: true, hung };
+}
+
+/** Look through the inbox for replies, bookings, bounces and opt-outs.
+ *  caught_up is true only when this scan finished and both the inbox and
+ *  the sent folder were covered. A scan that is still running, hung, or
+ *  threw is not caught up. Unread ids, a failed full read, a short list,
+ *  or a sent-scan error keep follow-ups held. */
 async function checkInbox() {
-  if (checking || !(await mailMode()) || (await mailMode()) === 'test') return { checked: 0 };
+  const blocked = inboxScanBlocked();
+  if (blocked) return blocked;
+  const mode = await mailMode();
+  if (!mode || mode === 'test') return { checked: 0, caught_up: true };
   const active = await inboxCandidates();
   const convo = await conversationCandidates();
-  if (!active.length && !convo.length) return { checked: 0 };
+  if (!active.length && !convo.length) return { checked: 0, caught_up: true };
   checking = true;
+  scanStartedAt = gmail.clockNow();
+  const gmailApi = mode === 'gmail_api';
   let messages = [];
   let outcomes = [];
   let followOns = [];
   let sentHandled = 0;
+  let sentResult = null;
+  let caughtUp = true;
+  let backlog = 0;
+  const scanned = [];
+  let recorded = 0;
+  let setupErr = null;
   try {
-    const since = new Date(Math.min(...[...active, ...convo].map(p => new Date(p.sent_at).getTime())) - 86400000);
-    messages = await fetchInbox(since);
-    outcomes = collectInboxOutcomes(active, messages);
-    const taken = new Set(outcomes.map(([, , m]) => m));
-    followOns = collectFollowOns(convo, messages, taken);
-    if ((await mailMode()) === 'gmail_api') {
-      try { sentHandled = await require('./inbox').applySentMessages(await gmail.sentSince(since)); }
-      catch (err) { console.error('[inbox] sent check failed:', err.message); }
+    try {
+      const since = new Date(Math.min(...[...active, ...convo].map(p => new Date(p.sent_at).getTime())) - 86400000);
+      if (gmailApi) {
+        const budget = gmail.minuteReadBudget();
+        const inbox = await gmail.scanInbox(since, budget);
+        messages = inbox.messages;
+        backlog = inbox.backlog;
+        scanned.push(...inbox.scanned.map(id => ({ id, box: 'inbox' })));
+        if (backlog > 0 || budget.quotaHit || inbox.readFailed) caughtUp = false;
+        try {
+          sentResult = await gmail.scanSent(since, budget);
+          if (sentResult.backlog > 0 || budget.quotaHit || sentResult.readFailed) caughtUp = false;
+        } catch (err) {
+          console.error('[inbox] sent check failed:', err.message);
+          if (err && err.setup) setupErr = err;
+          caughtUp = false;
+        }
+      } else {
+        messages = await fetchInbox(since);
+      }
+      outcomes = collectInboxOutcomes(active, messages);
+      const taken = new Set(outcomes.map(([, , m]) => m));
+      followOns = collectFollowOns(convo, messages, taken);
+    } catch (err) {
+      console.error('[inbox] ✗ check failed:', err.message);
+      if (err && err.setup) setupErr = err;
+      caughtUp = false;
     }
-  } catch (err) {
-    console.error('[inbox] ✗ check failed:', err.message);
+    // Inbox outcomes first, so a reply that arrives in this same check has an
+    // inbox item before the Sent folder is applied. Main re-read Sent next
+    // time; a scanned id would not be read again.
+    for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
+    for (const [p, o, msg] of followOns) if (await applyFollowOn(p, o, msg)) recorded++;
+    await settleNewInboxItems();
+    if (sentResult) {
+      const newestFirst = sentResult.order === 'newest'
+        ? sentResult.messages.slice()
+        : sentResult.messages.slice().reverse();
+      let sentApplied = false;
+      try {
+        sentHandled = await require('./inbox').applySentMessages(newestFirst);
+        sentApplied = true;
+      } catch (err) {
+        console.error('[inbox] sent check failed:', err.message);
+        caughtUp = false;
+      }
+      // A failed apply records no Sent id, so the next check reads them again.
+      if (sentApplied) {
+        const keep = await sentIdsToScan(newestFirst, sentResult.scanned);
+        if (keep.length < (sentResult.scanned || []).length) caughtUp = false;
+        scanned.push(...keep.map(id => ({ id, box: 'sent' })));
+      }
+    }
+    if (gmailApi) {
+      // Only after the outcomes above are applied, so a crash re-reads them.
+      try { await gmail.markScanned(scanned); await gmail.purgeScanned(); }
+      catch (err) { console.error('[inbox] could not record scanned messages:', err.message); }
+      console.log(`[inbox] read ${messages.length} new message(s)${backlog ? `, ${backlog} left for the next check` : ''}`);
+    }
+    require('./inbox').kick();
+    // A Gmail sign-in or setup failure (#120) goes back to the caller with its
+    // fixed sentence once what was read is recorded. The cron and the route
+    // both hold follow-ups when checkInbox throws.
+    if (setupErr) throw setupErr;
+    return { checked: messages.length, matched: outcomes.length, follow_ons: recorded, replied_from_gmail: sentHandled, caught_up: caughtUp, backlog };
   } finally {
     checking = false;
   }
-  for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
-  let recorded = 0;
-  for (const [p, o, msg] of followOns) if (await applyFollowOn(p, o, msg)) recorded++;
-  require('./inbox').kick();
-  return { checked: messages.length, matched: outcomes.length, follow_ons: recorded, replied_from_gmail: sentHandled };
+}
+
+// Fail closed: no result, a running scan, a hung scan, or caught_up not
+// exactly true all hold. A thrown checkInbox leaves inbox null.
+function holdFollowups(inbox) {
+  return !inbox || inbox.caught_up !== true;
+}
+
+async function followupsAfterInbox(inbox) {
+  if (holdFollowups(inbox)) {
+    noteFollowupHold();
+    const backlog = inbox && inbox.backlog;
+    console.log(`[sender] follow-ups wait: the inbox check isn't caught up${backlog ? ` (${backlog} unread)` : ''}`);
+    return { sent: 0, held: true };
+  }
+  clearFollowupHold();
+  return sendDueFollowups();
 }
 
 async function senderTick() {
-  try { await checkInbox(); } catch (err) { console.error('[sender] inbox:', err.message); }
-  try { return await sendDueFollowups(); } catch (err) { console.error('[sender] follow-ups:', err.message); }
+  let inbox = null;
+  try { inbox = await checkInbox(); }
+  catch (err) {
+    console.error('[sender] inbox:', err.message);
+    inbox = { caught_up: false, failed: true };
+  }
+  try { return await followupsAfterInbox(inbox); }
+  catch (err) { console.error('[sender] follow-ups:', err.message); }
+}
+
+function _resetFollowupHoldForTests() {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_resetFollowupHoldForTests is only available when NODE_ENV=test');
+  consecutiveHolds = 0;
+  holdAlerted = false;
+  checking = false;
+  scanStartedAt = 0;
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, senderTick, stopSequence, stopLeadSequences, markOptOut, lockLeadForUpdate, _setLeadStop, _setOptOutGate, _setFollowupClaimGate, _setMailerGate, _setLockGate, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, prepareOutgoing, senderTick, holdFollowups, followupsAfterInbox, stopSequence, classifyMessage, applyOutcome,
+  missingRecipient, normalizeRecipient, storedRecipient, isPermanentFollowupError, isPermanentSmtpRecipient, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
+  _beforeFollowupClaim, _beforeTransport, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
+  _setRandom, _setAlertHook, _setCredentialCheck, _setSendTxnGate, afterLeadLock,
+  backoffDelayMs, backoffDelayMinutes, recheckLead, BACKOFF_CAP_MS,
+  FOLLOWUP_BACKOFF_CAP_MS, FOLLOWUP_MAX_AGE_MS, RESEND_CONFIRM,
+  HOLD_ALERT_AFTER_TICKS, SCAN_TIMEOUT_MS, _resetFollowupHoldForTests,
+  stopLeadSequences, markOptOut, lockLeadForUpdate, _setLeadStop, _setOptOutGate, _setLockGate,
 };
