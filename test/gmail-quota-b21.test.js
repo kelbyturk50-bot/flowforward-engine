@@ -314,9 +314,14 @@ describe('gmail quota round 10 (B21, rewrite_queued, failed Sent apply)', () => 
 
     const release = await holdItem(itemId);
     let first;
-    try { first = await send.checkInbox(); }
-    finally { await release(); }
-    assert.equal((await itemRow(itemId)).status, 'rewrite_queued', 'the check saw the item rewrite_queued');
+    let during;
+    try {
+      first = await send.checkInbox();
+      // Read while the lock is still held. Once it is released the worker
+      // kicked by checkInbox can claim the item at any moment.
+      during = await itemRow(itemId);
+    } finally { await release(); }
+    assert.equal(during.status, 'rewrite_queued', 'the check saw the item rewrite_queued');
     assert.equal(first.replied_from_gmail, 0);
     assert.equal(first.caught_up, false, 'the waiting Sent id holds this check');
     assert.equal(await isScanned(replyId), false, 'the Sent id is not marked read while the item is rewrite_queued');
