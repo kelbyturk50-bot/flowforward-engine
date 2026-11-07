@@ -208,6 +208,29 @@ CREATE TABLE IF NOT EXISTS proposal_runs (
 );
 
 -- Small key/value store for settings editable from the CRM (e.g. proposal voice notes)
+-- Gmail messages the inbox check has already read in full (one row per
+-- Gmail message id). Each full read costs 60 quota units of the 6,000 a user
+-- gets per minute, so a message is read once, not on every 15-minute check.
+-- Rows older than 120 days are purged by the check.
+CREATE TABLE IF NOT EXISTS gmail_scanned_messages (
+  gmail_id    TEXT PRIMARY KEY,
+  box         TEXT NOT NULL,
+  scanned_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT gmail_scanned_messages_box_check CHECK (box IN ('inbox', 'sent')),
+  CONSTRAINT gmail_scanned_messages_id_check CHECK (gmail_id ~ '^[A-Za-z0-9_-]{1,64}$')
+);
+
+-- Where a large list left off. pending_ids is every id a check listed that
+-- is not yet in gmail_scanned_messages, so newer mail cannot push one out of
+-- reach. page_token is the next older Gmail page, so a later check does not
+-- list the same pages again.
+CREATE TABLE IF NOT EXISTS gmail_list_state (
+  query_key   TEXT PRIMARY KEY,
+  page_token  TEXT,
+  pending_ids TEXT[] NOT NULL DEFAULT '{}',
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS app_settings (
   key         TEXT PRIMARY KEY,
   value       JSONB,
@@ -1236,6 +1259,7 @@ CREATE TABLE IF NOT EXISTS prototype_facts (
   snippet      TEXT,
   captured_at  TIMESTAMPTZ NOT NULL,
   test_tag     TEXT NOT NULL,
+  review_status TEXT NOT NULL DEFAULT 'approved',
   CONSTRAINT prototype_facts_field_check CHECK (
     field IN (
       'business_name', 'services', 'service_area', 'phone', 'address', 'hours',
@@ -1268,13 +1292,64 @@ CREATE TABLE IF NOT EXISTS prototype_facts (
   CONSTRAINT prototype_facts_snippet_len CHECK (snippet IS NULL OR char_length(snippet) BETWEEN 1 AND 300),
   CONSTRAINT prototype_facts_research_snippet CHECK (source <> 'cached_research' OR snippet IS NOT NULL),
   CONSTRAINT prototype_facts_tag_check CHECK (
-    test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
-    AND char_length(test_tag) <= 80
-  )
+    char_length(test_tag) <= 80
+    AND (
+      test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+      OR test_tag ~ '^demo-[a-z0-9]+(-[a-z0-9]+)*$'
+    )
+  ),
+  CONSTRAINT prototype_facts_review_status_check CHECK (review_status IN ('proposed', 'approved'))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_prototype_facts_prospect_field
   ON prototype_facts (prospect_id, field);
+
+-- Facts sheets for real leads (Kelby, Oct 29). Facts read from research
+-- insert as 'proposed'; the public chat reads 'approved' only. ADD COLUMN
+-- with DEFAULT 'approved' keeps every existing row (TEST: and hand-typed)
+-- approved without an UPDATE, and its inline check needs no DROP.
+ALTER TABLE prototype_facts ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'approved'
+  CONSTRAINT prototype_facts_review_status_check CHECK (review_status IN ('proposed', 'approved'));
+
+-- BEGIN prototype_facts_tag_check upgrade
+-- CREATE TABLE IF NOT EXISTS keeps an older TEST-only check. Drop and re-add
+-- so a database that booted an earlier head accepts demo-prototype for real
+-- leads too. The new check only widens the old one, so no stored row can
+-- fail it, and the table is small.
+ALTER TABLE prototype_facts DROP CONSTRAINT IF EXISTS prototype_facts_tag_check;
+ALTER TABLE prototype_facts ADD CONSTRAINT prototype_facts_tag_check CHECK (
+  char_length(test_tag) <= 80
+  AND (
+    test_tag ~ '^TEST:[a-z0-9]+(-[a-z0-9]+)*$'
+    OR test_tag ~ '^demo-[a-z0-9]+(-[a-z0-9]+)*$'
+  )
+);
+-- END prototype_facts_tag_check upgrade
+
+-- Voice receptionist demo (docs/VOICE_DEMO.md). One row per call. A call
+-- reserves its maximum before Retell is asked; the call_ended webhook
+-- settles it, and a sweeper asks Retell to stop any call that outlives its
+-- maximum. No caller number, transcript, or IP is stored.
+CREATE TABLE IF NOT EXISTS voice_demo_calls (
+  id                UUID PRIMARY KEY,
+  -- SET NULL, not CASCADE: deleting a lead must not erase minutes already
+  -- used today from the daily cap or a running call from the busy count.
+  prototype_id      INTEGER REFERENCES prototypes(id) ON DELETE SET NULL,
+  call_id           TEXT UNIQUE,
+  status            TEXT NOT NULL,
+  reserved_seconds  INTEGER NOT NULL,
+  actual_seconds    INTEGER,
+  day               DATE NOT NULL,
+  created_at        TIMESTAMPTZ NOT NULL,
+  ended_at          TIMESTAMPTZ,
+  stop_requested_at TIMESTAMPTZ,
+  CONSTRAINT voice_demo_calls_status_check CHECK (status IN ('reserved', 'ended', 'failed', 'expired')),
+  CONSTRAINT voice_demo_calls_reserved_check CHECK (reserved_seconds BETWEEN 60 AND 180),
+  CONSTRAINT voice_demo_calls_actual_check CHECK (actual_seconds IS NULL OR actual_seconds BETWEEN 0 AND 7200),
+  CONSTRAINT voice_demo_calls_call_id_check CHECK (call_id IS NULL OR call_id ~ '^[A-Za-z0-9_-]{1,128}$')
+);
+CREATE INDEX IF NOT EXISTS idx_voice_demo_calls_prototype ON voice_demo_calls (prototype_id);
+CREATE INDEX IF NOT EXISTS idx_voice_demo_calls_day ON voice_demo_calls (day);
 
 CREATE TABLE IF NOT EXISTS chat_demo_sessions (
   id             UUID PRIMARY KEY,

@@ -969,11 +969,17 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
   it('commits schema.sql and boots when a 51c459d brand row breaks the tighter checks', async () => {
     const schema = fs.readFileSync(path.join(ROOT, 'src/db/schema.sql'), 'utf8');
     const repair = fs.readFileSync(path.join(ROOT, 'src/db/brand-constraints.sql'), 'utf8');
-    const schemaWithoutTagUpgrade = schema.replace(
-      /-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/,
-      ''
-    );
+    const schemaWithoutTagUpgrade = schema
+      .replace(/-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/, '')
+      .replace(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/, '');
     assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
+    // The facts tag upgrade drops and re-adds that one check and nothing else.
+    const factsUpgrade = schema.match(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/);
+    assert.ok(factsUpgrade);
+    assert.deepEqual(
+      [...factsUpgrade[0].matchAll(/DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+(\w+)/gi)].map((m) => m[1]),
+      ['prototype_facts_tag_check']
+    );
     assert.equal(/DROP\s+CONSTRAINT/i.test(schemaWithoutTagUpgrade), false);
     assert.equal(/DROP\s+CONSTRAINT/i.test(repair), false);
     assert.match(repair, /NOT VALID/);

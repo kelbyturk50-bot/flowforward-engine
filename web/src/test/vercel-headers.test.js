@@ -16,8 +16,19 @@ const DEMO_HEADERS = [
   { key: 'X-Content-Type-Options', value: 'nosniff' },
 ];
 
+// A shop's chat page also hosts the voice receptionist: the Retell SDK
+// signals to api.retellai.com and, on its LiveKit transport, to Retell's
+// LiveKit Cloud project (which can hand off to a regional *.livekit.cloud
+// host). Media itself is WebRTC, which connect-src does not govern.
+const RETELL_HOSTS = 'https://api.retellai.com https://*.livekit.cloud wss://*.livekit.cloud';
+const VOICE_CSP = CSP.replace(`connect-src ${PRODUCTION_API_URL}`, `connect-src ${PRODUCTION_API_URL} ${RETELL_HOSTS}`);
+
 const CHAT_CSP = [{ key: 'Content-Security-Policy', value: CSP }];
-const PROTO_HEADERS = [...DEMO_HEADERS, ...CHAT_CSP];
+const PROTO_HEADERS = [
+  ...DEMO_HEADERS,
+  { key: 'Content-Security-Policy', value: VOICE_CSP },
+  { key: 'Permissions-Policy', value: 'microphone=(self)' },
+];
 
 // Vercel compiles header sources with path-to-regexp (strict, case-sensitive).
 // Every matching source contributes headers. A later key replaces an earlier one.
@@ -71,7 +82,9 @@ describe('CRM vercel.json', () => {
 
     for (const pathname of [`/demo/prototype/${token}`, `/demo/prototype/${token}/`]) {
       const headers = headersFor(config, pathname);
-      expect(headers.get('Content-Security-Policy'), pathname).toBe(CSP);
+      expect(headers.get('Content-Security-Policy'), pathname).toBe(VOICE_CSP);
+      expect(headers.get('Content-Security-Policy'), pathname).not.toContain('connect-src *');
+      expect(headers.get('Permissions-Policy'), pathname).toBe('microphone=(self)');
       expect(headers.get('X-Robots-Tag'), pathname).toBe('noindex, nofollow');
       expect(headers.get('Referrer-Policy'), pathname).toBe('no-referrer');
       expect(headers.get('Cache-Control'), pathname).toBe('no-store');

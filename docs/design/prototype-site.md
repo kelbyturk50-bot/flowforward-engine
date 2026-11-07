@@ -214,7 +214,7 @@ body{padding-bottom:60px}
 | Soft gradient hero / purple-blue fades | Solid brand block with a straight edge and an SVG line-art illustration at low opacity |
 | Small "Try it" badges / sparkle emojis | A plain-text hint in the ribbon only, e.g., "Tip: submit the form or tap Schedule to see the automations" |
 | Fake browser frame around the site | The page *is* the site, full-bleed. Only the ribbon says it's a prototype |
-| Right-rail pricing card | Delete it. FlowForward pricing doesn't belong on the shop's site; put it on a separate FlowForward page |
+| Right-rail pricing card | Delete it. FlowForward pricing doesn't belong on the shop's site or any public page; it is shared after initial outreach |
 | Inter / system font, medium weights | Barlow Condensed uppercase display + Source Sans 3 |
 | Everything centered | Left-aligned headings and copy; only the closing band is centered |
 | Three identical icon-in-circle-above-heading cards | Icon-left tiles, 6–8 of them, plus one wide featured tile |

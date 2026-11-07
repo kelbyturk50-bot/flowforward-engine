@@ -51,7 +51,8 @@ New table `prototype_facts`. There is one row per known fact. **Unknown facts ha
 
 - [ ] Writes are CRM-only (API key) or fixture inserts in tests. The public route never writes facts.
 - [ ] `cached_research` rows come only from `prospects.research` that is already cached. **No HTTP** to build the sheet (the same cache-only rule as the PROTOTYPE_PLAY score path), and no new Places queries.
-- [ ] Pre-prod (the current Railway env is staging, per PLAYBOOK) accepts facts only for prospects whose `company` starts with `TEST:`. The write path refuses anything else (422) and a test proves it.
+- [x] **Real leads (Kelby, Oct 29, 2026): yes.** Facts sheets cover real leads, not only `TEST:` leads. A real lead's rows are tagged `demo-prototype` (the same tag its chat sessions store). This replaces the earlier pre-prod rule that refused non-`TEST:` writes with 422.
+- [x] **Read from research, then approve.** `POST /api/chat/facts/build` (also run when a new prototype link is made) reads the research the proposal bot already saved through `src/chatdemo/facts-extract.js`: Google hours, phone and address (per Google, only from a `google.com` maps link), and from the crawled pages the services, towns, 24/7 emergency service, free estimates, financing, a maintenance plan, and "licensed and insured". Every fact carries the page's `https` URL and a verbatim snippet. Prices, warranties, guarantees, years in business, license numbers, reviews and ratings are never extracted. Built facts start as `review_status = 'proposed'` and the public chat reads `approved` rows only. Kelby approves or removes each one in the CRM (Proposal drawer → Prototype → What the chat knows). Typed facts are approved on write. A rebuild never overwrites an approved or typed fact.
 - [ ] **"per Google" rule.** A fact renders as "per Google" only when **both** hold:
   - `source = 'cached_research'`;
   - its `source_url` host is `google.com` or a subdomain of it: the parsed `URL.hostname` equals `google.com` or ends with `.google.com` (so `maps.google.com` counts, `google.com.evil.example` doesn't).
@@ -81,7 +82,7 @@ Reuse the prototype shell, tokens, `fixAccent` and the wordmark from `src/protot
   - `capture_lead`: demo-only (§6).
   - `handoff_to_human`: "In the live version this would ring the on-call tech." Nothing dials.
   - No card makes a network send. Action buttons show the existing "In the live version this would …" toast.
-- [ ] Footer and CTA reuse prototype-system §4–5 (14-day expiry, "Talk to Kelby" as a plain `<a>`, conditional price anchors only). No ROI or close-rate promises.
+- [ ] Footer and CTA reuse prototype-system §4–5 (14-day expiry, "Talk to Kelby" as a plain `<a>`, no FlowForward prices). No ROI or close-rate promises.
 - [ ] Layout is verified at 390 and 1280. Axe reports no contrast violations. Brand strings are escaped (the hostile-name test from prototype-system §6 also covers the chat).
 
 ## 5. Claims validator (deterministic; Canyon)
