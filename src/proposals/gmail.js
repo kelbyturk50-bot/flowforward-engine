@@ -389,13 +389,26 @@ async function scanListed(q, budget, box, shape, { forceNewest = false } = {}) {
   const got = new Set(read.scanned);
   const seen = head.ids.length ? await scannedIds(head.ids) : new Set();
   const headFresh = head.ids.filter(id => !got.has(id) && !seen.has(id));
+  const inHead = new Set(head.ids);
+
+  // Every id this check lists stays in pending_ids until it is in
+  // gmail_scanned_messages, read this check or not. The head is only the
+  // newest 10,100 ids and the saved token only reaches older pages, so an id
+  // kept nowhere else could fall between the two when newer mail arrives.
+  const keep = [];
+  const kept = new Set();
+  const hold = (id) => { if (id && !kept.has(id)) { kept.add(id); keep.push(id); } };
+  for (const id of head.ids) if (!seen.has(id)) hold(id);
 
   const pending = (state.pending || []).filter(Boolean);
   const pendingSeen = pending.length ? await scannedIds(pending) : new Set();
-  const pendingUnread = pending.filter(id => !pendingSeen.has(id));
-  if (pendingUnread.length && budget.units >= COST.get) {
-    mergeRead(read, await readNew(pendingUnread, box, budget, shape, { oldestFirst: false }));
+  const pendingOpen = pending.filter(id => !pendingSeen.has(id) && !inHead.has(id));
+  for (const id of pendingOpen) hold(id);
+  if (pendingOpen.length && budget.units >= COST.get) {
+    mergeRead(read, await readNew(pendingOpen, box, budget, shape, { oldestFirst: false }));
   }
+  const readNow = () => new Set(read.scanned);
+  const pendingUnread = pendingOpen.filter(id => !readNow().has(id));
 
   let nextToken = null;
   let confirmToken = null;
@@ -408,6 +421,7 @@ async function scanListed(q, budget, box, shape, { forceNewest = false } = {}) {
       const pageSeen = page.ids.length ? await scannedIds(page.ids) : new Set();
       const notDurable = page.ids.filter(id => !pageSeen.has(id));
       if (notDurable.length) {
+        for (const id of notDurable) hold(id);
         mergeRead(read, await readNew(page.ids, box, budget, shape, { oldestFirst: false }));
         break;
       }
@@ -438,6 +452,7 @@ async function scanListed(q, budget, box, shape, { forceNewest = false } = {}) {
       } else {
         const againSeen = again.ids.length ? await scannedIds(again.ids) : new Set();
         const arrived = again.ids.filter(id => !againSeen.has(id) && !got.has(id));
+        for (const id of again.ids) if (!againSeen.has(id)) hold(id);
         if (arrived.length) {
           mergeRead(read, await readNew(again.ids, box, budget, shape, { oldestFirst: false }));
           headSafe = false;
@@ -447,11 +462,12 @@ async function scanListed(q, budget, box, shape, { forceNewest = false } = {}) {
     }
   }
 
-  const still = stale || headFresh.length > 0 || pendingUnread.length > 0
+  const done = readNow();
+  const unread = keep.filter(id => !done.has(id));
+  const still = stale || unread.length > 0
     || (!head.reachedEnd && (!walkedToEnd || !headSafe));
-  if (still) await saveListState(q, nextToken, pendingUnread);
-  else await saveListState(q, null, []);
-  if (!oldestFirst) read.backlog = headFresh.length + pendingUnread.length + (nextToken ? 1 : 0);
+  await saveListState(q, still ? nextToken : null, keep);
+  read.backlog = unread.length + (nextToken ? 1 : 0);
   if (still && read.backlog < 1) read.backlog = 1;
   read.listIncomplete = still;
   read.order = oldestFirst ? 'oldest' : 'newest';

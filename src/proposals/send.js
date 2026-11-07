@@ -602,8 +602,10 @@ async function applyInboxMessages(messages) {
 
 // A Sent id stays unread only while its proposal thread can still grow an
 // open inbox item: the latest inbound has no item yet, or that item is still
-// triaging, rewriting, or sending. sent, handled, and discarded are finished,
-// so the id is marked read and other follow-ups are not held.
+// triaging, waiting to be rewritten (rewrite_queued, also what a restart
+// leaves a cut-off rewrite as), rewriting, or sending. sent, handled, and
+// discarded are finished, so the id is marked read and other follow-ups are
+// not held.
 // Triage is kicked when an inbound item is queued. Let a fast failure finish
 // before the Sent folder is applied, so it cannot overwrite "handled". A slow
 // triage is left for the next check; the Sent id stays unread until then.
@@ -623,7 +625,7 @@ function sameMailId(a, b) {
   return left !== '' && left === norm(b);
 }
 
-const ITEM_STILL_FORMING = new Set(['triaging', 'rewriting', 'sending']);
+const ITEM_STILL_FORMING = new Set(['triaging', 'rewrite_queued', 'rewriting', 'sending']);
 
 async function sentIdsToScan(messages, scannedIds) {
   const leave = new Set();
@@ -647,7 +649,7 @@ async function sentIdsToScan(messages, scannedIds) {
     if (!info || !info.proposal) continue;
     if (sameMailId(msg.messageIdHeader, info.proposal_message_id)) continue;
     if (!(info.last_at && msg.date && new Date(msg.date) > new Date(info.last_at))) continue;
-    // No inbox item yet, or the latest one is still being triaged or sent.
+    // No inbox item yet, or the latest one is still being triaged, rewritten, or sent.
     // A sent, handled, or discarded item will not open again.
     if (!info.latest_status || ITEM_STILL_FORMING.has(info.latest_status)) leave.add(msg.id);
   }
@@ -722,14 +724,20 @@ async function checkInbox() {
       const newestFirst = sentResult.order === 'newest'
         ? sentResult.messages.slice()
         : sentResult.messages.slice().reverse();
-      try { sentHandled = await require('./inbox').applySentMessages(newestFirst); }
-      catch (err) {
+      let sentApplied = false;
+      try {
+        sentHandled = await require('./inbox').applySentMessages(newestFirst);
+        sentApplied = true;
+      } catch (err) {
         console.error('[inbox] sent check failed:', err.message);
         caughtUp = false;
       }
-      const keep = await sentIdsToScan(newestFirst, sentResult.scanned);
-      if (keep.length < (sentResult.scanned || []).length) caughtUp = false;
-      scanned.push(...keep.map(id => ({ id, box: 'sent' })));
+      // A failed apply records no Sent id, so the next check reads them again.
+      if (sentApplied) {
+        const keep = await sentIdsToScan(newestFirst, sentResult.scanned);
+        if (keep.length < (sentResult.scanned || []).length) caughtUp = false;
+        scanned.push(...keep.map(id => ({ id, box: 'sent' })));
+      }
     }
     if (gmailApi) {
       // Only after the outcomes above are applied, so a crash re-reads them.
