@@ -1006,6 +1006,113 @@ describe('gmail quota fix round', () => {
     assert.equal(after.rows.length, 1);
   });
 
+  it('a missing inbox item skips only that due lead while another due lead sends', async () => {
+    const waiting = await insertDueFollowup('missing-due', 'test+missing-due@example.com');
+    const other = await insertDueFollowup('missing-other', 'test+missing-other@example.com');
+    await pool.query(`UPDATE proposals SET thread_id = 'thr-missing' WHERE id = $1`, [waiting.proposal.id]);
+    await pool.query(
+      `INSERT INTO inbox_messages (prospect_id, proposal_id, direction, dedupe_key, thread_id, from_addr, subject, body, received_at)
+       VALUES ($1, $2, 'in', 'missing-in', 'thr-missing', 'test+missing-due@example.com', 'Re: idea', 'Thursday?', '2026-11-06T15:00:00Z')`,
+      [waiting.prospect.id, waiting.proposal.id]
+    );
+    installThreads({
+      sent: [threadMessage('reply-missing', 'thr-missing', 'Friday is better', '2026-11-07T00:00:00Z')],
+    });
+    const first = await send.senderTick();
+    assert.notEqual(first.held, true, 'the newest window was read');
+    assert.equal(first.sent, 1, 'only the unrelated due lead sends');
+    const waitingRow = await pool.query('SELECT followup1_sent_at FROM proposals WHERE id = $1', [waiting.proposal.id]);
+    const otherRow = await pool.query('SELECT followup1_sent_at FROM proposals WHERE id = $1', [other.proposal.id]);
+    assert.equal(waitingRow.rows[0].followup1_sent_at, null);
+    assert.ok(otherRow.rows[0].followup1_sent_at);
+    const unread = await pool.query(`SELECT 1 FROM gmail_scanned_messages WHERE gmail_id = 'reply-missing'`);
+    assert.equal(unread.rows.length, 0);
+    const { rows: [inbound] } = await pool.query(
+      `SELECT id FROM inbox_messages WHERE dedupe_key = 'missing-in'`
+    );
+    await pool.query(
+      `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status) VALUES ($1, $2, $3, 'failed')`,
+      [waiting.prospect.id, waiting.proposal.id, inbound.id]
+    );
+    now += 60 * 1000;
+    const second = await send.senderTick();
+    assert.notEqual(second.held, true);
+    assert.equal(second.sent, 1, 'the waiting lead sends once the item can be applied');
+    const applied = await pool.query(
+      `SELECT i.status, i.handled_note FROM inbox_items i WHERE i.message_id = $1`,
+      [inbound.id]
+    );
+    assert.equal(applied.rows[0].status, 'handled');
+    assert.equal(applied.rows[0].handled_note, 'You replied from Gmail');
+    const sentAfter = await pool.query('SELECT followup1_sent_at FROM proposals WHERE id = $1', [waiting.proposal.id]);
+    assert.ok(sentAfter.rows[0].followup1_sent_at);
+    const scanned = await pool.query(`SELECT 1 FROM gmail_scanned_messages WHERE gmail_id = 'reply-missing'`);
+    assert.equal(scanned.rows.length, 1);
+  });
+
+  it('rewrite_queued after recover skips only that due lead, then the next tick sends it', async () => {
+    const waiting = await insertDueFollowup('rq-due', 'test+rq-due@example.com');
+    const other = await insertDueFollowup('rq-other', 'test+rq-other@example.com');
+    await pool.query(`UPDATE proposals SET thread_id = 'thr-rq-due' WHERE id = $1`, [waiting.proposal.id]);
+    const { rows: [inbound] } = await pool.query(
+      `INSERT INTO inbox_messages (prospect_id, proposal_id, direction, dedupe_key, thread_id, from_addr, subject, body, received_at)
+       VALUES ($1, $2, 'in', 'rq-due-in', 'thr-rq-due', 'test+rq-due@example.com', 'Re: idea', 'Thursday?', '2026-11-06T15:00:00Z')
+       RETURNING id`,
+      [waiting.prospect.id, waiting.proposal.id]
+    );
+    const { rows: [scratch] } = await pool.query(
+      `INSERT INTO inbox_items (prospect_id, proposal_id, message_id, status) VALUES ($1, $2, $3, 'rewriting') RETURNING id`,
+      [waiting.prospect.id, waiting.proposal.id, inbound.id]
+    );
+    await require('../src/proposals/inbox').recover();
+    let leftRewrite = false;
+    for (let i = 0; i < 50; i += 1) {
+      const row = await pool.query('SELECT status FROM inbox_items WHERE id = $1', [scratch.id]);
+      if (row.rows[0].status !== 'rewriting') { leftRewrite = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(leftRewrite, true, 'recover moves a cut-off rewrite off rewriting');
+    const client = await pool.connect();
+    await client.query('BEGIN');
+    await client.query(`UPDATE inbox_items SET status = 'rewrite_queued' WHERE id = $1`, [scratch.id]);
+    await client.query('COMMIT');
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM inbox_items WHERE id = $1 FOR UPDATE', [scratch.id]);
+    installThreads({
+      sent: [threadMessage('reply-rq-due', 'thr-rq-due', 'Friday is better', '2026-11-07T00:00:00Z')],
+    });
+    let first;
+    let heldStatus;
+    try {
+      first = await send.senderTick();
+      heldStatus = await client.query('SELECT status FROM inbox_items WHERE id = $1', [scratch.id]);
+    } finally {
+      await client.query('COMMIT');
+      client.release();
+    }
+    assert.ok(['rewrite_queued', 'rewriting'].includes(heldStatus.rows[0].status));
+    assert.notEqual(first.held, true);
+    assert.equal(first.sent, 1, 'only the unrelated due lead sends');
+    const waitingRow = await pool.query('SELECT followup1_sent_at FROM proposals WHERE id = $1', [waiting.proposal.id]);
+    const otherRow = await pool.query('SELECT followup1_sent_at FROM proposals WHERE id = $1', [other.proposal.id]);
+    assert.equal(waitingRow.rows[0].followup1_sent_at, null);
+    assert.ok(otherRow.rows[0].followup1_sent_at);
+    const unread = await pool.query(`SELECT 1 FROM gmail_scanned_messages WHERE gmail_id = 'reply-rq-due'`);
+    assert.equal(unread.rows.length, 0);
+    await pool.query(`UPDATE inbox_items SET status = 'failed' WHERE id = $1`, [scratch.id]);
+    now += 60 * 1000;
+    const second = await send.senderTick();
+    assert.notEqual(second.held, true);
+    assert.equal(second.sent, 1);
+    const applied = await pool.query('SELECT status, handled_note FROM inbox_items WHERE id = $1', [scratch.id]);
+    assert.equal(applied.rows[0].status, 'handled');
+    assert.equal(applied.rows[0].handled_note, 'You replied from Gmail');
+    const sentAfter = await pool.query('SELECT followup1_sent_at FROM proposals WHERE id = $1', [waiting.proposal.id]);
+    assert.ok(sentAfter.rows[0].followup1_sent_at);
+    const scanned = await pool.query(`SELECT 1 FROM gmail_scanned_messages WHERE gmail_id = 'reply-rq-due'`);
+    assert.equal(scanned.rows.length, 1);
+  });
+
   it('an unread id is fetched again until it is marked scanned', async () => {
     installApi({ inboxIds: newestFirstIds(3) });
     const since = new Date('2026-10-01T00:00:00Z');
