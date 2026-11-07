@@ -880,7 +880,13 @@ async function approveAndSend(proposalId, options = {}) {
     throw Object.assign(new Error(safe), { status: 502 });
   }
   const gate = await recheckLead(p.prospect_id);
-  const block = leadBlocksSend(gate);
+  let block = leadBlocksSend(gate);
+  // A first send was never refused for the stage the lead was already in
+  // when approve started (qualified, responded, ... are normal first-send
+  // stages; the success write moves found and qualified to contacted). Only a
+  // move into a stop stage while this approve ran blocks it, the same as a
+  // do-not-contact flag or an archive.
+  if (block === 'stage' && gate && gate.stage === p.stage) block = null;
   if (block) {
     await pool.query(
       `UPDATE proposals
