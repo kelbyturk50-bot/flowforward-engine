@@ -67,8 +67,6 @@ Nightly proposal drafting stays off (`PROPOSAL_AUTO_DRAFT` unset). Drafts are ma
 
 ## Usage rules
 
-Summit relayed these rules. This section records that request. It does not record a separate check that Kelby approved them. They sit with Change flow steps 4–8 and do not change who may merge. Role names stay the ones in the Roles table: QA is Gauge, Security is Warden, and Scout is Scout.
-
 1. **One review request per role per head.** Each reviewer role gets one review request per PR head commit. Keep the fresh-agent review plus QA, plus Security when it applies (auth, API, data, schema, email path, public routes), plus Scout when UI changes. New code resets only the affected gates. Nobody repeats a review of an unchanged head.
 2. **Gates start from existing output.** Gates start from existing CI and Railway job output and look only into failures and changes, with compact evidence. Infrastructure, job, or spend changes need Kelby's approval. The existing outreach job is never duplicated.
 3. **Bounded investigations.** An investigation is at most 6 targeted reads, plus 1 retry for a transient failure, then a compact finding or a blocker. Deeper QA or Security work needs an explicit expanded scope from Summit, and is never waived or passed when it did not pass.
