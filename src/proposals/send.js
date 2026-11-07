@@ -263,6 +263,30 @@ async function loadHalt() {
   return rows[0] ? rows[0].value : null;
 }
 
+// A hold that lasts this many sender ticks is logged once and shown in the
+// CRM setup list. It does not release follow-ups.
+const HOLD_ALERT_AFTER_TICKS = 3;
+// A scan still inside this window is "running". Past it, the scan is hung.
+// Either way follow-ups stay held. The flag is in memory, so a restart clears it.
+const SCAN_TIMEOUT_MS = 2 * 60 * 1000;
+let consecutiveHolds = 0;
+let holdAlerted = false;
+let checking = false;
+let scanStartedAt = 0;
+
+function noteFollowupHold() {
+  consecutiveHolds += 1;
+  if (consecutiveHolds >= HOLD_ALERT_AFTER_TICKS && !holdAlerted) {
+    holdAlerted = true;
+    console.error(`[sender] alert: follow-ups held for ${consecutiveHolds} consecutive checks; inbox is not caught up`);
+  }
+}
+
+function clearFollowupHold() {
+  consecutiveHolds = 0;
+  holdAlerted = false;
+}
+
 async function sendReadiness() {
   const problems = [];
   const mode = await mailMode();
@@ -273,6 +297,9 @@ async function sendReadiness() {
   }
   if (!SENDER.address) problems.push('Add SENDER_ADDRESS (a mailing address for the email footer; the law requires one).');
   problems.halt = haltView(await loadHalt());
+  if (consecutiveHolds >= HOLD_ALERT_AFTER_TICKS) {
+    problems.push('Follow-ups are on hold: the inbox check is not caught up.');
+  }
   return problems;
 }
 
@@ -1416,7 +1443,7 @@ async function sendDueFollowupsLocked() {
           }
           continue;
         }
-        await prepared.send();
+        const info = await prepared.send();
         mailed = true;
         if (failNextPostSend) {
           failNextPostSend = false;
@@ -1436,6 +1463,12 @@ async function sendDueFollowupsLocked() {
           await markManualReview(p.id, sentColumn, attemptKey);
         } else {
           sent++;
+          // #125: the inbox check reads each Gmail message once. Our own
+          // follow-up is recorded so the Sent scan does not spend a read on it.
+          if (info && typeof info.id === 'string') {
+            try { await gmail.markScanned([{ id: info.id, box: 'sent' }]); }
+            catch (err) { console.error('[gmail] could not record sent id:', err && err.code || 'error'); }
+          }
           await clearSenderAlert();
           await pool.query(`UPDATE prospects SET last_contacted_at = NOW() WHERE id = $1`, [p.prospect_id]);
           await logActivity(p.prospect_id, 'email', `Sent ${which === 'followup1' ? 'follow-up 1' : 'follow-up 2 (last)'} to ${toAddress}.`);
@@ -1480,6 +1513,14 @@ async function sendDueFollowupsLocked() {
             else await recordOutage(p, sentColumn, attemptKey, klass);
           } else {
             await recordTransient(p, sentColumn, klass, attemptKey);
+          }
+          // #125: Gmail's per-minute quota is used up, so every other send
+          // this minute fails the same way. Stop here; the rest stay due.
+          // err.quota is set by the Gmail wrapper (gmail.js isQuotaError) on
+          // every real Gmail API quota answer.
+          if (err && err.quota === true) {
+            console.error('[send] Gmail quota used up for this minute; remaining follow-ups wait for the next check');
+            stopSweep = true;
           }
         }
       }
@@ -1626,7 +1667,6 @@ async function fetchInbox(since) {
   return out;
 }
 
-let checking = false;
 // Sent proposals, including archived leads. Opt-outs and bounces are still
 // recorded while a lead is archived. A reply or booking is not: that would
 // write status and next_action, which stay with the finisher and the send path.
@@ -1714,51 +1754,208 @@ async function applyInboxMessages(messages) {
   return { checked: messages.length, matched: outcomes.length, follow_ons: followOns };
 }
 
-/** Look through the inbox for replies, bookings, bounces and opt-outs. */
+// A Sent id stays unread only while its proposal thread can still grow an
+// open inbox item: the latest inbound has no item yet, or that item is still
+// triaging, waiting to be rewritten (rewrite_queued, also what a restart
+// leaves a cut-off rewrite as), rewriting, or sending. sent, handled, and
+// discarded are finished, so the id is marked read and other follow-ups are
+// not held.
+// Triage is kicked when an inbound item is queued. Let a fast failure finish
+// before the Sent folder is applied, so it cannot overwrite "handled". A slow
+// triage is left for the next check; the Sent id stays unread until then.
+async function settleNewInboxItems() {
+  const deadline = Date.now() + 50;
+  while (Date.now() < deadline) {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM inbox_items WHERE status IN ('queued', 'triaging') LIMIT 1`);
+    if (!rows.length) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
+function sameMailId(a, b) {
+  const norm = (s) => String(s || '').replace(/[<>]/g, '').trim().toLowerCase();
+  const left = norm(a);
+  return left !== '' && left === norm(b);
+}
+
+const ITEM_STILL_FORMING = new Set(['triaging', 'rewrite_queued', 'rewriting', 'sending']);
+
+async function sentIdsToScan(messages, scannedIds) {
+  const leave = new Set();
+  for (const msg of messages) {
+    if (!msg || !msg.id || !msg.threadId) continue;
+    const row = await pool.query(
+      `SELECT
+         EXISTS (SELECT 1 FROM proposals WHERE thread_id = $1) AS proposal,
+         (SELECT message_id FROM proposals WHERE thread_id = $1 ORDER BY id LIMIT 1) AS proposal_message_id,
+         (SELECT MAX(received_at) FROM inbox_messages WHERE thread_id = $1) AS last_at,
+         (
+           SELECT i.status
+             FROM inbox_messages m
+             LEFT JOIN inbox_items i ON i.message_id = m.id
+            WHERE m.thread_id = $1 AND m.direction = 'in'
+            ORDER BY m.received_at DESC, m.id DESC
+            LIMIT 1
+         ) AS latest_status`,
+      [msg.threadId]);
+    const info = row.rows[0];
+    if (!info || !info.proposal) continue;
+    if (sameMailId(msg.messageIdHeader, info.proposal_message_id)) continue;
+    if (!(info.last_at && msg.date && new Date(msg.date) > new Date(info.last_at))) continue;
+    // No inbox item yet, or the latest one is still being triaged, rewritten, or sent.
+    // A sent, handled, or discarded item will not open again.
+    if (!info.latest_status || ITEM_STILL_FORMING.has(info.latest_status)) leave.add(msg.id);
+  }
+  return (scannedIds || []).filter(id => !leave.has(id));
+}
+
+function inboxScanBlocked() {
+  if (!checking) return null;
+  const hung = gmail.clockNow() - scanStartedAt >= SCAN_TIMEOUT_MS;
+  return { checked: 0, caught_up: false, scanning: true, hung };
+}
+
+/** Look through the inbox for replies, bookings, bounces and opt-outs.
+ *  caught_up is true only when this scan finished and both the inbox and
+ *  the sent folder were covered. A scan that is still running, hung, or
+ *  threw is not caught up. Unread ids, a failed full read, a short list,
+ *  or a sent-scan error keep follow-ups held. */
 async function checkInbox() {
-  if (checking || !(await mailMode()) || (await mailMode()) === 'test') return { checked: 0 };
+  const blocked = inboxScanBlocked();
+  if (blocked) return blocked;
+  const mode = await mailMode();
+  if (!mode || mode === 'test') return { checked: 0, caught_up: true };
   const active = await inboxCandidates();
   const convo = await conversationCandidates();
-  if (!active.length && !convo.length) return { checked: 0 };
+  if (!active.length && !convo.length) return { checked: 0, caught_up: true };
   checking = true;
+  scanStartedAt = gmail.clockNow();
+  const gmailApi = mode === 'gmail_api';
   let messages = [];
   let outcomes = [];
   let followOns = [];
   let sentHandled = 0;
+  let sentResult = null;
+  let caughtUp = true;
+  let backlog = 0;
+  const scanned = [];
+  let recorded = 0;
+  let setupErr = null;
   try {
-    const since = new Date(Math.min(...[...active, ...convo].map(p => new Date(p.sent_at).getTime())) - 86400000);
-    messages = await fetchInbox(since);
-    outcomes = collectInboxOutcomes(active, messages);
-    const taken = new Set(outcomes.map(([, , m]) => m));
-    followOns = collectFollowOns(convo, messages, taken);
-    if ((await mailMode()) === 'gmail_api') {
-      try { sentHandled = await require('./inbox').applySentMessages(await gmail.sentSince(since)); }
-      catch (err) { console.error('[inbox] sent check failed:', err.message); }
+    try {
+      const since = new Date(Math.min(...[...active, ...convo].map(p => new Date(p.sent_at).getTime())) - 86400000);
+      if (gmailApi) {
+        const budget = gmail.minuteReadBudget();
+        const inbox = await gmail.scanInbox(since, budget);
+        messages = inbox.messages;
+        backlog = inbox.backlog;
+        scanned.push(...inbox.scanned.map(id => ({ id, box: 'inbox' })));
+        if (backlog > 0 || budget.quotaHit || inbox.readFailed) caughtUp = false;
+        try {
+          sentResult = await gmail.scanSent(since, budget);
+          if (sentResult.backlog > 0 || budget.quotaHit || sentResult.readFailed) caughtUp = false;
+        } catch (err) {
+          console.error('[inbox] sent check failed:', err.message);
+          if (err && err.setup) setupErr = err;
+          caughtUp = false;
+        }
+      } else {
+        messages = await fetchInbox(since);
+      }
+      outcomes = collectInboxOutcomes(active, messages);
+      const taken = new Set(outcomes.map(([, , m]) => m));
+      followOns = collectFollowOns(convo, messages, taken);
+    } catch (err) {
+      console.error('[inbox] ✗ check failed:', err.message);
+      if (err && err.setup) setupErr = err;
+      caughtUp = false;
     }
-  } catch (err) {
-    if (err && err.status) throw err;
-    console.error(`[inbox] check failed: ${err && err.code || 'error'}`);
+    // Inbox outcomes first, so a reply that arrives in this same check has an
+    // inbox item before the Sent folder is applied. Main re-read Sent next
+    // time; a scanned id would not be read again.
+    for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
+    for (const [p, o, msg] of followOns) if (await applyFollowOn(p, o, msg)) recorded++;
+    await settleNewInboxItems();
+    if (sentResult) {
+      const newestFirst = sentResult.order === 'newest'
+        ? sentResult.messages.slice()
+        : sentResult.messages.slice().reverse();
+      let sentApplied = false;
+      try {
+        sentHandled = await require('./inbox').applySentMessages(newestFirst);
+        sentApplied = true;
+      } catch (err) {
+        console.error('[inbox] sent check failed:', err.message);
+        caughtUp = false;
+      }
+      // A failed apply records no Sent id, so the next check reads them again.
+      if (sentApplied) {
+        const keep = await sentIdsToScan(newestFirst, sentResult.scanned);
+        if (keep.length < (sentResult.scanned || []).length) caughtUp = false;
+        scanned.push(...keep.map(id => ({ id, box: 'sent' })));
+      }
+    }
+    if (gmailApi) {
+      // Only after the outcomes above are applied, so a crash re-reads them.
+      try { await gmail.markScanned(scanned); await gmail.purgeScanned(); }
+      catch (err) { console.error('[inbox] could not record scanned messages:', err.message); }
+      console.log(`[inbox] read ${messages.length} new message(s)${backlog ? `, ${backlog} left for the next check` : ''}`);
+    }
+    require('./inbox').kick();
+    // A Gmail sign-in or setup failure (#120) goes back to the caller with its
+    // fixed sentence once what was read is recorded. The cron and the route
+    // both hold follow-ups when checkInbox throws.
+    if (setupErr) throw setupErr;
+    return { checked: messages.length, matched: outcomes.length, follow_ons: recorded, replied_from_gmail: sentHandled, caught_up: caughtUp, backlog };
   } finally {
     checking = false;
   }
-  for (const [p, o, msg] of outcomes) await applyOutcome(p, o, msg);
-  let recorded = 0;
-  for (const [p, o, msg] of followOns) if (await applyFollowOn(p, o, msg)) recorded++;
-  require('./inbox').kick();
-  return { checked: messages.length, matched: outcomes.length, follow_ons: recorded, replied_from_gmail: sentHandled };
+}
+
+// Fail closed: no result, a running scan, a hung scan, or caught_up not
+// exactly true all hold. A thrown checkInbox leaves inbox null.
+function holdFollowups(inbox) {
+  return !inbox || inbox.caught_up !== true;
+}
+
+async function followupsAfterInbox(inbox) {
+  if (holdFollowups(inbox)) {
+    noteFollowupHold();
+    const backlog = inbox && inbox.backlog;
+    console.log(`[sender] follow-ups wait: the inbox check isn't caught up${backlog ? ` (${backlog} unread)` : ''}`);
+    return { sent: 0, held: true };
+  }
+  clearFollowupHold();
+  return sendDueFollowups();
 }
 
 async function senderTick() {
-  try { await checkInbox(); } catch (err) { console.error('[sender] inbox:', err.message); }
-  try { return await sendDueFollowups(); } catch (err) { console.error('[sender] follow-ups:', err.message); }
+  let inbox = null;
+  try { inbox = await checkInbox(); }
+  catch (err) {
+    console.error('[sender] inbox:', err.message);
+    inbox = { caught_up: false, failed: true };
+  }
+  try { return await followupsAfterInbox(inbox); }
+  catch (err) { console.error('[sender] follow-ups:', err.message); }
+}
+
+function _resetFollowupHoldForTests() {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_resetFollowupHoldForTests is only available when NODE_ENV=test');
+  consecutiveHolds = 0;
+  holdAlerted = false;
+  checking = false;
+  scanStartedAt = 0;
 }
 
 module.exports = {
-  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, prepareOutgoing, senderTick, stopSequence, classifyMessage, applyOutcome,
+  approveAndSend, sendDueFollowups, attachPrototypeUrl, withPrototype, checkInbox, inboxCandidates, conversationCandidates, applyInboxMessages, mailer, prepareOutgoing, senderTick, holdFollowups, followupsAfterInbox, stopSequence, classifyMessage, applyOutcome,
   missingRecipient, normalizeRecipient, storedRecipient, isPermanentFollowupError, isPermanentSmtpRecipient, classifyFollowupError, ARGUMENT_ATTEMPTS, claimFollowupAttempt,
   renderMessage, renderMessageHtml, addedLines, withBooking, fillPlaceholders, onepagerUrl, inSendWindow, sendReadiness, sentToday, mailMode, _setTransport,
   _beforeFollowupClaim, _beforeTransport, _failNextRelease, _failNextPostSend, _resetSendTestHooks,
   _setRandom, _setAlertHook, _setCredentialCheck, _setSendTxnGate, afterLeadLock,
   backoffDelayMs, backoffDelayMinutes, recheckLead, BACKOFF_CAP_MS,
   FOLLOWUP_BACKOFF_CAP_MS, FOLLOWUP_MAX_AGE_MS, RESEND_CONFIRM,
+  HOLD_ALERT_AFTER_TICKS, SCAN_TIMEOUT_MS, _resetFollowupHoldForTests,
 };

@@ -13,6 +13,7 @@ import {
 } from './contract.js';
 import { chipsFor } from './fixture.js';
 import { publicJson } from './public-client.js';
+import VoiceCallPanel from './VoiceCallPanel.jsx';
 
 const CHIP_IDS = new Set(['chip_emergency', 'chip_booking', 'chip_price', 'chip_hours', 'chip_area']);
 
@@ -190,6 +191,9 @@ export default function LiveChatConnected({ kind = 'sample', token = '' }) {
         onCta,
         onExpired: () => setView({ status: 'expired' }),
         onNotFound: () => setView({ status: 'closed' }),
+        voice: view.kind === 'prototype' && view.token
+          ? <VoiceCallPanel token={view.token} businessName={model.business_name || 'this business'} />
+          : null,
       }}
     />
   );

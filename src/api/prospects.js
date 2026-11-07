@@ -245,6 +245,10 @@ router.delete('/:id', async (req, res) => {
     await pool.query('DELETE FROM prospects WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
   } catch (err) {
+    // lead_offers references prospects with ON DELETE RESTRICT.
+    if (err && err.code === '23503') {
+      return res.status(409).json({ error: 'This lead has offer records. Archive it instead of deleting it.' });
+    }
     res.status(500).json({ error: err.message });
   }
 });

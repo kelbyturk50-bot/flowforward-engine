@@ -86,6 +86,22 @@ async function colorsFor(prospect) {
   if (found[0]) return { primary: found[0], secondary: found[1] || SECONDARY_FALLBACK };
   const cached = siteColors(prospect.research);
   if (cached) return cached;
+  // Drafting keeps its research on the proposal, not the lead. Without this
+  // a prototype made from the CRM after a draft always got the fallback
+  // green, even when research had already read the shop's colors (Oct 29).
+  const { rows: drafted } = await pool.query(
+    `SELECT research FROM proposals
+      WHERE prospect_id = $1 AND research IS NOT NULL
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1`,
+    [prospect.id]
+  );
+  // Older drafts were scored before stock theme colors were discounted, so a
+  // draft's colors are used only when they were confident and are not a
+  // stock theme color.
+  const draftColors = drafted[0] && drafted[0].research && drafted[0].research.site && drafted[0].research.site.brand_colors;
+  const fromDraft = draftColors && draftColors.confident === true ? siteColors(drafted[0].research) : null;
+  if (fromDraft && !palette.FRAMEWORK_DEFAULTS.has(fromDraft.primary)) return fromDraft;
   return { primary: PRIMARY_FALLBACK, secondary: SECONDARY_FALLBACK };
 }
 
@@ -206,6 +222,19 @@ async function loadProspect(prospectId, research) {
   return prospect;
 }
 
+// A new link proposes chat facts from the research the proposal bot already
+// cached. No fetch, no model call. Kelby approves them in the CRM before the
+// chat uses them. A failure here never fails the prototype.
+async function proposeChatFacts(prospectId) {
+  try {
+    const { buildFacts } = require('../chatdemo/facts-store');
+    const result = await buildFacts(prospectId);
+    if (result && result.proposed) console.log(`[prototype] prospect ${prospectId} proposed ${result.proposed} chat facts`);
+  } catch (err) {
+    console.error('[prototype] chat facts failed:', err && err.code);
+  }
+}
+
 // Draft hook. Uses the rubric; no pick means no prototype.
 async function attachPrototype({ prospectId, research }) {
   if (!(await prototypeOnDraft())) return null;
@@ -228,6 +257,7 @@ async function attachPrototype({ prospectId, research }) {
     const colors = await colorsFor(prospect);
     const row = await insertRow(prospect, pick.agent, colors);
     console.log(`[prototype] prospect ${prospect.id} agent ${row.agent_type} prototype ${row.id}`);
+    await proposeChatFacts(prospect.id);
     return row;
   } catch (err) {
     console.error('[prototype] hook failed:', err && err.code);
@@ -260,6 +290,7 @@ async function ensurePrototype(prospectId, { fresh = false } = {}) {
   if (existing) await revoke(existing.id);
   const row = await insertRow(prospect, agent, colors);
   console.log(`[prototype] prospect ${prospect.id} agent ${row.agent_type} prototype ${row.id} (from CRM)`);
+  await proposeChatFacts(prospect.id);
   return row;
 }
 

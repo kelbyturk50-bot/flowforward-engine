@@ -182,7 +182,9 @@ router.post('/gmail/disconnect', async (req, res) => {
   try { await gmail.disconnect(); res.json({ ok: true }); } catch (err) { fail(res, err); }
 });
 
-// POST /api/proposals/check-inbox — run the reply check + follow-up sender now
+// POST /api/proposals/check-inbox — run the reply check + follow-up sender now.
+// A thrown scan is not caught up. The route does not answer 429; it returns
+// 200 with followups.held when follow-ups wait.
 router.post('/check-inbox', async (req, res) => {
   try {
     const mode = await send.mailMode();
@@ -193,8 +195,16 @@ router.post('/check-inbox', async (req, res) => {
         : 'Email is not set up. Go to Settings and click Connect Gmail.';
       throw Object.assign(new Error(message), { status: 503 });
     }
-    const inbox = await send.checkInbox();
-    const followups = await send.sendDueFollowups();
+    let inbox;
+    try { inbox = await send.checkInbox(); }
+    catch (err) {
+      // A Gmail sign-in or setup failure answers with its fixed sentence
+      // (502/503). Follow-ups do not run either way.
+      if (err && err.setup) throw err;
+      console.error('[check-inbox] scan failed:', err.message);
+      inbox = { checked: 0, caught_up: false, failed: true };
+    }
+    const followups = await send.followupsAfterInbox(inbox);
     res.json({ ok: true, inbox, followups });
   } catch (err) { fail(res, err); }
 });
