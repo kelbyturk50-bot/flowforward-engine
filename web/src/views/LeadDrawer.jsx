@@ -230,7 +230,7 @@ function ProposalBlock({ lead, openProposal }) {
       )}
       {current ? (
         <div className="prop-mini">
-          <ProposalChip status={current.status} verdict={current.fit_verdict} />
+          <ProposalChip status={current.status} verdict={current.fit_verdict} stopReason={current.stop_reason} />
           <span className="grow">{current.subject ? `“${current.subject}”` : `Version ${current.version}`}
             <span className="muted small"> · v{current.version} · {money2(current.cost_usd)}{current.sent_at ? ` · sent ${timeAgo(current.sent_at)}` : ''}</span></span>
           <button className="btn btn-sm" onClick={() => openProposal(current.id)}>Open</button>

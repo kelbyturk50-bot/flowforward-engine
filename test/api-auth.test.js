@@ -335,7 +335,7 @@ describe('api auth fails closed', { concurrency: false }, () => {
     const sent = await request(port, 'POST', sendPath, { key: READY_KEY });
     assert.equal(sent.status, 200, sent.text);
     assert.equal(sentMails.length, 1);
-    assert.equal(sentMails[0].to, 'test+auth@example.test');
+    assert.deepEqual(sentMails[0].to, { address: 'test+auth@example.test' });
     console.log('[auth] ready key: wrong header 401, right header 200, authed send called the mock once');
   });
 

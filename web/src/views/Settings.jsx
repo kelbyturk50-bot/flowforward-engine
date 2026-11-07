@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, settings } from '../api';
 import { acceptedApiUrl, apiUrlIssue, shouldStoreApiUrl } from '../api-base.js';
-import { useAsync, ErrorNote, timeAgo, toast, money2 } from '../ui';
+import { useAsync, ErrorNote, FollowupHaltNotice, timeAgo, toast, money2 } from '../ui';
 import FeatureFlagsPanel from './FeatureFlags';
 import VoiceSettings from './VoiceSettings';
 
@@ -15,6 +15,7 @@ export default function Settings({ authProblem, onSaved, version }) {
 
   const connected = !!settings.apiKey;
   const runs = useAsync(() => connected ? api.runs() : Promise.resolve(null), [version, connected]);
+  const summary = useAsync(() => connected ? api.proposalSummary() : Promise.resolve(null), [version, connected]);
 
   const onAddress = (e) => {
     const next = e.target.value;
@@ -66,6 +67,8 @@ export default function Settings({ authProblem, onSaved, version }) {
   return (
     <div className="page page-narrow">
       <header className="page-head"><div><h1>Settings</h1></div></header>
+
+      <FollowupHaltNotice halt={summary.data?.halt} place="settings" />
 
       {authProblem && <div className="error-note" role="alert"><p>The API needs a valid key. Enter the value of CRM_API_KEY from Railway.</p></div>}
 
@@ -209,6 +212,18 @@ function EmailSettings() {
   const st = useAsync(() => api.gmailStatus(), []);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
+    let flag = '';
+    try { flag = sessionStorage.getItem('ff.scrollEmail') || ''; } catch { /* storage blocked */ }
+    if (flag === '1') {
+      try { sessionStorage.removeItem('ff.scrollEmail'); } catch { /* storage blocked */ }
+      const card = document.getElementById('email-sending');
+      if (card) {
+        card.scrollIntoView({ block: 'start' });
+        card.focus();
+      }
+    }
+  }, []);
+  useEffect(() => {
     const m = window.location.hash.match(/gmail=(connected|error)/);
     if (!m) return;
     toast(m[1] === 'connected' ? 'Gmail connected.' : 'Gmail did not connect. Try again.');
@@ -225,8 +240,8 @@ function EmailSettings() {
     try { await api.gmailDisconnect(); toast('Gmail disconnected.'); st.reload(); } catch (e) { toast(e.message); } finally { setBusy(false); }
   };
   return (
-    <section className="panel">
-      <h2>Email sending</h2>
+    <section className="panel" id="email-sending" tabIndex={-1} aria-labelledby="email-sending-title">
+      <h2 id="email-sending-title">Email sending</h2>
       <p className="muted">{"Proposals go out from your Gmail through Google's API, and replies are picked up from its inbox."}</p>
       <ErrorNote error={st.error} onRetry={st.reload} />
       {g && (

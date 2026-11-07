@@ -923,8 +923,10 @@ describe('pilot csv estimate intake', () => {
     const migrate = fs.readFileSync(path.join(__dirname, '../src/db/migrate.js'), 'utf8');
     const schemaWithoutTagUpgrade = schema
       .replace(/-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/, '')
-      .replace(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/, '');
+      .replace(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/, '')
+      .replace(/ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient;/, '');
     assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
+    assert.match(schema, /DROP CONSTRAINT IF EXISTS sent_requires_recipient/);
     // The facts tag upgrade drops and re-adds that one check and nothing else.
     const factsUpgrade = schema.match(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/);
     assert.ok(factsUpgrade);

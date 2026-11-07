@@ -166,7 +166,8 @@ describe('gmail quota budget', () => {
     const { rows } = await pool.query(
       `SELECT status, followup1_sent_at, error FROM proposals WHERE id = ANY($1::int[]) ORDER BY id`, [ids]);
     assert.ok(rows.every((r) => r.status === 'sent' && r.followup1_sent_at === null), 'all still sent and due');
-    assert.match(rows[0].error, /Quota exceeded/);
+    // #120 stores a fixed retry sentence rather than Google's raw message.
+    assert.equal(rows[0].error, 'Follow-up will retry: quota');
     console.log('[gmail-quota] follow-up loop stops on quota and keeps every follow-up due');
   });
 });

@@ -971,8 +971,10 @@ describe('brand extract and prototype rubric', { concurrency: false }, () => {
     const repair = fs.readFileSync(path.join(ROOT, 'src/db/brand-constraints.sql'), 'utf8');
     const schemaWithoutTagUpgrade = schema
       .replace(/-- BEGIN chat_demo_sessions_tag_check upgrade[\s\S]*?-- END chat_demo_sessions_tag_check upgrade/, '')
-      .replace(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/, '');
+      .replace(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/, '')
+      .replace(/ALTER TABLE proposals DROP CONSTRAINT IF EXISTS sent_requires_recipient;/, '');
     assert.match(schema, /DROP CONSTRAINT IF EXISTS chat_demo_sessions_tag_check/);
+    assert.match(schema, /DROP CONSTRAINT IF EXISTS sent_requires_recipient/);
     // The facts tag upgrade drops and re-adds that one check and nothing else.
     const factsUpgrade = schema.match(/-- BEGIN prototype_facts_tag_check upgrade[\s\S]*?-- END prototype_facts_tag_check upgrade/);
     assert.ok(factsUpgrade);
