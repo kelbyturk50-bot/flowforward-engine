@@ -254,16 +254,8 @@ CREATE TABLE IF NOT EXISTS gmail_scanned_messages (
   CONSTRAINT gmail_scanned_messages_id_check CHECK (gmail_id ~ '^[A-Za-z0-9_-]{1,64}$')
 );
 
--- Where a large list left off. pending_ids is every id a check listed that
--- is not yet in gmail_scanned_messages, so newer mail cannot push one out of
--- reach. page_token is the next older Gmail page, so a later check does not
--- list the same pages again.
-CREATE TABLE IF NOT EXISTS gmail_list_state (
-  query_key   TEXT PRIMARY KEY,
-  page_token  TEXT,
-  pending_ids TEXT[] NOT NULL DEFAULT '{}',
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- gmail_list_state is not created here. A database that already has it from
+-- an earlier boot keeps the table. This boot does not drop it and does not read it.
 
 CREATE TABLE IF NOT EXISTS app_settings (
   key         TEXT PRIMARY KEY,
