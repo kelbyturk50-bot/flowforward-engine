@@ -3,6 +3,7 @@ import { api } from '../api';
 import { formatDenverDateTime } from '../live-chat/dates';
 import { demoChatUrl } from '../live-chat/route';
 import { toast } from '../ui';
+import ChatFactsPanel from './ChatFactsPanel';
 
 export const AGENT_LABELS = {
   estimate_followup: 'Estimate follow-up',
@@ -89,6 +90,7 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
           <button type="button" className="btn demo-link-copy" disabled={!!busy} onClick={askDemo}>
             {busy === 'demo' ? 'Creating…' : 'Create demo link'}
           </button>
+          {prospectId ? <ChatFactsPanel prospectId={prospectId} /> : null}
         </div>
       </section>
     );
@@ -151,6 +153,7 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
             </button>
           </>
         )}
+        {prospectId ? <ChatFactsPanel prospectId={prospectId} /> : null}
       </div>
       <div className="proto-grid">
         <label>Lead with

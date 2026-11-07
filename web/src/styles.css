@@ -1493,6 +1493,20 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
 .proto-addon pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .9rem; }
 .demo-link-block { display: grid; gap: .45rem; }
 .demo-link-block .col-title { margin: 0; font-size: 1rem; }
+.chat-facts { display: grid; gap: .45rem; margin-top: .4rem; padding-top: .6rem; border-top: 1px solid var(--line); min-width: 0; }
+.chat-facts-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
+.chat-facts-head .link-row { margin: 0; }
+.chat-facts-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+.chat-facts-list { gap: .35rem; }
+.chat-fact { border: 1px solid var(--line); border-left-width: 3px; border-radius: var(--radius-s, 8px); padding: .45rem .6rem; display: grid; gap: .2rem; min-width: 0; }
+.chat-fact.is-proposed { border-left-color: var(--ochre); background: var(--ochre-wash); }
+.chat-fact-main { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .6rem; min-width: 0; }
+.chat-fact-label { font-weight: 600; }
+.chat-fact-value { overflow-wrap: anywhere; min-width: 0; }
+.chat-fact-actions { margin-left: auto; display: inline-flex; gap: .35rem; }
+.chat-fact-source { overflow-wrap: anywhere; }
+.chat-fact-quote { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+@media (min-width: 700px) { .chat-fact-quote { display: inline; } }
 .demo-link-url {
   margin: 0;
   padding: .7rem .8rem;

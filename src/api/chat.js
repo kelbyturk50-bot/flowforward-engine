@@ -5,7 +5,7 @@ const express = require('express');
 const requireApiKey = require('./auth');
 const { readCeiling } = require('../chatdemo/ceiling');
 const { zoneDay, FLOWFORWARD_ZONE } = require('../chatdemo/copy');
-const { listFacts, writeFact } = require('../chatdemo/facts-store');
+const { listFacts, writeFact, buildFacts, approveFacts, deleteFact } = require('../chatdemo/facts-store');
 const { readSpend } = require('../chatdemo/spend');
 
 const router = express.Router();
@@ -31,9 +31,15 @@ function invalidJson(err, req, res, next) {
 }
 
 function sendError(res, error) {
-  if (error === 'test_only') return res.status(422).json({ error: 'test_only' });
   if (error === 'not_found') return res.status(404).json({ error: 'not_found' });
+  if (error === 'no_research') return res.status(409).json({ error: 'no_research' });
+  if (error === 'archived') return res.status(409).json({ error: 'archived' });
   return res.status(400).json({ error: 'invalid_body' });
+}
+
+function objectBody(req) {
+  const body = req.body;
+  return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
 }
 
 router.get('/facts', async (req, res) => {
@@ -66,6 +72,49 @@ router.post('/facts', async (req, res) => {
     res.status(201).json({ fact: result.fact });
   } catch (err) {
     console.error(`[chat] facts write failed (${err && err.code ? err.code : 'error'})`);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+// Read the research the proposal bot already cached and propose facts.
+// No fetch and no model call. Proposed facts wait for approval.
+router.post('/facts/build', async (req, res) => {
+  const body = objectBody(req);
+  if (!body) return res.status(400).json({ error: 'invalid_body' });
+  try {
+    const result = await buildFacts(body.prospect_id);
+    if (result.error) return sendError(res, result.error);
+    res.json({ facts: result.facts, proposed: result.proposed });
+  } catch (err) {
+    console.error(`[chat] facts build failed (${err && err.code ? err.code : 'error'})`);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+// { prospect_id, fields? } approves the listed proposed facts, or all of them.
+router.post('/facts/approve', async (req, res) => {
+  const body = objectBody(req);
+  if (!body) return res.status(400).json({ error: 'invalid_body' });
+  if (body.fields !== undefined && body.fields !== null && !Array.isArray(body.fields)) {
+    return res.status(400).json({ error: 'invalid_body' });
+  }
+  try {
+    const result = await approveFacts(body.prospect_id, body.fields ?? null);
+    if (result.error) return sendError(res, result.error);
+    res.json({ facts: result.facts, approved: result.approved });
+  } catch (err) {
+    console.error(`[chat] facts approve failed (${err && err.code ? err.code : 'error'})`);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+router.delete('/facts', async (req, res) => {
+  try {
+    const result = await deleteFact(req.query.prospect_id, req.query.field);
+    if (result.error) return sendError(res, result.error);
+    res.json({ facts: result.facts });
+  } catch (err) {
+    console.error(`[chat] facts delete failed (${err && err.code ? err.code : 'error'})`);
     res.status(500).json({ error: 'server_error' });
   }
 });
