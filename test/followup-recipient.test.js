@@ -2147,6 +2147,39 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     }
   });
 
+  it('approve sends to a lead already in a later stage, and refuses only a move into one during the approve', async () => {
+    // Before #120, approve had no stage rule. The pre-send recheck now
+    // refuses only a stage that changed into a stop stage while approve ran.
+    for (const [stage, after] of [['qualified', 'contacted'], ['responded', 'responded'], ['proposal', 'proposal']]) {
+      const prospect = await lead();
+      await pool.query('UPDATE prospects SET stage = $2 WHERE id = $1', [prospect.id, stage]);
+      const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: `test+approve-stage-${prospect.id}@example.com` });
+      const calls = useTransport();
+      const res = await fetch(`${apiBase}/api/proposals/${draft.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+      });
+      assert.equal(res.status, 200, `${stage}: ${await res.clone().text()}`);
+      assert.equal(calls.length, 1, stage);
+      assert.equal((await state(draft.id)).status, 'sent', stage);
+      const row = await pool.query('SELECT stage FROM prospects WHERE id = $1', [prospect.id]);
+      assert.equal(row.rows[0].stage, after, stage);
+      _resetSendTestHooks();
+    }
+    // Already qualified, then lost while the approve runs: refused.
+    const prospect = await lead();
+    await pool.query(`UPDATE prospects SET stage = 'qualified' WHERE id = $1`, [prospect.id]);
+    const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: `test+approve-stage-lost-${prospect.id}@example.com` });
+    const calls = useTransport();
+    _beforeTransport(async () => { await pool.query(`UPDATE prospects SET stage = 'lost' WHERE id = $1`, [prospect.id]); });
+    const res = await fetch(`${apiBase}/api/proposals/${draft.id}/send`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': API_KEY }, body: '{}',
+    });
+    assert.equal(res.status, 409);
+    assert.equal(calls.length, 0);
+    assert.equal((await state(draft.id)).status, 'draft');
+    _resetSendTestHooks();
+  });
+
   it('stops a non-ASCII address as unsupported and does not mail a trimmed copy', async () => {
     const row = await legacySent('caf\u00e9@example.com');
     const calls = useTransport();
