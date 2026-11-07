@@ -18,6 +18,11 @@ function mountBeforeCors(app) {
   const { demoRouter, prototypeChatRouter } = require('./public');
   app.use('/api/public/chat', demoRouter);
   app.use('/api/public/prototypes/:token/chat', prototypeChatRouter);
+  // Voice receptionist (docs/VOICE_DEMO.md). Same mount rules as chat: before
+  // cors() and the global parser; the webhook needs the raw body.
+  const { prototypeVoiceRouter, webhookRouter } = require('../voicedemo/public');
+  app.use('/api/public/prototypes/:token/voice', prototypeVoiceRouter);
+  app.use('/api/public/voice/retell-webhook', webhookRouter);
   // A token that is not valid percent-encoding throws while the route
   // param is decoded. That is the same 404 as any other unknown token.
   app.use((err, req, res, next) => {
@@ -37,10 +42,12 @@ function startMaintenance() {
   const { purge } = require('./counters');
   const { sweep } = require('./spend');
   const { logErr } = require('./log');
+  const { sweepOverdue } = require('../voicedemo/public');
   const tick = () => {
     const at = new Date();
     purge(at).catch((err) => logErr('ip_purge_failed', err));
     sweep(at).catch((err) => logErr('reservation_expired', err));
+    sweepOverdue(at).catch((err) => console.error(`[voice] sweep_failed ${err && err.code ? err.code : 'error'}`));
   };
   tick();
   const timer = setInterval(tick, 60 * 1000);

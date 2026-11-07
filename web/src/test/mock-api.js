@@ -76,6 +76,7 @@ export const api = {
   buildChatFacts: method(),
   approveChatFacts: method(),
   removeChatFact: method(),
+  voiceStatus: method(),
   dismissJob: method(),
   markProposalSeen: method(),
   markSentProposal: method(),

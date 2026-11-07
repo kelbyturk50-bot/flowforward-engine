@@ -788,6 +788,31 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   border: 1px solid var(--line); border-radius: 10px;
   font-size: .92rem;
 }
+.voice-call {
+  flex: none;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #FFFFFF;
+  color: #1E2A2F;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.voice-call-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; min-width: 0; }
+.voice-call-head > div { min-width: 0; flex: 1 1 260px; }
+.voice-call-title { margin: 0; font-size: 1rem; line-height: 1.3; overflow-wrap: anywhere; }
+.voice-call-note { margin: 2px 0 0; font-size: .82rem; line-height: 1.35; color: var(--ink-2); }
+.voice-call-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.voice-call .voice-call-btn { width: auto; flex: 0 0 auto; padding: 10px 18px; }
+@media (max-width: 560px) { .voice-call .voice-call-head > .voice-call-btn { width: 100%; } }
+.voice-call-live { font-weight: 700; font-variant-numeric: tabular-nums; color: #1F5F46; }
+.voice-call-status { margin: 0; font-size: .88rem; line-height: 1.35; }
+.voice-call-status.is-error { color: #9A3412; }
+.voice-call-try { font-size: .88rem; }
+.voice-call-try-label { margin: 0; font-weight: 700; }
+.voice-call-try ul { margin: 2px 0 0; padding-left: 1.1rem; }
 .live-chat-stage {
   position: relative;
   display: flex;
@@ -1493,6 +1518,11 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
 .proto-addon pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .9rem; }
 .demo-link-block { display: grid; gap: .45rem; }
 .demo-link-block .col-title { margin: 0; font-size: 1rem; }
+.voice-webhook code { overflow-wrap: anywhere; }
+.voice-setup { margin-top: .6rem; }
+.voice-setup summary { cursor: pointer; font-weight: 600; }
+.voice-setup ol { margin: .5rem 0; padding-left: 1.2rem; }
+.voice-prompt { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; background: var(--line-2); border-radius: var(--radius-s, 8px); padding: .7rem .8rem; font-size: .8rem; margin: .6rem 0 0; }
 .chat-facts { display: grid; gap: .45rem; margin-top: .4rem; padding-top: .6rem; border-top: 1px solid var(--line); min-width: 0; }
 .chat-facts-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
 .chat-facts-head .link-row { margin: 0; }

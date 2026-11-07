@@ -139,6 +139,7 @@ export const api = {
   buildChatFacts:    (prospectId)   => request('POST', '/api/chat/facts/build', { prospect_id: prospectId }),
   approveChatFacts:  (prospectId, fields = null) => request('POST', '/api/chat/facts/approve', { prospect_id: prospectId, fields }),
   removeChatFact:    (prospectId, field) => request('DELETE', `/api/chat/facts${qs({ prospect_id: prospectId, field })}`),
+  voiceStatus:       ()             => request('GET', '/api/chat/voice'),
   markSentProposal:  (id, note)     => request('POST', `/api/proposals/${id}/mark-sent`, { note }),
   stopProposal:      (id, reason)   => request('POST', `/api/proposals/${id}/stop`, { reason }),
   repliedProposal:   (id, note)     => request('POST', `/api/proposals/${id}/replied`, { note }),

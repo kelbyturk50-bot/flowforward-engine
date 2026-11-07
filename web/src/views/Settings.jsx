@@ -3,6 +3,7 @@ import { api, settings } from '../api';
 import { acceptedApiUrl, apiUrlIssue, shouldStoreApiUrl } from '../api-base.js';
 import { useAsync, ErrorNote, timeAgo, toast, money2 } from '../ui';
 import FeatureFlagsPanel from './FeatureFlags';
+import VoiceSettings from './VoiceSettings';
 
 export default function Settings({ authProblem, onSaved, version }) {
   const [baseline, setBaseline] = useState(() => settings.apiUrl);
@@ -112,6 +113,7 @@ export default function Settings({ authProblem, onSaved, version }) {
       )}
 
       {connected && <EmailSettings />}
+      {connected && <VoiceSettings version={version} />}
       {connected && <ProposalSettings version={version} />}
     </div>
   );
