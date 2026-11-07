@@ -315,7 +315,8 @@ async function stopSequence(proposalId, reason, status = 'stopped') {
 }
 
 /** Send any follow-ups that are due. Called every 15 minutes. */
-async function sendDueFollowups() {
+async function sendDueFollowups(deferProspectIds) {
+  const defer = new Set(deferProspectIds || []);
   if (!(await mailMode()) || !SENDER.address || !inSendWindow()) return { sent: 0 };
   // Exclude pest names in SQL. A JS skip after LIMIT 25 would fill the batch
   // with rows that are never sent and starve every other sequence. The
@@ -344,6 +345,7 @@ async function sendDueFollowups() {
       console.error('[send] skipped follow-up: lead is archived');
       continue;
     }
+    if (defer.has(p.prospect_id)) continue;
     if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
       await stopSequence(p.id, p.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${p.stage}`);
       continue;
@@ -602,10 +604,8 @@ async function applyInboxMessages(messages) {
 
 // A Sent id stays unread only while its proposal thread can still grow an
 // open inbox item: the latest inbound has no item yet, or that item is still
-// triaging, waiting to be rewritten (rewrite_queued, also what a restart
-// leaves a cut-off rewrite as), rewriting, or sending. sent, handled, and
-// discarded are finished, so the id is marked read and other follow-ups are
-// not held.
+// triaging, rewriting, or sending. sent, handled, and discarded are finished,
+// so the id is marked read and other follow-ups are not held.
 // Triage is kicked when an inbound item is queued. Let a fast failure finish
 // before the Sent folder is applied, so it cannot overwrite "handled". A slow
 // triage is left for the next check; the Sent id stays unread until then.
@@ -625,16 +625,18 @@ function sameMailId(a, b) {
   return left !== '' && left === norm(b);
 }
 
-const ITEM_STILL_FORMING = new Set(['triaging', 'rewrite_queued', 'rewriting', 'sending']);
+const ITEM_STILL_FORMING = new Set(['triaging', 'rewriting', 'rewrite_queued', 'sending']);
 
 async function sentIdsToScan(messages, scannedIds) {
   const leave = new Set();
+  const deferProspectIds = [];
   for (const msg of messages) {
     if (!msg || !msg.id || !msg.threadId) continue;
     const row = await pool.query(
       `SELECT
          EXISTS (SELECT 1 FROM proposals WHERE thread_id = $1) AS proposal,
          (SELECT message_id FROM proposals WHERE thread_id = $1 ORDER BY id LIMIT 1) AS proposal_message_id,
+         (SELECT prospect_id FROM proposals WHERE thread_id = $1 ORDER BY id LIMIT 1) AS prospect_id,
          (SELECT MAX(received_at) FROM inbox_messages WHERE thread_id = $1) AS last_at,
          (
            SELECT i.status
@@ -649,11 +651,18 @@ async function sentIdsToScan(messages, scannedIds) {
     if (!info || !info.proposal) continue;
     if (sameMailId(msg.messageIdHeader, info.proposal_message_id)) continue;
     if (!(info.last_at && msg.date && new Date(msg.date) > new Date(info.last_at))) continue;
-    // No inbox item yet, or the latest one is still being triaged, rewritten, or sent.
-    // A sent, handled, or discarded item will not open again.
-    if (!info.latest_status || ITEM_STILL_FORMING.has(info.latest_status)) leave.add(msg.id);
+    // No inbox item yet, or the latest one is still being triaged or rewritten.
+    // That holds only this lead. A sent, handled, or discarded item is finished
+    // and must not keep every other follow-up waiting.
+    if (!info.latest_status || ITEM_STILL_FORMING.has(info.latest_status)) {
+      leave.add(msg.id);
+      if (info.prospect_id != null) deferProspectIds.push(info.prospect_id);
+    }
   }
-  return (scannedIds || []).filter(id => !leave.has(id));
+  return {
+    keep: (scannedIds || []).filter(id => !leave.has(id)),
+    deferProspectIds,
+  };
 }
 
 function inboxScanBlocked() {
@@ -662,11 +671,10 @@ function inboxScanBlocked() {
   return { checked: 0, caught_up: false, scanning: true, hung };
 }
 
-/** Look through the inbox for replies, bookings, bounces and opt-outs.
- *  caught_up is true only when this scan finished and both the inbox and
- *  the sent folder were covered. A scan that is still running, hung, or
- *  threw is not caught up. Unread ids, a failed full read, a short list,
- *  or a sent-scan error keep follow-ups held. */
+/** Look through the newest inbox and Sent windows for replies, bookings, bounces and opt-outs.
+ *  caught_up is true only when this tick listed and read that window with no quota error,
+ *  no failed read, and no short list. A previous tick does not cover this one.
+ *  A Sent reply that is still waiting on its own inbox item skips that lead only. */
 async function checkInbox() {
   const blocked = inboxScanBlocked();
   if (blocked) return blocked;
@@ -681,10 +689,12 @@ async function checkInbox() {
   let messages = [];
   let outcomes = [];
   let followOns = [];
-  let sentHandled = 0;
+    let sentHandled = 0;
   let sentResult = null;
   let caughtUp = true;
   let backlog = 0;
+  let sentApplyThrew = false;
+  let deferProspectIds = [];
   const scanned = [];
   let recorded = 0;
   try {
@@ -696,10 +706,10 @@ async function checkInbox() {
         messages = inbox.messages;
         backlog = inbox.backlog;
         scanned.push(...inbox.scanned.map(id => ({ id, box: 'inbox' })));
-        if (backlog > 0 || budget.quotaHit || inbox.readFailed) caughtUp = false;
+        if (!inbox.complete || budget.quotaHit || inbox.readFailed) caughtUp = false;
         try {
           sentResult = await gmail.scanSent(since, budget);
-          if (sentResult.backlog > 0 || budget.quotaHit || sentResult.readFailed) caughtUp = false;
+          if (!sentResult.complete || budget.quotaHit || sentResult.readFailed) caughtUp = false;
         } catch (err) {
           console.error('[inbox] sent check failed:', err.message);
           caughtUp = false;
@@ -724,29 +734,29 @@ async function checkInbox() {
       const newestFirst = sentResult.order === 'newest'
         ? sentResult.messages.slice()
         : sentResult.messages.slice().reverse();
-      let sentApplied = false;
-      try {
-        sentHandled = await require('./inbox').applySentMessages(newestFirst);
-        sentApplied = true;
-      } catch (err) {
+      try { sentHandled = await require('./inbox').applySentMessages(newestFirst); }
+      catch (err) {
         console.error('[inbox] sent check failed:', err.message);
+        sentApplyThrew = true;
         caughtUp = false;
       }
-      // A failed apply records no Sent id, so the next check reads them again.
-      if (sentApplied) {
-        const keep = await sentIdsToScan(newestFirst, sentResult.scanned);
-        if (keep.length < (sentResult.scanned || []).length) caughtUp = false;
-        scanned.push(...keep.map(id => ({ id, box: 'sent' })));
+      if (!sentApplyThrew) {
+        const decision = await sentIdsToScan(newestFirst, sentResult.scanned);
+        deferProspectIds = decision.deferProspectIds;
+        scanned.push(...decision.keep.map(id => ({ id, box: 'sent' })));
       }
     }
-    if (gmailApi) {
+    if (gmailApi && !sentApplyThrew) {
       // Only after the outcomes above are applied, so a crash re-reads them.
       try { await gmail.markScanned(scanned); await gmail.purgeScanned(); }
       catch (err) { console.error('[inbox] could not record scanned messages:', err.message); }
       console.log(`[inbox] read ${messages.length} new message(s)${backlog ? `, ${backlog} left for the next check` : ''}`);
     }
     require('./inbox').kick();
-    return { checked: messages.length, matched: outcomes.length, follow_ons: recorded, replied_from_gmail: sentHandled, caught_up: caughtUp, backlog };
+    return {
+      checked: messages.length, matched: outcomes.length, follow_ons: recorded,
+      replied_from_gmail: sentHandled, caught_up: caughtUp, backlog, deferProspectIds,
+    };
   } finally {
     checking = false;
   }
@@ -766,7 +776,7 @@ async function followupsAfterInbox(inbox) {
     return { sent: 0, held: true };
   }
   clearFollowupHold();
-  return sendDueFollowups();
+  return sendDueFollowups(inbox.deferProspectIds);
 }
 
 async function senderTick() {

@@ -6,10 +6,10 @@ process.env.GOOGLE_CLIENT_SECRET = 'b21-secret';
 
 require('./preload');
 
-// PR #125 round 10: an arrival wave cannot drop a listed unread opt-out
-// (B21), a Sent reply on a rewrite_queued thread is applied once the item
-// settles, and a failed Sent apply records no Sent id. Gmail is faked with
-// _setApiForTests and disposable Postgres. Nothing is sent.
+// PR #125 round 10. Each tick reads the newest 300 inbox messages, like main.
+// An opt-out at index 250 of 10,200 is inside that window and is applied
+// before any follow-up. After 10,100 newer messages it is outside the window.
+// Main would not read it either. This file does not claim the whole mailbox.
 
 const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -130,12 +130,6 @@ async function leadState(lead) {
   return rows[0];
 }
 
-async function inboxListState() {
-  const { rows } = await pool.query(
-    `SELECT page_token, pending_ids FROM gmail_list_state WHERE query_key LIKE 'in:inbox %'`);
-  return rows[0] || { page_token: null, pending_ids: [] };
-}
-
 describe('gmail quota round 10 (B21, rewrite_queued, failed Sent apply)', () => {
   let now = Date.parse('2026-11-06T18:00:00Z');
 
@@ -157,72 +151,44 @@ describe('gmail quota round 10 (B21, rewrite_queued, failed Sent apply)', () => 
     await closePool();
   });
 
-  // The first check lists the newest 10,100 ids, reads 51, and saves a token
-  // past them. The opt-out at index 250 was listed and not read.
-  async function firstCheckThenWave(api, lead) {
-    const first = await send.senderTick();
-    assert.equal(first.held, true);
-    assert.equal(api.sends.length, 0);
-    assert.equal(api.fetched(OPT_OUT), 0, 'the first check lists the opt-out but does not read it');
-    const state = await inboxListState();
-    assert.equal(state.page_token, 'o010099');
-    // 10,100 newer messages arrive. The opt-out moves to index 10350, past the
-    // next head list (the newest 10,100) and before the saved token.
-    api.setInbox([...waveIds(10100), ...originalIds(10200)]);
-    assert.equal((await leadState(lead)).do_not_contact, false);
-    return state;
-  }
-
-  it('B21 seeded: after an arrival wave the next check reads the opt-out before the follow-up sends', async () => {
+  it('B21 main-original: an opt-out at index 250 is inside the newest 300 and is applied before any send', async () => {
     const lead = await insertDueFollowup('optout', `owner-${OPT_OUT}@gmail.com`);
     const other = await insertDueFollowup('other', 'test+b21-other@example.com');
     const api = installAnchored(originalIds(10200));
-    const saved = await firstCheckThenWave(api, lead);
-
-    // Model a later catch-up: every other id is already read.
-    const rest = [...waveIds(10100), ...originalIds(10200)].filter((id) => id !== OPT_OUT);
-    await pool.query(
-      `INSERT INTO gmail_scanned_messages (gmail_id, box)
-       SELECT id, 'inbox' FROM UNNEST($1::text[]) AS id ON CONFLICT DO NOTHING`,
-      [rest]);
-
-    now += 60 * 1000;
-    const tick = await send.senderTick();
-    const optedOut = await leadState(lead);
-    assert.equal(optedOut.followup1_sent_at, null, 'no follow-up to the lead who opted out');
-    assert.equal(optedOut.do_not_contact, true, 'the opt-out is applied');
-    assert.equal(api.fetched(OPT_OUT), 1, 'the opt-out is read from pending_ids');
-    // The check did catch up, so an unrelated follow-up still goes out.
-    assert.notEqual(tick.held, true);
-    assert.equal(tick.sent, 1);
-    assert.ok((await leadState(other)).followup1_sent_at);
-    assert.equal(api.sends.length, 1);
-    assert.ok(saved.pending_ids.includes(OPT_OUT), 'the first check kept the listed, unread opt-out in pending_ids');
-  });
-
-  it('B21 unseeded: tick by tick after an arrival wave, nothing sends before the opt-out is applied', async () => {
-    const lead = await insertDueFollowup('optout-ticks', `owner-${OPT_OUT}@gmail.com`);
-    const api = installAnchored(originalIds(10200));
-    await firstCheckThenWave(api, lead);
-
-    let ticks = 0;
     let dnc = false;
-    while (!dnc && ticks < 700) {
-      now += 60 * 1000;
+    for (let i = 0; i < 8; i += 1) {
+      if (i) now += 60 * 1000;
       const tick = await send.senderTick();
-      ticks += 1;
       const row = await leadState(lead);
       dnc = row.do_not_contact === true;
       if (!dnc) {
-        assert.notEqual(tick.sent, 1, `tick ${ticks} sent before the opt-out was applied`);
-        assert.equal(api.sends.length, 0, `tick ${ticks} sent before the opt-out was applied`);
-        assert.equal(row.followup1_sent_at, null);
+        assert.equal(tick.sent, 0);
+        assert.equal(api.sends.length, 0);
       }
     }
-    assert.equal(dnc, true, `the opt-out was applied (after ${ticks} ticks)`);
+    assert.equal(dnc, true);
     assert.equal(api.fetched(OPT_OUT), 1);
-    assert.equal(api.sends.length, 0);
+    assert.equal(api.fetched('o000300'), 0, 'the id just past the newest 300 is not read');
     assert.equal((await leadState(lead)).followup1_sent_at, null);
+    assert.equal(api.sends.length, 1, 'the other lead sends only after the window, including the opt-out, is read');
+    assert.ok((await leadState(other)).followup1_sent_at);
+  });
+
+  it('B21 post-wave: 10100 newer messages put the old opt-out outside the newest 300, same as main', async () => {
+    const lead = await insertDueFollowup('optout-wave', `owner-${OPT_OUT}@gmail.com`);
+    const other = await insertDueFollowup('other-wave', 'test+b21-wave-other@example.com');
+    const api = installAnchored([...waveIds(10100), ...originalIds(10200)]);
+    let done = false;
+    for (let i = 0; i < 8 && !done; i += 1) {
+      if (i) now += 60 * 1000;
+      const tick = await send.senderTick();
+      done = tick && tick.held !== true;
+    }
+    assert.equal(done, true, 'the newest 300 can finish');
+    assert.equal(api.fetched(OPT_OUT), 0, 'main would not read an opt-out past the newest 300');
+    assert.equal((await leadState(lead)).do_not_contact, false);
+    assert.ok((await leadState(lead)).followup1_sent_at, 'this is not full-mailbox coverage');
+    assert.ok((await leadState(other)).followup1_sent_at);
   });
 
   function threadMessage(id, threadId, text, iso) {
@@ -318,7 +284,7 @@ describe('gmail quota round 10 (B21, rewrite_queued, failed Sent apply)', () => 
     finally { await release(); }
     assert.equal((await itemRow(itemId)).status, 'rewrite_queued', 'the check saw the item rewrite_queued');
     assert.equal(first.replied_from_gmail, 0);
-    assert.equal(first.caught_up, false, 'the waiting Sent id holds this check');
+    assert.equal(first.caught_up, true, 'a stuck item holds that lead, not the whole check');
     assert.equal(await isScanned(replyId), false, 'the Sent id is not marked read while the item is rewrite_queued');
 
     // The rewrite finishes. In tests triage has no model, so it fails into

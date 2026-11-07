@@ -187,10 +187,11 @@ function bodyText(payload) {
 // minute (developers.google.com/workspace/gmail/api/reference/quota, checked
 // Nov 3, 2026). Reading one message in full costs 60, so re-reading a few
 // hundred messages every 15 minutes used the whole minute and left nothing
-// for sending follow-ups. Now each message is read in full once (its id goes
-// in gmail_scanned_messages). Reads from the 15-minute scan and from
-// Check inbox now share one per-minute budget, and a used-up quota stops
-// the scan at once instead of failing every remaining message.
+// for sending follow-ups. Each tick lists only the newest 300 inbox messages
+// and the newest Sent page, the same windows main reads. A message already
+// applied is not fetched again. Reads from the 15-minute scan and from
+// Check inbox now share one per-minute budget. A used-up quota or a short
+// list stops this tick; it does not authorize a send.
 const COST = Object.freeze({ list: 5, get: 60 });
 const READ_BUDGET = 3600; // leaves 2,400 of the minute's 6,000 for sends
 const MINUTE_MS = 60 * 1000;
@@ -214,7 +215,7 @@ function currentMinuteBucket() {
   return minuteBucket;
 }
 
-// A live view. listIds and readNew keep one object for the whole scan, and
+// A live view. The list and the reads keep one object for the whole scan, and
 // every read of units or quotaHit follows the clock into the current minute.
 function minuteReadBudget() {
   const view = {};
@@ -269,208 +270,65 @@ async function purgeScanned(days = 120) {
   await pool.query(`DELETE FROM gmail_scanned_messages WHERE scanned_at < NOW() - make_interval(days => $1)`, [days]);
 }
 
-async function loadListState(q) {
-  const { rows } = await pool.query(
-    'SELECT page_token, pending_ids FROM gmail_list_state WHERE query_key = $1', [q]);
-  if (!rows[0]) return { pageToken: null, pending: [] };
-  return { pageToken: rows[0].page_token || null, pending: rows[0].pending_ids || [] };
-}
+const INBOX_WINDOW = 300;
+const SENT_WINDOW = 100;
 
-async function saveListState(q, pageToken, pending) {
-  if ((!pending || !pending.length) && !pageToken) {
-    await pool.query('DELETE FROM gmail_list_state WHERE query_key = $1', [q]);
-    return;
-  }
-  await pool.query(
-    `INSERT INTO gmail_list_state (query_key, page_token, pending_ids)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (query_key) DO UPDATE
-       SET page_token = EXCLUDED.page_token, pending_ids = EXCLUDED.pending_ids, updated_at = NOW()`,
-    [q, pageToken, pending || []]);
-}
-
-// Page newest-first. A list stops before it would leave less than one full
-// read. A mailbox that still fits is listed through, so the oldest id is not
-// dropped. `incomplete` means older ids may still exist. 10,100 ids is the
-// largest mailbox a check still lists all the way through, so the oldest id
-// is read (the 10,002-id quota test). A bigger mailbox keeps a page token for
-// the older tail. The head is listed again on the next check.
-const MAX_LIST_PAGES = 101;
-
-async function listIds(q, budget, startToken, maxPages = MAX_LIST_PAGES) {
+// List the newest ids only, the same window main reads. No page token is
+// stored. A list that stops early is incomplete: this tick must not send.
+async function listWindow(q, budget, maxIds, { onePage = false } = {}) {
   const ids = [];
-  let pageToken = startToken || undefined;
-  let incomplete = false;
-  let nextToken = null;
-  let reachedEnd = false;
-  let pages = 0;
-  while (true) {
-    if (pages >= maxPages && pageToken) { incomplete = true; nextToken = pageToken; break; }
-    if (budget.units < COST.list + COST.get) { incomplete = true; nextToken = pageToken || null; break; }
+  let pageToken;
+  while (ids.length < maxIds) {
+    if (budget.units < COST.list) return { ids: ids.slice(0, maxIds), incomplete: true };
     budget.units -= COST.list;
     let page;
     try {
-      page = await gmail('get', '/messages', { params: { q, maxResults: 100, pageToken } });
+      const params = { q, maxResults: Math.min(100, maxIds), pageToken };
+      page = await gmail('get', '/messages', { params });
     } catch (err) {
-      if (err.quota) { budget.quotaHit = true; budget.units = 0; throw err; }
-      // A bad cursor drops the rest of this list. Ids already collected stay,
-      // and the caller does not keep the token.
-      if (pageToken && staleCursor(err)) {
-        return { ids, incomplete: true, nextToken: null, reachedEnd: false, stale: true };
-      }
+      if (err.quota) { budget.quotaHit = true; budget.units = 0; }
       throw err;
     }
     ids.push(...(page.messages || []).map(m => m.id));
-    pages += 1;
-    if (!page.nextPageToken) { nextToken = null; incomplete = false; reachedEnd = true; break; }
+    if (onePage || !page.nextPageToken) return { ids: ids.slice(0, maxIds), incomplete: false };
     pageToken = page.nextPageToken;
   }
-  return { ids, incomplete, nextToken, reachedEnd, stale: false };
+  return { ids: ids.slice(0, maxIds), incomplete: false };
 }
 
-function staleCursor(err) {
-  const status = err && err.status;
-  return status === 400 || status === 404;
-}
-
-// Read the not-yet-scanned ids while the budget lasts. Inbox catch-up reads
-// oldest first once the list is complete. A truncated list reads newest first
-// so the check still moves. backlog = unread ids left for a later check.
-async function readNew(ids, box, budget, shape, { oldestFirst = true } = {}) {
+// ids are already in read order. Already-scanned ids are not fetched again.
+// A 404 will not come back. Any other read error stays unread so the tick
+// is not a successful check. Quota stops the scan.
+async function readWindow(ids, box, budget, shape) {
   const seen = await scannedIds(ids);
   const fresh = ids.filter(id => !seen.has(id));
-  const ordered = oldestFirst ? fresh.slice().reverse() : fresh;
-  const messages = []; const scanned = []; let attempted = 0; let readFailed = false;
-  for (const id of ordered) {
-    if (budget.units < COST.get) break;
+  const messages = [];
+  const scanned = [];
+  let readFailed = false;
+  for (const id of fresh) {
+    if (budget.quotaHit || budget.units < COST.get) break;
     budget.units -= COST.get;
-    attempted++;
     try {
       const m = await gmail('get', `/messages/${id}`, { params: { format: 'full' } });
       messages.push(await shape(m));
       scanned.push(id);
     } catch (err) {
-      if (err.quota) { attempted--; budget.quotaHit = true; budget.units = 0; break; }
-      // Deleted since the list: nothing to read, so don't try again.
+      if (err.quota) { budget.quotaHit = true; budget.units = 0; break; }
       if (err.status === 404) { scanned.push(id); continue; }
-      // Any other read error (500, network, and the rest) was not read.
-      // It stays in the backlog so follow-ups are not caught up.
-      attempted--;
       readFailed = true;
       console.error(`[gmail] skip ${box} ${id}: ${err.message}`);
     }
   }
-  return { messages, scanned, backlog: fresh.length - attempted, readFailed };
+  const done = new Set(scanned);
+  const backlog = fresh.filter(id => !done.has(id)).length;
+  return { messages, scanned, backlog, readFailed };
 }
 
-function mergeRead(read, more) {
-  if (!more) return;
-  read.messages.push(...more.messages);
-  read.scanned.push(...more.scanned);
-  if (more.readFailed) read.readFailed = true;
-}
-
-// Every check lists from the mailbox head. The saved token is only the older
-// tail, and it stays on a page until that page is in gmail_scanned_messages,
-// so a crash before markScanned reads the same ids again. When the tail page
-// is the end of the mailbox, the head is listed once more before the check
-// is caught up. A 400 or 404 drops the token and leaves this check incomplete.
-async function scanListed(q, budget, box, shape, { forceNewest = false } = {}) {
-  const state = await loadListState(q);
-  const head = await listIds(q, budget, null);
-  let stale = !!head.stale;
-  let tailToken = stale ? null : (state.pageToken || null);
-  if (!stale && tailToken && budget.units >= COST.list + COST.get) {
-    const probe = await listIds(q, budget, tailToken, 1);
-    if (probe.stale) { stale = true; tailToken = null; }
-  }
-  const oldestFirst = head.reachedEnd && !forceNewest && !stale;
-  const read = await readNew(head.ids, box, budget, shape, { oldestFirst });
-  const got = new Set(read.scanned);
-  const seen = head.ids.length ? await scannedIds(head.ids) : new Set();
-  const headFresh = head.ids.filter(id => !got.has(id) && !seen.has(id));
-  const inHead = new Set(head.ids);
-
-  // Every id this check lists stays in pending_ids until it is in
-  // gmail_scanned_messages, read this check or not. The head is only the
-  // newest 10,100 ids and the saved token only reaches older pages, so an id
-  // kept nowhere else could fall between the two when newer mail arrives.
-  const keep = [];
-  const kept = new Set();
-  const hold = (id) => { if (id && !kept.has(id)) { kept.add(id); keep.push(id); } };
-  for (const id of head.ids) if (!seen.has(id)) hold(id);
-
-  const pending = (state.pending || []).filter(Boolean);
-  const pendingSeen = pending.length ? await scannedIds(pending) : new Set();
-  const pendingOpen = pending.filter(id => !pendingSeen.has(id) && !inHead.has(id));
-  for (const id of pendingOpen) hold(id);
-  if (pendingOpen.length && budget.units >= COST.get) {
-    mergeRead(read, await readNew(pendingOpen, box, budget, shape, { oldestFirst: false }));
-  }
-  const readNow = () => new Set(read.scanned);
-  const pendingUnread = pendingOpen.filter(id => !readNow().has(id));
-
-  let nextToken = null;
-  let confirmToken = null;
-  let walkedToEnd = false;
-  if (!head.reachedEnd && !stale && headFresh.length === 0 && pendingUnread.length === 0) {
-    let token = tailToken || head.nextToken;
-    while (token && budget.units >= COST.list + COST.get) {
-      const page = await listIds(q, budget, token, 1);
-      if (page.stale) { stale = true; token = null; break; }
-      const pageSeen = page.ids.length ? await scannedIds(page.ids) : new Set();
-      const notDurable = page.ids.filter(id => !pageSeen.has(id));
-      if (notDurable.length) {
-        for (const id of notDurable) hold(id);
-        mergeRead(read, await readNew(page.ids, box, budget, shape, { oldestFirst: false }));
-        break;
-      }
-      if (page.reachedEnd) {
-        confirmToken = token;
-        token = null;
-        walkedToEnd = true;
-        break;
-      }
-      token = page.nextToken;
-    }
-    nextToken = token;
-  } else if (!head.reachedEnd && !stale) {
-    nextToken = tailToken || head.nextToken;
-  }
-
-  let headSafe = true;
-  if (walkedToEnd && !stale) {
-    if (budget.units < COST.list + COST.get) {
-      headSafe = false;
-      nextToken = confirmToken;
-    } else {
-      const again = await listIds(q, budget, null, 1);
-      if (again.stale) {
-        stale = true;
-        headSafe = false;
-        nextToken = confirmToken;
-      } else {
-        const againSeen = again.ids.length ? await scannedIds(again.ids) : new Set();
-        const arrived = again.ids.filter(id => !againSeen.has(id) && !got.has(id));
-        for (const id of again.ids) if (!againSeen.has(id)) hold(id);
-        if (arrived.length) {
-          mergeRead(read, await readNew(again.ids, box, budget, shape, { oldestFirst: false }));
-          headSafe = false;
-          nextToken = confirmToken;
-        }
-      }
-    }
-  }
-
-  const done = readNow();
-  const unread = keep.filter(id => !done.has(id));
-  const still = stale || unread.length > 0
-    || (!head.reachedEnd && (!walkedToEnd || !headSafe));
-  await saveListState(q, still ? nextToken : null, keep);
-  read.backlog = unread.length + (nextToken ? 1 : 0);
-  if (still && read.backlog < 1) read.backlog = 1;
-  read.listIncomplete = still;
-  read.order = oldestFirst ? 'oldest' : 'newest';
+function finishWindow(listed, read, budget, order) {
+  if ((listed.incomplete || budget.quotaHit || read.readFailed) && read.backlog < 1) read.backlog = 1;
+  read.listIncomplete = !!(listed.incomplete || read.backlog > 0 || read.readFailed || budget.quotaHit);
+  read.complete = !read.listIncomplete;
+  read.order = order;
   return read;
 }
 
@@ -491,10 +349,12 @@ function inboxShape(m) {
   };
 }
 
-/** New inbox messages since a date, oldest first once the list is complete. */
+/** Newest 300 inbox messages since a date. Gmail lists newest-first; within that window the read is oldest-first, matching main. */
 async function scanInbox(since, budget = readBudget()) {
   const after = Math.floor(new Date(since).getTime() / 1000);
-  return scanListed(`in:inbox after:${after} -from:me`, budget, 'inbox', inboxShape);
+  const listed = await listWindow(`in:inbox after:${after} -from:me`, budget, INBOX_WINDOW);
+  const read = await readWindow(listed.ids.slice().reverse(), 'inbox', budget, inboxShape);
+  return finishWindow(listed, read, budget, 'oldest');
 }
 
 /** Inbox messages since a date, newest last, in the shape classifyMessage expects. */
@@ -510,11 +370,12 @@ function isAutoReply(headers) {
   return /auto_reply|auto-reply/i.test(header(headers, 'precedence'));
 }
 
-/** New messages Kelby sent from Gmail since a date (replies he sent outside the CRM), within the budget. */
+/** Newest Sent page since a date, newest-first, matching main's one-page sent check. */
 async function scanSent(since, budget = readBudget()) {
   const after = Math.floor(new Date(since).getTime() / 1000);
   const fromEmail = (await getSetting('gmail_oauth'))?.email || SENDER.email;
-  return scanListed(`in:sent after:${after}`, budget, 'sent', (m) => {
+  const listed = await listWindow(`in:sent after:${after}`, budget, SENT_WINDOW, { onePage: true });
+  const read = await readWindow(listed.ids, 'sent', budget, (m) => {
     const h = m.payload?.headers;
     const toHeader = header(h, 'to');
     return {
@@ -526,7 +387,8 @@ async function scanSent(since, budget = readBudget()) {
       messageIdHeader: header(h, 'message-id') || null,
       text: bodyText(m.payload).slice(0, 20000),
     };
-  }, { forceNewest: true });
+  });
+  return finishWindow(listed, read, budget, 'newest');
 }
 
 /** Messages Kelby sent from Gmail since a date (to catch replies he sent outside the CRM). */
