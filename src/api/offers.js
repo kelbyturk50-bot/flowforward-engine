@@ -1,11 +1,11 @@
 // Offer tracking HTTP API. Closed unless FF_OFFER_TRACKING is exactly "true".
 // Records offers only. Does not import a mail transport.
 //
-// Mount order in server.js:
-//   1. flagGate on /api/offers and /api/leads, before requireApiKey.
-//      Anything other than exactly "true" leaves the router, which is the
-//      same 404 as an unknown path, with or without a request key.
-//   2. requireApiKey. A missing or wrong key is 401. An unready key is 503.
+// Mount order in server.js: requireApiKey on /api first (a missing or wrong
+// key is 401, an unready key is 503), then gated(router). With the flag
+// anything other than exactly "true", gated() passes the request on as if
+// the router were not mounted, so a closed offer path answers exactly like
+// an unknown /api path, with or without a key.
 
 const express = require('express');
 const store = require('../offers/store');
@@ -32,10 +32,11 @@ function offerTrackingOn() {
   return process.env.FF_OFFER_TRACKING === 'true';
 }
 
-function flagGate(req, res, next) {
-  if (req.method === 'OPTIONS') return next();
-  if (!offerTrackingOn()) return next('router');
-  return next();
+function gated(handler) {
+  return function offerTrackingGate(req, res, next) {
+    if (!offerTrackingOn()) return next();
+    return handler(req, res, next);
+  };
 }
 
 function invalid(res, field) {
@@ -80,7 +81,11 @@ function readOfferedAt(value) {
   if (typeof value !== 'string' || value.length > 40 || !OFFERED_AT.test(value)) return null;
   const ms = Date.parse(value);
   if (Number.isNaN(ms)) return null;
-  return new Date(ms).toISOString();
+  const iso = new Date(ms).toISOString();
+  // Date.parse rolls 2026-02-30 over to March 2 and 24:00 to the next day.
+  // Only a timestamp that reads back unchanged is a real one.
+  if (iso.slice(0, 19) !== value.slice(0, 19)) return null;
+  return iso;
 }
 
 function readNotes(value) {
@@ -230,7 +235,7 @@ leadsRouter.get('/:id/offers', async (req, res) => {
 });
 
 module.exports = {
-  flagGate,
+  gated,
   router,
   leadsRouter,
   offerTrackingOn,

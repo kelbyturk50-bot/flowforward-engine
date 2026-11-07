@@ -220,11 +220,11 @@ describe('offers', serial, () => {
     const offers = require('../src/api/offers');
     const app = express();
     app.use(express.json({ limit: '1mb' }));
-    app.use('/api/offers', offers.flagGate);
-    app.use('/api/leads', offers.flagGate);
+    // Same order as src/server.js: the key first, then the gated routers.
     app.use('/api', require('../src/api/auth'));
-    app.use('/api/offers', offers.router);
-    app.use('/api/leads', offers.leadsRouter);
+    app.use('/api/prospects', require('../src/api/prospects'));
+    app.use('/api/offers', offers.gated(offers.router));
+    app.use('/api/leads', offers.gated(offers.leadsRouter));
     server = http.createServer(app);
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   });
@@ -240,9 +240,11 @@ describe('offers', serial, () => {
     await clearOffers();
   });
 
-  it('offers: flag off is 404 on all four routes, with or without a key', async () => {
+  it('offers: flag off answers exactly like an unknown /api path, with or without a key', async () => {
     const unknown = await request('GET', '/api/not-a-real-route', { headers: authHeaders() });
     assert.equal(unknown.status, 404);
+    const unknownNoKey = await request('GET', '/api/not-a-real-route');
+    assert.equal(unknownNoKey.status, 401);
     const paths = [
       ['GET', '/api/offers'],
       ['GET', `/api/leads/${alpha.id}/offers`],
@@ -262,12 +264,15 @@ describe('offers', serial, () => {
           body: method === 'GET' ? undefined : offerBody(alpha.id),
         });
         assert.equal(withKey.status, 404, `${value} ${method} ${reqPath}`);
-        assert.equal(noKey.status, 404, `no key ${value} ${method} ${reqPath}`);
         assert.equal(normalize404(withKey.text), normalize404(unknown.text));
-        assert.equal(normalize404(noKey.text), normalize404(unknown.text));
+        // Without a key a closed route is the same 401 as an unknown path,
+        // so the status does not tell a caller the route exists.
+        assert.equal(noKey.status, 401, `no key ${value} ${method} ${reqPath}`);
+        assert.deepEqual(noKey.json, unknownNoKey.json);
+        assert.equal(noKey.headers['content-type'], unknownNoKey.headers['content-type']);
       }
     }
-    console.log('[offers] flag off: 4 routes 404 with and without a key');
+    console.log('[offers] flag off: 4 routes match an unknown path (404 with a key, 401 without)');
   });
 
   it('offers: a missing or bad API key is 401 once the flag is on', async () => {
@@ -588,6 +593,8 @@ describe('offers', serial, () => {
     try {
       const unknown = await rawGet(closed.port, '/api/not-a-real-route', authHeaders());
       assert.equal(unknown.status, 404);
+      const unknownNoKey = await rawGet(closed.port, '/api/not-a-real-route');
+      assert.equal(unknownNoKey.status, 401);
       for (const [method, reqPath] of paths) {
         const res = await request(method, reqPath, {
           port: closed.port,
@@ -596,6 +603,12 @@ describe('offers', serial, () => {
         });
         assert.equal(res.status, 404, `real off ${method} ${reqPath}`);
         assert.equal(normalize404(res.text), normalize404(unknown.text));
+        const noKey = await request(method, reqPath, {
+          port: closed.port,
+          body: method === 'GET' ? undefined : offerBody(alpha.id),
+        });
+        assert.equal(noKey.status, 401, `real off, no key ${method} ${reqPath}`);
+        assert.deepEqual(noKey.json, unknownNoKey.json);
       }
     } finally {
       await closed.stop();
@@ -616,6 +629,181 @@ describe('offers', serial, () => {
     } finally {
       await open.stop();
     }
-    console.log('[offers] real server: flag off 404, missing key 401, open list 200');
+    console.log('[offers] real server: flag off matches an unknown path, missing key 401, open list 200');
+  });
+
+  it('offers: an impossible offered_at is 400 and a real one is stored as sent', async () => {
+    process.env.FF_OFFER_TRACKING = 'true';
+    for (const bad of [
+      '2026-02-30T12:00:00Z',
+      '2026-04-31T08:00:00Z',
+      '2026-13-01T00:00:00Z',
+      '2026-01-01T24:00:00Z',
+      '2026-01-01T12:60:00Z',
+      '2025-02-29T12:00:00Z',
+    ]) {
+      const res = await request('POST', '/api/offers', {
+        headers: authHeaders(),
+        body: offerBody(alpha.id, { offered_at: bad }),
+      });
+      assert.equal(res.status, 400, bad);
+      assert.equal(res.json.field, 'offered_at', bad);
+    }
+    const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM lead_offers');
+    assert.equal(rows[0].n, 0, 'no rolled-over date was stored');
+    for (const good of ['2024-02-29T12:00:00Z', '2026-10-25T05:30:00.250Z']) {
+      const res = await request('POST', '/api/offers', {
+        headers: authHeaders(),
+        body: offerBody(alpha.id, { offered_at: good }),
+      });
+      assert.equal(res.status, 201, good);
+      assert.equal(res.json.offer.offered_at, new Date(good).toISOString());
+    }
+    console.log('[offers] impossible offered_at rejected, real ones kept');
+  });
+
+  it('offers: is_test is stored as sent through the API', async () => {
+    process.env.FF_OFFER_TRACKING = 'true';
+    const flagged = await request('POST', '/api/offers', {
+      headers: authHeaders(),
+      body: offerBody(alpha.id, { is_test: true }),
+    });
+    const plain = await request('POST', '/api/offers', {
+      headers: authHeaders(),
+      body: offerBody(beta.id, { is_test: undefined }),
+    });
+    assert.equal(flagged.status, 201);
+    assert.equal(plain.status, 201);
+    assert.equal(flagged.json.offer.is_test, true);
+    assert.equal(plain.json.offer.is_test, false, 'is_test defaults to false');
+    const { rows } = await pool.query(
+      'SELECT id, is_test FROM lead_offers WHERE id = ANY($1::int[]) ORDER BY id',
+      [[flagged.json.offer.id, plain.json.offer.id]]
+    );
+    assert.deepEqual(rows.map((r) => r.is_test), [true, false]);
+    console.log('[offers] is_test stored from the API body');
+  });
+
+  it('offers: patch and path validation (extra field, non-numeric id, NUL in notes)', async () => {
+    process.env.FF_OFFER_TRACKING = 'true';
+    const created = await request('POST', '/api/offers', {
+      headers: authHeaders(),
+      body: offerBody(alpha.id, { status: 'offered' }),
+    });
+    assert.equal(created.status, 201);
+    const id = created.json.offer.id;
+    const extra = await request('PATCH', `/api/offers/${id}`, {
+      headers: authHeaders(),
+      body: { status: 'declined', notes: 'sneaky' },
+    });
+    assert.equal(extra.status, 400);
+    assert.equal(extra.json.field, 'notes');
+    for (const bad of ['abc', '0', '01', '1.5', '2147483648']) {
+      const patch = await request('PATCH', `/api/offers/${bad}`, {
+        headers: authHeaders(),
+        body: { status: 'declined' },
+      });
+      assert.equal(patch.status, 404, `PATCH ${bad}`);
+      assert.deepEqual(patch.json, { error: 'not_found' });
+      const lead = await request('GET', `/api/leads/${bad}/offers`, { headers: authHeaders() });
+      assert.equal(lead.status, 404, `GET lead ${bad}`);
+      assert.deepEqual(lead.json, { error: 'not_found' });
+    }
+    const nul = await request('POST', '/api/offers', {
+      headers: authHeaders(),
+      body: offerBody(alpha.id, { notes: 'before\u0000after' }),
+    });
+    assert.equal(nul.status, 400);
+    assert.equal(nul.json.field, 'notes');
+    const row = await pool.query('SELECT status FROM lead_offers WHERE id = $1', [id]);
+    assert.equal(row.rows[0].status, 'offered', 'the rejected patch wrote nothing');
+    console.log('[offers] patch extra field, bad ids, and NUL notes rejected');
+  });
+
+  it('offers: at a full cap, accepting an annual_prepay offer or re-accepting a founding one is 200', async () => {
+    process.env.FF_OFFER_TRACKING = 'true';
+    const founding = [];
+    for (let i = 0; i < 3; i += 1) founding.push(await insertOffer({ leadId: alpha.id, status: 'accepted' }));
+    const annual = await insertOffer({ leadId: beta.id, offerType: 'annual_prepay', status: 'offered' });
+    assert.equal(await slotUsed(), 3);
+    const acceptAnnual = await request('PATCH', `/api/offers/${annual}`, {
+      headers: authHeaders(),
+      body: { status: 'accepted' },
+    });
+    assert.equal(acceptAnnual.status, 200, 'annual_prepay does not use a founding slot');
+    assert.equal(acceptAnnual.json.offer.status, 'accepted');
+    const again = await request('PATCH', `/api/offers/${founding[0]}`, {
+      headers: authHeaders(),
+      body: { status: 'accepted' },
+    });
+    assert.equal(again.status, 200, 'an already accepted founding offer is not a new slot');
+    assert.equal(again.json.offer.status, 'accepted');
+    assert.equal(await slotUsed(), 3);
+    console.log('[offers] full cap: annual accept and founding re-accept are 200');
+  });
+
+  it('offers: a lead with offers cannot be deleted, and the delete route says so', async () => {
+    process.env.FF_OFFER_TRACKING = 'true';
+    const doomed = await insertProspect({
+      google_place_id: 'test-offer-delete',
+      company: '[TEST] Offer Delete',
+      email: 'test+offer-delete@example.com',
+      industry: 'HVAC',
+    });
+    const offerId = await insertOffer({ leadId: doomed.id, status: 'accepted' });
+    let sqlErr = null;
+    try { await pool.query('DELETE FROM prospects WHERE id = $1', [doomed.id]); }
+    catch (err) { sqlErr = err; }
+    assert.equal(sqlErr && sqlErr.code, '23503', 'ON DELETE RESTRICT refuses the delete');
+    const res = await request('DELETE', `/api/prospects/${doomed.id}`, { headers: authHeaders() });
+    assert.equal(res.status, 409);
+    assert.match(res.json.error, /offer records/);
+    assert.doesNotMatch(res.text, /violates|constraint|lead_offers_prospect_id_fkey/);
+    const kept = await pool.query('SELECT status FROM lead_offers WHERE id = $1', [offerId]);
+    assert.equal(kept.rows[0].status, 'accepted', 'the offer and its founding slot stay');
+    assert.equal(await slotUsed(), 1);
+    const lead = await pool.query('SELECT id FROM prospects WHERE id = $1', [doomed.id]);
+    assert.equal(lead.rowCount, 1);
+    await pool.query('DELETE FROM lead_offers WHERE prospect_id = $1', [doomed.id]);
+    const gone = await request('DELETE', `/api/prospects/${doomed.id}`, { headers: authHeaders() });
+    assert.equal(gone.status, 200, 'a lead with no offers still deletes');
+    console.log('[offers] lead delete refused while offers exist (409), allowed after');
+  });
+
+  it('offers: the boot checks find constraints on lead_offers only', async () => {
+    const fkey = await pool.query(
+      `SELECT confdeltype FROM pg_constraint
+        WHERE conname = 'lead_offers_prospect_id_fkey' AND conrelid = 'lead_offers'::regclass`
+    );
+    assert.equal(fkey.rows[0].confdeltype, 'r', 'prospect_id is ON DELETE RESTRICT');
+    // Another table holds a constraint with the same name. The boot must
+    // still add the check to lead_offers.
+    await pool.query('DROP TABLE IF EXISTS offers_name_shadow');
+    await pool.query(
+      `CREATE TABLE offers_name_shadow (status TEXT,
+         CONSTRAINT lead_offers_status_check CHECK (status IS NOT NULL))`
+    );
+    try {
+      await pool.query('ALTER TABLE lead_offers DROP CONSTRAINT lead_offers_status_check');
+      await applyMainSchema();
+      const { rows } = await pool.query(
+        `SELECT 1 FROM pg_constraint
+          WHERE conname = 'lead_offers_status_check' AND conrelid = 'lead_offers'::regclass`
+      );
+      assert.equal(rows.length, 1, 'the status check is back on lead_offers');
+      let rejected = null;
+      try {
+        await pool.query(
+          `INSERT INTO lead_offers (prospect_id, offer_type, package, channel, status, is_test)
+           VALUES ($1, 'founding', 'starter', 'phone', 'won', true)`,
+          [alpha.id]
+        );
+      } catch (err) { rejected = err; }
+      assert.equal(rejected && rejected.code, '23514');
+    } finally {
+      await pool.query('DROP TABLE IF EXISTS offers_name_shadow');
+      await applyMainSchema();
+    }
+    console.log('[offers] boot constraint checks are scoped to lead_offers');
   });
 });
