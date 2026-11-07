@@ -337,6 +337,47 @@ describe('gmail quota round 10 (B21, rewrite_queued, failed Sent apply)', () => 
     assert.equal(api.fetches(), 2, 'read once per check until it was applied');
   });
 
+  it('#113 an opt-out that cannot commit leaves its Gmail id unread, and the next check applies it', async () => {
+    const lead = await insertDueFollowup('optx', 'owner-optx1@gmail.com');
+    const api = installAnchored(['optx1']);
+    const optOutText = 'please unsubscribe';
+    gmail._setApiForTests(async (method, path, opts = {}) => {
+      if (path === '/messages') {
+        if (String(opts.params?.q || '').includes('in:sent')) return { messages: [] };
+        return { messages: [{ id: 'optx1', threadId: 't-optx1' }] };
+      }
+      return fakeMessage('optx1', optOutText);
+    });
+    let tries = 0;
+    send._setOptOutGate(() => {
+      tries += 1;
+      throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
+    });
+    const quiet = console.error;
+    console.error = () => {};
+    let first;
+    try {
+      first = await send.senderTick();
+    } finally {
+      console.error = quiet;
+      send._setOptOutGate(null);
+    }
+    assert.equal(tries, 3, 'three tries, then the error is thrown');
+    assert.equal(first.held, true, 'a check that threw holds follow-ups');
+    assert.equal(await isScanned('optx1'), false, 'the opt-out message is not marked read');
+    assert.equal((await leadState(lead)).do_not_contact, false);
+
+    now += 60 * 1000;
+    await send.checkInbox();
+    const row = await leadState(lead);
+    assert.equal(row.do_not_contact, true, 'the next check applies the opt-out');
+    assert.equal(row.followup1_sent_at, null);
+    const src = await pool.query('SELECT do_not_contact_source FROM prospects WHERE id = $1', [lead.prospect.id]);
+    assert.equal(src.rows[0].do_not_contact_source, 'opt_out');
+    assert.equal(await isScanned('optx1'), true);
+    assert.equal(api.sends.length, 0);
+  });
+
   it('a failed Sent apply records no Sent id and the next check applies it', async () => {
     const { thread, itemId } = await threadWithItem('apply-throws', 'ready');
     const replyId = 'reply-apply-throws';

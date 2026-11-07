@@ -18,6 +18,7 @@ const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 
 const { canonicalizeRecipient, missingRecipient, normalizeRecipient } = require('./recipient');
 const { blocksNewSendSql, siblingBlockMessage, blockingSibling } = require('./sequence-block');
+const { lockLeadForUpdate, isDeadlock, DEADLOCK_ATTEMPTS, _setLockGate } = require('./lead-lock');
 const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const GENERIC_DOMAINS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'aol.com', 'live.com', 'msn.com', 'comcast.net', 'me.com', 'protonmail.com'];
@@ -962,11 +963,87 @@ async function logActivity(prospectId, type, body) {
   await pool.query(`INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, $2, $3)`, [prospectId, type, body]);
 }
 
-async function stopSequence(proposalId, reason, status = 'stopped') {
-  const { rows } = await pool.query(
+async function stopSequence(proposalId, reason, status = 'stopped', db = pool) {
+  const { rows } = await db.query(
     `UPDATE proposals SET status = $2, stop_reason = $3 WHERE id = $1 AND status IN ('sent', 'draft') RETURNING *`,
     [proposalId, status, reason]);
   return rows[0] || null;
+}
+
+// Stops every live sequence for a lead on the caller's client, so the manual
+// do-not-contact route and the inbox opt-out stop them in the same
+// transaction as the flag. 'sending' is a first send in flight: #120's
+// approve then finds the row stopped, records nothing, and answers 409.
+let leadStop = null;
+async function stopLeadSequences(db, prospectId, reason) {
+  if (leadStop) return leadStop(db, prospectId, reason);
+  const { rows } = await db.query(
+    `SELECT id, status FROM proposals
+      WHERE prospect_id = $1 AND status IN ('sent', 'draft', 'sending')
+      ORDER BY id
+      FOR UPDATE`,
+    [prospectId]
+  );
+  for (const proposal of rows) {
+    if (proposal.status === 'sending') {
+      await db.query(
+        `UPDATE proposals SET status = 'stopped', stop_reason = $2 WHERE id = $1 AND status = 'sending'`,
+        [proposal.id, reason]
+      );
+    } else {
+      await stopSequence(proposal.id, reason, 'stopped', db);
+    }
+  }
+}
+
+function _setLeadStop(fn) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_setLeadStop is only available when NODE_ENV=test');
+  leadStop = fn || null;
+}
+
+// An inbox opt-out raises the flag (source opt_out, stage lost) and stops the
+// lead's sequences in one transaction, prospect locked first. proposalId,
+// when set, is the replied proposal: it becomes opted_out before siblings
+// are stopped. A deadlock (40P01) or serialization failure (40001) is tried
+// DEADLOCK_ATTEMPTS times; any other error, or the last of those, is thrown.
+// The inbox check then does not mark the message read, so the next check
+// applies the opt-out again (the writes are idempotent).
+let optOutGate = null;
+async function markOptOut(prospectId, proposalId) {
+  for (let attempt = 1; attempt <= DEADLOCK_ATTEMPTS; attempt++) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await lockLeadForUpdate(client, prospectId, { between: true });
+      if (optOutGate) await optOutGate(client, prospectId);
+      await client.query(
+        `UPDATE prospects
+            SET do_not_contact = TRUE, do_not_contact_source = 'opt_out', stage = 'lost'
+          WHERE id = $1`,
+        [prospectId]);
+      if (proposalId != null) {
+        await stopSequence(proposalId, 'Asked not to be contacted', 'opted_out', client);
+      }
+      await stopLeadSequences(client, prospectId, 'Asked not to be contacted');
+      await client.query('COMMIT');
+      return;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (isDeadlock(err) && attempt < DEADLOCK_ATTEMPTS) continue;
+      if (isDeadlock(err)) {
+        console.error(`[opt-out] retries exhausted prospect ${prospectId} proposal ${proposalId == null ? 'none' : proposalId} sqlstate ${err.code}`);
+        err.optOutExhausted = true;
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+}
+
+function _setOptOutGate(fn) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('_setOptOutGate is only available when NODE_ENV=test');
+  optOutGate = fn || null;
 }
 
 async function loadDueFollowups() {
@@ -1614,8 +1691,7 @@ async function applyOutcomeEffects(p, outcome, msg) {
     return;
   }
   if (kind === 'opted_out') {
-    await stopSequence(p.id, 'Asked not to be contacted', 'opted_out');
-    await pool.query(`UPDATE prospects SET do_not_contact = TRUE, stage = 'lost' WHERE id = $1`, [p.prospect_id]);
+    await markOptOut(p.prospect_id, p.id);
     await logActivity(p.prospect_id, 'email', `Replied asking not to be contacted${snippet ? `: "${snippet}"` : ''}. Marked do-not-contact.`);
     return;
   }
@@ -1694,7 +1770,7 @@ async function applyFollowOn(p, outcome, msg) {
   const inbox = require('./inbox');
   if (await inbox.alreadyRecorded(msg)) return false;
   if (outcome.kind === 'opted_out') {
-    await pool.query(`UPDATE prospects SET do_not_contact = TRUE, stage = 'lost' WHERE id = $1`, [p.prospect_id]);
+    await markOptOut(p.prospect_id, p.id);
     await logActivity(p.prospect_id, 'email', 'Asked not to be contacted. Marked do-not-contact.');
   } else if (outcome.kind === 'replied' || outcome.kind === 'booked') {
     await pool.query(`UPDATE prospects SET next_action = $2, next_action_at = CURRENT_DATE WHERE id = $1`,
@@ -1958,4 +2034,5 @@ module.exports = {
   backoffDelayMs, backoffDelayMinutes, recheckLead, BACKOFF_CAP_MS,
   FOLLOWUP_BACKOFF_CAP_MS, FOLLOWUP_MAX_AGE_MS, RESEND_CONFIRM,
   HOLD_ALERT_AFTER_TICKS, SCAN_TIMEOUT_MS, _resetFollowupHoldForTests,
+  stopLeadSequences, markOptOut, lockLeadForUpdate, _setLeadStop, _setOptOutGate, _setLockGate,
 };

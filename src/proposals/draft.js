@@ -227,8 +227,16 @@ async function draftProposal(prospectId, opts = {}) {
     try {
     // Hold the prospect across the recheck, the supersede, and the insert so
     // two processes cannot both write a live draft.
-    await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [lead.id]);
+    const locked = await db.query('SELECT id, do_not_contact FROM prospects WHERE id = $1 FOR UPDATE', [lead.id]);
     if (draftTxnGate) await draftTxnGate({ prospectId: lead.id });
+    // The lead can be flagged (manual route or inbox opt-out) while the model
+    // call ran. FOR UPDATE returns the latest committed row, so a flag that
+    // committed first is seen here and no draft is written (#113).
+    const flagged = locked.rows[0];
+    if (flagged && flagged.do_not_contact) {
+      await db.query('ROLLBACK');
+      throw Object.assign(new Error(`${lead.company} is marked do-not-contact.`), { status: 409 });
+    }
     // The model call already finished. A sibling can have moved into review
     // while that call was in flight, so the block is checked again here.
     const blocked = await blockingSibling(db, lead.id);

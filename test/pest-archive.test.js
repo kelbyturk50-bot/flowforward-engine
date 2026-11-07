@@ -100,6 +100,33 @@ function parseWrite(stdout, label) {
   return { n, runId };
 }
 
+// gen_random_uuid() is hex. A run of 555 inside that id is not a phone number.
+const RUN_LINE = /^run [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/m;
+
+function assertNoContactLeak(stdout) {
+  assert.doesNotMatch(stdout.replace(RUN_LINE, ''), /@|TEST:|555/);
+}
+
+it('does not treat 555 inside the archive run id as a phone number', () => {
+  assertNoContactLeak(
+    'database flowforward_test\nlocal\narchived 4\nrun 504555ca-c649-4cf4-9001-b516253835f5\n'
+  );
+  assert.throws(() => assertNoContactLeak('database flowforward_test\nlocal\narchived 4\n555-0100\n'));
+  // The strip must only ever remove the exact run line, never a leak beside it.
+  const runId = '504555ca-c649-4cf4-9001-b516253835f5';
+  for (const leak of [
+    `run ${runId} 555-0100`,
+    `555-0100 run ${runId}`,
+    'run 555-0100',
+    'run 555-0100-0000-0000-000000000000',
+    `lead ${runId} 555-0100`,
+    `run ${runId}\nphone 555-0100`,
+    `phone 555-0100\nrun ${runId}`,
+  ]) {
+    assert.throws(() => assertNoContactLeak(`database flowforward_test\nlocal\narchived 4\n${leak}\n`), leak);
+  }
+});
+
 function assertRefused(result) {
   assert.equal(result.status, 1, result.stderr);
   assert.equal(result.stdout, '');
@@ -402,7 +429,7 @@ describe('pest-name archive', { concurrency: false }, () => {
     assert.equal(apply.status, 0, apply.stderr);
     const applied = parseWrite(apply.stdout, 'archived');
     assert.equal(applied.n, 4);
-    assert.doesNotMatch(apply.stdout, /@|TEST:|555/);
+    assertNoContactLeak(apply.stdout);
     const afterCount = await pool.query('SELECT COUNT(*)::int AS n FROM prospects');
     assert.equal(afterCount.rows[0].n, beforeCount.rows[0].n);
 

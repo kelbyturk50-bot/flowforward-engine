@@ -404,7 +404,7 @@ router.post('/:id/mark-sent', async (req, res) => {
     await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [found.rows[0].prospect_id]);
     await send.afterLeadLock(found.rows[0].prospect_id);
     const { rows } = await db.query(
-      `SELECT pr.*, p.company, p.stage, p.archived_at
+      `SELECT pr.*, p.company, p.stage, p.archived_at, p.do_not_contact
          FROM proposals pr
          JOIN prospects p ON p.id = pr.prospect_id
         WHERE pr.id = $1
@@ -415,6 +415,13 @@ router.post('/:id/mark-sent', async (req, res) => {
     if (!p) { await db.query('ROLLBACK'); res.status(404).json({ error: 'Not found' }); return; }
     // Same refusal as send. Roll back before any status change, prospect
     // update, or follow-up scheduling.
+    // The prospect row is locked above, so this reads the flag as of the
+    // lock. A manual flag or an opt-out that commits first is seen here (#113).
+    if (p.do_not_contact) {
+      await db.query('ROLLBACK');
+      res.status(409).json({ error: `${p.company} is marked do-not-contact.` });
+      return;
+    }
     if (isPestCompanyName(p.company)) {
       await db.query('ROLLBACK');
       res.status(409).json({ error: `${PEST_NAME_REASON}.` });
