@@ -57,6 +57,7 @@ async function resetDb() {
       campaign_leads,
       campaign_variants,
       campaigns,
+      lead_offers,
       prospects,
       gmail_scanned_messages,
       gmail_list_state,
