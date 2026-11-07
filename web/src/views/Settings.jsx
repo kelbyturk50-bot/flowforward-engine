@@ -119,12 +119,18 @@ export default function Settings({ authProblem, onSaved, version }) {
   );
 }
 
+function countPhrase(n, singular, plural) {
+  const count = Number(n) || 0;
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 function ProposalSettings({ version }) {
   const summary = useAsync(() => api.proposalSummary(), [version]);
   const runs = useAsync(() => api.proposalRuns(), [version]);
   const st = useAsync(() => api.proposalSettings(), []);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
+  const [checkingInbox, setCheckingInbox] = useState(false);
   useEffect(() => { if (st.data) setNotes(st.data.style_notes || ''); }, [st.data]);
   const s = summary.data; const c = s?.config;
 
@@ -134,8 +140,19 @@ function ProposalSettings({ version }) {
     catch (err) { toast(err.message); } finally { setSaving(false); }
   };
   const inbox = async () => {
-    try { const r = await api.checkInbox(); toast(`Checked ${r.inbox?.checked || 0} messages, ${r.inbox?.matched || 0} matched. ${r.followups?.sent || 0} follow-ups sent.`); summary.reload(); }
+    if (checkingInbox) return;
+    setCheckingInbox(true);
+    try {
+      const r = await api.checkInbox();
+      const read = `Read ${countPhrase(r.inbox?.checked, 'new message', 'new messages')}, ${r.inbox?.matched || 0} matched.`;
+      const rest = r.followups?.held
+        ? ` Follow-ups wait until the inbox is caught up${r.inbox?.backlog ? ` (${r.inbox.backlog} still to read)` : ''}. Nothing was sent.`
+        : ` ${countPhrase(r.followups?.sent, 'follow-up', 'follow-ups')} sent.`;
+      toast(read + rest);
+      summary.reload();
+    }
     catch (err) { toast(err.message); }
+    finally { setCheckingInbox(false); }
   };
 
   return (
@@ -165,7 +182,7 @@ function ProposalSettings({ version }) {
             <dt>Today</dt><dd>{s.sent_today} of {s.daily_limit} emails sent · {money2(s.spend_this_month)} spent on drafts this month</dd>
           </dl>
         )}
-        <div className="link-row"><button className="btn btn-quiet" onClick={inbox}>Check inbox for replies now</button></div>
+        <div className="link-row"><button className="btn btn-quiet" onClick={inbox} disabled={checkingInbox}>Check inbox for replies now</button></div>
         {runs.data?.length > 0 && (
           <table className="runs">
             <thead><tr><th>Started</th><th>Status</th><th>Trigger</th><th>Drafted</th><th>Errors</th><th>Cost</th></tr></thead>

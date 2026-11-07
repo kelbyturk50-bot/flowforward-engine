@@ -208,6 +208,29 @@ CREATE TABLE IF NOT EXISTS proposal_runs (
 );
 
 -- Small key/value store for settings editable from the CRM (e.g. proposal voice notes)
+-- Gmail messages the inbox check has already read in full (one row per
+-- Gmail message id). Each full read costs 60 quota units of the 6,000 a user
+-- gets per minute, so a message is read once, not on every 15-minute check.
+-- Rows older than 120 days are purged by the check.
+CREATE TABLE IF NOT EXISTS gmail_scanned_messages (
+  gmail_id    TEXT PRIMARY KEY,
+  box         TEXT NOT NULL,
+  scanned_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT gmail_scanned_messages_box_check CHECK (box IN ('inbox', 'sent')),
+  CONSTRAINT gmail_scanned_messages_id_check CHECK (gmail_id ~ '^[A-Za-z0-9_-]{1,64}$')
+);
+
+-- Where a large list left off. pending_ids is every id a check listed that
+-- is not yet in gmail_scanned_messages, so newer mail cannot push one out of
+-- reach. page_token is the next older Gmail page, so a later check does not
+-- list the same pages again.
+CREATE TABLE IF NOT EXISTS gmail_list_state (
+  query_key   TEXT PRIMARY KEY,
+  page_token  TEXT,
+  pending_ids TEXT[] NOT NULL DEFAULT '{}',
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS app_settings (
   key         TEXT PRIMARY KEY,
   value       JSONB,

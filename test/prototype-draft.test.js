@@ -386,7 +386,7 @@ describe('prototype on draft', () => {
     async function shift(expiresAt) {
       const { rows } = await pool.query(
         `UPDATE prototypes
-            SET issued_at = $2::timestamptz - INTERVAL '14 days',
+            SET issued_at = $2::timestamptz - INTERVAL '336 hours',
                 expires_at = $2::timestamptz
           WHERE id = $1
           RETURNING expires_at`,
@@ -658,8 +658,8 @@ describe('prototype on draft', () => {
     assert.deepEqual(after.json, { error: 'not_found' });
     await pool.query(
       `UPDATE prototypes
-          SET issued_at = NOW() - INTERVAL '14 days',
-              expires_at = NOW() - INTERVAL '14 days' + INTERVAL '14 days'
+          SET issued_at = NOW() - INTERVAL '336 hours',
+              expires_at = NOW() - INTERVAL '336 hours' + INTERVAL '336 hours'
         WHERE id = $1`,
       [row.id]
     );
