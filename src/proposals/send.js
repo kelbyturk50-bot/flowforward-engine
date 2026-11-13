@@ -1395,7 +1395,7 @@ async function recordTransient(p, sentColumn, klass, key) {
 }
 
 /** Send any follow-ups that are due. Called every 15 minutes and from check-inbox. */
-async function sendDueFollowups() {
+async function sendDueFollowups(deferProspectIds) {
   // The lock is session-level. Acquire and release it on the same client.
   // pool.query would check the lock out on one connection and unlock on another.
   // A terminated backend emits 'error'. Without a listener that crashes the
@@ -1413,7 +1413,7 @@ async function sendDueFollowups() {
     const locked = await client.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', [FOLLOWUP_SWEEP_LOCK]);
     held = !!(locked.rows[0] && locked.rows[0].ok);
     if (!held) return { sent: 0, skipped: true };
-    return await sendDueFollowupsLocked();
+    return await sendDueFollowupsLocked(deferProspectIds);
   } finally {
     if (held && !failed) {
       try {
@@ -1429,7 +1429,8 @@ async function sendDueFollowups() {
   }
 }
 
-async function sendDueFollowupsLocked() {
+async function sendDueFollowupsLocked(deferProspectIds) {
+  const deferLeads = new Set(deferProspectIds || []);
   await recoverStaleSending();
   await reapExpiredFollowupLeases();
   const rows = await loadDueFollowups();
@@ -1460,6 +1461,7 @@ async function sendDueFollowupsLocked() {
   let halted = false;
   for (const p of ready) {
     try {
+      if (deferLeads.has(p.prospect_id)) continue;
       if (p.do_not_contact || ACTIVE_STAGES_TO_STOP.includes(p.stage)) {
         await stopSequence(p.id, p.do_not_contact ? 'Lead is do-not-contact' : `Lead moved to ${p.stage}`);
         continue;
@@ -1859,12 +1861,14 @@ const ITEM_STILL_FORMING = new Set(['triaging', 'rewrite_queued', 'rewriting', '
 
 async function sentIdsToScan(messages, scannedIds) {
   const leave = new Set();
+  const deferProspectIds = [];
   for (const msg of messages) {
     if (!msg || !msg.id || !msg.threadId) continue;
     const row = await pool.query(
       `SELECT
          EXISTS (SELECT 1 FROM proposals WHERE thread_id = $1) AS proposal,
          (SELECT message_id FROM proposals WHERE thread_id = $1 ORDER BY id LIMIT 1) AS proposal_message_id,
+         (SELECT prospect_id FROM proposals WHERE thread_id = $1 ORDER BY id LIMIT 1) AS prospect_id,
          (SELECT MAX(received_at) FROM inbox_messages WHERE thread_id = $1) AS last_at,
          (
            SELECT i.status
@@ -1880,10 +1884,16 @@ async function sentIdsToScan(messages, scannedIds) {
     if (sameMailId(msg.messageIdHeader, info.proposal_message_id)) continue;
     if (!(info.last_at && msg.date && new Date(msg.date) > new Date(info.last_at))) continue;
     // No inbox item yet, or the latest one is still being triaged, rewritten, or sent.
-    // A sent, handled, or discarded item will not open again.
-    if (!info.latest_status || ITEM_STILL_FORMING.has(info.latest_status)) leave.add(msg.id);
+    // That waits on this lead only. A sent, handled, or discarded item is finished.
+    if (!info.latest_status || ITEM_STILL_FORMING.has(info.latest_status)) {
+      leave.add(msg.id);
+      if (info.prospect_id != null) deferProspectIds.push(info.prospect_id);
+    }
   }
-  return (scannedIds || []).filter(id => !leave.has(id));
+  return {
+    keep: (scannedIds || []).filter(id => !leave.has(id)),
+    deferProspectIds,
+  };
 }
 
 function inboxScanBlocked() {
@@ -1915,6 +1925,7 @@ async function checkInbox() {
   let sentResult = null;
   let caughtUp = true;
   let backlog = 0;
+  let deferProspectIds = [];
   const scanned = [];
   let recorded = 0;
   let setupErr = null;
@@ -1927,10 +1938,10 @@ async function checkInbox() {
         messages = inbox.messages;
         backlog = inbox.backlog;
         scanned.push(...inbox.scanned.map(id => ({ id, box: 'inbox' })));
-        if (backlog > 0 || budget.quotaHit || inbox.readFailed) caughtUp = false;
+        if (!inbox.complete || budget.quotaHit || inbox.readFailed) caughtUp = false;
         try {
           sentResult = await gmail.scanSent(since, budget);
-          if (sentResult.backlog > 0 || budget.quotaHit || sentResult.readFailed) caughtUp = false;
+          if (!sentResult.complete || budget.quotaHit || sentResult.readFailed) caughtUp = false;
         } catch (err) {
           console.error('[inbox] sent check failed:', err.message);
           if (err && err.setup) setupErr = err;
@@ -1967,9 +1978,9 @@ async function checkInbox() {
       }
       // A failed apply records no Sent id, so the next check reads them again.
       if (sentApplied) {
-        const keep = await sentIdsToScan(newestFirst, sentResult.scanned);
-        if (keep.length < (sentResult.scanned || []).length) caughtUp = false;
-        scanned.push(...keep.map(id => ({ id, box: 'sent' })));
+        const decision = await sentIdsToScan(newestFirst, sentResult.scanned);
+        deferProspectIds = decision.deferProspectIds;
+        scanned.push(...decision.keep.map(id => ({ id, box: 'sent' })));
       }
     }
     if (gmailApi) {
@@ -1983,7 +1994,10 @@ async function checkInbox() {
     // fixed sentence once what was read is recorded. The cron and the route
     // both hold follow-ups when checkInbox throws.
     if (setupErr) throw setupErr;
-    return { checked: messages.length, matched: outcomes.length, follow_ons: recorded, replied_from_gmail: sentHandled, caught_up: caughtUp, backlog };
+    return {
+      checked: messages.length, matched: outcomes.length, follow_ons: recorded,
+      replied_from_gmail: sentHandled, caught_up: caughtUp, backlog, deferProspectIds,
+    };
   } finally {
     checking = false;
   }
@@ -2003,7 +2017,7 @@ async function followupsAfterInbox(inbox) {
     return { sent: 0, held: true };
   }
   clearFollowupHold();
-  return sendDueFollowups();
+  return sendDueFollowups(inbox.deferProspectIds);
 }
 
 async function senderTick() {
