@@ -1,6 +1,7 @@
 // Thin client for the FlowForward Engine API.
 // Base URL rules live in api-base.js.
 import { resolveApiBase, UNCONFIGURED_MESSAGE } from './api-base.js';
+import { taskPathId } from './demo-view-task.js';
 import { FEATURE_FLAGS_API, parseFlagUpdate, parseFlagsPayload } from './flags-contract.js';
 
 function read(key, fallback = '') {
@@ -67,6 +68,12 @@ async function request(method, path, body) {
     throw new ApiError(data.error || `Request failed (${res.status})`, res.status);
   }
   return data;
+}
+
+function demoViewTaskId(id) {
+  const pathId = taskPathId(id);
+  if (!pathId) throw new ApiError('not_found', 404);
+  return pathId;
 }
 
 const qs = (o) => {
@@ -156,4 +163,9 @@ export const api = {
   // Feature flags. Path and body live only in flags-contract.js.
   flags:             ()             => request('GET', FEATURE_FLAGS_API.list).then(parseFlagsPayload),
   setFlag:           (name, enabled) => request('PUT', FEATURE_FLAGS_API.update(name), FEATURE_FLAGS_API.body(enabled)).then(parseFlagUpdate),
+  // Demo-view call tasks. 404 { error: "not_found" } means the flag is off.
+  demoViewTasks:     ()             => request('GET', '/api/demo-view-tasks'),
+  demoViewTaskDone:  async (id)     => request('POST', `/api/demo-view-tasks/${demoViewTaskId(id)}/done`),
+  demoViewTaskSnooze: async (id)    => request('POST', `/api/demo-view-tasks/${demoViewTaskId(id)}/snooze`),
+  demoViewTaskDismiss: async (id)   => request('POST', `/api/demo-view-tasks/${demoViewTaskId(id)}/dismiss`),
 };

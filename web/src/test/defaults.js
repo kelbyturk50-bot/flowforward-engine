@@ -48,6 +48,10 @@ export function installApiDefaults() {
     throw Object.assign(new Error(`No mock for GET ${path}`), { status: 404 });
   });
   api.flags.mockResolvedValue(flagRecords());
+  api.demoViewTasks.mockRejectedValue(Object.assign(new Error('not_found'), { status: 404 }));
+  api.demoViewTaskDone.mockResolvedValue({ id: 1, status: 'done', prospect_id: 10 });
+  api.demoViewTaskSnooze.mockResolvedValue({ id: 1, status: 'open', snoozed_until: '2026-11-15T21:14:00.000Z' });
+  api.demoViewTaskDismiss.mockResolvedValue({ id: 1, status: 'dismissed', prospect_id: 10 });
   api.setFlag.mockImplementation(async (name, enabled) => savedFlag(name, enabled));
   api.updateLead.mockResolvedValue(foundLead);
   api.updateTask.mockResolvedValue({});

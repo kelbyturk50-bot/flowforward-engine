@@ -153,6 +153,37 @@ textarea.input { resize: vertical; line-height: 1.5; }
 .tally small { font-size: 1rem; color: var(--ink-2); font-weight: 500; }
 .today-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr)); gap: 1.25rem; align-items: start; }
 
+/* Call tasks from a real proposal or demo view. 44px at every width. */
+.view-task-panel { min-width: 0; max-width: 100%; font-family: var(--font); }
+.view-task-panel .btn {
+  min-height: 44px; min-width: 44px; white-space: normal; overflow-wrap: anywhere;
+  text-align: center; line-height: 1.2;
+}
+.view-task-list { list-style: none; margin: .55rem 0 .2rem; padding: 0; min-width: 0; }
+.view-task {
+  min-width: 0; display: flex; flex-direction: column; gap: .65rem;
+  padding: .85rem 0 1rem; border-top: 1px solid var(--line-2);
+}
+.view-task:first-child { border-top: 0; }
+.view-task-copy { min-width: 0; }
+.view-task-title { font-weight: 600; font-size: 1.05rem; line-height: 1.3; overflow-wrap: anywhere; }
+.view-task-sub, .view-task-note, .view-task-nophone {
+  margin-top: .25rem; color: var(--ink-2); font-size: .95rem; line-height: 1.35; overflow-wrap: anywhere;
+}
+.view-task-note { color: var(--ink); font-weight: 600; }
+.view-task-actions { display: flex; flex-wrap: wrap; gap: .5rem; min-width: 0; }
+.view-task-phone { font-weight: 500; }
+.view-task-snoozed {
+  background: var(--ochre-wash); border: 0; border-radius: var(--radius-s);
+  padding: .75rem .85rem; margin-top: .35rem;
+}
+@media (max-width: 860px) {
+  .view-task-panel { padding-top: .75rem; padding-bottom: .3rem; }
+  .view-task { padding: .4rem 0 .45rem; gap: .4rem; }
+  .view-task-actions { flex-direction: column; align-items: stretch; gap: .4rem; }
+  .view-task-actions .btn { width: 100%; }
+}
+
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); padding: 1.1rem 1.1rem .6rem; margin-bottom: 1.25rem; }
 .today-grid .panel { margin: 0; }
 .panel > h2 { margin-bottom: .2rem; }

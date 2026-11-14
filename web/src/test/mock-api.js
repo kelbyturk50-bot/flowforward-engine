@@ -94,4 +94,8 @@ export const api = {
   gmailDisconnect: method(),
   flags: method(),
   setFlag: method(),
+  demoViewTasks: method(),
+  demoViewTaskDone: method(),
+  demoViewTaskSnooze: method(),
+  demoViewTaskDismiss: method(),
 };
