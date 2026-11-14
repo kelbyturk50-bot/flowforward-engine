@@ -1,5 +1,6 @@
 import { api } from '../api';
 import { useAsync, ErrorNote, money, relDate, isOverdue, addDays, toast } from '../ui';
+import DemoViewTasks from './DemoViewTasks';
 import LeadRow from './LeadRow';
 
 function greeting() {
@@ -43,6 +44,8 @@ export default function Today({ version, bump, openLead, openProject }) {
           <div><dt>Replies this week</dt><dd>{c.proposal_replies_7d ?? 0}</dd></div>
         </dl>
       )}
+
+      <DemoViewTasks version={version} bump={bump} openLead={openLead} />
 
       {loading && !data && <p className="muted pad">Loading your day…</p>}
 

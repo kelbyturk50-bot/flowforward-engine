@@ -276,4 +276,59 @@ describe('real API client', () => {
     await api.health();
     expect(fetchSpy.mock.calls[0][0]).toBe(`${PRODUCTION_API_URL}/health`);
   });
+
+  it('loads demo-view tasks and posts done, snooze, and dismiss by id', async () => {
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ tasks: [] }),
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+    _setRuntimeForTests({
+      dev: true,
+      prod: false,
+      hostname: 'localhost',
+      port: '5173',
+      protocol: 'http:',
+      viteApiUrl: '',
+      savedUrl: '',
+    });
+    await api.demoViewTasks();
+    await api.demoViewTaskDone(1);
+    await api.demoViewTaskSnooze('2');
+    await api.demoViewTaskDismiss(3);
+    expect(fetchSpy.mock.calls.map((call) => [call[0], call[1].method])).toEqual([
+      ['http://localhost:3000/api/demo-view-tasks', 'GET'],
+      ['http://localhost:3000/api/demo-view-tasks/1/done', 'POST'],
+      ['http://localhost:3000/api/demo-view-tasks/2/snooze', 'POST'],
+      ['http://localhost:3000/api/demo-view-tasks/3/dismiss', 'POST'],
+    ]);
+    for (const call of fetchSpy.mock.calls.slice(1)) expect(call[1].body).toBeUndefined();
+  });
+
+  it('turns the flag-off 404 into not_found and does not fetch a bad id', async () => {
+    const fetchSpy = vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: 'not_found' }),
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+    _setRuntimeForTests({
+      dev: true,
+      prod: false,
+      hostname: 'localhost',
+      port: '',
+      protocol: 'http:',
+      viteApiUrl: '',
+      savedUrl: '',
+    });
+    await expect(api.demoViewTasks()).rejects.toMatchObject({ message: 'not_found', status: 404 });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    fetchSpy.mockClear();
+    await expect(api.demoViewTaskDone('1/done')).rejects.toMatchObject({ message: 'not_found', status: 404 });
+    await expect(api.demoViewTaskSnooze('../2')).rejects.toMatchObject({ status: 404 });
+    await expect(api.demoViewTaskDismiss(0)).rejects.toMatchObject({ status: 404 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });
