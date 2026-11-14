@@ -6,6 +6,8 @@ const pool    = require('../db/client');
 const { SENDER } = require('./config');
 const { demoHrefForProposal } = require('../pilot/tokens');
 const { prototypeForProposal } = require('../prototypes/store');
+const { BOT_UA, INTERNAL_COOKIE } = require('../demo-view/classify');
+const { recordOnepagerView } = require('../demo-view/store');
 
 const router = express.Router();
 
@@ -13,8 +15,6 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<'
 // "FlowForward" renders as the two-tone wordmark; any other company name stays plain.
 const wordmark = (name) => /^FlowForward$/.test(name) ? 'Flow<span class="fwd">Forward</span>' : esc(name);
 const para = (s) => esc(s).split(/\n{2,}/).map(x => `<p>${x.replace(/\n/g, '<br>')}</p>`).join('');
-const BOT_UA = /bot|crawler|spider|preview|slurp|facebookexternalhit|google-?(read|inspection)|linkedin|skype|whatsapp|proofpoint|mimecast|barracuda|scanner/i;
-
 const ICONS = {
   calendar: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="16" rx="2"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4"/></svg>',
   mail: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 6.5 8.5 6.5 8.5-6.5"/></svg>',
@@ -168,6 +168,7 @@ footer{color:var(--ink-2);font-size:.85rem;padding:12px 0 40px;text-align:center
 }
 
 router.get('/:slug', async (req, res) => {
+  if (req.query && req.query.preview === '1') res.append('Set-Cookie', INTERNAL_COOKIE);
   try {
     const { rows } = await pool.query(
       `SELECT pr.*, p.company, p.city, p.archived_at FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id WHERE pr.slug = $1`, [req.params.slug]);
@@ -176,6 +177,12 @@ router.get('/:slug', async (req, res) => {
     const preview = req.query.preview === '1';
     if (!preview && p.sent_at && !BOT_UA.test(req.get('user-agent') || '')) {
       pool.query(`UPDATE proposals SET views = views + 1, last_viewed_at = NOW() WHERE id = $1`, [p.id]).catch(() => {});
+    }
+    try {
+      await recordOnepagerView(req, p.id);
+    } catch (err) {
+      const code = err && typeof err.code === 'string' ? err.code : 'error';
+      console.error('[demo-view] log_failed', code);
     }
     const demoHref = await demoHrefForProposal(req, p.id);
     let prototypeHref = '';

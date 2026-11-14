@@ -46,6 +46,10 @@ function startMaintenance() {
   const tick = () => {
     const at = new Date();
     purge(at).catch((err) => logErr('ip_purge_failed', err));
+    require('../demo-view/store').purgeViewLog(at).catch((err) => {
+      const code = err && err.code ? err.code : 'error';
+      console.error(`[demo-view] purge_failed ${code}`);
+    });
     sweep(at).catch((err) => logErr('reservation_expired', err));
     sweepOverdue(at).catch((err) => console.error(`[voice] sweep_failed ${err && err.code ? err.code : 'error'}`));
   };

@@ -79,6 +79,8 @@ curl -X POST https://your-railway-url.railway.app/api/runs/trigger
 
 Every `/api/*` route returns 503 `{ "error": "api_key_not_configured" }` unless `CRM_API_KEY` is ready (`crmApiKeyReady`: at least 32 characters after trim, with whitespace removed). A ready key requires the `x-api-key` header (or `Authorization: Bearer`). A missing or wrong header is 401. `/api/public/prototypes` is public; the token is the credential.
 
+`FF_DEMO_VIEW_TASK` is env-only and off unless it is `true`, `1`, `yes`, or `on` (trim, then lower case). Do not set it on Railway or Vercel from a change in this repo. While it is off, `GET/POST /api/demo-view-tasks` returns 404 `{ "error": "not_found" }` after the API key check. The view log can still be written. See `AGENTS.md`.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Server health check (no key needed) |

@@ -26,6 +26,7 @@ const { UnpricedModelError, release, reservationUsd, reserve, settle } = require
 const { withChatTx, pool } = require('./tx');
 const { validate } = require('./validator');
 const { bucketIp, ipHash } = require('./ip');
+const { recordDemoView } = require('../demo-view/store');
 const { defaultLiveGate, flags } = require('./wiring');
 const counters = require('./counters');
 
@@ -95,7 +96,7 @@ function createChatEngine(opts = {}) {
     }
   }
 
-  async function safeTouch(business, type, sessionUuid, at) {
+  async function safeTouch(business, type, sessionUuid, at, view) {
     if (!business.prospectId || !sessionUuid) return;
     try {
       if (!(await flags('FF_CAMPAIGNS'))) return;
@@ -113,6 +114,13 @@ function createChatEngine(opts = {}) {
          VALUES ($1, $2, 'prototype_link', $3, 'system', $4)`,
         [business.prospectId, type, at, external]
       );
+      if (type === 'prototype_viewed') {
+        try {
+          await recordDemoView({ prospectId: business.prospectId, at, view });
+        } catch (err) {
+          logErr('demo_view_log_failed', err);
+        }
+      }
     } catch (err) {
       logErr('cap_store_unavailable', err);
     }
@@ -259,7 +267,7 @@ function createChatEngine(opts = {}) {
       type: 'chat_viewed',
       at,
     });
-    await safeTouch(business, 'prototype_viewed', session.id, at);
+    await safeTouch(business, 'prototype_viewed', session.id, at, ctx.view);
     return {
       status: 201,
       body: envelope(business, {

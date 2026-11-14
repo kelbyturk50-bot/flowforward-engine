@@ -121,6 +121,7 @@ app.use('/api/tasks',     tasks);
 app.use('/api/focus',     require('./api/focus'));
 app.use('/api/runs',      require('./api/runs'));
 app.use('/api/proposals', require('./api/proposals'));
+app.use('/api/demo-view-tasks', require('./api/demo-view-tasks'));
 app.use('/api/inbox',     require('./api/inbox'));
 app.use('/api/prototypes', require('./api/prototypes'));
 app.use('/api/brands',    require('./api/brands'));

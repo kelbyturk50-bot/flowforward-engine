@@ -71,6 +71,7 @@ Nightly proposal drafting stays off (`PROPOSAL_AUTO_DRAFT` unset). Drafts are ma
 2. **Gates start from existing output.** Gates start from existing CI and Railway job output and look only into failures and changes, with compact evidence. Infrastructure, job, or spend changes need Kelby's approval. The existing outreach job is never duplicated.
 3. **Bounded investigations.** An investigation is at most 6 targeted reads, plus 1 retry for a transient failure, then a compact finding or a blocker. Deeper QA or Security work needs an explicit expanded scope from Summit, and is never waived or passed when it did not pass.
 4. **Bot messages.** Bot messages cover only merges, failures, blocks, and decisions. No acknowledgements and no progress chatter. Handoffs are deduplicated by issue, head, and gate.
+5. **One-pager previews.** Audits and QA open `/p/` links only with `?preview=1`. That response sets the first-party `ff_internal` cookie on the API origin, and later views that send the cookie are not treated as a lead. A forwarded preview link can mark a real lead's browser the same way. That misses a task. It never sends anything.
 
 ## Pre-production Railway
 
