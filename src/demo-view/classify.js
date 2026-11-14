@@ -50,7 +50,7 @@ function isPrefetch(purpose, secPurpose) {
 }
 
 // First match wins. Burst is applied after the row is stored, and only
-// replaces a null reason.
+// replaces a null reason. The window is BURST_WINDOW in store.js.
 function exclusionReason({ method, ua, purpose, secPurpose, preview, cookie, sentAt, at }) {
   if (String(method || 'GET').toUpperCase() === 'HEAD') return 'head';
   if (isPrefetch(purpose, secPurpose)) return 'prefetch';

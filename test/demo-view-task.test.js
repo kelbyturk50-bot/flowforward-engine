@@ -13,6 +13,7 @@ const { applyMainSchema } = require('../src/db/migrate');
 const { resetDb, closePool, pool, insertProspect } = require('./fixtures');
 const { demoViewTaskOn } = require('../src/demo-view/flag');
 const store = require('../src/demo-view/store');
+const { BURST_WINDOW } = store;
 const send = require('../src/proposals/send');
 const gmail = require('../src/proposals/gmail');
 
@@ -277,7 +278,8 @@ describe('demo-view call tasks', { concurrency: false }, () => {
     assert.equal((await tasks(plain.proposal.id)).length, 1);
   });
 
-  it('retroactively excludes a 10-minute burst and leaves a different client', async () => {
+  it('retroactively excludes 3 proposals inside 10 minutes, which is inside the 2-hour window', async () => {
+    assert.equal(BURST_WINDOW, '2 hours');
     const base = new Date('2026-06-02T16:00:00.000Z');
     const ip = nextIp();
     const other = nextIp();
@@ -304,12 +306,50 @@ describe('demo-view call tasks', { concurrency: false }, () => {
       const mine = (await logs(row.proposal.id)).filter((item) => item.excluded_reason === 'burst');
       assert.equal(mine.length, 1);
     }
-    const after = new Date(base.getTime() + 13 * 60 * 1000);
+    const stillInside = new Date(base.getTime() + 15 * 60 * 1000);
+    const fifth = await sentProposal('burst-still');
+    store._setClockForTests(() => stillInside);
+    await openPage(fifth.proposal.slug, { ip });
+    assert.equal((await logs(fifth.proposal.id))[0].excluded_reason, 'burst');
+    assert.equal((await tasks(fifth.proposal.id)).length, 0);
+    const after = new Date(base.getTime() + (2 * 60 + 3) * 60 * 1000);
     const fourth = await sentProposal('burst-after');
     store._setClockForTests(() => after);
     await openPage(fourth.proposal.slug, { ip });
     assert.equal((await logs(fourth.proposal.id))[0].excluded_reason, null);
     assert.equal((await tasks(fourth.proposal.id)).length, 1);
+  });
+
+  it('does not treat one proposal, or two, as a burst across 2 hours', async () => {
+    const repeat = await sentProposal('repeat');
+    const ip = nextIp();
+    const start = new Date('2026-06-04T16:00:00.000Z');
+    for (let i = 0; i < 5; i += 1) {
+      store._setClockForTests(() => new Date(start.getTime() + i * 25 * 60 * 1000));
+      await openPage(repeat.proposal.slug, { ip });
+    }
+    const repeatLogs = await logs(repeat.proposal.id);
+    assert.equal(repeatLogs.length, 5);
+    assert.ok(repeatLogs.every((item) => item.excluded_reason == null));
+    const repeatTask = await tasks(repeat.proposal.id);
+    assert.equal(repeatTask.length, 1);
+    assert.equal(repeatTask[0].view_count, 5);
+    assert.equal(new Date(repeatTask[0].last_viewed_at).toISOString(), new Date(start.getTime() + 100 * 60 * 1000).toISOString());
+
+    const pairIp = nextIp();
+    const left = await sentProposal('pair-a');
+    const right = await sentProposal('pair-b');
+    const pairStart = new Date('2026-06-05T16:00:00.000Z');
+    store._setClockForTests(() => pairStart);
+    await openPage(left.proposal.slug, { ip: pairIp });
+    store._setClockForTests(() => new Date(pairStart.getTime() + 30 * 60 * 1000));
+    await openPage(right.proposal.slug, { ip: pairIp });
+    store._setClockForTests(() => new Date(pairStart.getTime() + 90 * 60 * 1000));
+    await openPage(left.proposal.slug, { ip: pairIp });
+    assert.ok((await logs(left.proposal.id)).every((item) => item.excluded_reason == null));
+    assert.ok((await logs(right.proposal.id)).every((item) => item.excluded_reason == null));
+    assert.equal((await tasks(left.proposal.id))[0].view_count, 2);
+    assert.equal((await tasks(right.proposal.id)).length, 1);
   });
 
   it('keeps one open task per proposal and updates the count', async () => {
@@ -519,30 +559,53 @@ describe('demo-view call tasks', { concurrency: false }, () => {
     if (lines.join('\n').includes(salt) || blob.includes(salt)) throw new Error('salt leaked');
   });
 
-  it('creates no tasks for an Oct 20 audit replay of 7 slugs', async () => {
+  it('creates no tasks for an Oct 20 audit replay spread from 10:00 to 11:50 PM MDT', async () => {
     const ip = '198.51.100.77';
     const rows = [];
     for (let i = 0; i < 7; i += 1) rows.push(await sentProposal(`audit-${i}`));
-    const start = new Date('2026-10-20T22:10:00-06:00');
+    const start = new Date('2026-10-20T22:00:00-06:00');
+    const end = new Date('2026-10-20T23:50:00-06:00');
+    const gapMs = 16 * 60 * 1000;
+    const opened = [];
     for (let i = 0; i < 7; i += 1) {
-      const at = new Date(start.getTime() + i * 60 * 1000);
+      const at = new Date(start.getTime() + i * gapMs);
+      opened.push(at);
       store._setClockForTests(() => at);
       const res = await openPage(rows[i].proposal.slug, { ip });
       assert.equal(res.status, 200);
     }
+    assert.ok(opened[0].getTime() >= start.getTime());
+    assert.ok(opened[opened.length - 1].getTime() <= end.getTime());
+    for (let i = 1; i < opened.length; i += 1) {
+      const gapMin = (opened[i].getTime() - opened[i - 1].getTime()) / 60000;
+      assert.ok(gapMin >= 15 && gapMin <= 18, `gap ${gapMin}`);
+    }
     const ids = rows.map((row) => row.proposal.id);
     const found = await pool.query(
-      `SELECT excluded_reason FROM proposal_view_log WHERE proposal_id = ANY($1::int[])`,
+      `SELECT excluded_reason, viewed_at FROM proposal_view_log
+        WHERE proposal_id = ANY($1::int[])
+        ORDER BY viewed_at`,
       [ids]
     );
     assert.equal(found.rows.length, 7);
+    assert.ok(found.rows.every((row) => row.excluded_reason != null));
     assert.ok(found.rows.every((row) => row.excluded_reason === 'burst'));
+    for (let i = 0; i < found.rows.length; i += 1) {
+      let neighbors = 1;
+      const at = new Date(found.rows[i].viewed_at).getTime();
+      for (let j = 0; j < found.rows.length; j += 1) {
+        if (i === j) continue;
+        const other = new Date(found.rows[j].viewed_at).getTime();
+        if (other <= at && at - other <= 10 * 60 * 1000) neighbors += 1;
+      }
+      assert.ok(neighbors < 3, `10-minute window held ${neighbors}`);
+    }
     const created = await pool.query(
       `SELECT COUNT(*)::int AS n FROM proposal_view_tasks WHERE proposal_id = ANY($1::int[])`,
       [ids]
     );
     assert.equal(created.rows[0].n, 0);
-    console.log('[demo-view] Oct 20 audit replay: 7 slugs, 0 tasks');
+    console.log('[demo-view] Oct 20 audit replay: 7 slugs across 10:00-11:36 PM MDT, 0 tasks');
   });
 
   it('skips a task when the lead replied, opted out, bounced, booked, or is unsent', async () => {

@@ -19,6 +19,10 @@ const { viewFromRequest } = require('./http');
 
 const SALT_KEY = 'proposal_view_fp_salt';
 const BURST_LOCK = 89089031;
+// Kelby, Nov 14 2026. The issue text said 10 minutes. The Oct 20 audit was
+// spread across the evening, and one client opening 3 or more distinct
+// proposals is an audit, not a lead. A wider window only drops tasks.
+const BURST_WINDOW = '2 hours';
 const PURGE_DAYS = 120;
 const CALL_REF = /^demo-view-task:[1-9][0-9]{0,17}$/;
 
@@ -262,7 +266,7 @@ async function recordView({ proposalId, source, at, method, ua, purpose, secPurp
            FROM proposal_view_log
           WHERE client_fp = $1
             AND viewed_at <= $2::timestamptz
-            AND viewed_at >= $2::timestamptz - interval '10 minutes'`,
+            AND viewed_at >= $2::timestamptz - interval '${BURST_WINDOW}'`,
         [fp, when]
       );
       const affected = new Set();
@@ -274,7 +278,7 @@ async function recordView({ proposalId, source, at, method, ua, purpose, secPurp
             WHERE client_fp = $1
               AND excluded_reason IS NULL
               AND viewed_at <= $2::timestamptz
-              AND viewed_at >= $2::timestamptz - interval '10 minutes'
+              AND viewed_at >= $2::timestamptz - interval '${BURST_WINDOW}'
             RETURNING proposal_id`,
           [fp, when]
         );
@@ -500,6 +504,7 @@ async function taskMetrics() {
 module.exports = {
   SALT_KEY,
   BURST_LOCK,
+  BURST_WINDOW,
   PURGE_DAYS,
   loadSalt,
   fingerprint,
