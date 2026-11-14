@@ -228,13 +228,14 @@ describe('demo-view call tasks', { concurrency: false }, () => {
     assert.equal((await tasks(row.proposal.id)).length, 0);
   });
 
-  it('excludes a view 2 minutes or less after sent_at', async () => {
+  it('excludes a view exactly 2 minutes after sent_at and counts one just past it', async () => {
     const sent = new Date('2026-03-01T15:00:00.000Z');
+    const twoMinutes = 2 * 60 * 1000;
     const early = await sentProposal('soon', { sentAt: sent });
     const later = await sentProposal('later', { sentAt: sent });
-    store._setClockForTests(() => new Date(sent.getTime() + 120000));
+    store._setClockForTests(() => new Date(sent.getTime() + twoMinutes));
     await openPage(early.proposal.slug, { ip: nextIp() });
-    store._setClockForTests(() => new Date(sent.getTime() + 120001));
+    store._setClockForTests(() => new Date(sent.getTime() + twoMinutes + 1));
     await openPage(later.proposal.slug, { ip: nextIp() });
     assert.equal((await logs(early.proposal.id))[0].excluded_reason, 'within_2m');
     assert.equal((await tasks(early.proposal.id)).length, 0);
@@ -352,6 +353,60 @@ describe('demo-view call tasks', { concurrency: false }, () => {
     assert.equal((await tasks(right.proposal.id)).length, 1);
   });
 
+  it('treats a view exactly 2 hours after the first as a burst, and one millisecond later as outside', async () => {
+    const twoHours = 2 * 60 * 60 * 1000;
+    const start = new Date('2026-07-10T12:00:00.000Z');
+    const insideIp = nextIp();
+    const outsideIp = nextIp();
+    const inside = [];
+    const outside = [];
+    for (let i = 0; i < 3; i += 1) {
+      inside.push(await sentProposal(`edge-in-${i}`));
+      outside.push(await sentProposal(`edge-out-${i}`));
+    }
+    const insideAt = [start, new Date(start.getTime() + 60 * 1000), new Date(start.getTime() + twoHours)];
+    for (let i = 0; i < 3; i += 1) {
+      const at = insideAt[i];
+      store._setClockForTests(() => at);
+      await openPage(inside[i].proposal.slug, { ip: insideIp });
+    }
+    for (const row of inside) {
+      assert.equal((await logs(row.proposal.id))[0].excluded_reason, 'burst');
+      assert.equal((await tasks(row.proposal.id)).length, 0);
+    }
+    const outsideAt = [start, new Date(start.getTime() + 60 * 1000), new Date(start.getTime() + twoHours + 1)];
+    for (let i = 0; i < 3; i += 1) {
+      const at = outsideAt[i];
+      store._setClockForTests(() => at);
+      await openPage(outside[i].proposal.slug, { ip: outsideIp });
+    }
+    for (const row of outside) {
+      assert.equal((await logs(row.proposal.id))[0].excluded_reason, null);
+      assert.equal((await tasks(row.proposal.id)).length, 1);
+    }
+  });
+
+  it('updates the pre-inserted open task through the partial unique index', async () => {
+    const row = await sentProposal('conflict');
+    const at = new Date('2026-08-01T16:00:00.000Z');
+    await pool.query(
+      `INSERT INTO proposal_view_tasks
+         (proposal_id, prospect_id, status, view_count, last_viewed_at, last_source, demo_link_expired)
+       VALUES ($1, $2, 'open', 50, '2020-01-01T00:00:00Z', 'demo', true)`,
+      [row.proposal.id, row.lead.id]
+    );
+    store._setClockForTests(() => at);
+    const recorded = await openPage(row.proposal.slug, { ip: nextIp() });
+    assert.equal(recorded.status, 200);
+    const open = await tasks(row.proposal.id);
+    assert.equal(open.length, 1);
+    assert.equal(open[0].status, 'open');
+    assert.equal(open[0].view_count, 1);
+    assert.equal(open[0].last_source, 'onepager');
+    assert.equal(open[0].demo_link_expired, false);
+    assert.equal(new Date(open[0].last_viewed_at).toISOString(), at.toISOString());
+  });
+
   it('keeps one open task per proposal and updates the count', async () => {
     const row = await sentProposal('dedupe');
     const ip = nextIp();
@@ -396,6 +451,30 @@ describe('demo-view call tasks', { concurrency: false }, () => {
     assert.equal((await tasks(row.proposal.id)).filter((item) => item.status === 'open').length, 0);
     const day8b = new Date(day8.getTime() + 60 * 1000);
     store._setClockForTests(() => day8b);
+    await openPage(row.proposal.slug, { ip });
+    const reopened = (await tasks(row.proposal.id)).filter((item) => item.status === 'open');
+    assert.equal(reopened.length, 1);
+    assert.equal(reopened[0].view_count, 2);
+  });
+
+  it('does not reopen a dismissed task on the 7-day boundary or on one later view', async () => {
+    const row = await sentProposal('dismiss-resurface');
+    const ip = nextIp();
+    const start = new Date('2026-02-01T15:00:00.000Z');
+    const week = 7 * 24 * 60 * 60 * 1000;
+    store._setClockForTests(() => start);
+    await openPage(row.proposal.slug, { ip });
+    const open = await tasks(row.proposal.id);
+    const dismissed = await request('POST', `/api/demo-view-tasks/${open[0].id}/dismiss`, { headers: authHeaders() });
+    assert.equal(dismissed.status, 200);
+    store._setClockForTests(() => new Date(start.getTime() + week));
+    await openPage(row.proposal.slug, { ip });
+    assert.equal((await tasks(row.proposal.id)).filter((item) => item.status === 'open').length, 0);
+    assert.equal((await tasks(row.proposal.id)).some((item) => item.status === 'dismissed'), true);
+    store._setClockForTests(() => new Date(start.getTime() + week + 1));
+    await openPage(row.proposal.slug, { ip });
+    assert.equal((await tasks(row.proposal.id)).filter((item) => item.status === 'open').length, 0);
+    store._setClockForTests(() => new Date(start.getTime() + week + 60 * 1000));
     await openPage(row.proposal.slug, { ip });
     const reopened = (await tasks(row.proposal.id)).filter((item) => item.status === 'open');
     assert.equal(reopened.length, 1);
@@ -514,12 +593,23 @@ describe('demo-view call tasks', { concurrency: false }, () => {
        VALUES ($1, $2, 'onepager', 'browser', $3), ($1, $4, 'demo', 'other', $3)`,
       [row.proposal.id, oldAt, fp, youngAt]
     );
+    const storeSrc = fs.readFileSync(path.join(__dirname, '../src/demo-view/store.js'), 'utf8');
+    const recordBody = storeSrc.slice(
+      storeSrc.indexOf('async function recordView'),
+      storeSrc.indexOf('async function recordOnepagerView')
+    );
+    assert.equal(recordBody.includes('purgeViewLog'), false);
+    const mountSrc = fs.readFileSync(path.join(__dirname, '../src/chatdemo/mount.js'), 'utf8');
+    assert.match(mountSrc, /purgeViewLog\(at\)/);
+    await openPage(row.proposal.slug, { ip: nextIp() });
+    const before = await logs(row.proposal.id);
+    assert.equal(before.some((item) => new Date(item.viewed_at).getTime() === oldAt.getTime()), true);
     const removed = await store.purgeViewLog(new Date());
     assert.ok(removed >= 1);
     const left = await logs(row.proposal.id);
-    assert.equal(left.length, 1);
-    assert.equal(left[0].source, 'demo');
-    assert.equal(new Date(left[0].viewed_at).toISOString(), youngAt.toISOString());
+    assert.equal(left.some((item) => new Date(item.viewed_at).getTime() === oldAt.getTime()), false);
+    assert.equal(left.some((item) => item.source === 'demo'), true);
+    assert.equal(new Date(left.find((item) => item.source === 'demo').viewed_at).toISOString(), youngAt.toISOString());
   });
 
   it('does not store a raw IP, a full user-agent, or the salt', async () => {

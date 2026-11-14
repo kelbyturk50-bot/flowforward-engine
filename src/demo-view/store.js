@@ -34,11 +34,6 @@ function _setClockForTests(fn) {
   nowFn = typeof fn === 'function' ? fn : () => new Date();
 }
 
-function logCode(err) {
-  const code = err && typeof err.code === 'string' && /^[0-9A-Za-z_]{1,40}$/.test(err.code) ? err.code : 'error';
-  console.error(`[demo-view] ${code}`);
-}
-
 function readSalt(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const raw = value.salt;
@@ -184,40 +179,22 @@ async function syncTask(client, proposalId, at) {
   if (!openId && closedAt && n < 2) return;
 
   const expired = await demoLinkExpired(client, prospectId, proposalId, at);
-  if (openId && n > 0) {
-    await client.query(
-      `UPDATE proposal_view_tasks
-          SET view_count = $2,
-              last_viewed_at = $3,
-              last_source = $4,
-              demo_link_expired = $5,
-              updated_at = $6
-        WHERE id = $1 AND status = 'open'`,
-      [openId, n, stats.last_viewed_at, stats.source, expired, at]
-    );
-    return;
-  }
-  try {
-    await client.query(
-      `INSERT INTO proposal_view_tasks
-         (proposal_id, prospect_id, status, view_count, last_viewed_at, last_source,
-          demo_link_expired, created_at, updated_at)
-       VALUES ($1, $2, 'open', $3, $4, $5, $6, $7, $7)`,
-      [proposalId, prospectId, n, stats.last_viewed_at, stats.source, expired, at]
-    );
-  } catch (err) {
-    if (!err || err.code !== '23505') throw err;
-    await client.query(
-      `UPDATE proposal_view_tasks
-          SET view_count = $2,
-              last_viewed_at = $3,
-              last_source = $4,
-              demo_link_expired = $5,
-              updated_at = $6
-        WHERE proposal_id = $1 AND status = 'open'`,
-      [proposalId, n, stats.last_viewed_at, stats.source, expired, at]
-    );
-  }
+  // One statement. A caught 23505 would abort this transaction, so the
+  // partial unique index is the conflict target instead of a try/catch.
+  await client.query(
+    `INSERT INTO proposal_view_tasks
+       (proposal_id, prospect_id, status, view_count, last_viewed_at, last_source,
+        demo_link_expired, created_at, updated_at)
+     VALUES ($1, $2, 'open', $3, $4, $5, $6, $7, $7)
+     ON CONFLICT (proposal_id) WHERE status = 'open'
+     DO UPDATE SET
+       view_count = EXCLUDED.view_count,
+       last_viewed_at = EXCLUDED.last_viewed_at,
+       last_source = EXCLUDED.last_source,
+       demo_link_expired = EXCLUDED.demo_link_expired,
+       updated_at = EXCLUDED.updated_at`,
+    [proposalId, prospectId, n, stats.last_viewed_at, stats.source, expired, at]
+  );
 }
 
 async function recordView({ proposalId, source, at, method, ua, purpose, secPurpose, preview, cookie, ip }) {
@@ -230,11 +207,6 @@ async function recordView({ proposalId, source, at, method, ua, purpose, secPurp
   const salt = await loadSalt();
   const klass = uaClass(ua);
   const fp = fingerprint(salt, ip, klass);
-  try {
-    await purgeViewLog(when);
-  } catch (err) {
-    logCode(err);
-  }
 
   return withClient('demo-view', async (client) => {
     await client.query('BEGIN');
