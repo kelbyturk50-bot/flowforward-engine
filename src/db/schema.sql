@@ -1687,3 +1687,62 @@ CREATE INDEX IF NOT EXISTS idx_lead_offers_prospect_id ON lead_offers (prospect_
 CREATE INDEX IF NOT EXISTS idx_lead_offers_founding_status
   ON lead_offers (status)
   WHERE offer_type = 'founding';
+
+-- Demo-view call tasks (F-007, issue #131). Additive and idempotent.
+-- Applied on every boot. This block does not UPDATE or DELETE proposals,
+-- prospects, campaign rows, or existing view counts. The HMAC salt is not
+-- seeded here; the app writes proposal_view_fp_salt once and does not log it.
+-- Rows in proposal_view_log older than 120 days are deleted by the app, not
+-- by this file.
+CREATE TABLE IF NOT EXISTS proposal_view_log (
+  id              BIGSERIAL PRIMARY KEY,
+  proposal_id     INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+  viewed_at       TIMESTAMPTZ NOT NULL,
+  source          TEXT NOT NULL,
+  excluded_reason TEXT,
+  ua_class        TEXT NOT NULL,
+  client_fp       TEXT NOT NULL,
+  CONSTRAINT proposal_view_log_source_check CHECK (source IN ('onepager', 'demo')),
+  CONSTRAINT proposal_view_log_reason_check CHECK (
+    excluded_reason IS NULL OR excluded_reason IN (
+      'head', 'prefetch', 'preview', 'internal_cookie', 'bot_ua', 'within_2m', 'burst'
+    )
+  ),
+  CONSTRAINT proposal_view_log_ua_class_check CHECK (
+    ua_class IN ('empty', 'bot', 'browser', 'other')
+  ),
+  CONSTRAINT proposal_view_log_fp_check CHECK (client_fp ~ '^[0-9a-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS idx_proposal_view_log_fp_viewed
+  ON proposal_view_log (client_fp, viewed_at);
+CREATE INDEX IF NOT EXISTS idx_proposal_view_log_proposal_viewed
+  ON proposal_view_log (proposal_id, viewed_at);
+CREATE INDEX IF NOT EXISTS idx_proposal_view_log_viewed_at
+  ON proposal_view_log (viewed_at);
+
+CREATE TABLE IF NOT EXISTS proposal_view_tasks (
+  id                BIGSERIAL PRIMARY KEY,
+  proposal_id       INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+  prospect_id       INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  status            TEXT NOT NULL DEFAULT 'open',
+  view_count        INTEGER NOT NULL,
+  last_viewed_at    TIMESTAMPTZ,
+  last_source       TEXT,
+  demo_link_expired BOOLEAN NOT NULL DEFAULT FALSE,
+  snoozed_until     TIMESTAMPTZ,
+  done_at           TIMESTAMPTZ,
+  dismissed_at      TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT proposal_view_tasks_status_check CHECK (status IN ('open', 'done', 'dismissed')),
+  CONSTRAINT proposal_view_tasks_source_check CHECK (
+    last_source IS NULL OR last_source IN ('onepager', 'demo')
+  ),
+  CONSTRAINT proposal_view_tasks_count_check CHECK (view_count >= 1)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS proposal_view_tasks_one_open
+  ON proposal_view_tasks (proposal_id)
+  WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS idx_proposal_view_tasks_open_list
+  ON proposal_view_tasks (last_viewed_at DESC)
+  WHERE status = 'open';

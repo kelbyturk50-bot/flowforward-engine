@@ -132,7 +132,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <button className="btn btn-danger" disabled={!!busy} onClick={() => act('nf', () => api.discardProposal(p.id, { disqualify: true, reason: 'Not a fit (Kelby)' }), 'Marked not a fit.')}>Not a fit</button>
         </>}
         {p.status === 'sent' && <>
-          <a className="btn btn-quiet" href={p.onepager_url} target="_blank" rel="noreferrer">Open one-pager</a>
+          <a className="btn btn-quiet" href={`${p.onepager_url}?preview=1`} target="_blank" rel="noreferrer">Open one-pager</a>
           <TryLiveDemoLink className="btn btn-quiet" />
           <button className="btn btn-quiet" disabled={!!busy} onClick={() => act('replied', () => api.repliedProposal(p.id, 'They got in touch another way'), 'Marked replied. Follow-ups stopped.')}>They replied another way</button>
           <button className="btn btn-danger" disabled={!!busy} onClick={() => act('stop', () => api.stopProposal(p.id), 'Follow-ups stopped.')}>Stop follow-ups</button>

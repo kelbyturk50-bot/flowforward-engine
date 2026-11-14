@@ -4,6 +4,7 @@
 const express = require('express');
 const { chatCors } = require('./cors');
 const { clientIp } = require('../pilot/rate-limit');
+const { viewFromRequest } = require('../demo-view/http');
 const { lookupToken } = require('../prototypes/store');
 const { effective } = require('../flags/resolve');
 const { banner, disclosure, envelope, perGoogle, PAUSE_MESSAGE, WATERMARK_TEXT } = require('./copy');
@@ -277,7 +278,11 @@ function createRouter(kind) {
     router.post('/demos/:slug/session', wrap(async (req, res) => {
       const demo = await resolveDemo(req.params.slug);
       if (!demo) return send404(res);
-      sendResult(res, await engine().openSession({ business: businessFromDemo(demo), ip: clientIp(req) }));
+      sendResult(res, await engine().openSession({
+        business: businessFromDemo(demo),
+        ip: clientIp(req),
+        view: viewFromRequest(req),
+      }));
     }));
     router.post('/demos/:slug/message', wrap(async (req, res) => {
       const demo = await resolveDemo(req.params.slug);
@@ -303,7 +308,11 @@ function createRouter(kind) {
       if (resolved.status === 404) return send404(res);
       if (resolved.status === 410) return send410(res);
       if (resolved.status === 503) return res.status(503).json(pausedBody());
-      sendResult(res, await engine().openSession({ business: resolved.business, ip: clientIp(req) }));
+      sendResult(res, await engine().openSession({
+        business: resolved.business,
+        ip: clientIp(req),
+        view: viewFromRequest(req),
+      }));
     }));
     router.post('/message', wrap(async (req, res) => {
       const resolved = await resolvePrototype(req.params.token);

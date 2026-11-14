@@ -45,6 +45,8 @@ async function resetDb() {
       pilot_customers,
       pilot_events,
       pilot_tokens,
+      proposal_view_log,
+      proposal_view_tasks,
       proposal_jobs,
       proposal_runs,
       proposals,
