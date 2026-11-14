@@ -880,7 +880,15 @@ async function approveAndSend(proposalId, options = {}) {
     throw Object.assign(new Error(safe), { status: 502 });
   }
   const gate = await recheckLead(p.prospect_id);
-  const block = leadBlocksSend(gate);
+  let block = leadBlocksSend(gate);
+  // A first send was never refused for the stage the lead was already in
+  // when approve started. qualified, responded, proposal, won, lost, and
+  // disqualified are normal for a draft Kelby approves; the success write
+  // still moves only found and qualified to contacted. The recheck refuses
+  // a first send only when the stage changed into a stop stage while this
+  // approve ran, the same as a do-not-contact flag or an archive. Follow-ups
+  // keep the full stop list and do not use this exception.
+  if (block === 'stage' && gate && gate.stage === p.stage) block = null;
   if (block) {
     await pool.query(
       `UPDATE proposals

@@ -673,7 +673,12 @@ describe('gmail quota fix round', () => {
     ];
     installThreads({ inbox, sent });
     const lead = await insertDueFollowup('b14', 'test+thread@example.com');
-    await pool.query(`UPDATE proposals SET thread_id = 'thr-lead' WHERE id = $1`, [lead.proposal.id]);
+    // sent_at has to be before the thread. insertDueFollowup uses the wall
+    // clock, and these message dates are fixed in November 2026.
+    await pool.query(
+      `UPDATE proposals SET thread_id = 'thr-lead', sent_at = '2026-11-06T14:00:00Z' WHERE id = $1`,
+      [lead.proposal.id]
+    );
     const first = await send.checkInbox();
     assert.equal(first.replied_from_gmail, 1);
     const item = await pool.query('SELECT status, handled_note FROM inbox_items WHERE prospect_id = $1', [lead.prospect.id]);
