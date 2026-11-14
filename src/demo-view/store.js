@@ -19,11 +19,10 @@ const { viewFromRequest } = require('./http');
 
 const SALT_KEY = 'proposal_view_fp_salt';
 const BURST_LOCK = 89089031;
-// Issue #131 AC 2 said 10 minutes. Canyon widened this to 2 hours on
-// Nov 14, 2026 as an engineering call, not a Kelby decision. The Oct 20
-// audit was spread across the evening. One client opening 3 or more
-// distinct proposals is an audit, not a lead. A wider window only drops
-// tasks. Summit or Scout still signs off because it differs from AC 2.
+// Issue #131 AC 2 said 10 minutes. Canyon proposed 2 hours and Summit
+// signed off on Nov 14, 2026. The Oct 20 audit was spread across the
+// evening. One client opening 3 or more distinct proposals is an audit,
+// not a lead. A wider window only drops tasks.
 const BURST_WINDOW = '2 hours';
 const PURGE_DAYS = 120;
 const CALL_REF = /^demo-view-task:[1-9][0-9]{0,17}$/;
