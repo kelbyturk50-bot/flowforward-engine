@@ -3,8 +3,9 @@
 // The log stores a coarse UA class and an HMAC of the client bucket plus
 // that class. The HMAC key is a random 32-byte salt created once and kept
 // in app_settings under proposal_view_fp_salt. The salt is not logged.
-// Rows older than 120 days are deleted. No raw IP and no full user-agent
-// are written.
+// Rows older than 120 days are deleted by the maintenance tick only
+// (startMaintenance). Recording a view does not purge. No raw IP and no
+// full user-agent are written.
 //
 // Task rows are written only while FF_DEMO_VIEW_TASK is on. The log is
 // written either way. This module does not import the mail transport.
@@ -13,7 +14,7 @@ const crypto = require('crypto');
 const pool = require('../db/client');
 const { withClient } = require('../db/with-client');
 const { bucketAddress } = require('../pilot/rate-limit');
-const { demoViewTaskOn } = require('./flag');
+const { demoViewTaskOn, prospectViewsOn } = require('./flag');
 const { uaClass, exclusionReason } = require('./classify');
 const { viewFromRequest } = require('./http');
 
@@ -26,6 +27,7 @@ const BURST_LOCK = 89089031;
 const BURST_WINDOW = '2 hours';
 const PURGE_DAYS = 120;
 const CALL_REF = /^demo-view-task:[1-9][0-9]{0,17}$/;
+const PROSPECT_VIEW_REF = /^prospect-view:[1-9][0-9]{0,17}$/;
 
 let nowFn = () => new Date();
 
@@ -197,7 +199,48 @@ async function syncTask(client, proposalId, at) {
   );
 }
 
-async function recordView({ proposalId, source, at, method, ua, purpose, secPurpose, preview, cookie, ip }) {
+function prospectViewRef(id) {
+  const text = String(id);
+  if (!/^[1-9][0-9]{0,17}$/.test(text)) return null;
+  const ref = `prospect-view:${text}`;
+  return PROSPECT_VIEW_REF.test(ref) ? ref : null;
+}
+
+// A qualifying demo view is the only one that inserts a prototype_viewed
+// touch. Burst is retroactive: rows whose reason just became burst lose the
+// touch this module inserted for them. The ref is the log id. No address,
+// user-agent, or name is written. Flag off does not call this.
+async function syncQualifyingDemoTouch({ prospectId, at, logId, reason, burstLogIds }) {
+  if (!prospectViewsOn()) return;
+  const dropped = [];
+  for (const id of Array.isArray(burstLogIds) ? burstLogIds : []) {
+    const ref = prospectViewRef(id);
+    if (ref) dropped.push(ref);
+  }
+  if (dropped.length) {
+    await pool.query(
+      `DELETE FROM campaign_touches
+        WHERE type = 'prototype_viewed'
+          AND source = 'system'
+          AND external_ref = ANY($1::text[])`,
+      [dropped]
+    );
+  }
+  if (reason != null || !prospectId) return;
+  const ref = prospectViewRef(logId);
+  if (!ref || dropped.includes(ref)) return;
+  await pool.query(
+    `INSERT INTO campaign_touches (lead_id, type, channel, occurred_at, source, external_ref)
+     SELECT $1, 'prototype_viewed', 'prototype_link', $2, 'system', $3
+      WHERE NOT EXISTS (
+        SELECT 1 FROM campaign_touches
+         WHERE type = 'prototype_viewed' AND external_ref = $3
+      )`,
+    [prospectId, at, ref]
+  );
+}
+
+async function recordView({ proposalId, source, at, method, ua, purpose, secPurpose, preview, internalHeader, cookie, ip }) {
   if (source !== 'onepager' && source !== 'demo') {
     const err = new Error('source');
     err.code = 'source';
@@ -208,7 +251,7 @@ async function recordView({ proposalId, source, at, method, ua, purpose, secPurp
   const klass = uaClass(ua);
   const fp = fingerprint(salt, ip, klass);
 
-  return withClient('demo-view', async (client) => {
+  const recorded = await withClient('demo-view', async (client) => {
     await client.query('BEGIN');
     try {
       const meta = await client.query('SELECT sent_at FROM proposals WHERE id = $1', [proposalId]);
@@ -222,6 +265,8 @@ async function recordView({ proposalId, source, at, method, ua, purpose, secPurp
         purpose,
         secPurpose,
         preview,
+        // The header only suppresses, and only while the flag is on.
+        internalHeader: prospectViewsOn() && (internalHeader === true || internalHeader === '1'),
         cookie,
         sentAt: meta.rows[0].sent_at,
         at: when,
@@ -243,6 +288,7 @@ async function recordView({ proposalId, source, at, method, ua, purpose, secPurp
         [fp, when]
       );
       const affected = new Set();
+      const burstLogIds = [];
       let reason = preliminary;
       if (burst.rows[0] && burst.rows[0].n >= 3) {
         const updated = await client.query(
@@ -252,22 +298,37 @@ async function recordView({ proposalId, source, at, method, ua, purpose, secPurp
               AND excluded_reason IS NULL
               AND viewed_at <= $2::timestamptz
               AND viewed_at >= $2::timestamptz - interval '${BURST_WINDOW}'
-            RETURNING proposal_id`,
+            RETURNING id, proposal_id`,
           [fp, when]
         );
-        for (const row of updated.rows) affected.add(row.proposal_id);
+        for (const row of updated.rows) {
+          affected.add(row.proposal_id);
+          burstLogIds.push(row.id);
+        }
         if (reason == null) reason = 'burst';
       }
       if (reason == null) affected.add(proposalId);
       const ids = [...affected].sort((a, b) => a - b);
       for (const id of ids) await syncTask(client, id, when);
       await client.query('COMMIT');
-      return { id: inserted.rows[0].id, reason, ua_class: klass };
+      return { id: inserted.rows[0].id, reason, ua_class: klass, burstLogIds, viewedAt: when };
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       throw err;
     }
   });
+  // Burst is retroactive across /p and the demo page. Drop touches for rows
+  // whose reason just became burst, including when this view was a one-pager.
+  if (recorded && recorded.burstLogIds && recorded.burstLogIds.length) {
+    await syncQualifyingDemoTouch({
+      prospectId: null,
+      at: recorded.viewedAt,
+      logId: null,
+      reason: 'burst',
+      burstLogIds: recorded.burstLogIds,
+    });
+  }
+  return recorded;
 }
 
 async function recordOnepagerView(req, proposalId) {
@@ -289,7 +350,7 @@ async function recordDemoView({ prospectId, at, view }) {
   );
   if (!rows[0]) return null;
   const fields = view || {};
-  return recordView({
+  const recorded = await recordView({
     proposalId: rows[0].id,
     source: 'demo',
     at: at || nowFn(),
@@ -298,9 +359,29 @@ async function recordDemoView({ prospectId, at, view }) {
     purpose: fields.purpose || '',
     secPurpose: fields.secPurpose || '',
     preview: fields.preview === true,
+    internalHeader: fields.internalHeader === true,
     cookie: fields.cookie || '',
     ip: fields.ip || 'unknown',
   });
+  if (!recorded || !prospectViewsOn()) return recorded;
+  const viewedAt = recorded.viewedAt || (at || nowFn());
+  await syncQualifyingDemoTouch({
+    prospectId,
+    at: viewedAt,
+    logId: recorded.id,
+    reason: recorded.reason,
+    burstLogIds: recorded.burstLogIds,
+  });
+  return recorded;
+}
+
+// GET /demo/prototype/:token. Same classifier and fingerprint as /p/:slug.
+// Flag off returns before any read of the proposal, so the page writes nothing.
+async function recordDemoPageView(req, prospectId) {
+  if (!prospectViewsOn()) return null;
+  if (!prospectId) return null;
+  const view = viewFromRequest(req);
+  return recordDemoView({ prospectId, at: nowFn(), view });
 }
 
 function stamp(value) {
@@ -485,6 +566,7 @@ module.exports = {
   recordView,
   recordOnepagerView,
   recordDemoView,
+  recordDemoPageView,
   listOpenTasks,
   markDone,
   snoozeTask,

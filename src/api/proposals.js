@@ -12,6 +12,8 @@ const jobs    = require('../proposals/jobs');
 const pilotFlags = require('../pilot/flags');
 const pilotTokens = require('../pilot/tokens');
 const { prototypeForProposal } = require('../prototypes/store');
+const { prospectViewsOn } = require('../demo-view/flag');
+const { attachProspectViewFields } = require('../demo-view/counts');
 
 const LIST_COLS = `pr.id, pr.prospect_id, pr.version, pr.status, pr.slug, pr.to_email, pr.to_name, pr.subject,
   pr.cost_usd, pr.feedback_rating, pr.reviewed_at, pr.created_at, pr.updated_at, pr.sent_at, pr.followup1_due_at, pr.followup1_sent_at,
@@ -44,19 +46,26 @@ function proposalIdOrNull(raw) {
 }
 const withUrl = (p) => p && ({ ...p, onepager_url: send.onepagerUrl(p) });
 
+// Flag off returns the same objects the list has always returned.
+async function sendProposalList(res, rows) {
+  const proposals = rows.map(withUrl);
+  if (!prospectViewsOn()) return res.json({ proposals });
+  return res.json({ proposals: await attachProspectViewFields(proposals) });
+}
+
 // GET /api/proposals?view=review|out|replied|flagged|closed  or  ?prospect_id=
 router.get('/', async (req, res) => {
   try {
     if (req.query.prospect_id) {
       const { rows } = await pool.query(`SELECT ${LIST_COLS} FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
         WHERE pr.prospect_id = $1 AND p.archived_at IS NULL ORDER BY pr.version DESC`, [req.query.prospect_id]);
-      return res.json({ proposals: rows.map(withUrl) });
+      return sendProposalList(res, rows);
     }
     const where = VIEWS[req.query.view] || VIEWS.review;
     const order = req.query.view === 'out' ? 'pr.sent_at DESC' : req.query.view === 'review' ? 'p.fit_score DESC NULLS LAST, pr.created_at DESC' : 'pr.updated_at DESC';
     const { rows } = await pool.query(`SELECT ${LIST_COLS} FROM proposals pr JOIN prospects p ON p.id = pr.prospect_id
       WHERE ${where} AND p.archived_at IS NULL ORDER BY ${order} LIMIT 200`);
-    res.json({ proposals: rows.map(withUrl) });
+    return sendProposalList(res, rows);
   } catch (err) { fail(res, err); }
 });
 
@@ -281,7 +290,7 @@ router.get('/:id', async (req, res) => {
     // Preview shows the prototype line exactly as it would go out now.
     p.prototype_url = prototype && prototype.url && !prototype.expired ? prototype.url : null;
     const additions = { first: send.addedLines(p, 'first'), followup1: send.addedLines(p, 'followup1') };
-    res.json({
+    const body = {
       ...withUrl(p),
       versions: versions.rows,
       preview: {
@@ -291,7 +300,10 @@ router.get('/:id', async (req, res) => {
       },
       prototype,
       additions,
-    });
+    };
+    if (!prospectViewsOn()) return res.json(body);
+    const [withCounts] = await attachProspectViewFields([body]);
+    res.json(withCounts);
   } catch (err) { fail(res, err); }
 });
 

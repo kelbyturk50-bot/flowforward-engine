@@ -1705,7 +1705,7 @@ CREATE TABLE IF NOT EXISTS proposal_view_log (
   CONSTRAINT proposal_view_log_source_check CHECK (source IN ('onepager', 'demo')),
   CONSTRAINT proposal_view_log_reason_check CHECK (
     excluded_reason IS NULL OR excluded_reason IN (
-      'head', 'prefetch', 'preview', 'internal_cookie', 'bot_ua', 'within_2m', 'burst'
+      'head', 'prefetch', 'preview', 'internal_header', 'internal_cookie', 'bot_ua', 'within_2m', 'burst'
     )
   ),
   CONSTRAINT proposal_view_log_ua_class_check CHECK (
@@ -1719,6 +1719,37 @@ CREATE INDEX IF NOT EXISTS idx_proposal_view_log_proposal_viewed
   ON proposal_view_log (proposal_id, viewed_at);
 CREATE INDEX IF NOT EXISTS idx_proposal_view_log_viewed_at
   ON proposal_view_log (viewed_at);
+
+-- A database that already has the check from an earlier boot does not see
+-- the CREATE TABLE change. Replacing the check does not update view rows.
+-- Later boots skip this once the definition names internal_header.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'proposal_view_log_reason_check'
+       AND pg_get_constraintdef(oid) LIKE '%internal_header%'
+  ) THEN
+    ALTER TABLE proposal_view_log DROP CONSTRAINT IF EXISTS proposal_view_log_reason_check;
+    ALTER TABLE proposal_view_log ADD CONSTRAINT proposal_view_log_reason_check CHECK (
+      excluded_reason IS NULL OR excluded_reason IN (
+        'head', 'prefetch', 'preview', 'internal_header', 'internal_cookie',
+        'bot_ua', 'within_2m', 'burst'
+      )
+    );
+  END IF;
+END $$;
+
+-- Earliest instant the prospect-vs-team counts trust the log (F-008).
+-- Written once. A later boot does not change it. This does not update
+-- proposals, prospects, view rows, or touches.
+INSERT INTO app_settings (key, value, updated_at)
+VALUES (
+  'prospect_views_counting_since',
+  jsonb_build_object('at', NOW()),
+  NOW()
+)
+ON CONFLICT (key) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS proposal_view_tasks (
   id                BIGSERIAL PRIMARY KEY,

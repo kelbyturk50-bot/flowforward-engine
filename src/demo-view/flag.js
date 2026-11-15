@@ -6,11 +6,23 @@
 
 const TRUTHY = new Set(['true', '1', 'yes', 'on']);
 
-function demoViewTaskOn(env = process.env) {
-  if (!env || !Object.prototype.hasOwnProperty.call(env, 'FF_DEMO_VIEW_TASK')) return false;
-  const raw = env.FF_DEMO_VIEW_TASK;
+// One parser for the env-only view flags. A value counts only when it is a
+// string and, after trim and a lower-case fold, one of true, 1, yes, on.
+function envFlagOn(env, name) {
+  if (!env || !Object.prototype.hasOwnProperty.call(env, name)) return false;
+  const raw = env[name];
   if (typeof raw !== 'string') return false;
   return TRUTHY.has(raw.trim().toLowerCase());
 }
 
-module.exports = { TRUTHY, demoViewTaskOn };
+function demoViewTaskOn(env = process.env) {
+  return envFlagOn(env, 'FF_DEMO_VIEW_TASK');
+}
+
+// FF_PROSPECT_VIEWS is env-only, same parser as FF_DEMO_VIEW_TASK. Off
+// unless the value is a clear truthy token. Nothing in this process sets it.
+function prospectViewsOn(env = process.env) {
+  return envFlagOn(env, 'FF_PROSPECT_VIEWS');
+}
+
+module.exports = { TRUTHY, demoViewTaskOn, prospectViewsOn };

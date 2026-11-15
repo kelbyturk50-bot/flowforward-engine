@@ -22,6 +22,9 @@ const path = require('path');
 const { clientIp, consume } = require('../pilot/rate-limit');
 const { SENDER } = require('../proposals/config');
 const { lookupToken } = require('./store');
+const { INTERNAL_COOKIE } = require('../demo-view/classify');
+const { prospectViewsOn } = require('../demo-view/flag');
+const { recordDemoPageView } = require('../demo-view/store');
 const { fixAccent, contrastRatio, normalizeHex } = require('./color');
 const { tradeFor, serviceArea, AGENTS } = require('./content');
 const { icon, VAN } = require('./icons');
@@ -654,6 +657,10 @@ function stamp(res) {
 }
 
 router.get('/:token', async (req, res) => {
+  // Same cookie as /p/:slug. The HTML below does not read the query.
+  if (prospectViewsOn() && req.query && req.query.preview === '1') {
+    res.append('Set-Cookie', INTERNAL_COOKIE);
+  }
   const hit = consume(clientIp(req), 'prototype');
   stamp(res);
   if (hit.limited) {
@@ -663,6 +670,14 @@ router.get('/:token', async (req, res) => {
   try {
     const { status, row } = await lookupToken(req.params.token);
     if (status !== 200) return res.status(status).type('html').send(renderGone(status));
+    if (prospectViewsOn()) {
+      try {
+        await recordDemoPageView(req, row.prospect_id);
+      } catch (err) {
+        const code = err && typeof err.code === 'string' ? err.code : 'error';
+        console.error('[demo-view] log_failed', code);
+      }
+    }
     res.type('html').send(renderPrototype(row));
   } catch (err) {
     console.error('[prototype] page failed:', err && err.code);
