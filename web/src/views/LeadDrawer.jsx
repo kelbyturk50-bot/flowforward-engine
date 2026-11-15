@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useJobs } from '../jobs';
 import { Drawer, FitBadge, STAGES, Stars, ErrorNote, money, money2, relDate, isOverdue, timeAgo, addDays, telHref, mapsHref, statusLabel, toast, ProposalChip } from '../ui';
+import ProspectViews from './ProspectViews';
+import { hasProspectViewFields } from './prospect-views.js';
 
 const ACT_LABEL = { note: 'Note', call: 'Call', email: 'Email', meeting: 'Meeting', stage_change: 'Stage' };
 
@@ -234,6 +236,7 @@ function ProposalBlock({ lead, openProposal }) {
           <span className="grow">{current.subject ? `“${current.subject}”` : `Version ${current.version}`}
             <span className="muted small"> · v{current.version} · {money2(current.cost_usd)}{current.sent_at ? ` · sent ${timeAgo(current.sent_at)}` : ''}</span></span>
           <button className="btn btn-sm" onClick={() => openProposal(current.id)}>Open</button>
+          {hasProspectViewFields(current) ? <ProspectViews proposal={current} /> : null}
         </div>
       ) : (
         <>

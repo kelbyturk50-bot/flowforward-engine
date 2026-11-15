@@ -13,6 +13,16 @@ export const AGENT_LABELS = {
 };
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
+
+// Only the Open control is a team preview. Copy, the visible URL, the demo
+// chat URL, and the server link stay without this parameter.
+export function previewPrototypeHref(url) {
+  const raw = String(url ?? '');
+  const hashAt = raw.indexOf('#');
+  const hash = hashAt === -1 ? '' : raw.slice(hashAt);
+  const before = hashAt === -1 ? raw : raw.slice(0, hashAt);
+  return `${before}${before.includes('?') ? '&' : '?'}preview=1${hash}`;
+}
 const LINK_STOPS = 'The current link will stop working.';
 const TURN_OFF = 'The prototype and chat link will stop working for anyone who has them.';
 
@@ -115,7 +125,7 @@ export default function PrototypeCard({ prospectId, prototype, onChange }) {
       )}
       {proto.url && !proto.expired && (
         <div className="link-row proto-link">
-          <a className="btn" href={proto.url} target="_blank" rel="noreferrer">Open prototype</a>
+          <a className="btn" href={previewPrototypeHref(proto.url)} target="_blank" rel="noreferrer">Open prototype</a>
           <button className="btn btn-quiet" onClick={copy}>Copy link</button>
           <code className="proto-url" title={proto.url}>{proto.url}</code>
         </div>

@@ -3,6 +3,8 @@ import { api } from '../api';
 import { PreviewDemoLink } from '../demo/DemoLinks';
 import { useAsync, ErrorNote, FitBadge, FollowupHaltNotice, ProposalChip, money2, proposalStatusCopy, relDate, timeAgo, toast } from '../ui';
 import { useJobs, elapsed } from '../jobs';
+import ProspectViews from './ProspectViews';
+import { hasProspectViewFields } from './prospect-views.js';
 
 const TABS = [
   { id: 'review',  label: 'To review', note: 'Drafts the bot wrote. Read, edit, then approve and send.' },
@@ -155,7 +157,13 @@ export default function Proposals({ version, bump, openProposal }) {
                       {p.to_email ? <><span className="sep" />{p.to_email}</> : <><span className="sep" /><span className="warn-text">No email found</span></>}
                     </span>
                     {p.subject && <span className="prop-subject">“{p.subject}”</span>}
-                    {tab !== 'review' && <span className="prop-seq">{sequenceLine(p)}{p.views ? ` · one-pager opened ${p.views}×` : ''}</span>}
+                    {tab !== 'review' && (
+                      <span className="prop-seq">
+                        {sequenceLine(p)}
+                        {!hasProspectViewFields(p) && p.views ? ` · one-pager opened ${p.views}×` : ''}
+                      </span>
+                    )}
+                    {hasProspectViewFields(p) ? <ProspectViews proposal={p} /> : null}
                   </span>
                   <span className="prop-side">
                     {activeFor(p.prospect_id) && <span className="pchip pchip-working"><span className="spinner spinner-sm" aria-hidden="true" />Rewriting…</span>}
