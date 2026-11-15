@@ -27,6 +27,10 @@ const { withChatTx, pool } = require('./tx');
 const { validate } = require('./validator');
 const { bucketIp, ipHash } = require('./ip');
 const { recordDemoView } = require('../demo-view/store');
+const { prospectViewsOn } = require('../demo-view/flag');
+// Flag on logs through this alias and returns before the insert below.
+// Flag off still inserts, then calls recordDemoView.
+const logDemoView = recordDemoView;
 const { defaultLiveGate, flags } = require('./wiring');
 const counters = require('./counters');
 
@@ -101,6 +105,14 @@ function createChatEngine(opts = {}) {
     try {
       if (!(await flags('FF_CAMPAIGNS'))) return;
       if (!String(business.company || '').startsWith('TEST:')) return;
+      if (type === 'prototype_viewed' && prospectViewsOn()) {
+        try {
+          await logDemoView({ prospectId: business.prospectId, at, view });
+        } catch (err) {
+          logErr('demo_view_log_failed', err);
+        }
+        return;
+      }
       const external = `TEST:chatdemo:${sessionUuid}`;
       if (type === 'prototype_viewed') {
         const existing = await pool.query(

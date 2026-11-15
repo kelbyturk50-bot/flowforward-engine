@@ -10,6 +10,7 @@ const REASONS = Object.freeze([
   'head',
   'prefetch',
   'preview',
+  'internal_header',
   'internal_cookie',
   'bot_ua',
   'within_2m',
@@ -49,12 +50,17 @@ function isPrefetch(purpose, secPurpose) {
   return secText.includes('prefetch') || secText.includes('prerender');
 }
 
-// First match wins. Burst is applied after the row is stored, and only
-// replaces a null reason. The window is BURST_WINDOW in store.js.
-function exclusionReason({ method, ua, purpose, secPurpose, preview, cookie, sentAt, at }) {
+// First match wins. The internal header sits immediately after preview.
+// It can only add an exclusion. A later rule never runs once it matches,
+// and it never clears head, prefetch, or preview. Burst is applied after
+// the row is stored, and only replaces a null reason. The window is
+// BURST_WINDOW in store.js. Callers pass internalHeader only while
+// FF_PROSPECT_VIEWS is on; the check itself is the exact value 1.
+function exclusionReason({ method, ua, purpose, secPurpose, preview, internalHeader, cookie, sentAt, at }) {
   if (String(method || 'GET').toUpperCase() === 'HEAD') return 'head';
   if (isPrefetch(purpose, secPurpose)) return 'prefetch';
   if (preview === true || preview === '1') return 'preview';
+  if (internalHeader === true || internalHeader === '1') return 'internal_header';
   if (hasInternalCookie(cookie)) return 'internal_cookie';
   if (BOT_UA.test(typeof ua === 'string' ? ua : '')) return 'bot_ua';
   if (sentAt != null) {

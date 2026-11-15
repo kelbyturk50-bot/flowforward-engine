@@ -18,6 +18,9 @@ function viewFromRequest(req) {
     secPurpose: header(req, 'sec-purpose'),
     cookie: header(req, 'cookie'),
     preview: Boolean(query && query.preview === '1'),
+    // Exact "1" only. The raw header is not stored. recordView applies it
+    // only while FF_PROSPECT_VIEWS is on.
+    internalHeader: header(req, 'x-ff-internal') === '1',
     ip: clientIp(req),
   };
 }

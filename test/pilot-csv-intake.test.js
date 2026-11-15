@@ -940,6 +940,8 @@ describe('pilot csv estimate intake', () => {
       'DROP TRIGGER IF EXISTS pilot_open_estimates_updated_at ON pilot_open_estimates;',
       'DROP TRIGGER IF EXISTS inbox_items_updated_at ON inbox_items;',
       'DROP TRIGGER IF EXISTS campaign_touches_default_channel ON campaign_touches;',
+      // F-008. Replaces the view-log reason check so internal_header is allowed.
+      'ALTER TABLE proposal_view_log DROP CONSTRAINT IF EXISTS proposal_view_log_reason_check;',
     ];
     const dropKind = /\bDROP\s+(?:CONSTRAINT|COLUMN|TRIGGER|TABLE|INDEX)\b/i;
     // One left-to-right pass: a string literal is kept, a block or line
