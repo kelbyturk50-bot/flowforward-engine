@@ -335,6 +335,20 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
 .prop-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
 .prop-subject { font-size: .93rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .prop-seq { font-size: .86rem; color: var(--sky); }
+.prospect-views {
+  display: flex; flex-direction: column; align-items: flex-start; gap: .12rem;
+  min-width: 0; max-width: 100%; flex: 1 1 100%; white-space: normal;
+}
+.prospect-views-main,
+.prospect-views-last,
+.prospect-views-team,
+.prospect-views-since {
+  max-width: 100%; overflow-wrap: break-word; white-space: normal;
+}
+.prospect-views-main { color: var(--ink); font-weight: 600; font-size: 1rem; line-height: 1.35; }
+.prospect-views-team,
+.prospect-views-since { color: var(--ink-2); font-size: .95rem; font-weight: 500; line-height: 1.4; }
+.sequence .prospect-views { margin-top: .45rem; }
 .prop-side { display: flex; flex-direction: column; align-items: flex-end; gap: .3rem; flex: none; }
 .warn-text { color: var(--rust); }
 .pchip { display: inline-block; padding: .12rem .55rem; border-radius: 999px; font-size: .8rem; font-weight: 600; white-space: nowrap; background: var(--line-2); color: var(--ink-2); }

@@ -6,7 +6,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { api } from '../api';
 import { installApiDefaults } from '../test/defaults.js';
-import PrototypeCard from './PrototypeCard';
+import PrototypeCard, { previewPrototypeHref } from './PrototypeCard';
 
 const live = {
   id: 4, url: 'http://127.0.0.1:3000/demo/prototype/' + 'a'.repeat(43), agent_type: 'estimate_followup',
@@ -23,7 +23,7 @@ describe('PrototypeCard', () => {
     render(<PrototypeCard prospectId={12} prototype={null} />);
     await userEvent.click(screen.getByRole('button', { name: 'Make a prototype' }));
     expect(api.createPrototype).toHaveBeenCalledWith(12);
-    expect(await screen.findByRole('link', { name: 'Open prototype' })).toHaveAttribute('href', live.url);
+    expect(await screen.findByRole('link', { name: 'Open prototype' })).toHaveAttribute('href', previewPrototypeHref(live.url));
   });
 
   it('saves hand-entered colors and changes the featured agent', async () => {
@@ -87,6 +87,35 @@ describe('PrototypeCard', () => {
     expect(api.createPrototype).toHaveBeenCalledWith(12, true);
     const css = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../styles.css'), 'utf8');
     expect(css).toMatch(/\.demo-link-copy\s*\{[^}]*min-height:\s*44px/);
+  });
+
+  it('adds preview=1 only on Open prototype', async () => {
+    const token = 'c'.repeat(43);
+    const plain = `http://127.0.0.1:3000/demo/prototype/${token}`;
+    const queried = `${plain}?fresh=1`;
+    const hashed = `${plain}#shop`;
+    const both = `${queried}#shop`;
+    expect(previewPrototypeHref(plain)).toBe(`${plain}?preview=1`);
+    expect(previewPrototypeHref(queried)).toBe(`${queried}&preview=1`);
+    expect(previewPrototypeHref(hashed)).toBe(`${plain}?preview=1#shop`);
+    expect(previewPrototypeHref(both)).toBe(`${queried}&preview=1#shop`);
+
+    const writeText = vi.fn().mockResolvedValue();
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    render(<PrototypeCard prospectId={12} prototype={{ ...live, url: queried }} />);
+    const open = screen.getByRole('link', { name: 'Open prototype' });
+    expect(open).toHaveAttribute('href', `${queried}&preview=1`);
+    expect(screen.getByText(queried)).toBeInTheDocument();
+    expect(open).not.toHaveTextContent('preview=1');
+    await userEvent.click(screen.getByRole('button', { name: 'Copy link' }));
+    expect(writeText).toHaveBeenCalledWith(queried);
+    const chat = `${window.location.origin}/demo/prototype/${token}`;
+    expect(screen.getByText(chat)).toBeInTheDocument();
+    expect(screen.getByText(chat)).not.toHaveTextContent('preview=1');
+
+    const css = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../styles.css'), 'utf8');
+    expect(css).toMatch(/\.prospect-views-team,[\s\S]*font-size:\s*\.95rem/);
+    expect(css).toMatch(/@media \(max-width: 860px\)[\s\S]*\.btn, \.btn-sm \{ min-height: 44px; \}/);
   });
 
   it('asks before replacing a live link', async () => {

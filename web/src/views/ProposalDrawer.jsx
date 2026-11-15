@@ -5,6 +5,8 @@ import { TryLiveDemoLink } from '../demo/DemoLinks';
 import { Drawer, FitBadge, ProposalChip, ErrorNote, emailChecks, money2, PROPOSAL_STATUS, proposalStatusCopy, relDate, timeAgo, toast, dismissToast, Stars } from '../ui';
 import { useJobs, elapsed } from '../jobs';
 import PrototypeCard from './PrototypeCard';
+import ProspectViews from './ProspectViews';
+import { hasProspectViewFields } from './prospect-views.js';
 
 function guardedSend(p) {
   const reason = String(p.stop_reason || '').trim().toLowerCase();
@@ -181,7 +183,9 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
       {regen && <Regenerate p={p} done={() => setRegen(false)} />}
       {busy && !['save', 'send', 'mark-sent'].includes(busy) && <p className="muted" role="status">Working…</p>}
 
-      {p.status === 'sent' || p.sent_at ? <Sequence p={p} /> : null}
+      {p.status === 'sent' || p.sent_at
+        ? <Sequence p={p} />
+        : hasProspectViewFields(p) ? <ProspectViews proposal={p} /> : null}
 
       {!['discarded', 'superseded'].includes(p.status) && (
         <PrototypeCard prospectId={p.prospect_id} prototype={p.prototype} onChange={bump} />
@@ -453,7 +457,9 @@ function Sequence({ p }) {
         {p.followup2 ? step('Follow-up 2', p.followup2_due_at, p.followup2_sent_at) : null}
         {p.replied_at && <li className="done hot"><span>Replied</span><span className="muted">{timeAgo(p.replied_at)}</span></li>}
       </ol>
-      <p className="muted small">One-pager opened {p.views || 0}×{p.last_viewed_at ? `, last ${timeAgo(p.last_viewed_at)}` : ''}. Email scanners can trigger a view, so treat this as a hint.</p>
+      {hasProspectViewFields(p)
+        ? <ProspectViews proposal={p} />
+        : <p className="muted small">One-pager opened {p.views || 0}×{p.last_viewed_at ? `, last ${timeAgo(p.last_viewed_at)}` : ''}. Email scanners can trigger a view, so treat this as a hint.</p>}
     </section>
   );
 }
