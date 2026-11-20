@@ -32,6 +32,7 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
   const [listError, setListError] = useState(null);
   const [tick, setTick] = useState(0);
   const [, setUndoTick] = useState(0);
+  const [openId, setOpenId] = useState(null);
   const [saving, setSaving] = useState(() => new Set());
   const [rowErrors, setRowErrors] = useState(() => new Map());
   const knownOn = useRef(false);
@@ -39,7 +40,14 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
   const pendingRef = useRef(new Map());
   const savingRef = useRef(saving);
   const commitRef = useRef(async () => {});
+  const clockRef = useRef(null);
+  const openRowRef = useRef(null);
   savingRef.current = saving;
+
+  function scrollOpenRow() {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    try { openRowRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch { /* jsdom */ }
+  }
 
   useEffect(() => {
     onActiveChange?.(phase === 'ready' || phase === 'error');
@@ -127,20 +135,40 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
     function flushAll() {
       for (const id of [...pending.keys()]) flushOne(id);
     }
-    function onHide() {
+    function onVis() {
       if (document.visibilityState === 'hidden') flushAll();
+      else scrollOpenRow();
     }
     function onPageHide() { flushAll(); }
+    function onFocus() { scrollOpenRow(); }
     alive.current = true;
-    document.addEventListener('visibilitychange', onHide);
+    document.addEventListener('visibilitychange', onVis);
     window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('focus', onFocus);
     return () => {
-      document.removeEventListener('visibilitychange', onHide);
+      document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('focus', onFocus);
+      if (clockRef.current) {
+        clearInterval(clockRef.current);
+        clockRef.current = null;
+      }
       alive.current = false;
       flushAll();
     };
   }, []);
+
+  function startClock() {
+    if (clockRef.current) return;
+    clockRef.current = setInterval(() => {
+      if (pendingRef.current.size === 0) {
+        clearInterval(clockRef.current);
+        clockRef.current = null;
+        return;
+      }
+      setUndoTick((n) => n + 1);
+    }, 1000);
+  }
 
   function arm(item, outcome) {
     const id = String(item?.prospect_id ?? '');
@@ -159,7 +187,9 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
       outcome,
       kind: item.kind === 'walk_in' ? 'walk_in' : 'call',
       timer,
+      deadline: Date.now() + UNDO_MS,
     });
+    startClock();
     setUndoTick((n) => n + 1);
   }
 
@@ -204,7 +234,7 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
   return (
     <section className="panel call-list-panel" aria-labelledby="call-list-heading">
       <h2 id="call-list-heading">Calls due / Walk-ins</h2>
-      <p className="panel-note">A call opens your phone. A map opens Google Maps. Nothing is sent from here.</p>
+      <p className="panel-note">Taps open your phone or Maps. Nothing is sent from here.</p>
       {listError && <ErrorNote error={listError} onRetry={() => setTick((n) => n + 1)} />}
       {rows.length === 0 && !listError && <p className="empty">{EMPTY_CALL_LIST}</p>}
       {rows.length > 0 && (
@@ -217,6 +247,9 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
               pending={pendingRef.current.get(String(item.prospect_id)) || null}
               saving={saving.has(String(item.prospect_id))}
               error={rowErrors.get(String(item.prospect_id)) || ''}
+              open={openId === String(item.prospect_id)}
+              rowRef={openId === String(item.prospect_id) ? openRowRef : null}
+              onReveal={() => setOpenId(String(item.prospect_id))}
               onArm={arm}
               onUndo={undo}
               ordinary={ordinary}
@@ -237,8 +270,15 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
   );
 }
 
-function CallListRow({ item, openLead, pending, saving, error, onArm, onUndo, ordinary, caution }) {
+function undoSeconds(deadline) {
+  const remain = deadline - Date.now();
+  if (remain <= 0) return 1;
+  return Math.min(8, Math.ceil(remain / 1000));
+}
+
+function CallListRow({ item, openLead, pending, saving, error, open, rowRef, onReveal, onArm, onUndo, ordinary, caution }) {
   const company = item.company || 'Lead';
+  const [scriptOpen, setScriptOpen] = useState(false);
   const undoRef = useRef(null);
   useEffect(() => {
     if (!pending) return;
@@ -258,11 +298,11 @@ function CallListRow({ item, openLead, pending, saving, error, onArm, onUndo, or
     const label = CALL_OUTCOME_LABELS[pending.outcome] || 'Outcome';
     return (
       <li className="call-list-card" ref={undoRef}>
-        <div className="call-list-undo" role="status">
+        <div className="call-list-undo">
           <p className="call-list-company-text">{company}</p>
-          <p>{`${label}. Undo to cancel.`}</p>
-          <button type="button" className="btn" onClick={() => onUndo(pending.id)}>
-            {`Undo ${label}`}
+          <p role="status">{`${label}. Undo to cancel.`}</p>
+          <button type="button" className="btn" aria-live="off" onClick={() => onUndo(pending.id)}>
+            {`Undo ${label} (${undoSeconds(pending.deadline)})`}
           </button>
         </div>
       </li>
@@ -275,10 +315,10 @@ function CallListRow({ item, openLead, pending, saving, error, onArm, onUndo, or
   const voicemail = rowVoicemail(item);
   const ask = rowAsk(item);
   const extraLabel = voicemail && ask ? 'Voicemail and the ask' : voicemail ? 'Voicemail' : ask ? 'The ask' : '';
-  const phone = typeof item.phone === 'string' ? item.phone.trim() : '';
+  const mapPrimary = !tel && Boolean(maps);
 
   return (
-    <li className="call-list-card">
+    <li className={`call-list-card${open ? ' is-open' : ''}`} ref={rowRef || undefined}>
       <div className="call-list-top">
         <button type="button" className="call-list-company" onClick={() => openLead(Number(item.prospect_id))}>
           {company}
@@ -288,28 +328,49 @@ function CallListRow({ item, openLead, pending, saving, error, onArm, onUndo, or
         </span>
       </div>
       {item.reason ? <p className="call-list-reason">{item.reason}</p> : null}
-      {tel && (
-        <a className="btn call-list-action" href={tel}>
-          {phone ? `Call ${phone}` : 'Call'}
-        </a>
-      )}
-      {maps && (
-        <a className="btn btn-quiet call-list-action" href={maps} target="_blank" rel="noreferrer">
-          Map
-        </a>
-      )}
-      {script ? <p className="call-list-script">{script}</p> : null}
+      {script ? (
+        <button
+          type="button"
+          className={`call-list-script${scriptOpen ? ' is-open' : ''}`}
+          aria-expanded={scriptOpen ? 'true' : 'false'}
+          onClick={() => setScriptOpen((value) => !value)}
+        >
+          {script}
+        </button>
+      ) : null}
+      <div className="call-list-actions">
+        {tel && (
+          <a className="btn call-list-go is-primary" href={tel} aria-label={`Call ${company}`} onClick={onReveal}>
+            Call
+          </a>
+        )}
+        {maps && (
+          <a
+            className={`btn call-list-go${mapPrimary ? ' is-primary' : ' btn-quiet is-secondary'}`}
+            href={maps}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={`Map for ${company}`}
+            onClick={onReveal}
+          >
+            Map
+          </a>
+        )}
+        <button type="button" className="btn btn-quiet call-list-go is-secondary" aria-label={`Log ${company}`} onClick={onReveal}>
+          Log
+        </button>
+      </div>
       {item.backNote ? <p className="call-list-back">{item.backNote}</p> : null}
-      {extraLabel && (
+      {open && extraLabel && (
         <details className="call-list-extra">
           <summary className="call-list-fold">{extraLabel}</summary>
           {voicemail ? <p>{voicemail}</p> : null}
           {ask ? <p>{ask}</p> : null}
         </details>
       )}
-      {saving && <p className="call-list-saving">Saving…</p>}
-      {error && <p className="call-list-row-error" role="alert">{error}</p>}
-      {!saving && (
+      {open && saving && <p className="call-list-saving">Saving…</p>}
+      {open && error && <p className="call-list-row-error" role="alert">{error}</p>}
+      {open && !saving && (
         <div className="call-list-outcomes">
           {ordinary.map((outcome) => (
             <button

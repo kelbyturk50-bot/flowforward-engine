@@ -161,30 +161,45 @@ describe('call list rows', () => {
     const openLead = vi.fn();
     renderToday(openLead);
     const region = await screen.findByRole('region', { name: 'Calls due / Walk-ins' });
-    expect(within(region).getByText(/Nothing is sent from here/)).toBeInTheDocument();
+    expect(within(region).getByText('Taps open your phone or Maps. Nothing is sent from here.')).toBeInTheDocument();
     expect(within(region).getByText(CALL_REASONS.demo_view)).toBeInTheDocument();
-    expect(within(region).getByText(SCOUT_COPY.callEmailed)).toBeInTheDocument();
-    expect(within(region).getByText('Call')).toBeInTheDocument();
-    expect(within(region).getByText('Walk-in')).toBeInTheDocument();
-    const tel = within(region).getByRole('link', { name: 'Call (801) 555-0142' });
+    const script = within(region).getByRole('button', { name: SCOUT_COPY.callEmailed });
+    expect(script).toHaveAttribute('aria-expanded', 'false');
+    expect(script.className).not.toContain('is-open');
+    fireEvent.click(script);
+    expect(script).toHaveAttribute('aria-expanded', 'true');
+    expect(script.className).toContain('is-open');
+    expect(within(region).getByText('Call', { selector: '.call-list-badge' })).toBeInTheDocument();
+    expect(within(region).getByText('Walk-in', { selector: '.call-list-badge' })).toBeInTheDocument();
+    expect(within(region).queryByRole('button', { name: 'No answer' })).not.toBeInTheDocument();
+    const tel = within(region).getByRole('link', { name: 'Call TEST: Wasatch Heating' });
     expect(tel).toHaveAttribute('href', 'tel:8015550142');
+    expect(tel).toHaveClass('is-primary');
     expect(tel).not.toHaveAttribute('target');
-    const maps = within(region).getAllByRole('link', { name: 'Map' });
+    const maps = within(region).getAllByRole('link', { name: /Map for / });
     expect(maps[0]).toHaveAttribute('href', callRow.maps_url);
     expect(maps[0]).toHaveAttribute('target', '_blank');
     expect(maps[0]).toHaveAttribute('rel', 'noreferrer');
+    expect(maps[0]).toHaveClass('is-secondary');
     expect(maps[1]).toHaveAttribute('href', walkRow.maps_url);
-    expect(within(region).queryByRole('link', { name: 'Call (801) 555-0199' })).not.toBeInTheDocument();
+    expect(maps[1]).toHaveClass('is-primary');
+    expect(within(region).queryByRole('link', { name: 'Call TEST: Eagle Mountain Plumbing' })).not.toBeInTheDocument();
     expect(within(region).getByText(SCOUT_COPY.walkIn)).toBeInTheDocument();
     expect(within(region).getByText(CALL_REASONS.listedWalkIn)).toBeInTheDocument();
+    expect(within(region).queryByText('Voicemail and the ask')).not.toBeInTheDocument();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
     const callDetails = within(region).getByText('Voicemail and the ask').closest('details');
     expect(callDetails).not.toHaveAttribute('open');
     expect(within(callDetails).getByText(SCOUT_COPY.voicemail)).toBeInTheDocument();
     expect(within(callDetails).getByText(SCOUT_COPY.ask)).toBeInTheDocument();
+    expect(within(region).getByRole('button', { name: 'No answer' })).toBeInTheDocument();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Eagle Mountain Plumbing' }));
+    expect(within(region).queryByText('Voicemail and the ask')).not.toBeInTheDocument();
     const walkDetails = within(region).getByText('The ask').closest('details');
     expect(within(walkDetails).queryByText(SCOUT_COPY.voicemail)).not.toBeInTheDocument();
     expect(walkDetails.querySelectorAll('p')).toHaveLength(1);
     expect(within(walkDetails).getByText(SCOUT_COPY.ask)).toBeInTheDocument();
+    expect(within(region).getAllByRole('button', { name: 'No answer' })).toHaveLength(1);
     expect(walkRow.voicemail_script).toBeNull();
     expect(walkRow.emailed).toBe(false);
     expect(walkRow.open_task_id).toBeNull();
@@ -199,6 +214,7 @@ describe('call list rows', () => {
     api.todayCallList.mockResolvedValue(enabledCallList([{ ...callRow, ask: '  ' }]));
     renderToday();
     const region = await screen.findByRole('region', { name: 'Calls due / Walk-ins' });
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
     const details = within(region).getByText('Voicemail', { selector: 'summary' }).closest('details');
     expect(within(details).getByText(SCOUT_COPY.voicemail)).toBeInTheDocument();
     expect(within(details).queryByText(SCOUT_COPY.ask)).not.toBeInTheDocument();
@@ -261,17 +277,22 @@ describe('call list outcomes', () => {
   it('waits 8 seconds, Undo sends nothing, and the timeout sends one POST', async () => {
     api.recordCallOutcome.mockResolvedValue({ activity_id: 3, removed: false, back_on: null });
     const region = await ready();
-    fireEvent.click(within(region).getAllByRole('button', { name: 'No answer' })[0]);
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'No answer' }));
     expect(within(region).getByRole('status')).toHaveTextContent('No answer. Undo to cancel.');
-    expect(within(region).getByRole('button', { name: 'Undo No answer' })).toBeInTheDocument();
-    await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS - 1); });
+    expect(within(region).getByRole('status')).not.toHaveTextContent('(8)');
+    expect(within(region).getByRole('button', { name: 'Undo No answer (8)' })).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(within(region).getByRole('button', { name: 'Undo No answer (7)' })).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(within(region).getByRole('button', { name: 'Undo No answer (1)' })).toBeInTheDocument();
     expect(api.recordCallOutcome).not.toHaveBeenCalled();
-    fireEvent.click(within(region).getByRole('button', { name: 'Undo No answer' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Undo No answer (1)' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     expect(api.recordCallOutcome).not.toHaveBeenCalled();
-    expect(within(region).getAllByRole('button', { name: 'No answer' })[0]).toBeInTheDocument();
+    expect(within(region).getByRole('button', { name: 'No answer' })).toBeInTheDocument();
 
-    fireEvent.click(within(region).getAllByRole('button', { name: 'No answer' })[0]);
+    fireEvent.click(within(region).getByRole('button', { name: 'No answer' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
     expect(api.recordCallOutcome).toHaveBeenCalledWith('41', { outcome: 'no_answer', kind: 'call' });
@@ -280,8 +301,9 @@ describe('call list outcomes', () => {
   it('sends each outcome once, with the row kind, after 8 seconds', async () => {
     api.recordCallOutcome.mockResolvedValue({ activity_id: 4, removed: false, back_on: null });
     const region = await ready();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
     for (const outcome of CALL_OUTCOMES) {
-      fireEvent.click(within(region).getAllByRole('button', { name: CALL_OUTCOME_LABELS[outcome] })[0]);
+      fireEvent.click(within(region).getByRole('button', { name: CALL_OUTCOME_LABELS[outcome] }));
       await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     }
     expect(api.recordCallOutcome).toHaveBeenCalledTimes(CALL_OUTCOMES.length);
@@ -289,7 +311,8 @@ describe('call list outcomes', () => {
       expect(api.recordCallOutcome).toHaveBeenNthCalledWith(index + 1, '41', { outcome, kind: 'call' });
     });
     api.recordCallOutcome.mockClear();
-    fireEvent.click(within(region).getAllByRole('button', { name: 'Voicemail' })[1]);
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Eagle Mountain Plumbing' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Voicemail' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
     expect(api.recordCallOutcome).toHaveBeenCalledWith('42', { outcome: 'voicemail', kind: 'walk_in' });
@@ -298,7 +321,8 @@ describe('call list outcomes', () => {
   it('ignores a second tap and still sends one POST', async () => {
     api.recordCallOutcome.mockResolvedValue({ activity_id: 5, removed: false, back_on: null });
     const region = await ready();
-    const button = within(region).getAllByRole('button', { name: 'Talked' })[0];
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    const button = within(region).getByRole('button', { name: 'Talked' });
     fireEvent.click(button);
     fireEvent.click(button);
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
@@ -310,7 +334,8 @@ describe('call list outcomes', () => {
     api.recordCallOutcome.mockResolvedValue({ activity_id: 6, removed: true, back_on: null });
     const first = renderToday();
     await settle();
-    fireEvent.click(screen.getAllByRole('button', { name: 'Audit booked' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Audit booked' }));
     first.unmount();
     expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
     expect(api.recordCallOutcome).toHaveBeenCalledWith('41', { outcome: 'audit_booked', kind: 'call' });
@@ -318,7 +343,8 @@ describe('call list outcomes', () => {
     api.recordCallOutcome.mockClear();
     const second = renderToday();
     await settle();
-    fireEvent.click(screen.getAllByRole('button', { name: 'Not interested' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Not interested' }));
     await act(async () => { window.dispatchEvent(new Event('pagehide')); });
     expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
     expect(api.recordCallOutcome).toHaveBeenCalledWith('41', { outcome: 'not_interested', kind: 'call' });
@@ -330,7 +356,8 @@ describe('call list outcomes', () => {
     api.recordCallOutcome.mockClear();
     const third = renderToday();
     await settle();
-    fireEvent.click(screen.getAllByRole('button', { name: 'Do not contact' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Do not contact' }));
     const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
     await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
     expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
@@ -344,25 +371,28 @@ describe('call list outcomes', () => {
   it('restores the row and shows an error when the POST fails', async () => {
     api.recordCallOutcome.mockRejectedValue(Object.assign(new Error('Something went wrong.'), { status: 500 }));
     const region = await ready();
-    fireEvent.click(within(region).getAllByRole('button', { name: 'No answer' })[0]);
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'No answer' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     await settle();
     expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
     expect(within(region).getByRole('alert')).toHaveTextContent('Something went wrong.');
     expect(within(region).getByText('TEST: Wasatch Heating')).toBeInTheDocument();
-    expect(within(region).getAllByRole('button', { name: 'No answer' })[0]).toBeInTheDocument();
+    expect(within(region).getByRole('button', { name: 'No answer' })).toBeInTheDocument();
   });
 
   it('drops a removed row and shows when a lead comes back', async () => {
     api.recordCallOutcome.mockResolvedValue({ activity_id: 8, removed: true, back_on: null });
     const region = await ready();
-    fireEvent.click(within(region).getAllByRole('button', { name: 'Talked' })[0]);
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Talked' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     await settle();
     expect(within(region).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
     expect(within(region).getByText('TEST: Eagle Mountain Plumbing')).toBeInTheDocument();
 
     api.recordCallOutcome.mockResolvedValue({ activity_id: 9, removed: true, back_on: '2026-11-23' });
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Eagle Mountain Plumbing' }));
     fireEvent.click(within(region).getByRole('button', { name: 'Voicemail' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     await settle();
@@ -375,6 +405,7 @@ describe('call list outcomes', () => {
     const again = renderToday();
     await settle();
     const next = again.container.querySelector('.call-list-panel');
+    fireEvent.click(within(next).getByRole('button', { name: 'Log TEST: American Fork Air' }));
     fireEvent.click(within(next).getByRole('button', { name: 'No answer' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     await settle();
@@ -415,6 +446,14 @@ describe('call list on Today replaces the other call surfaces', () => {
     });
     expect(screen.getByRole('heading', { name: 'Follow-ups due' })).toBeInTheDocument();
     expect(callListIsOnlySurface(true)).toBe(true);
+
+    const scroll = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scroll;
+    fireEvent.click(within(region).getByRole('link', { name: 'Call TEST: Wasatch Heating' }));
+    expect(within(region).getByRole('button', { name: 'Do not contact' })).toBeInTheDocument();
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('focus'));
+    expect(scroll).toHaveBeenCalled();
     expect(callListIsOnlySurface(false)).toBe(false);
   });
 });
@@ -567,16 +606,19 @@ describe('call list helpers and tokens', () => {
     expect(SCOUT_COPY.voicemail).not.toMatch(/tomorrow/i);
   });
 
-  it('keeps outcome controls at 44px, stacks them on a phone, and uses River Valley tokens', () => {
+  it('keeps outcome controls at 44px in a two-column grid and uses River Valley tokens', () => {
     const block = css.slice(css.indexOf('/* call-list:start */'), css.indexOf('/* call-list:end */'));
     expect(block).toContain('min-height: 44px');
     expect(block).toContain('min-width: 44px');
-    expect(block).toContain('flex-direction: column');
+    expect(block).toContain('grid-template-columns: 1fr 1fr');
+    expect(block).toContain('-webkit-line-clamp: 2');
     expect(block).toContain('.call-list-hold');
+    expect(block).toContain('grid-column: 1 / -1');
     expect(block).toContain('border-top: 1px solid var(--line)');
-    expect(block).toContain('background: var(--rust-wash)');
-    expect(block).toContain('color: var(--ink)');
+    expect(block).toContain('background: var(--ochre-wash)');
+    expect(block).toContain('color: var(--rust)');
     expect(block).toContain('border-color: var(--rust)');
+    expect(block).not.toContain('background: var(--rust-wash)');
     expect(block).not.toMatch(/#[0-9A-Fa-f]{3,8}/);
     const root = css.slice(css.indexOf(':root {'), css.indexOf('@media (prefers-color-scheme: dark)'));
     const hex = (name) => root.match(new RegExp(`${name}:\\s*(#[0-9A-Fa-f]{6})`))[1];

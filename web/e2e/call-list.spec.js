@@ -94,7 +94,20 @@ const focus = {
 
 const callRow = callListItem();
 const walkRow = walkInItem();
-const listed = enabledCallList([callRow, walkRow]);
+const thirdRow = callListItem({
+  prospect_id: 43,
+  company: 'TEST: Lehi Electric',
+  city: 'Lehi',
+  phone: '(801) 555-0160',
+  tel: 'tel:8015550160',
+  reason: 'Intro email 4 days ago, no reply',
+  reason_code: 'intro_3_5d',
+  emailed: false,
+  script: SCOUT_COPY.callNeverEmailed,
+  open_task_id: null,
+  maps_url: 'https://www.google.com/maps/search/?api=1&query=TEST%3A%20Lehi%20Electric',
+});
+const listed = enabledCallList([callRow, walkRow, thirdRow]);
 
 const task = {
   id: 7,
@@ -214,17 +227,43 @@ test.describe('F-010 call list screenshots', () => {
       await expect(page.getByText(SCOUT_COPY.callEmailed)).toBeVisible();
       await expect(page.locator('.call-list-badge.is-walk')).toHaveText('Walk-in');
       await expect(page.getByRole('heading', { name: 'Call next' })).toHaveCount(0);
-      const tel = page.getByRole('link', { name: 'Call (801) 555-0142' });
+      const tel = page.getByRole('link', { name: 'Call TEST: Wasatch Heating' });
       await expect(tel).toHaveAttribute('href', 'tel:8015550142');
-      const map = page.getByRole('link', { name: 'Map' }).first();
+      const map = page.getByRole('link', { name: 'Map for TEST: Wasatch Heating' });
       await expect(map).toHaveAttribute('target', '_blank');
       await expect(map).toHaveAttribute('rel', 'noreferrer');
+      const cards = page.locator('.call-list-card');
+      await expect(cards).toHaveCount(3);
       if (width === 375) {
         const box = await tel.boundingBox();
         expect(box.height).toBeGreaterThanOrEqual(44);
-        expect(box.width).toBeGreaterThanOrEqual(44);
+        const rects = await cards.evaluateAll((els) => els.map((el) => {
+          const r = el.getBoundingClientRect();
+          return { height: r.height, bottom: r.bottom, top: r.top };
+        }));
+        for (const rect of rects) expect(rect.height).toBeLessThanOrEqual(210);
+        expect(rects[2].top).toBeLessThan(height - 48);
+        expect(rects[2].bottom).toBeLessThanOrEqual(height);
       }
+      await page.evaluate(() => window.scrollTo(0, 0));
       await shoot(page, `list-${width}`);
+    });
+
+    test(`expanded outcomes at ${width}`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await boot(page, 'list');
+      await page.goto('/#/today');
+      await page.getByRole('link', { name: 'Call TEST: Wasatch Heating' }).click();
+      const card = page.locator('.call-list-card').first();
+      await expect(card.getByRole('button', { name: 'No answer' })).toBeVisible();
+      await expect(card.getByRole('button', { name: 'Do not contact' })).toBeVisible();
+      const grid = await card.getByRole('button', { name: 'No answer' }).boundingBox();
+      const hold = await card.getByRole('button', { name: 'Do not contact' }).boundingBox();
+      expect(hold.width).toBeGreaterThan(grid.width * 1.5);
+      expect(grid.height).toBeGreaterThanOrEqual(44);
+      expect(hold.height).toBeGreaterThanOrEqual(44);
+      await card.scrollIntoViewIfNeeded();
+      await shoot(page, `expanded-${width}`);
     });
 
     test(`call row at ${width}`, async ({ page }) => {
@@ -233,6 +272,7 @@ test.describe('F-010 call list screenshots', () => {
       await page.goto('/#/today');
       const card = page.locator('.call-list-card').first();
       await expect(card.getByText(SCOUT_COPY.callEmailed)).toBeVisible();
+      await card.getByRole('button', { name: 'Log TEST: Wasatch Heating' }).click();
       await card.locator('summary').click();
       await expect(card.getByText(SCOUT_COPY.voicemail)).toBeVisible();
       await expect(card.getByText(SCOUT_COPY.ask)).toBeVisible();
@@ -248,7 +288,9 @@ test.describe('F-010 call list screenshots', () => {
       await expect(card.getByText(SCOUT_COPY.walkIn)).toBeVisible();
       await expect(card.locator('.call-list-badge')).toHaveText('Walk-in');
       await expect(card.getByText(SCOUT_COPY.voicemail)).toHaveCount(0);
-      const map = card.getByRole('link', { name: 'Map' });
+      await expect(card.getByRole('link', { name: /Call / })).toHaveCount(0);
+      const map = card.getByRole('link', { name: 'Map for TEST: Eagle Mountain Plumbing' });
+      await expect(map).toHaveClass(/is-primary/);
       await expect(map).toBeVisible();
       if (width === 375) {
         const box = await map.boundingBox();
@@ -266,8 +308,9 @@ test.describe('F-010 call list screenshots', () => {
         if (request.method() === 'POST' && request.url().includes('/call-outcome')) posts.push(request.url());
       });
       await page.goto('/#/today');
-      await page.getByRole('button', { name: 'No answer' }).first().click();
-      const undo = page.getByRole('button', { name: 'Undo No answer' });
+      await page.getByRole('button', { name: 'Log TEST: Wasatch Heating' }).click();
+      await page.getByRole('button', { name: 'No answer' }).click();
+      const undo = page.getByRole('button', { name: 'Undo No answer (8)' });
       await expect(undo).toBeVisible();
       await expect(page.getByText('No answer. Undo to cancel.')).toBeVisible();
       const box = await undo.boundingBox();
