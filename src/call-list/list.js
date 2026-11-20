@@ -66,11 +66,6 @@ function demoReason(at, todayYmd) {
   return copy.reasonDemoDays(days);
 }
 
-function recentOutcome(rows, at) {
-  const cutoff = at.getTime() - 14 * 24 * 60 * 60 * 1000;
-  return rows.some((row) => new Date(row.created_at).getTime() >= cutoff);
-}
-
 async function loadCandidates() {
   const params = [];
   const kept = appendCompanyPestExclusion(params);
@@ -183,13 +178,13 @@ function chooseTier(row, signal, at) {
       return { tier: 3, reason: copy.reasonIntroDays(days), reason_code: 'intro_3_5d' };
     }
   }
-  if (truthy(mail.any_sent) && !truthy(mail.sequence_open) && !signal.recentOutcome) {
+  if (truthy(mail.any_sent) && !truthy(mail.sequence_open)) {
     return { tier: 4, reason: copy.REASON_SEQUENCE_DONE, reason_code: 'sequence_done' };
   }
   return null;
 }
 
-function toItem(row, picked, signal) {
+function toItem(row, picked, signal, at) {
   const kind = resolveKind(row);
   if (!kind) return null;
   const phone = phoneFields(row.phone);
@@ -198,6 +193,11 @@ function toItem(row, picked, signal) {
   const summary = signal.summary;
   const latest = summary.latest;
   const city = row.city == null || String(row.city).trim() === '' ? null : String(row.city).trim();
+  let reason = picked.reason;
+  if (picked.reason_code !== 'demo_view' && latest) {
+    const outcomeReason = copy.reasonForOutcome(latest.body, kind, latest.created_at, denverYmd(at));
+    if (outcomeReason) reason = outcomeReason;
+  }
   return {
     prospect_id: Number(row.id),
     company: row.company,
@@ -207,7 +207,7 @@ function toItem(row, picked, signal) {
     address: address.address,
     city,
     maps_url: address.maps_url,
-    reason: picked.reason,
+    reason,
     reason_code: picked.reason_code,
     emailed,
     script: copy.scriptFor(kind, emailed),
@@ -238,11 +238,10 @@ async function buildCallList({ all }) {
       task: loaded.tasks.get(row.id) || null,
       mail: loaded.mail.get(row.id) || null,
       summary,
-      recentOutcome: recentOutcome(outcomeRows, at),
     };
     const picked = chooseTier(row, signal, at);
     if (!picked) continue;
-    const item = toItem(row, picked, signal);
+    const item = toItem(row, picked, signal, at);
     if (!item) continue;
     ranked.push(item);
   }

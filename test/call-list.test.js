@@ -509,15 +509,24 @@ describe('F-010 call list', { concurrency: false }, () => {
     await proposal(recentCall.id, {
       sentAt: sent, followup1Due: f1, followup1Sent: f1, followup2Due: f2, followup2Sent: f2,
     });
-    await request('POST', `/api/prospects/${recentCall.id}/call-outcome`, { body: { outcome: 'talked', kind: 'call' } });
-    at('2026-11-28', 15);
-    const later = (await list('?all=1')).json;
-    const done = one(later, finished.id);
+    const beforeOutcome = (await list('?all=1')).json;
+    const done = one(beforeOutcome, finished.id);
     assert.equal(done.reason, 'Emails finished, no reply');
     assert.equal(done.reason_code, 'sequence_done');
-    assert.equal(ids(later).includes(unfinished.id), false);
-    assert.equal(ids(later).includes(outStateDone.id), false);
-    assert.equal(ids(later).includes(recentCall.id), false);
+    assert.equal(ids(beforeOutcome).includes(unfinished.id), false);
+    assert.equal(ids(beforeOutcome).includes(outStateDone.id), false);
+    const talked = await request('POST', `/api/prospects/${recentCall.id}/call-outcome`, {
+      body: { outcome: 'talked', kind: 'call' },
+    });
+    assert.equal(talked.json.back_on, '2026-11-27');
+    assert.equal(talked.json.stage, 'responded');
+    at('2026-11-26', 15);
+    assert.equal(ids((await list('?all=1')).json).includes(recentCall.id), false);
+    at('2026-11-27', 15);
+    const talkedBack = one((await list('?all=1')).json, recentCall.id);
+    assert.equal(talkedBack.reason_code, 'sequence_done');
+    assert.equal(talkedBack.reason, 'Talked Nov 20, follow up');
+    at('2026-11-20', 15);
 
     const never = await lead({ city: 'Saratoga Springs', phone: '(801) 555-0199', industry: 'Auto Repair', state: 'CA' });
     await request('PUT', `/api/prospects/${never.id}/call-list`, { body: { kind: 'call' } });
@@ -586,6 +595,131 @@ describe('F-010 call list', { concurrency: false }, () => {
     const unique = new Set(expanded.items.map((item) => item.prospect_id));
     assert.equal(unique.size, expanded.items.length);
     console.log(`[call-list] order and cap more=${capped.more} all=${expanded.items.length} left=${expanded.more}`);
+  });
+
+  it('orders tiers 1, 2, 3, then 4 ahead of city and fit', async () => {
+    await enable();
+    const tier1 = await lead({ city: 'Provo', fit_score: 1, industry: 'HVAC', state: 'UT' });
+    const tier1Proposal = await proposal(tier1.id, { sentAt: null, status: 'draft' });
+    await viewLog(tier1Proposal.id, instantInDenver('2026-11-19', 12));
+    const tier2 = await lead({ city: 'Provo', fit_score: 99, industry: 'Auto Repair', state: 'CA' });
+    await request('PUT', `/api/prospects/${tier2.id}/call-list`, { body: { kind: 'call' } });
+    const tier3 = await lead({ city: 'Saratoga Springs', fit_score: 99, industry: 'HVAC', state: 'UT' });
+    await proposal(tier3.id, {
+      sentAt: instantInDenver('2026-11-16', 12),
+      followup1Due: instantInDenver('2026-11-27', 12),
+    });
+    const tier4 = await lead({ city: 'Saratoga Springs', fit_score: 99, industry: 'Plumbing', state: 'UT' });
+    const sent = instantInDenver('2026-10-31', 12);
+    const f1 = instantInDenver('2026-11-03', 12);
+    const f2 = instantInDenver('2026-11-10', 12);
+    await proposal(tier4.id, {
+      sentAt: sent, followup1Due: f1, followup1Sent: f1, followup2Due: f2, followup2Sent: f2,
+    });
+    const body = (await list('?all=1')).json;
+    assert.deepEqual(ids(body), [tier1.id, tier2.id, tier3.id, tier4.id]);
+    assert.deepEqual(body.items.map((item) => item.reason_code), [
+      'demo_view', 'listed', 'intro_3_5d', 'sequence_done',
+    ]);
+    console.log('[call-list] cross-tier order is 1, 2, 3, 4');
+  });
+
+  it('returns a tier 4 lead on back_on after no_answer and after three misses', async () => {
+    await enable();
+    async function finishedLead(city) {
+      const row = await lead({ industry: 'HVAC', state: 'UT', city });
+      const sentAt = instantInDenver('2026-10-31', 12);
+      const follow1 = instantInDenver('2026-11-03', 12);
+      const follow2 = instantInDenver('2026-11-10', 12);
+      await proposal(row.id, {
+        sentAt, followup1Due: follow1, followup1Sent: follow1, followup2Due: follow2, followup2Sent: follow2,
+      });
+      return row;
+    }
+    at('2026-11-23', 15);
+    const once = await finishedLead('Orem');
+    const noAnswer = await request('POST', `/api/prospects/${once.id}/call-outcome`, {
+      body: { outcome: 'no_answer', kind: 'call' },
+    });
+    assert.equal(noAnswer.json.back_on, '2026-11-24');
+    assert.equal(noAnswer.json.stage, 'found');
+    assert.equal(ids((await list('?all=1')).json).includes(once.id), false);
+    at('2026-11-24', 9);
+    const back = one((await list('?all=1')).json, once.id);
+    assert.equal(back.reason_code, 'sequence_done');
+    assert.equal(back.reason, 'No answer Mon, try again');
+    assert.equal(back.last_outcome, 'no_answer');
+
+    at('2026-11-20', 15);
+    const streak = await finishedLead('Lehi');
+    await request('POST', `/api/prospects/${streak.id}/call-outcome`, { body: { outcome: 'no_answer', kind: 'call' } });
+    await request('POST', `/api/prospects/${streak.id}/call-outcome`, { body: { outcome: 'voicemail', kind: 'call' } });
+    const third = await request('POST', `/api/prospects/${streak.id}/call-outcome`, {
+      body: { outcome: 'no_answer', kind: 'call' },
+    });
+    assert.equal(third.json.back_on, '2026-12-04');
+    at('2026-12-03', 15);
+    assert.equal(ids((await list('?all=1')).json).includes(streak.id), false);
+    at('2026-12-04', 15);
+    const held = one((await list('?all=1')).json, streak.id);
+    assert.equal(held.attempts, 3);
+    assert.equal(held.reason_code, 'sequence_done');
+    assert.equal(held.reason, 'No answer Nov 20, try again');
+    console.log('[call-list] tier 4 returns on back_on for no_answer and for three misses');
+  });
+
+  it('uses the latest outcome on the reason line, and keeps a tier 1 view reason', async () => {
+    await enable();
+    at('2026-11-17', 15);
+    const voice = await lead({ city: 'Lehi', industry: 'Auto Repair', state: 'CA' });
+    await request('PUT', `/api/prospects/${voice.id}/call-list`, { body: { kind: 'call' } });
+    await request('POST', `/api/prospects/${voice.id}/call-outcome`, { body: { outcome: 'voicemail', kind: 'call' } });
+
+    at('2026-11-18', 15);
+    const stopped = await lead({
+      city: 'Lehi', industry: 'Auto Repair', state: 'CA', phone: null, address: '4 Walk St',
+    });
+    await request('PUT', `/api/prospects/${stopped.id}/call-list`, { body: { kind: 'walk_in' } });
+    await request('POST', `/api/prospects/${stopped.id}/call-outcome`, { body: { outcome: 'no_answer', kind: 'walk_in' } });
+
+    at('2026-11-13', 15);
+    const talked = await lead({ city: 'Lehi', industry: 'Auto Repair', state: 'CA' });
+    await request('PUT', `/api/prospects/${talked.id}/call-list`, { body: { kind: 'call' } });
+    const talkedRes = await request('POST', `/api/prospects/${talked.id}/call-outcome`, {
+      body: { outcome: 'talked', kind: 'call' },
+    });
+    assert.equal(talkedRes.json.back_on, '2026-11-20');
+
+    at('2026-11-14', 11);
+    const boundary = await lead({ city: 'Lehi', industry: 'Auto Repair', state: 'CA' });
+    await request('PUT', `/api/prospects/${boundary.id}/call-list`, { body: { kind: 'call' } });
+    await request('POST', `/api/prospects/${boundary.id}/call-outcome`, { body: { outcome: 'no_answer', kind: 'call' } });
+
+    at('2026-11-16', 15);
+    const viewed = await lead({ city: 'Provo', industry: 'HVAC', state: 'UT' });
+    await request('POST', `/api/prospects/${viewed.id}/call-outcome`, { body: { outcome: 'no_answer', kind: 'call' } });
+    const viewedProposal = await proposal(viewed.id, { sentAt: null, status: 'draft' });
+    await viewLog(viewedProposal.id, instantInDenver('2026-11-19', 12));
+
+    at('2026-11-20', 15);
+    const body = (await list('?all=1')).json;
+    const voiceItem = one(body, voice.id);
+    assert.equal(voiceItem.reason, 'Left a voicemail Tue');
+    assert.equal(voiceItem.reason_code, 'listed');
+    const stoppedItem = one(body, stopped.id);
+    assert.equal(stoppedItem.reason, 'Stopped by Wed, try again');
+    assert.equal(stoppedItem.kind, 'walk_in');
+    assert.equal(stoppedItem.reason_code, 'listed');
+    const talkedItem = one(body, talked.id);
+    assert.equal(talkedItem.reason, 'Talked Nov 13, follow up');
+    assert.equal(talkedItem.reason_code, 'listed');
+    const boundaryItem = one(body, boundary.id);
+    assert.equal(boundaryItem.reason, 'No answer Sat, try again');
+    const viewedItem = one(body, viewed.id);
+    assert.equal(viewedItem.reason, 'Viewed the demo yesterday');
+    assert.equal(viewedItem.reason_code, 'demo_view');
+    assert.equal(viewedItem.last_outcome, 'no_answer');
+    console.log('[call-list] outcome reasons use a weekday inside 6 days and a short date after that; tier 1 keeps the view line');
   });
 
   it('returns one row when a lead qualifies for several tiers, including an open task', async () => {
