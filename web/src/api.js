@@ -1,8 +1,11 @@
 // Thin client for the FlowForward Engine API.
 // Base URL rules live in api-base.js.
 import { resolveApiBase, UNCONFIGURED_MESSAGE } from './api-base.js';
+import { CALL_LIST_KIND_FIELD, CALL_LIST_SET_AT_FIELD, CALL_OUTCOMES } from './call-list-contract.js';
 import { taskPathId } from './demo-view-task.js';
 import { FEATURE_FLAGS_API, parseFlagUpdate, parseFlagsPayload } from './flags-contract.js';
+
+export { CALL_LIST_KIND_FIELD, CALL_LIST_SET_AT_FIELD, CALL_OUTCOMES };
 
 function read(key, fallback = '') {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
@@ -74,6 +77,18 @@ function demoViewTaskId(id) {
   const pathId = taskPathId(id);
   if (!pathId) throw new ApiError('not_found', 404);
   return pathId;
+}
+
+const CALL_LIST_PATH = '/api/today/call-list';
+
+function callListProspectId(id) {
+  const text = String(id ?? '');
+  if (!/^\d{1,9}$/.test(text)) throw new ApiError('Not found', 404);
+  return text;
+}
+
+function callListMarkPath(id) {
+  return `/api/prospects/${callListProspectId(id)}/call-list`;
 }
 
 const qs = (o) => {
@@ -168,4 +183,12 @@ export const api = {
   demoViewTaskDone:  async (id)     => request('POST', `/api/demo-view-tasks/${demoViewTaskId(id)}/done`),
   demoViewTaskSnooze: async (id)    => request('POST', `/api/demo-view-tasks/${demoViewTaskId(id)}/snooze`),
   demoViewTaskDismiss: async (id)   => request('POST', `/api/demo-view-tasks/${demoViewTaskId(id)}/dismiss`),
+  // Calls due / Walk-ins. The phone is a tel: link; these routes only log.
+  todayCallList:     (options)      => request('GET', options?.all === true ? `${CALL_LIST_PATH}?all=1` : CALL_LIST_PATH),
+  recordCallOutcome: (id, body)     => request('POST', `/api/prospects/${callListProspectId(id)}/call-outcome`, {
+    outcome: body?.outcome,
+    kind: body?.kind,
+  }),
+  saveCallListKind:  (id, kind)     => request('PUT', callListMarkPath(id), { kind }),
+  removeCallList:    (id)           => request('DELETE', callListMarkPath(id)),
 };

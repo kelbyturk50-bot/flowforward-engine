@@ -1,6 +1,7 @@
 // Stand-in for src/api.js. Tests import this instead of the real client.
 // No network, no production URL, no credentials.
 import { vi } from 'vitest';
+export { CALL_LIST_KIND_FIELD, CALL_LIST_SET_AT_FIELD, CALL_OUTCOMES } from '../call-list-contract.js';
 
 export const settings = {
   apiUrl: 'http://127.0.0.1:3000',
@@ -98,4 +99,8 @@ export const api = {
   demoViewTaskDone: method(),
   demoViewTaskSnooze: method(),
   demoViewTaskDismiss: method(),
+  todayCallList: method(),
+  recordCallOutcome: method(),
+  saveCallListKind: method(),
+  removeCallList: method(),
 };

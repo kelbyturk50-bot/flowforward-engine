@@ -49,6 +49,16 @@ export function installApiDefaults() {
   });
   api.flags.mockResolvedValue(flagRecords());
   api.demoViewTasks.mockRejectedValue(Object.assign(new Error('not_found'), { status: 404 }));
+  api.todayCallList.mockResolvedValue({ enabled: false, items: [] });
+  api.recordCallOutcome.mockResolvedValue({ activity_id: 1, removed: true, back_on: null, stage: null });
+  api.saveCallListKind.mockImplementation(async (_id, kind) => ({
+    call_list_kind: kind,
+    call_list_set_at: '2026-11-20T18:00:00.000Z',
+  }));
+  api.removeCallList.mockResolvedValue({
+    call_list_kind: 'excluded',
+    call_list_set_at: '2026-11-20T18:00:00.000Z',
+  });
   api.demoViewTaskDone.mockResolvedValue({ id: 1, status: 'done', prospect_id: 10 });
   api.demoViewTaskSnooze.mockResolvedValue({ id: 1, status: 'open', snoozed_until: '2026-11-15T21:14:00.000Z' });
   api.demoViewTaskDismiss.mockResolvedValue({ id: 1, status: 'dismissed', prospect_id: 10 });

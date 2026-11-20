@@ -147,5 +147,6 @@ describe('feature flags contract', () => {
     expect(locked.FF_PROTOTYPE_GALLERY).toBe(true);
     expect(locked.FF_CAMPAIGNS).toBe(false);
     expect(FEATURE_FLAG_NAMES).toContain('FF_PROTOTYPE_ON_DRAFT');
+    expect(FEATURE_FLAG_NAMES).toContain('FF_CALL_LIST');
   });
 });

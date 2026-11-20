@@ -32,6 +32,7 @@ export const FEATURE_FLAG_CATALOG = Object.freeze([
   Object.freeze({ name: 'FF_CAMPAIGNS', label: 'Campaigns' }),
   Object.freeze({ name: 'FF_CAMPAIGN_OPEN_PIXEL', label: 'Campaign open pixel' }),
   Object.freeze({ name: 'FF_PROTOTYPE_ON_DRAFT', label: 'Branded prototype on new proposal drafts' }),
+  Object.freeze({ name: 'FF_CALL_LIST', label: 'Calls due / Walk-ins' }),
 ]);
 
 export const FEATURE_FLAG_NAMES = Object.freeze(FEATURE_FLAG_CATALOG.map((flag) => flag.name));

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useJobs } from '../jobs';
 import { Drawer, FitBadge, STAGES, Stars, ErrorNote, money, money2, relDate, isOverdue, timeAgo, addDays, telHref, mapsHref, statusLabel, toast, ProposalChip } from '../ui';
+import CallListMarker from './CallListMarker';
 import ProspectViews from './ProspectViews';
 import { hasProspectViewFields } from './prospect-views.js';
 
@@ -93,6 +94,8 @@ function LeadBody({ lead, save, setLead, bump, openProject, openProposal }) {
         {lead.website && <a className="btn btn-quiet btn-sm" href={lead.website} target="_blank" rel="noreferrer">Website</a>}
         <a className="btn btn-quiet btn-sm" href={mapsHref(lead)} target="_blank" rel="noreferrer">Map</a>
       </div>
+
+      <CallListMarker lead={lead} onLead={setLead} />
 
       <section className="block">
         <label className="stage-pick">Stage
