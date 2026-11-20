@@ -26,14 +26,23 @@ function approveHeading(p) {
 export default function ProposalDrawer({ id, onClose, bump, openLead, openProposal }) {
   const [p, setP] = useState(null);
   const [error, setError] = useState(null);
+  const openId = useRef(id);
+  openId.current = id;
 
   const load = async (pid = id) => {
+    // A send reload can finish after the drawer has moved. Ignore that
+    // response so it cannot replace the proposal that is open now.
+    if (pid !== openId.current) return;
     try {
       setError(null);
       const data = await api.proposal(pid);
+      if (pid !== openId.current) return;
       setP(data);
       if (data.status === 'draft' && !data.reviewed_at) api.markProposalSeen(pid).then(() => bump()).catch(() => {});
-    } catch (e) { setError(e); }
+    } catch (e) {
+      if (pid !== openId.current) return;
+      setError(e);
+    }
   };
   useEffect(() => { setP(null); if (id) load(id); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -43,6 +52,16 @@ export default function ProposalDrawer({ id, onClose, bump, openLead, openPropos
       {!p && !error && <div className="drawer-body"><p className="muted">Loading…</p></div>}
       {p && p.id === id && <Body key={`${p.id}-${p.updated_at}`} p={p} reload={load} bump={bump} openLead={openLead} openProposal={openProposal} onClose={onClose} />}
     </Drawer>
+  );
+}
+
+function ReplyWarning({ children }) {
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.focus(); }, []);
+  return (
+    <div className="reply-warning" role="alert" tabIndex={-1} ref={ref}>
+      {children}
+    </div>
   );
 }
 
@@ -120,7 +139,9 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   const cancelReplyWarning = () => {
     if (sendLock.current) return;
     setRecentReply(null);
+    setConfirming(false);
   };
+  const sending = busy === 'send';
 
   return (
     <div className="drawer-body">
@@ -132,7 +153,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <div className="head-chips">
             <ProposalChip status={p.status} verdict={a.fit_verdict} stopReason={p.stop_reason} />
             {p.versions?.length > 1 ? (
-              <select className="mini-select" value={p.id} onChange={e => openProposal(Number(e.target.value))} aria-label="Version">
+              <select className="mini-select" value={p.id} disabled={sending} onChange={e => openProposal(Number(e.target.value))} aria-label="Version">
                 {p.versions.map(v => <option key={v.id} value={v.id}>v{v.version} · {v.status === 'superseded' ? 'older' : (PROPOSAL_STATUS[v.status] || v.status)}{v.instructions ? ' · w/ notes' : ''}</option>)}
               </select>
             ) : <span className="muted small">v{p.version}</span>}
@@ -206,21 +227,21 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
         </div>
       )}
       {recentReply && (
-        <div className="reply-warning" role="alert">
+        <ReplyWarning>
           <p>{recentReply.sentence}</p>
-          <button type="button" className="linklike reply-warning-link" onClick={() => openProposal(recentReply.sibling_proposal_id)}>
-            Open that proposal
-          </button>
           {confirmAck && <p>This draft is marked for another look. Send it only if you mean to.</p>}
           <div className="reply-warning-actions">
-            <button type="button" className="btn" disabled={busy === 'send' || noRecipient} onClick={() => submitApprove(true)}>
-              {busy === 'send' ? 'Sending…' : 'Send anyway'}
+            <button type="button" className="btn" disabled={sending} onClick={() => openProposal(recentReply.sibling_proposal_id)}>
+              Open that proposal
             </button>
-            <button type="button" className="btn btn-quiet" disabled={busy === 'send'} onClick={cancelReplyWarning}>
+            <button type="button" className="btn btn-quiet" disabled={!!busy || noRecipient} onClick={() => submitApprove(true)}>
+              {sending ? 'Sending…' : 'Send anyway'}
+            </button>
+            <button type="button" className="btn btn-quiet" disabled={sending} onClick={cancelReplyWarning}>
               Cancel
             </button>
           </div>
-        </div>
+        </ReplyWarning>
       )}
       {confirmingManual && (
         <div className="confirm" role="alertdialog" aria-label="Confirm manual send">

@@ -149,6 +149,7 @@ describe('feature flags contract', () => {
     expect(FEATURE_FLAG_NAMES).toContain('FF_PROTOTYPE_ON_DRAFT');
     expect(FEATURE_FLAG_NAMES.at(-1)).toBe('FF_APPROVE_REPLY_WARNING');
     const catalog = closedPanelFlags().find((flag) => flag.name === 'FF_APPROVE_REPLY_WARNING');
-    expect(catalog.label).toBe('Warn before approving if the lead replied to another proposal in the last 60 days.');
+    expect(catalog.label).toBe('Warn before approving if the lead replied to another proposal in the last 60 days');
+    expect(catalog.label.endsWith('.')).toBe(false);
   });
 });

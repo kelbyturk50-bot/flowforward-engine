@@ -395,15 +395,6 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   max-width: 100%;
 }
 .reply-warning p { margin: 0; overflow-wrap: anywhere; }
-.reply-warning-link {
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  min-width: 44px;
-  padding: 0 .15rem;
-  color: var(--juniper);
-}
 .reply-warning-actions { display: flex; flex-wrap: wrap; gap: .5rem; min-width: 0; }
 .reply-warning-actions .btn { min-height: 44px; min-width: 44px; }
 .check { flex-direction: row; align-items: center; gap: .5rem; color: var(--ink); }
@@ -1569,7 +1560,7 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
   .boost input { min-width: 0; width: 100%; flex-basis: 100%; }
   .link-row .btn, .action-bar .btn { max-width: 100%; white-space: normal; text-align: center; }
   .reply-warning-actions { flex-direction: column; }
-  .reply-warning-actions .btn { width: 100%; }
+  .reply-warning-actions .btn { width: 100%; white-space: normal; text-align: center; }
   .action-bar { min-width: 0; }
   .prop-mini { min-width: 0; }
   .prop-mini .grow { min-width: 0; overflow-wrap: anywhere; }

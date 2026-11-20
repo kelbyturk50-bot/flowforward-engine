@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { api } from '../api';
 import { installApiDefaults } from '../test/defaults.js';
@@ -108,12 +108,32 @@ describe('approve recent-reply warning', () => {
     expect(screen.queryByRole('alertdialog', { name: 'Confirm send' })).toBeNull();
     expect(document.querySelector('.toast')).not.toHaveTextContent('recent_reply');
     expect(document.querySelector('.toast')).not.toHaveClass('show');
-    const link = within(warning).getByRole('button', { name: 'Open that proposal' });
+    const actions = [...warning.querySelector('.reply-warning-actions').querySelectorAll('button')];
+    expect(actions.map((button) => button.textContent)).toEqual(['Open that proposal', 'Send anyway', 'Cancel']);
+    expect(actions[0].className).toBe('btn');
+    expect(actions[1].className).toBe('btn btn-quiet');
+    expect(actions[2].className).toBe('btn btn-quiet');
+    expect(warning).toHaveAttribute('tabindex', '-1');
+    await waitFor(() => expect(warning).toHaveFocus());
+    const link = actions[0];
     expect(link).not.toHaveAttribute('target');
+    expect(link).not.toHaveClass('linklike');
     await userEvent.click(link);
     expect(openProposal).toHaveBeenCalledTimes(1);
     expect(openProposal).toHaveBeenCalledWith(42);
     expect(link.closest('a')).toBeNull();
+  });
+
+  it('moves focus to the warning panel when it replaces the confirm dialog', async () => {
+    api.proposal.mockResolvedValue(draft);
+    api.sendProposal.mockRejectedValue(recentReplyError());
+    renderDrawer();
+    await openConfirm();
+    await userEvent.click(screen.getByRole('button', { name: 'Send it' }));
+    const warning = await screen.findByRole('alert');
+    expect(warning).toHaveAttribute('tabindex', '-1');
+    expect(screen.queryByRole('alertdialog', { name: 'Confirm send' })).toBeNull();
+    await waitFor(() => expect(warning).toHaveFocus());
   });
 
   it('opens the sibling proposal in the same drawer', async () => {
@@ -163,6 +183,7 @@ describe('approve recent-reply warning', () => {
     expect(ack.acknowledge_recent_reply).toBe(true);
     expect(typeof ack.acknowledge_recent_reply).toBe('boolean');
     expect(screen.getByRole('button', { name: 'Sending…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Open that proposal' })).toBeDisabled();
 
     api.proposal.mockResolvedValue(sent);
     release();
@@ -254,6 +275,124 @@ describe('approve recent-reply warning', () => {
     expect(await screen.findByText('Out')).toBeInTheDocument();
   });
 
+  it('keeps the sibling draft on screen when Send anyway finishes after the drawer moves', async () => {
+    const versions = [
+      { id: 9, version: 2, status: 'draft' },
+      { id: 42, version: 1, status: 'draft' },
+    ];
+    const original = { ...draft, versions };
+    const sibling = {
+      ...draft,
+      id: 42,
+      version: 1,
+      company: 'TEST: Peak Plumbing',
+      subject: 'Earlier draft',
+      body: 'Sibling draft body.',
+      status: 'draft',
+      updated_at: '2026-11-18T16:00:00.000Z',
+      versions,
+    };
+    let current = original;
+    api.proposal.mockImplementation(async (pid) => (pid === 42 ? sibling : current));
+    let release;
+    api.sendProposal.mockImplementation((id, body) => {
+      if (body && body.acknowledge_recent_reply === true) {
+        return new Promise((resolve) => { release = () => resolve({ id, status: 'sent' }); });
+      }
+      return Promise.reject(recentReplyError());
+    });
+    const { rerenderDrawer } = renderDrawer();
+    await openConfirm();
+    await userEvent.click(screen.getByRole('button', { name: 'Send it' }));
+    const warning = await screen.findByRole('alert');
+    within(warning).getByRole('button', { name: 'Send anyway' }).click();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Sending…' })).toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Open that proposal' })).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Version' })).toBeDisabled();
+
+    rerenderDrawer({ id: 42 });
+    expect(await screen.findByRole('heading', { name: 'TEST: Peak Plumbing' })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Earlier draft')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Sibling draft body.')).toBeInTheDocument();
+
+    current = { ...original, status: 'sent', sent_at: '2026-11-20T16:00:00.000Z', updated_at: '2026-11-20T16:00:00.000Z' };
+    await act(async () => { release(); });
+    expect(api.sendProposal).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('heading', { name: 'TEST: Peak Plumbing' })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Earlier draft')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Sibling draft body.')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Proposal for TEST: Peak Plumbing' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'TEST: Wasatch Heating' })).toBeNull();
+    const ack = api.sendProposal.mock.calls[1];
+    expect(ack[0]).toBe(9);
+    expect(ack[1]).toEqual({ acknowledge_recent_reply: true });
+    expect(ack[1].acknowledge_recent_reply).toBe(true);
+    expect(typeof ack[1].acknowledge_recent_reply).toBe('boolean');
+    expect(api.sendProposal.mock.calls[0]).toEqual([9, undefined]);
+  });
+
+  it('Cancel after recent_reply then held-back leaves no confirm dialog', async () => {
+    api.proposal.mockResolvedValue(draft);
+    api.sendProposal
+      .mockRejectedValueOnce(recentReplyError())
+      .mockRejectedValueOnce(heldBackError())
+      .mockRejectedValueOnce(recentReplyError())
+      .mockResolvedValueOnce({ id: 9, status: 'sent' });
+    renderDrawer();
+    await openConfirm();
+    await userEvent.click(screen.getByRole('button', { name: 'Send it' }));
+    const warning = await screen.findByRole('alert');
+    await userEvent.click(within(warning).getByRole('button', { name: 'Send anyway' }));
+    expect(await within(warning).findByText('This draft is marked for another look. Send it only if you mean to.')).toBeInTheDocument();
+    expect(screen.queryByRole('alertdialog', { name: 'Confirm send' })).toBeNull();
+    expect(api.sendProposal.mock.calls[1][1]).toEqual({ acknowledge_recent_reply: true });
+
+    await userEvent.click(within(warning).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('alertdialog', { name: 'Confirm send' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send it' })).toBeNull();
+    expect(api.sendProposal).toHaveBeenCalledTimes(2);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Approve and send' }));
+    const dialog = screen.getByRole('alertdialog', { name: 'Confirm send' });
+    expect(dialog).toHaveTextContent('This draft is marked for another look. Send it only if you mean to.');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Send it' }));
+    expect(api.sendProposal.mock.calls[2][1]).toEqual({ confirm: true });
+    const again = await screen.findByRole('alert');
+    api.proposal.mockResolvedValue(sent);
+    await userEvent.click(within(again).getByRole('button', { name: 'Send anyway' }));
+    const ack = api.sendProposal.mock.calls[3][1];
+    expect(ack).toEqual({ confirm: true, acknowledge_recent_reply: true });
+    expect(ack.acknowledge_recent_reply).toBe(true);
+    expect(typeof ack.acknowledge_recent_reply).toBe('boolean');
+    expect(await screen.findByText('Out')).toBeInTheDocument();
+  });
+
+  it('disables Send anyway while a save is in flight', async () => {
+    let releaseSave;
+    api.proposal.mockResolvedValue(draft);
+    api.updateProposal.mockImplementation(() => new Promise((resolve) => {
+      releaseSave = () => resolve({ ...draft, subject: 'Updated subject' });
+    }));
+    api.sendProposal.mockRejectedValue(recentReplyError());
+    renderDrawer();
+    await openConfirm();
+    await userEvent.click(screen.getByRole('button', { name: 'Send it' }));
+    const warning = await screen.findByRole('alert');
+    const sendAnyway = within(warning).getByRole('button', { name: 'Send anyway' });
+    expect(sendAnyway).toBeEnabled();
+    const subject = screen.getByLabelText('Subject');
+    await userEvent.clear(subject);
+    await userEvent.type(subject, 'Updated subject');
+    await userEvent.tab();
+    await waitFor(() => expect(sendAnyway).toBeDisabled());
+    expect(api.sendProposal).toHaveBeenCalledTimes(1);
+    expect(api.updateProposal).toHaveBeenCalledWith(9, { subject: 'Updated subject' });
+    releaseSave();
+    await waitFor(() => expect(within(screen.getByRole('alert')).getByRole('button', { name: 'Send anyway' })).toBeEnabled());
+    expect(api.sendProposal).toHaveBeenCalledTimes(1);
+  });
+
   it('Cancel dismisses the warning, sends nothing more, and leaves the draft', async () => {
     api.proposal.mockResolvedValue(draft);
     api.sendProposal.mockRejectedValue(recentReplyError());
@@ -336,11 +475,15 @@ describe('approve recent-reply warning', () => {
     expect(block).toContain('min-height: 44px');
     expect(block).toContain('color: var(--ink)');
     expect(block).toContain('background: var(--ochre-wash)');
-    expect(block).toContain('color: var(--juniper)');
+    expect(block).not.toContain('.reply-warning-link');
     expect(block).not.toMatch(/#[0-9A-Fa-f]{3,8}/);
+    const buttons = css.slice(css.indexOf('.btn {'), css.indexOf('.btn-quiet'));
+    expect(buttons).toContain('background: var(--juniper)');
+    expect(buttons).toContain('color: var(--juniper-ink)');
+    expect(css).toContain('.btn-quiet { background: transparent; color: var(--ink); border-color: var(--line); }');
     const phone = css.slice(css.indexOf('@media (max-width: 860px)'));
     expect(phone).toContain('.reply-warning-actions { flex-direction: column; }');
-    expect(phone).toContain('.reply-warning-actions .btn { width: 100%; }');
+    expect(phone).toContain('.reply-warning-actions .btn { width: 100%; white-space: normal; text-align: center; }');
     expect(css).toContain('--ink-2: #55656B');
     expect(css).toContain('--paper: #F3F6F5');
   });

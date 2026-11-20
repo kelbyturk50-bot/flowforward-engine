@@ -274,16 +274,28 @@ test.describe('F-009 recent-reply warning screenshots', () => {
       await expect(warning).toContainText(WARNING);
       await expect(page.getByRole('alertdialog', { name: 'Confirm send' })).toHaveCount(0);
       await expect(page.locator('.toast.show')).toHaveCount(0);
+      const open = warning.getByRole('button', { name: 'Open that proposal' });
       const sendAnyway = warning.getByRole('button', { name: 'Send anyway' });
       const cancel = warning.getByRole('button', { name: 'Cancel' });
-      const link = warning.getByRole('button', { name: 'Open that proposal' });
-      await expect(link).toBeVisible();
-      const boxes = await Promise.all([sendAnyway.boundingBox(), cancel.boundingBox(), link.boundingBox(), warning.boundingBox()]);
-      for (const box of boxes.slice(0, 3)) expect(box.height).toBeGreaterThanOrEqual(44);
+      await expect(open).toBeVisible();
+      await expect(open).toHaveClass('btn');
+      await expect(open).not.toHaveAttribute('target');
+      await expect(sendAnyway).toHaveClass('btn btn-quiet');
+      await expect(cancel).toHaveClass('btn btn-quiet');
+      await expect(warning).toBeFocused();
+      const boxes = await Promise.all([open.boundingBox(), sendAnyway.boundingBox(), cancel.boundingBox()]);
+      for (const box of boxes) expect(box.height).toBeGreaterThanOrEqual(44);
       if (width === 375) {
         expect(boxes[0].y + boxes[0].height).toBeLessThanOrEqual(boxes[1].y + 1);
+        expect(boxes[1].y + boxes[1].height).toBeLessThanOrEqual(boxes[2].y + 1);
         expect(Math.abs(boxes[0].width - boxes[1].width)).toBeLessThan(2);
+        expect(Math.abs(boxes[1].width - boxes[2].width)).toBeLessThan(2);
         expect(boxes[0].width).toBeGreaterThan(width * 0.7);
+      } else {
+        expect(boxes[0].x + boxes[0].width).toBeLessThanOrEqual(boxes[1].x + 1);
+        expect(boxes[1].x + boxes[1].width).toBeLessThanOrEqual(boxes[2].x + 1);
+        expect(Math.abs(boxes[0].y - boxes[1].y)).toBeLessThan(4);
+        expect(Math.abs(boxes[1].y - boxes[2].y)).toBeLessThan(4);
       }
       await scrollIntoDrawer(page, '.reply-warning');
       await shoot(page, `warning-${width}`);
