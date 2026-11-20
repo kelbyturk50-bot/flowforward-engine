@@ -1,7 +1,7 @@
 process.env.SENDER_ADDRESS = '1 Test Street, Provo, UT 84601';
 require('./preload');
 
-// HTML part of outgoing emails: short link text, logo signature, escaping.
+// HTML renderer. Inbox replies still send this part. Intros and follow-ups do not.
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const cfg = require('../src/proposals/config');
