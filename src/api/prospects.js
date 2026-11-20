@@ -4,8 +4,11 @@ const router  = express.Router();
 const pool    = require('../db/client');
 const { rescore } = require('../scoring/fit');
 const { normalizeIndustry } = require('../scoring/industry');
-const { stopLeadSequences, lockLeadForUpdate } = require('../proposals/send');
+const { lockLeadForUpdate } = require('../proposals/send');
 const { isDeadlock, DEADLOCK_ATTEMPTS } = require('../proposals/lead-lock');
+const { raiseManualDoNotContact, MARKED_DNC: MARKED_DNC_NOTE } = require('../prospects/manual-dnc');
+const { callListEnabled } = require('../call-list/flag');
+const { presentProspect } = require('../call-list/present');
 
 // Public writes must already be text. Do not coerce objects, arrays, or numbers.
 // Length is checked after trim. Control characters, including bidi marks, are rejected.
@@ -21,7 +24,7 @@ function industryIsValid(value) {
 
 const STAGES = ['found', 'contacted', 'responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const CLOSED = ['won', 'lost', 'disqualified'];
-const MARKED_DNC = 'Marked do-not-contact (manual)';
+const MARKED_DNC = MARKED_DNC_NOTE;
 const CLEARED_DNC = 'Cleared do-not-contact';
 
 // Prospect ids are positive serial integers with no leading zero. 0, 01, and
@@ -64,12 +67,18 @@ const { buildProspectListQuery, ProspectQueryError } = require('./prospect-query
 // min_value=0 is accepted and still excludes those NULL rows.
 router.get('/', async (req, res) => {
   try {
+    const flagOn = await callListEnabled();
     const q = buildProspectListQuery(req.query);
     const [rows, count] = await Promise.all([
       pool.query(q.listSql, q.params),
       pool.query(q.countSql, q.params),
     ]);
-    res.json({ prospects: rows.rows, total: count.rows[0].n, limit: q.limit, offset: q.offset });
+    res.json({
+      prospects: rows.rows.map((row) => presentProspect(row, flagOn)),
+      total: count.rows[0].n,
+      limit: q.limit,
+      offset: q.offset,
+    });
   } catch (err) {
     if (err instanceof ProspectQueryError) return res.status(400).json({ error: 'bad_request' });
     console.error('[prospects] list failed:', err.message);
@@ -129,6 +138,7 @@ router.post('/', async (req, res) => {
   if (!industryIsValid(b.industry)) return res.status(400).json({ error: 'invalid industry' });
   const industry = normalizeIndustry(b.industry);
   if (!b.company || !industry) return res.status(400).json({ error: 'company and industry are required' });
+  const flagOn = await callListEnabled();
   try {
     const { rows } = await pool.query(
       `INSERT INTO prospects (company, industry, phone, website, email, contact_name, address, city, state, zip,
@@ -140,7 +150,7 @@ router.post('/', async (req, res) => {
     );
     await rescore([rows[0].id]);
     const full = await pool.query('SELECT * FROM prospects WHERE id = $1', [rows[0].id]);
-    res.status(201).json(full.rows[0]);
+    res.status(201).json(presentProspect(full.rows[0], flagOn));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -149,13 +159,14 @@ router.post('/', async (req, res) => {
 // GET /api/prospects/:id — lead with activity log and linked projects
 router.get('/:id', async (req, res) => {
   try {
+    const flagOn = await callListEnabled();
     const [p, acts, projs] = await Promise.all([
       pool.query('SELECT * FROM prospects WHERE id = $1', [req.params.id]),
       pool.query('SELECT * FROM prospect_activities WHERE prospect_id = $1 ORDER BY created_at DESC LIMIT 100', [req.params.id]),
       pool.query('SELECT id, name, status, due_date FROM projects WHERE prospect_id = $1 ORDER BY created_at DESC', [req.params.id]),
     ]);
     if (!p.rows.length) return res.status(404).json({ error: 'Not found' });
-    res.json({ ...p.rows[0], activities: acts.rows, projects: projs.rows });
+    res.json({ ...presentProspect(p.rows[0], flagOn), activities: acts.rows, projects: projs.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -183,6 +194,7 @@ router.patch('/:id', async (req, res) => {
   for (const k of ['next_action_at', 'est_value', 'email', 'contact_name', 'website', 'phone']) if (body[k] === '') body[k] = null;
   if (body.fit_boost != null) body.fit_boost = Math.max(-20, Math.min(20, parseInt(body.fit_boost, 10) || 0));
 
+  const flagOn = await callListEnabled();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -210,7 +222,7 @@ router.patch('/:id', async (req, res) => {
 
     if (updates.some(([k]) => RESCORE_FIELDS.includes(k))) await rescore([parseInt(req.params.id, 10)]);
     const { rows } = await pool.query('SELECT * FROM prospects WHERE id = $1', [req.params.id]);
-    res.json(rows[0]);
+    res.json(presentProspect(rows[0], flagOn));
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     res.status(500).json({ error: err.message });
@@ -231,6 +243,7 @@ router.post('/:id/do-not-contact', async (req, res) => {
   if (id == null) return res.status(400).json({ error: 'invalid_id' });
   const value = readFlagValue(req.body);
   if (typeof value !== 'boolean') return res.status(400).json({ error: 'invalid_body' });
+  const flagOn = await callListEnabled();
 
   for (let attempt = 1; attempt <= DEADLOCK_ATTEMPTS; attempt++) {
   const client = await pool.connect();
@@ -248,49 +261,17 @@ router.post('/:id/do-not-contact', async (req, res) => {
     if (flagWriteGate) await flagWriteGate(client, row);
 
     if (value === true) {
-      // COALESCE keeps an existing source, including opt_out. A flagged NULL
-      // source stays NULL. The write runs for an already flagged opt_out row
-      // so that expression is what preserves the source. Activity is inserted
-      // only when this statement raises the flag. The sequence stop below
-      // still runs when the row was already opt_out.
-      const updated = await client.query(
-        `WITH prev AS (
-           SELECT id, do_not_contact AS was_flagged
-             FROM prospects
-            WHERE id = $1
-         )
-         UPDATE prospects AS p
-            SET do_not_contact = TRUE,
-                do_not_contact_source = CASE
-                  WHEN p.do_not_contact AND p.do_not_contact_source IS NULL
-                    THEN p.do_not_contact_source
-                  ELSE COALESCE(p.do_not_contact_source, 'manual')
-                END
-           FROM prev
-          WHERE p.id = prev.id
-        RETURNING p.*, prev.was_flagged`,
-        [id]
-      );
-      if (updated.rows.length) {
-        row = updated.rows[0];
-        if (row.was_flagged === false) {
-          await client.query(
-            `INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'note', $2)`,
-            [id, MARKED_DNC]
-          );
-        }
-        delete row.was_flagged;
-      }
       // Same transaction as the flag. A failure rolls the flag back, so a
-      // retry is not a no-op against a still-running sequence.
-      await stopLeadSequences(client, id, MARKED_DNC);
+      // retry is not a no-op against a still-running sequence. The source
+      // expression and the note live in raiseManualDoNotContact.
+      row = (await raiseManualDoNotContact(client, id)) || row;
       await client.query('COMMIT');
-      return res.json(row);
+      return res.json(presentProspect(row, flagOn));
     }
 
     if (!row.do_not_contact) {
       await client.query('ROLLBACK');
-      return res.json(row);
+      return res.json(presentProspect(row, flagOn));
     }
     const updated = await client.query(
       `UPDATE prospects
@@ -303,7 +284,7 @@ router.post('/:id/do-not-contact', async (req, res) => {
       const again = await client.query('SELECT * FROM prospects WHERE id = $1', [id]);
       await client.query('ROLLBACK');
       const current = again.rows[0];
-      if (!current || !current.do_not_contact) return res.json(current);
+      if (!current || !current.do_not_contact) return res.json(presentProspect(current, flagOn));
       return res.status(409).json({
         error: 'do_not_contact_locked',
         source: current.do_not_contact_source,
@@ -314,7 +295,7 @@ router.post('/:id/do-not-contact', async (req, res) => {
       [id, CLEARED_DNC]
     );
     await client.query('COMMIT');
-    return res.json(updated.rows[0]);
+    return res.json(presentProspect(updated.rows[0], flagOn));
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     if (isDeadlock(err) && attempt < DEADLOCK_ATTEMPTS) continue;
