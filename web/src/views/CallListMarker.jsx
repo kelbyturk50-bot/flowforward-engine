@@ -2,6 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { applyMarkerResponse, callListErrorMessage, readCallListKind } from './call-list';
 
+const ON_LIST_LINE = Object.freeze({
+  call: 'On your call list \u00B7 Call',
+  walk_in: 'On your call list \u00B7 Walk-in',
+});
+
+function leadKey(lead) {
+  return lead?.id == null ? '' : String(lead.id);
+}
+
 export default function CallListMarker({ lead, onLead }) {
   const [enabled, setEnabled] = useState(false);
   const [ready, setReady] = useState(false);
@@ -9,6 +18,14 @@ export default function CallListMarker({ lead, onLead }) {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const busyRef = useRef(false);
+  const alive = useRef(true);
+  const leadIdRef = useRef('');
+  leadIdRef.current = leadKey(lead);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -34,29 +51,35 @@ export default function CallListMarker({ lead, onLead }) {
 
   async function run(work, fallbackKind, success) {
     if (busyRef.current) return;
+    const id = leadKey(lead);
     busyRef.current = true;
     setBusy(true);
     setError('');
     try {
       const result = await work();
-      onLead(applyMarkerResponse(lead, result, fallbackKind));
+      if (!alive.current || leadIdRef.current !== id) return;
+      onLead((current) => (
+        current && String(current.id) === id
+          ? applyMarkerResponse(current, result, fallbackKind)
+          : current
+      ));
+      if (!alive.current) return;
       setMessage(success);
     } catch (err) {
+      if (!alive.current) return;
       setMessage('');
       setError(callListErrorMessage(err));
     } finally {
       busyRef.current = false;
-      setBusy(false);
+      if (alive.current) setBusy(false);
     }
   }
 
   return (
     <section className="block call-list-marker" aria-labelledby="call-list-marker-heading">
-      <h3 id="call-list-marker-heading">Add to call list</h3>
+      <h3 id="call-list-marker-heading">{onList ? 'Call list' : 'Add to call list'}</h3>
       {keptOff && <p className="call-list-hint">Kept off call list</p>}
-      {onList && (
-        <p className="call-list-hint">{marker.kind === 'walk_in' ? 'On the walk-in list.' : 'On the call list.'}</p>
-      )}
+      {onList && <p className="call-list-hint">{ON_LIST_LINE[marker.kind]}</p>}
       <div className="call-list-marker-actions">
         <button
           type="button"

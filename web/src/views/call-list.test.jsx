@@ -9,11 +9,11 @@ import { foundLead, focus } from '../test/fixtures.js';
 import { installApiDefaults } from '../test/defaults.js';
 import {
   mockRecordCallOutcome,
+  mockSaveCallListKind,
   presentProspectKeys,
   resetCallListMock,
   seedCallListLead,
   setMockCallListEnabled,
-  stageAfterOutcome,
 } from '../test/call-list-rules.js';
 import {
   CALL_REASONS,
@@ -26,6 +26,7 @@ import LeadDrawer from './LeadDrawer';
 import Leads from './Leads';
 import Pipeline from './Pipeline';
 import Today from './Today';
+import { notedStage } from './lead-stage';
 import {
   CALL_OUTCOME_LABELS,
   EMPTY_CALL_LIST,
@@ -71,6 +72,23 @@ async function settle() {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const ON_CALL = 'On your call list \u00B7 Call';
+const ON_WALK = 'On your call list \u00B7 Walk-in';
+
+function listRegion() {
+  return screen.getByRole('region', { name: 'Calls due / Walk-ins' });
 }
 
 beforeEach(() => {
@@ -478,6 +496,96 @@ describe('call list outcomes', () => {
     expect(within(next).getByRole('button', { name: 'No answer' })).toBeInTheDocument();
     expect(within(next).getByText('TEST: American Fork Air')).toBeInTheDocument();
   });
+
+  async function armTalked(region) {
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Talked' }));
+  }
+
+  it('keeps a logged row gone when a refresh that started earlier resolves', async () => {
+    const region = await ready();
+    armTalked(region);
+    const refresh = deferred();
+    api.todayCallList.mockImplementationOnce(() => refresh.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh day' }));
+    const post = deferred();
+    api.recordCallOutcome.mockImplementation(() => post.promise);
+    await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+    expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      post.resolve({ activity_id: 11, removed: true, back_on: null, stage: 'responded' });
+    });
+    await settle();
+    expect(within(listRegion()).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+    await act(async () => {
+      refresh.resolve(enabledCallList([callRow, walkRow]));
+    });
+    await settle();
+    expect(within(listRegion()).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+    expect(within(listRegion()).getByText('TEST: Eagle Mountain Plumbing')).toBeInTheDocument();
+    expect(within(listRegion()).queryByRole('button', { name: 'Log TEST: Wasatch Heating' })).not.toBeInTheDocument();
+    expect(within(listRegion()).queryByRole('button', { name: 'Talked' })).not.toBeInTheDocument();
+    expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a logged row gone when Show more started earlier resolves', async () => {
+    api.todayCallList.mockResolvedValue(enabledCallList([callRow, walkRow], { more: 1 }));
+    const region = await ready();
+    armTalked(region);
+    const rest = deferred();
+    api.todayCallList.mockImplementationOnce(() => rest.promise);
+    fireEvent.click(within(region).getByRole('button', { name: 'Show 1 more' }));
+    const post = deferred();
+    api.recordCallOutcome.mockImplementation(() => post.promise);
+    await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+    expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
+    expect(api.todayCallList).toHaveBeenLastCalledWith({ all: true });
+    await act(async () => {
+      post.resolve({ activity_id: 12, removed: true, back_on: null, stage: 'responded' });
+    });
+    await settle();
+    expect(within(listRegion()).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+    await act(async () => {
+      rest.resolve(enabledCallList([
+        callRow,
+        walkRow,
+        callListItem({ prospect_id: 43, company: 'TEST: Lehi Electric' }),
+      ], { more: 0 }));
+    });
+    await settle();
+    expect(within(listRegion()).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+    expect(within(listRegion()).queryByText('TEST: Lehi Electric')).not.toBeInTheDocument();
+    expect(within(listRegion()).getByText('TEST: Eagle Mountain Plumbing')).toBeInTheDocument();
+    expect(within(listRegion()).queryByRole('button', { name: 'Log TEST: Wasatch Heating' })).not.toBeInTheDocument();
+    expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
+  });
+
+  it('notes the returned stage when Today unmounts during the countdown', async () => {
+    const post = deferred();
+    api.recordCallOutcome.mockImplementation(() => post.promise);
+    const view = renderToday();
+    await settle();
+    armTalked(listRegion());
+    view.unmount();
+    expect(api.recordCallOutcome).toHaveBeenCalledTimes(1);
+    expect(notedStage(41)).toBeUndefined();
+    await act(async () => {
+      post.resolve({ activity_id: 13, removed: true, back_on: null, stage: 'responded' });
+    });
+    await settle();
+    expect(notedStage(41)).toBe('responded');
+  });
+
+  it('moves focus to Undo, then back to that row\'s Log button', async () => {
+    const region = await ready();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Talked' }));
+    const undo = within(region).getByRole('button', { name: 'Undo Talked (8)' });
+    expect(document.activeElement).toBe(undo);
+    fireEvent.click(undo);
+    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    expect(api.recordCallOutcome).not.toHaveBeenCalled();
+  });
 });
 
 describe('call list on Today replaces the other call surfaces', () => {
@@ -555,25 +663,36 @@ describe('lead drawer call list control', () => {
 
   it('adds a call or a walk-in, keeps a lead off, and shows the excluded state', async () => {
     api.todayCallList.mockResolvedValue(enabledCallList([]));
+    seedCallListLead({ id: foundLead.id, stage: 'found' });
     renderDrawer({ ...foundLead, company: 'TEST: Wasatch Heating', [CALL_LIST_KIND_FIELD]: null });
     expect(await screen.findByRole('heading', { name: 'Add to call list' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Call list' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Keep off call list' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Call', pressed: false }));
     expect(await screen.findByRole('status')).toHaveTextContent('Added to the call list.');
     expect(api.saveCallListKind).toHaveBeenCalledWith(11, 'call');
+    expect(screen.getByRole('heading', { name: 'Call list' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Add to call list' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Call', pressed: true })).toBeInTheDocument();
-    expect(screen.getByText('On the call list.')).toBeInTheDocument();
+    expect(screen.getByText(ON_CALL)).toBeInTheDocument();
     expect(screen.getByText("Won't come back unless they view the demo")).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Keep off call list' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Walk-in' }));
     expect(await screen.findByText('Added to the walk-in list.')).toBeInTheDocument();
     expect(api.saveCallListKind).toHaveBeenCalledWith(11, 'walk_in');
-    expect(screen.getByText('On the walk-in list.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Call list' })).toBeInTheDocument();
+    expect(screen.getByText(ON_WALK)).toBeInTheDocument();
+    expect(screen.queryByText(ON_CALL)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Keep off call list' }));
     expect(await screen.findByText('Kept off the call list.')).toBeInTheDocument();
     expect(api.removeCallList).toHaveBeenCalledWith(11);
     expect(screen.getByText('Kept off call list')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Add to call list' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Call list' })).not.toBeInTheDocument();
+    expect(screen.queryByText(ON_CALL)).not.toBeInTheDocument();
+    expect(screen.queryByText(ON_WALK)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Call', pressed: false })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Walk-in', pressed: false })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Keep off call list' })).not.toBeInTheDocument();
@@ -586,7 +705,7 @@ describe('lead drawer call list control', () => {
     expect(await screen.findByRole('heading', { name: 'Add to call list' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Call', pressed: false }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This lead is on do-not-contact'));
-    expect(screen.queryByText('On the call list.')).not.toBeInTheDocument();
+    expect(screen.queryByText(ON_CALL)).not.toBeInTheDocument();
     blocked.unmount();
 
     seedCallListLead({ id: foundLead.id, stage: 'found', archived_at: '2026-11-01T00:00:00.000Z' });
@@ -594,7 +713,7 @@ describe('lead drawer call list control', () => {
     expect(await screen.findByRole('heading', { name: 'Add to call list' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Walk-in', pressed: false }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This lead is archived'));
-    expect(screen.queryByText('On the walk-in list.')).not.toBeInTheDocument();
+    expect(screen.queryByText(ON_WALK)).not.toBeInTheDocument();
   });
 
   it('stays quiet when the marker keys are absent', async () => {
@@ -635,11 +754,12 @@ describe('lead drawer call list control', () => {
       call_list_set_at: '2026-11-20T18:04:00.000Z',
     });
     fireEvent.click(screen.getByRole('button', { name: 'Call' }));
-    expect(await screen.findByText('On the call list.')).toBeInTheDocument();
+    expect(await screen.findByText(ON_CALL)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Call list' })).toBeInTheDocument();
     api.removeCallList.mockRejectedValueOnce(Object.assign(new Error('not_found'), { status: 404 }));
     fireEvent.click(screen.getByRole('button', { name: 'Keep off call list' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Call list isn\'t available.'));
-    expect(screen.getByText('On the call list.')).toBeInTheDocument();
+    expect(screen.getByText(ON_CALL)).toBeInTheDocument();
   });
 
   it('shows add options for an excluded lead and reports a failed save', async () => {
@@ -647,6 +767,8 @@ describe('lead drawer call list control', () => {
     renderDrawer({ ...foundLead, company: 'TEST: Wasatch Heating', [CALL_LIST_KIND_FIELD]: 'excluded' });
     expect(await screen.findByText('Kept off call list')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Add to call list' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Call list' })).not.toBeInTheDocument();
+    expect(screen.queryByText(ON_CALL)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Keep off call list' })).not.toBeInTheDocument();
     api.saveCallListKind.mockRejectedValue(Object.assign(new Error('Something went wrong.'), { status: 500 }));
     fireEvent.click(screen.getByRole('button', { name: 'Walk-in' }));
@@ -654,6 +776,83 @@ describe('lead drawer call list control', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Something went wrong.');
     expect(api.saveCallListKind).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Kept off call list')).toBeInTheDocument();
+  });
+
+  it('does not move the drawer back to the lead a marker save started on', async () => {
+    api.todayCallList.mockResolvedValue(enabledCallList([]));
+    const first = {
+      ...foundLead,
+      id: 11,
+      company: 'TEST: Wasatch Heating',
+      call_list_kind: null,
+      activities: [],
+      projects: [],
+    };
+    const second = {
+      ...foundLead,
+      id: 12,
+      company: 'TEST: Peak Plumbing',
+      stage: 'contacted',
+      call_list_kind: null,
+      activities: [],
+      projects: [],
+    };
+    seedCallListLead({ id: 11, stage: 'found' });
+    seedCallListLead({ id: 12, stage: 'contacted' });
+    api.prospect.mockImplementation(async (id) => (Number(id) === 12 ? second : first));
+    const put = deferred();
+    api.saveCallListKind.mockImplementation(() => put.promise);
+    const view = render(
+      <LeadDrawer id={11} onClose={() => {}} bump={() => {}} openProject={() => {}} openProposal={() => {}} />,
+    );
+    expect(await screen.findByRole('heading', { name: 'Add to call list' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Call', pressed: false }));
+    expect(api.saveCallListKind).toHaveBeenCalledWith(11, 'call');
+    view.rerender(
+      <LeadDrawer id={12} onClose={() => {}} bump={() => {}} openProject={() => {}} openProposal={() => {}} />,
+    );
+    expect(await screen.findByRole('heading', { name: 'TEST: Peak Plumbing' })).toBeInTheDocument();
+    await act(async () => { put.resolve({ call_list_kind: 'call', call_list_set_at: '2026-11-20T18:00:00.000Z' }); });
+    await settle();
+    expect(screen.getByRole('dialog', { name: 'TEST: Peak Plumbing' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'TEST: Wasatch Heating' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Add to call list' })).toBeInTheDocument();
+    expect(screen.queryByText(ON_CALL)).not.toBeInTheDocument();
+  });
+
+  it('keeps a stage edit that lands while the marker save is in flight', async () => {
+    api.todayCallList.mockResolvedValue(enabledCallList([]));
+    const lead = {
+      ...foundLead,
+      company: 'TEST: Wasatch Heating',
+      stage: 'found',
+      call_list_kind: null,
+      activities: [],
+      projects: [],
+    };
+    seedCallListLead({ id: lead.id, stage: 'found' });
+    api.prospect.mockResolvedValue(lead);
+    const put = deferred();
+    api.saveCallListKind.mockImplementation(() => put.promise);
+    const stageSave = deferred();
+    api.updateLead.mockImplementation(() => stageSave.promise);
+    render(
+      <LeadDrawer id={lead.id} onClose={() => {}} bump={() => {}} openProject={() => {}} openProposal={() => {}} />,
+    );
+    expect(await screen.findByRole('heading', { name: 'Add to call list' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Stage' })).toHaveValue('found');
+    fireEvent.click(screen.getByRole('button', { name: 'Call', pressed: false }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Stage' }), { target: { value: 'contacted' } });
+    await act(async () => { stageSave.resolve({ ...lead, stage: 'contacted' }); });
+    await settle();
+    expect(screen.getByRole('combobox', { name: 'Stage' })).toHaveValue('contacted');
+    await act(async () => {
+      put.resolve({ call_list_kind: 'call', call_list_set_at: '2026-11-20T18:04:00.000Z' });
+    });
+    await settle();
+    expect(screen.getByRole('combobox', { name: 'Stage' })).toHaveValue('contacted');
+    expect(screen.getByRole('heading', { name: 'Call list' })).toBeInTheDocument();
+    expect(screen.getByText(ON_CALL)).toBeInTheDocument();
   });
 });
 
@@ -665,27 +864,91 @@ describe('call outcome stage from the POST body', () => {
   });
 
   it('moves talked, audit booked, and not interested, and leaves the others', () => {
-    expect(stageAfterOutcome('found', 'talked')).toBe('responded');
-    expect(stageAfterOutcome('contacted', 'talked')).toBe('responded');
-    expect(stageAfterOutcome('responded', 'talked')).toBe('responded');
-    expect(stageAfterOutcome('qualified', 'talked')).toBe('qualified');
-    expect(stageAfterOutcome('proposal', 'talked')).toBe('proposal');
-    expect(stageAfterOutcome('found', 'audit_booked')).toBe('qualified');
-    expect(stageAfterOutcome('contacted', 'audit_booked')).toBe('qualified');
-    expect(stageAfterOutcome('responded', 'audit_booked')).toBe('qualified');
-    expect(stageAfterOutcome('qualified', 'audit_booked')).toBe('qualified');
-    expect(stageAfterOutcome('proposal', 'audit_booked')).toBe('proposal');
-    for (const stage of OPEN) expect(stageAfterOutcome(stage, 'not_interested')).toBe('lost');
+    setMockCallListEnabled(true);
+    const talked = [
+      ['found', 'responded'],
+      ['contacted', 'responded'],
+      ['responded', 'responded'],
+      ['qualified', 'qualified'],
+      ['proposal', 'proposal'],
+    ];
+    const booked = [
+      ['found', 'qualified'],
+      ['contacted', 'qualified'],
+      ['responded', 'qualified'],
+      ['qualified', 'qualified'],
+      ['proposal', 'proposal'],
+    ];
+    let id = 1;
+    for (const [start, stage] of talked) {
+      seedCallListLead({ id, stage: start });
+      const body = mockRecordCallOutcome(id, { outcome: 'talked', kind: 'call' });
+      expect(body.stage).toBe(stage);
+      expect(body.removed).toBe(true);
+      id += 1;
+    }
+    for (const [start, stage] of booked) {
+      seedCallListLead({ id, stage: start });
+      const body = mockRecordCallOutcome(id, { outcome: 'audit_booked', kind: 'call' });
+      expect(body.stage).toBe(stage);
+      expect(body.removed).toBe(true);
+      id += 1;
+    }
+    for (const stage of OPEN) {
+      seedCallListLead({ id, stage });
+      const body = mockRecordCallOutcome(id, { outcome: 'not_interested', kind: 'call' });
+      expect(body.stage).toBe('lost');
+      expect(body.removed).toBe(true);
+      id += 1;
+    }
     for (const stage of ['won', 'lost', 'disqualified']) {
-      expect(stageAfterOutcome(stage, 'not_interested')).toBe(stage);
+      seedCallListLead({ id, stage });
+      const body = mockRecordCallOutcome(id, { outcome: 'not_interested', kind: 'call' });
+      expect(body.stage).toBe(stage);
+      expect(body.removed).toBe(true);
+      id += 1;
     }
     for (const outcome of ['no_answer', 'voicemail', 'do_not_contact']) {
       for (const stage of [...OPEN, 'won', 'lost', 'disqualified']) {
-        expect(stageAfterOutcome(stage, outcome)).toBe(stage);
+        seedCallListLead({ id, stage });
+        const body = mockRecordCallOutcome(id, { outcome, kind: 'call' });
+        expect(body.stage).toBe(stage);
+        expect(body.removed).toBe(true);
+        id += 1;
       }
     }
     expect(panelSource).not.toContain('responded');
     expect(panelSource).not.toContain('qualified');
+  });
+
+  it('returns 404 for an unseeded marker and checks kind before a 409', async () => {
+    setMockCallListEnabled(true);
+    const saveKind = async (id, kind) => mockSaveCallListKind(id, kind);
+    await expect(saveKind(404, 'call')).rejects.toMatchObject({
+      message: 'not_found',
+      status: 404,
+      body: { error: 'not_found' },
+    });
+    seedCallListLead({ id: 11, stage: 'found', do_not_contact: true });
+    await expect(saveKind(11, 'sideways')).rejects.toMatchObject({
+      message: 'invalid_kind',
+      status: 400,
+      body: { error: 'invalid_kind' },
+    });
+    await expect(saveKind(11, 'call')).rejects.toMatchObject({
+      message: 'do_not_contact',
+      status: 409,
+      body: { error: 'do_not_contact' },
+    });
+    seedCallListLead({ id: 12, stage: 'found', archived: true });
+    await expect(saveKind(12, 'nope')).rejects.toMatchObject({
+      message: 'invalid_kind',
+      status: 400,
+    });
+    await expect(saveKind(12, 'walk_in')).rejects.toMatchObject({
+      message: 'archived',
+      status: 409,
+    });
   });
 
   it('writes the returned stage onto the drawer, the pipeline, and the leads list', async () => {
@@ -698,10 +961,12 @@ describe('call outcome stage from the POST body', () => {
       contact_name: '',
     };
     seedCallListLead(lead);
-    api.recordCallOutcome.mockImplementation(async (id, body) => ({
-      ...mockRecordCallOutcome(id, body, 'found'),
-      removed: false,
-    }));
+    const removed = [];
+    api.recordCallOutcome.mockImplementation(async (id, body) => {
+      const result = mockRecordCallOutcome(id, body, 'found');
+      removed.push(result.removed);
+      return result;
+    });
     api.prospect.mockResolvedValue({ ...lead, activities: [], projects: [] });
     api.prospects.mockImplementation(async (filters = {}) => {
       const stage = String(filters.stage || '');
@@ -709,23 +974,36 @@ describe('call outcome stage from the POST body', () => {
       return { total: 0, prospects: [] };
     });
     api.todayCallList.mockResolvedValue(enabledCallList([callListItem({ prospect_id: 41 })]));
-    render(
-      <>
-        <Today version={0} bump={() => {}} openLead={() => {}} openProject={() => {}} />
-        <LeadDrawer id={41} onClose={() => {}} bump={() => {}} openProject={() => {}} openProposal={() => {}} />
-        <Leads version={0} bump={() => {}} openLead={() => {}} />
-        <Pipeline version={0} bump={() => {}} openLead={() => {}} openProject={() => {}} />
-      </>,
-    );
-    const region = await screen.findByRole('region', { name: 'Calls due / Walk-ins' });
+    function Board() {
+      const [version, setVersion] = useState(0);
+      return (
+        <>
+          <button type="button" onClick={() => setVersion((value) => value + 1)}>Refresh day</button>
+          <Today version={version} bump={() => {}} openLead={() => {}} openProject={() => {}} />
+          <LeadDrawer id={41} onClose={() => {}} bump={() => {}} openProject={() => {}} openProposal={() => {}} />
+          <Leads version={0} bump={() => {}} openLead={() => {}} />
+          <Pipeline version={0} bump={() => {}} openLead={() => {}} openProject={() => {}} />
+        </>
+      );
+    }
+    render(<Board />);
+    await screen.findByRole('region', { name: 'Calls due / Walk-ins' });
     const stage = () => within(screen.getByRole('dialog')).getByRole('combobox', { name: 'Stage' });
     const column = (name) => screen.getByRole('region', { name });
     const chip = () => within(screen.getByRole('table')).getByText(/^(Found|Contacted|Responded|Qualified|Proposal|Lost)$/);
 
     async function log(label) {
-      fireEvent.click(within(region).getByRole('button', { name: label }));
+      const current = listRegion();
+      fireEvent.click(within(current).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+      fireEvent.click(within(current).getByRole('button', { name: label }));
       await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
       await settle();
+    }
+
+    async function restoreRow() {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh day' }));
+      await settle();
+      expect(within(listRegion()).getByRole('button', { name: 'Log TEST: Wasatch Heating' })).toBeInTheDocument();
     }
 
     await settle();
@@ -733,32 +1011,41 @@ describe('call outcome stage from the POST body', () => {
     expect(within(column('Found')).getByText('TEST: Wasatch Heating')).toBeInTheDocument();
     expect(chip()).toHaveTextContent('Found');
     vi.useFakeTimers();
-    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
 
     await log('No answer');
+    expect(removed).toEqual([true]);
     expect(stage()).toHaveValue('found');
     expect(chip()).toHaveTextContent('Found');
+    expect(within(listRegion()).queryByRole('button', { name: 'Log TEST: Wasatch Heating' })).not.toBeInTheDocument();
+    await restoreRow();
     await log('Voicemail');
     expect(stage()).toHaveValue('found');
+    await restoreRow();
     await log('Do not contact');
     expect(stage()).toHaveValue('found');
     expect(within(column('Found')).getByText('TEST: Wasatch Heating')).toBeInTheDocument();
+    expect(within(listRegion()).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+    await restoreRow();
 
     await log('Talked');
     expect(stage()).toHaveValue('responded');
     expect(within(column('Responded')).getByText('TEST: Wasatch Heating')).toBeInTheDocument();
     expect(within(column('Found')).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
     expect(chip()).toHaveTextContent('Responded');
+    await restoreRow();
 
     await log('Audit booked');
     expect(stage()).toHaveValue('qualified');
     expect(within(column('Qualified')).getByText('TEST: Wasatch Heating')).toBeInTheDocument();
     expect(chip()).toHaveTextContent('Qualified');
+    await restoreRow();
 
     await log('Not interested');
     expect(stage()).toHaveValue('lost');
     expect(within(column('Qualified')).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
     expect(chip()).toHaveTextContent('Lost');
+    expect(removed.every((flag) => flag === true)).toBe(true);
+    expect(removed).toHaveLength(6);
     vi.useRealTimers();
   });
 });

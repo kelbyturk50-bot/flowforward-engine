@@ -341,8 +341,9 @@ test.describe('F-010 call list screenshots', () => {
       await page.goto('/#/today');
       await page.getByRole('button', { name: 'TEST: Wasatch Heating', exact: true }).click();
       const dialog = page.getByRole('dialog', { name: 'TEST: Wasatch Heating' });
-      await expect(dialog.getByRole('heading', { name: 'Add to call list' })).toBeVisible();
-      await expect(dialog.getByText('On the call list.')).toBeVisible();
+      await expect(dialog.getByRole('heading', { name: 'Call list' })).toBeVisible();
+      await expect(dialog.getByRole('heading', { name: 'Add to call list' })).toHaveCount(0);
+      await expect(dialog.getByText('On your call list \u00B7 Call')).toBeVisible();
       await expect(dialog.getByRole('button', { name: 'Keep off call list' })).toBeVisible();
       await expect(dialog.getByText('Won\'t come back unless they view the demo')).toBeVisible();
       const keep = dialog.getByRole('button', { name: 'Keep off call list' });

@@ -11,7 +11,7 @@ const OUTCOMES = new Set([
   'do_not_contact',
 ]);
 
-export function stageAfterOutcome(current, outcome) {
+function stageAfterOutcome(current, outcome) {
   if (outcome === 'talked') return forward(current, 'responded');
   if (outcome === 'audit_booked') return forward(current, 'qualified');
   if (outcome === 'not_interested') {
@@ -34,6 +34,7 @@ let enabled = false;
 function fail(status, error) {
   const err = new Error(error);
   err.status = status;
+  err.body = { error };
   throw err;
 }
 
@@ -72,10 +73,11 @@ function stored(id, fallbackStage) {
 
 export function mockSaveCallListKind(id, kind) {
   if (!enabled) fail(404, 'not_found');
-  const current = leads.get(String(id));
-  if (current?.do_not_contact) fail(409, 'do_not_contact');
-  if (current?.archived) fail(409, 'archived');
   if (kind !== 'call' && kind !== 'walk_in') fail(400, 'invalid_kind');
+  const current = leads.get(String(id));
+  if (!current) fail(404, 'not_found');
+  if (current.do_not_contact) fail(409, 'do_not_contact');
+  if (current.archived) fail(409, 'archived');
   return {
     call_list_kind: kind,
     call_list_set_at: '2026-11-20T18:00:00.000Z',

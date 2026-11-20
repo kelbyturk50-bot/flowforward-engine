@@ -38,6 +38,7 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
   const [rowErrors, setRowErrors] = useState(() => new Map());
   const knownOn = useRef(false);
   const alive = useRef(true);
+  const listGeneration = useRef(0);
   const pendingRef = useRef(new Map());
   const savingRef = useRef(saving);
   const commitRef = useRef(async () => {});
@@ -56,8 +57,9 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
 
   useEffect(() => {
     let live = true;
+    const generation = listGeneration.current;
     api.todayCallList().then((data) => {
-      if (!live) return;
+      if (!live || generation !== listGeneration.current) return;
       if (data?.enabled === true) {
         knownOn.current = true;
         const items = Array.isArray(data.items) ? data.items : [];
@@ -73,7 +75,7 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
       setListError(null);
       setPhase('off');
     }).catch((error) => {
-      if (!live) return;
+      if (!live || generation !== listGeneration.current) return;
       if (error?.status === 404 || !knownOn.current) {
         knownOn.current = false;
         setRows([]);
@@ -91,8 +93,9 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
     if (alive.current) setSaving((current) => new Set(current).add(entry.id));
     try {
       const result = await api.recordCallOutcome(entry.id, { outcome: entry.outcome, kind: entry.kind });
-      if (!alive.current) return;
       if (typeof result?.stage === 'string' && result.stage) noteLeadStage(entry.id, result.stage);
+      listGeneration.current += 1;
+      if (!alive.current) return;
       const back = backOnLabel(result?.back_on);
       setRows((list) => {
         if (result?.removed && back) {
@@ -197,10 +200,11 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
 
   async function showAll() {
     if (moreBusy || expanded) return;
+    const generation = listGeneration.current;
     setMoreBusy(true);
     try {
       const data = await api.todayCallList({ all: true });
-      if (!alive.current) return;
+      if (!alive.current || generation !== listGeneration.current) return;
       if (data?.enabled !== true) {
         knownOn.current = false;
         setRows([]);
@@ -213,7 +217,7 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
       setExpanded(true);
       setListError(null);
     } catch (error) {
-      if (!alive.current) return;
+      if (!alive.current || generation !== listGeneration.current) return;
       setListError({ message: callListErrorMessage(error) });
     } finally {
       if (alive.current) setMoreBusy(false);
@@ -282,9 +286,19 @@ function CallListRow({ item, openLead, pending, saving, error, open, rowRef, onR
   const company = item.company || 'Lead';
   const [scriptOpen, setScriptOpen] = useState(false);
   const undoRef = useRef(null);
+  const undoButtonRef = useRef(null);
+  const logButtonRef = useRef(null);
+  const returnFocus = useRef(false);
   useEffect(() => {
-    if (!pending) return;
-    try { undoRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch { /* jsdom */ }
+    if (pending) {
+      returnFocus.current = true;
+      try { undoButtonRef.current?.focus(); } catch { /* jsdom */ }
+      try { undoRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch { /* jsdom */ }
+      return;
+    }
+    if (!returnFocus.current) return;
+    returnFocus.current = false;
+    try { logButtonRef.current?.focus(); } catch { /* jsdom */ }
   }, [pending]);
 
   if (item.settledBackOn) {
@@ -303,7 +317,7 @@ function CallListRow({ item, openLead, pending, saving, error, open, rowRef, onR
         <div className="call-list-undo">
           <p className="call-list-company-text">{company}</p>
           <p role="status">{`${label}. Undo to cancel.`}</p>
-          <button type="button" className="btn" aria-live="off" onClick={() => onUndo(pending.id)}>
+          <button type="button" className="btn" ref={undoButtonRef} aria-live="off" onClick={() => onUndo(pending.id)}>
             {`Undo ${label} (${undoSeconds(pending.deadline)})`}
           </button>
         </div>
@@ -358,7 +372,7 @@ function CallListRow({ item, openLead, pending, saving, error, open, rowRef, onR
             Map
           </a>
         )}
-        <button type="button" className="btn btn-quiet call-list-go is-secondary" aria-label={`Log ${company}`} onClick={onReveal}>
+        <button type="button" ref={logButtonRef} className="btn btn-quiet call-list-go is-secondary" aria-label={`Log ${company}`} onClick={onReveal}>
           Log
         </button>
       </div>
