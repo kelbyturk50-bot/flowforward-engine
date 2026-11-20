@@ -204,11 +204,20 @@ function renderMessage(p, which) {
   return composed(p, which) + footer();
 }
 
-// The HTML part sent alongside the plain text: same words, short link text
-// instead of raw URLs, and a signature with the FlowForward logo.
+// HTML for the same composed text. Inbox replies call email-html directly
+// and still send that part. Intros and follow-ups do not attach it.
 function renderMessageHtml(p, which) {
   return require('./email-html').renderHtml(composed(p, which), p);
 }
+
+// Intros and follow-ups are one text/plain part. Nodemailer 10
+// quoted-printable-encodes this body: the footer middle dot (U+00B7) is not
+// 7bit, and a line longer than 76 characters is wrapped with a soft break
+// (`=\r\n`) that splits a prototype or one-pager URL. textEncoding 'base64'
+// (the composer reads the first character, B) selects base64 instead. The
+// decoded part is the same bytes as renderMessage. Inbox replies do not use
+// this and still send an HTML part.
+const OUTREACH_TEXT_ENCODING = 'base64';
 
 // Sets p.prototype_url to the lead's live prototype link, if any. A lookup
 // failure never blocks an email; it just goes without the link.
@@ -922,7 +931,7 @@ async function approveAndSend(proposalId, options = {}) {
       to: envelopeTo(p.to_name, toAddress),
       subject: p.subject.trim(),
       text: renderMessage(p, 'first'),
-      html: renderMessageHtml(p, 'first'),
+      textEncoding: OUTREACH_TEXT_ENCODING,
       headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
     };
     prepared = await prepareOutgoing(mail);
@@ -1569,7 +1578,7 @@ async function sendDueFollowupsLocked(deferProspectIds) {
           to: envelopeTo(p.to_name, toAddress),
           subject: /^re:/i.test(p.subject) ? p.subject : `Re: ${p.subject}`,
           text: renderMessage(p, which),
-          html: renderMessageHtml(p, which),
+          textEncoding: OUTREACH_TEXT_ENCODING,
           inReplyTo: p.message_id || undefined,
           references: p.message_id ? [p.message_id] : undefined,
           headers: { 'List-Unsubscribe': `<mailto:${SENDER.email}?subject=unsubscribe>` },
