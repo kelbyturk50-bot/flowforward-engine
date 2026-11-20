@@ -38,6 +38,18 @@ function focusFellToBody(active) {
     || active.isConnected === false;
 }
 
+function focusNode(node) {
+  try { node?.focus(); } catch { /* jsdom */ }
+}
+
+function replacementTarget(node) {
+  if (!node) return null;
+  const button = node.querySelector('button');
+  if (button) return button;
+  if (node.classList.contains('call-list-settled')) return node;
+  return null;
+}
+
 function sameId(item, id) {
   return String(item?.prospect_id) === id;
 }
@@ -66,6 +78,7 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
   const cardMap = useRef(new Map());
   const heldFocusRef = useRef(new Set());
   const focusMoveRef = useRef(null);
+  const settleFocusRef = useRef(null);
   const headingRef = useRef(null);
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
@@ -142,7 +155,9 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
       listGeneration.current += 1;
       if (!alive.current) return;
       const back = backOnLabel(result?.back_on);
-      if (result?.removed && !back && held) {
+      if (held && result?.removed && back) {
+        settleFocusRef.current = key;
+      } else if (held && result?.removed && !back) {
         focusMoveRef.current = { id: key, next: neighbors.next, prev: neighbors.prev };
       }
       setRows((list) => {
@@ -287,6 +302,18 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
   }
 
   useEffect(() => {
+    const settleId = settleFocusRef.current;
+    if (settleId) {
+      const row = rows.find((item) => sameId(item, settleId));
+      if (row?.settledBackOn) {
+        settleFocusRef.current = null;
+        const active = document.activeElement;
+        const card = cardMap.current.get(settleId);
+        const inside = !!(card && active && (active === card || card.contains(active)));
+        if (inside || focusFellToBody(active)) focusNode(card);
+      }
+    }
+
     const move = focusMoveRef.current;
     if (!move) return;
     if (rows.some((row) => sameId(row, move.id))) return;
@@ -296,8 +323,8 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
     const inside = !!(card && active && card.contains(active));
     if (!inside && !focusFellToBody(active)) return;
     const nextId = [move.next, move.prev].find((id) => id && rows.some((row) => sameId(row, id)));
-    const button = nextId ? cardMap.current.get(nextId)?.querySelector('button') : null;
-    try { (button || headingRef.current)?.focus(); } catch { /* jsdom */ }
+    const next = nextId ? replacementTarget(cardMap.current.get(nextId)) : null;
+    focusNode(next || headingRef.current);
   }, [rows]);
 
   if (phase === 'loading' || phase === 'off') return null;
@@ -397,7 +424,12 @@ function CallListRow({ item, openLead, pending, saving, error, open, rowRef, onC
 
   if (item.settledBackOn) {
     return (
-      <li className="call-list-card call-list-settled" ref={setCard}>
+      <li
+        className="call-list-card call-list-settled"
+        ref={setCard}
+        tabIndex={-1}
+        aria-label={`${company}, ${item.settledBackOn}`}
+      >
         <p className="call-list-company-text">{company}</p>
         <p className="call-list-back">{item.settledBackOn}</p>
       </li>

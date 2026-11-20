@@ -592,14 +592,14 @@ describe('call list outcomes', () => {
     api.recordCallOutcome.mockImplementation(() => post.promise);
     const region = await ready();
     fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
-    fireEvent.click(within(region).getByRole('button', { name: 'No answer' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Not interested' }));
     const other = within(region).getByRole('button', { name: 'Log TEST: Eagle Mountain Plumbing' });
     other.focus();
     expect(document.activeElement).toBe(other);
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     expect(document.activeElement).toBe(other);
     await act(async () => {
-      post.resolve({ activity_id: 31, removed: true, back_on: null, stage: 'found' });
+      post.resolve({ activity_id: 31, removed: true, back_on: null, stage: 'lost' });
     });
     await settle();
     expect(document.activeElement).toBe(other);
@@ -634,7 +634,7 @@ describe('call list outcomes', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     expect(document.activeElement).toBe(close);
     await act(async () => {
-      post.resolve({ activity_id: 32, removed: true, back_on: null, stage: 'found' });
+      post.resolve({ activity_id: 32, removed: true, back_on: '2026-11-23', stage: 'found' });
     });
     await settle();
     expect(document.activeElement).toBe(close);
@@ -692,11 +692,11 @@ describe('call list outcomes', () => {
   });
 
   it('moves focus to the next row when a removed outcome had focus', async () => {
-    api.recordCallOutcome.mockResolvedValue({ activity_id: 33, removed: true, back_on: null, stage: 'responded' });
+    api.recordCallOutcome.mockResolvedValue({ activity_id: 33, removed: true, back_on: null, stage: 'lost' });
     const region = await ready();
     fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
-    fireEvent.click(within(region).getByRole('button', { name: 'Talked' }));
-    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Undo Talked (8)' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Not interested' }));
+    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Undo Not interested (8)' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     await settle();
     const next = within(listRegion()).getByRole('button', { name: 'TEST: Eagle Mountain Plumbing' });
@@ -709,8 +709,8 @@ describe('call list outcomes', () => {
     api.recordCallOutcome.mockResolvedValue({ activity_id: 34, removed: true, back_on: null, stage: 'found' });
     const region = await ready();
     fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Eagle Mountain Plumbing' }));
-    fireEvent.click(within(region).getByRole('button', { name: 'Voicemail' }));
-    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Undo Voicemail (8)' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Do not contact' }));
+    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Undo Do not contact (8)' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     await settle();
     const previous = within(listRegion()).getByRole('button', { name: 'TEST: Wasatch Heating' });
@@ -721,17 +721,120 @@ describe('call list outcomes', () => {
 
   it('moves focus to the heading when a removed outcome empties the list', async () => {
     api.todayCallList.mockResolvedValue(enabledCallList([callRow]));
-    api.recordCallOutcome.mockResolvedValue({ activity_id: 35, removed: true, back_on: null, stage: 'responded' });
+    api.recordCallOutcome.mockResolvedValue({ activity_id: 35, removed: true, back_on: null, stage: 'qualified' });
     const region = await ready();
     fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
-    fireEvent.click(within(region).getByRole('button', { name: 'Talked' }));
-    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Undo Talked (8)' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Audit booked' }));
+    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Undo Audit booked (8)' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     await settle();
     const heading = screen.getByRole('heading', { name: 'Calls due / Walk-ins' });
     expect(heading.tabIndex).toBe(-1);
     expect(document.activeElement).toBe(heading);
     expect(screen.getByText(EMPTY_CALL_LIST)).toBeInTheDocument();
+  });
+
+  it('lands focus on the settled card when a snooze countdown had focus', async () => {
+    vi.setSystemTime(new Date('2026-11-20T18:00:00.000Z'));
+    const cases = [
+      ['No answer', '2026-11-23', 'found', 'TEST: Wasatch Heating, Back on Mon'],
+      ['Voicemail', '2026-11-24', 'found', 'TEST: Wasatch Heating, Back on Tue'],
+      ['Talked', '2026-11-27', 'responded', 'TEST: Wasatch Heating, Back on Nov 27'],
+    ];
+    for (const [label, backOn, stage, name] of cases) {
+      api.recordCallOutcome.mockResolvedValue({
+        activity_id: 36,
+        removed: true,
+        back_on: backOn,
+        stage,
+      });
+      const view = renderToday();
+      await settle();
+      const region = listRegion();
+      fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+      fireEvent.click(within(region).getByRole('button', { name: label }));
+      const undo = within(region).getByRole('button', { name: `Undo ${label} (8)` });
+      expect(document.activeElement).toBe(undo);
+      await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+      await settle();
+      const card = within(listRegion()).getByRole('listitem', { name });
+      expect(card.tabIndex).toBe(-1);
+      expect(card.className).toContain('call-list-settled');
+      expect(document.activeElement).toBe(card);
+      expect(document.activeElement).not.toBe(document.body);
+      expect(within(card).queryByRole('button')).not.toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  it('leaves focus where the user moved it when a snooze countdown settles', async () => {
+    vi.setSystemTime(new Date('2026-11-20T18:00:00.000Z'));
+    const cases = [
+      ['No answer', '2026-11-23', 'found', 'TEST: Wasatch Heating, Back on Mon'],
+      ['Voicemail', '2026-11-24', 'found', 'TEST: Wasatch Heating, Back on Tue'],
+      ['Talked', '2026-11-27', 'responded', 'TEST: Wasatch Heating, Back on Nov 27'],
+    ];
+    for (const [label, backOn, stage, name] of cases) {
+      api.recordCallOutcome.mockResolvedValue({
+        activity_id: 37,
+        removed: true,
+        back_on: backOn,
+        stage,
+      });
+      const view = renderToday();
+      await settle();
+      const region = listRegion();
+      fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+      fireEvent.click(within(region).getByRole('button', { name: label }));
+      const other = within(region).getByRole('button', { name: 'Log TEST: Eagle Mountain Plumbing' });
+      other.focus();
+      expect(document.activeElement).toBe(other);
+      await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+      await settle();
+      const card = within(listRegion()).getByRole('listitem', { name });
+      expect(card.className).toContain('call-list-settled');
+      expect(document.activeElement).toBe(other);
+      expect(document.activeElement).not.toBe(card);
+      expect(document.activeElement).not.toBe(document.body);
+      view.unmount();
+    }
+  });
+
+  it('moves focus to the next settled card when a removed row had focus', async () => {
+    vi.setSystemTime(new Date('2026-11-20T18:00:00.000Z'));
+    const region = await ready();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Eagle Mountain Plumbing' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Voicemail' }));
+    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Undo Voicemail (8)' }));
+    api.recordCallOutcome.mockResolvedValue({
+      activity_id: 38,
+      removed: true,
+      back_on: '2026-11-24',
+      stage: 'found',
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+    await settle();
+    const settled = within(listRegion()).getByRole('listitem', { name: 'TEST: Eagle Mountain Plumbing, Back on Tue' });
+    expect(settled.tabIndex).toBe(-1);
+    expect(document.activeElement).toBe(settled);
+
+    api.recordCallOutcome.mockResolvedValue({
+      activity_id: 39,
+      removed: true,
+      back_on: null,
+      stage: 'lost',
+    });
+    fireEvent.click(within(listRegion()).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    const closing = within(listRegion()).getByRole('button', { name: 'Not interested' });
+    closing.focus();
+    fireEvent.click(closing);
+    expect(document.activeElement).toBe(within(listRegion()).getByRole('button', { name: 'Undo Not interested (8)' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+    await settle();
+    expect(within(listRegion()).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(settled);
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).not.toBe(screen.getByRole('heading', { name: 'Calls due / Walk-ins' }));
   });
 
   it('lets the later list GET win when Show more and refresh share a generation', async () => {
@@ -1120,6 +1223,27 @@ describe('call outcome stage from the POST body', () => {
     expect(panelSource).not.toContain('qualified');
   });
 
+  it('derives back_on from the snooze outcome and returns null when the lead closes', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-20T18:00:00.000Z'));
+    try {
+      setMockCallListEnabled(true);
+      seedCallListLead({ id: 21, stage: 'found' });
+      expect(mockRecordCallOutcome(21, { outcome: 'no_answer', kind: 'call' }).back_on).toBe('2026-11-23');
+      expect(mockRecordCallOutcome(21, { outcome: 'voicemail', kind: 'call' }).back_on).toBe('2026-11-24');
+      expect(mockRecordCallOutcome(21, { outcome: 'talked', kind: 'call' }).back_on).toBe('2026-11-27');
+      expect(mockRecordCallOutcome(21, { outcome: 'audit_booked', kind: 'call' }).back_on).toBeNull();
+      expect(mockRecordCallOutcome(21, { outcome: 'not_interested', kind: 'call' }).back_on).toBeNull();
+      expect(mockRecordCallOutcome(21, { outcome: 'do_not_contact', kind: 'call' }).back_on).toBeNull();
+      vi.setSystemTime(new Date('2026-11-21T18:00:00.000Z'));
+      seedCallListLead({ id: 22, stage: 'found' });
+      expect(mockRecordCallOutcome(22, { outcome: 'no_answer', kind: 'call' }).back_on).toBe('2026-11-23');
+      expect(mockRecordCallOutcome(22, { outcome: 'talked', kind: 'call' }).back_on).toBe('2026-11-30');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns 404 for an unseeded marker and checks kind before a 409', async () => {
     setMockCallListEnabled(true);
     const saveKind = async (id, kind) => mockSaveCallListKind(id, kind);
@@ -1343,6 +1467,8 @@ describe('call list helpers and tokens', () => {
     expect(block).toContain('.call-list-hold');
     expect(block).toContain('grid-column: 1 / -1');
     expect(block).toContain('border-top: 1px solid var(--line)');
+    expect(block).toContain('.call-list-settled:focus');
+    expect(block).toContain('outline: 2px solid var(--focus)');
     expect(block).toContain('background: var(--ochre-wash)');
     expect(block).toContain('color: var(--rust)');
     expect(block).toContain('border-color: var(--rust)');

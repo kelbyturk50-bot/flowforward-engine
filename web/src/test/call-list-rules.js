@@ -59,6 +59,53 @@ export function mockLeadStage(id) {
   return leads.get(String(id))?.stage;
 }
 
+function denverYmd(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Denver',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const pick = (type) => parts.find((part) => part.type === type).value;
+  return `${pick('year')}-${pick('month')}-${pick('day')}`;
+}
+
+function addCalendarDays(ymd, count) {
+  const [year, month, day] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day) + count * 86400000).toISOString().slice(0, 10);
+}
+
+function isWeekend(ymd) {
+  const [year, month, day] = ymd.split('-').map(Number);
+  return [0, 6].includes(new Date(Date.UTC(year, month - 1, day)).getUTCDay());
+}
+
+function addBusinessDays(ymd, count) {
+  let cursor = ymd;
+  let left = count;
+  while (left > 0) {
+    cursor = addCalendarDays(cursor, 1);
+    if (!isWeekend(cursor)) left -= 1;
+  }
+  return cursor;
+}
+
+function snapBusinessDay(ymd) {
+  let cursor = ymd;
+  while (isWeekend(cursor)) cursor = addCalendarDays(cursor, 1);
+  return cursor;
+}
+
+// First snooze only, matching src/call-list/schedule.js. No streak is stored,
+// so three no-answers in a row still use one or two business days.
+function backOnForOutcome(outcome, at = new Date()) {
+  const day = denverYmd(at);
+  if (outcome === 'talked') return snapBusinessDay(addCalendarDays(day, 7));
+  if (outcome === 'voicemail') return addBusinessDays(day, 2);
+  if (outcome === 'no_answer') return addBusinessDays(day, 1);
+  return null;
+}
+
 function stored(id, fallbackStage) {
   const key = String(id);
   if (!leads.has(key)) {
@@ -103,11 +150,10 @@ export function mockRecordCallOutcome(id, body, fallbackStage = 'found') {
   const stage = stageAfterOutcome(current.stage, outcome);
   current.stage = stage;
   if (outcome === 'do_not_contact') current.do_not_contact = true;
-  const closing = outcome === 'audit_booked' || outcome === 'not_interested' || outcome === 'do_not_contact';
   return {
     activity_id: 1,
     removed: true,
-    back_on: closing ? null : '2026-11-23',
+    back_on: backOnForOutcome(outcome),
     stage,
   };
 }
