@@ -19,6 +19,7 @@ const { ARCHIVED_LEAD_REASON, isArchivedLead } = require('../db/pest-archive');
 const { canonicalizeRecipient, missingRecipient, normalizeRecipient } = require('./recipient');
 const { blocksNewSendSql, siblingBlockMessage, blockingSibling } = require('./sequence-block');
 const { lockLeadForUpdate, isDeadlock, DEADLOCK_ATTEMPTS, _setLockGate } = require('./lead-lock');
+const { effective: effectiveFlag } = require('../flags/resolve');
 const { SENDER } = cfg;
 const ACTIVE_STAGES_TO_STOP = ['responded', 'qualified', 'proposal', 'won', 'lost', 'disqualified'];
 const GENERIC_DOMAINS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'aol.com', 'live.com', 'msn.com', 'comcast.net', 'me.com', 'protonmail.com'];
@@ -306,6 +307,8 @@ async function sendReadiness() {
 
 const MANUAL_REVIEW = 'Needs manual review: the send outcome is uncertain';
 const RESEND_CONFIRM = 'Confirm before sending again';
+// F-009. Seeded off. Env can force it off and cannot force it on.
+const REPLY_WARNING_FLAG = 'FF_APPROVE_REPLY_WARNING';
 const TRANSIENT_MAX_AGE = 'transient_max_age';
 const MANUAL_REVIEW_STATUS = 'manual_review';
 const STALE_SENDING = '15 minutes';
@@ -789,6 +792,53 @@ function publicSendFailure(err) {
   return 'The email didn\'t send. Try again.';
 }
 
+// Another proposal for this lead replied inside 60 days. The window is
+// inclusive: replied_at >= NOW() - 60 days. A null replied_at does not match.
+// The proposal being approved does not match. Two siblings: the latest
+// replied_at, then the lowest id. The body is the id and the timestamp only.
+function recentReplyConflict(row) {
+  const when = row.replied_at instanceof Date ? row.replied_at : new Date(row.replied_at);
+  const err = new Error('recent_reply');
+  err.status = 409;
+  err.code = 'recent_reply';
+  err.sibling_proposal_id = Number(row.id);
+  err.replied_at = when.toISOString();
+  return err;
+}
+
+// Runs only when FF_APPROVE_REPLY_WARNING is effectively on and the caller
+// did not pass acknowledge_recent_reply: true. `confirm` is not read here.
+// Caller holds the prospect row lock. This locks every proposal for the lead
+// in id order (the same order as lockLeadForUpdate) and reads replied_at
+// before the claim UPDATE. It does not write, and it does not call mailer().
+async function recentSiblingReply(db, prospectId, proposalId) {
+  await db.query(
+    'SELECT id FROM proposals WHERE prospect_id = $1 ORDER BY id FOR UPDATE',
+    [prospectId]
+  );
+  const { rows } = await db.query(
+    `SELECT id, replied_at
+       FROM proposals
+      WHERE prospect_id = $1
+        AND id <> $2
+        AND replied_at >= NOW() - INTERVAL '60 days'
+      ORDER BY replied_at DESC, id ASC
+      LIMIT 1`,
+    [prospectId, proposalId]
+  );
+  return rows[0] || null;
+}
+
+async function refuseRecentSiblingReply(db, proposal, options) {
+  if (options.acknowledgeRecentReply === true) return;
+  const flag = await effectiveFlag(REPLY_WARNING_FLAG);
+  if (!flag || flag.effective !== true) return;
+  const sibling = await recentSiblingReply(db, proposal.prospect_id, proposal.id);
+  if (!sibling) return;
+  await db.query('ROLLBACK');
+  throw recentReplyConflict(sibling);
+}
+
 /** Approve a draft and send the first email now. */
 async function approveAndSend(proposalId, options = {}) {
   const stale = await recoverStaleSending(proposalId);
@@ -832,6 +882,10 @@ async function approveAndSend(proposalId, options = {}) {
     try {
       await db.query('SELECT id FROM prospects WHERE id = $1 FOR UPDATE', [p.prospect_id]);
       await afterLeadLock(p.prospect_id);
+      // After the prospect lock, before the claim. Flag off skips this and
+      // does not lock the proposal rows. It does not change stage, follow-up
+      // times, or the first-send stage waiver below.
+      await refuseRecentSiblingReply(db, p, options);
       const claim = await db.query(
         `UPDATE proposals AS pr
             SET status = 'sending', approved_at = NOW(), send_attempt_key = $2, send_attempted_at = NOW()
