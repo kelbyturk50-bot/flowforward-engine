@@ -6,10 +6,13 @@ const pool    = require('../db/client');
 const { CLOSED } = require('./prospects');
 const { appendATierPestHide } = require('../scoring/industry');
 const { notArchivedSql } = require('../db/pest-archive');
+const { callListEnabled } = require('../call-list/flag');
+const { presentProspect } = require('../call-list/present');
 
 router.get('/', async (req, res) => {
   const today = req.query.today || null; // YYYY-MM-DD in the viewer's timezone; defaults to server date
   try {
+    const flagOn = await callListEnabled();
     // $1 = closed stages; $2 = viewer's date when given
     const withDate = today ? [CLOSED, today] : [CLOSED];
     const d = today ? '$2::date' : 'CURRENT_DATE';
@@ -61,10 +64,11 @@ router.get('/', async (req, res) => {
                         AND ${notArchivedSql('p')})::int AS proposal_replies_7d`, countParams),
     ]);
 
+    const shape = (rows) => rows.map((row) => presentProspect(row, flagOn));
     res.json({
-      followups_due: due.rows,
-      top_new_leads: top.rows,
-      gone_quiet: stale.rows,
+      followups_due: shape(due.rows),
+      top_new_leads: shape(top.rows),
+      gone_quiet: shape(stale.rows),
       task_queue: work.rows,
       counts: counts.rows[0],
     });

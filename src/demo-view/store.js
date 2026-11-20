@@ -467,31 +467,53 @@ function taskClosed() {
   return err;
 }
 
+// Same statements POST /api/demo-view-tasks/:id/done runs. The caller is
+// already inside a transaction. A call-list outcome uses this so the task
+// write is not a second copy and not a second pool client.
+async function writeTaskDone(client, taskId, prospectId, at) {
+  await client.query(
+    `UPDATE proposal_view_tasks
+        SET status = 'done', done_at = $2, updated_at = $2
+      WHERE id = $1 AND status = 'open'`,
+    [taskId, at]
+  );
+  await client.query(
+    `INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'call', 'called')`,
+    [prospectId]
+  );
+  const ref = `demo-view-task:${taskId}`;
+  if (!CALL_REF.test(ref)) throw taskMissing();
+  await client.query(
+    `INSERT INTO campaign_touches
+       (lead_id, type, channel, occurred_at, source, external_ref)
+     VALUES ($1, 'call_logged', 'phone', $2, 'system', $3)`,
+    [prospectId, at, ref]
+  );
+}
+
 async function markDone(id) {
   return withTask(id, async (client, at) => {
     const row = await loadOpenTask(client, id);
     if (!row) throw taskMissing();
     if (row.status !== 'open') throw taskClosed();
-    await client.query(
-      `UPDATE proposal_view_tasks
-          SET status = 'done', done_at = $2, updated_at = $2
-        WHERE id = $1 AND status = 'open'`,
-      [id, at]
-    );
-    await client.query(
-      `INSERT INTO prospect_activities (prospect_id, type, body) VALUES ($1, 'call', 'called')`,
-      [row.prospect_id]
-    );
-    const ref = `demo-view-task:${id}`;
-    if (!CALL_REF.test(ref)) throw taskMissing();
-    await client.query(
-      `INSERT INTO campaign_touches
-         (lead_id, type, channel, occurred_at, source, external_ref)
-       VALUES ($1, 'call_logged', 'phone', $2, 'system', $3)`,
-      [row.prospect_id, at, ref]
-    );
+    await writeTaskDone(client, row.id, row.prospect_id, at);
     return { id: Number(id), status: 'done', prospect_id: row.prospect_id };
   });
+}
+
+async function completeOpenTasksForProspect(client, prospectId, at) {
+  const { rows } = await client.query(
+    `SELECT id, prospect_id
+       FROM proposal_view_tasks
+      WHERE prospect_id = $1 AND status = 'open'
+      ORDER BY id
+      FOR UPDATE`,
+    [prospectId]
+  );
+  for (const row of rows) {
+    await writeTaskDone(client, row.id, row.prospect_id, at);
+  }
+  return rows.length;
 }
 
 async function snoozeTask(id) {
@@ -569,6 +591,7 @@ module.exports = {
   recordDemoPageView,
   listOpenTasks,
   markDone,
+  completeOpenTasksForProspect,
   snoozeTask,
   dismissTask,
   taskMetrics,

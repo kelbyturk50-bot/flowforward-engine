@@ -510,7 +510,9 @@ describe('F-009 approve reply warning', { concurrency: false }, () => {
     assert.equal(flag.env_forced_off, false);
     assert.equal(flag.writable, true);
     assert.equal(flag.source, 'db');
-    assert.equal(listed.json.flags[listed.json.flags.length - 1].name, FLAG);
+    const names = listed.json.flags.map((row) => row.name);
+    assert.equal(names[names.indexOf(FLAG) + 1], 'FF_CALL_LIST');
+    assert.equal(names[names.length - 1], 'FF_CALL_LIST');
 
     await setFlag(true);
     setEnv('false');
