@@ -84,8 +84,9 @@ export function mockSaveCallListKind(id, kind) {
   };
 }
 
-export function mockRemoveCallList() {
+export function mockRemoveCallList(id) {
   if (!enabled) fail(404, 'not_found');
+  if (!leads.has(String(id))) fail(404, 'not_found');
   return {
     call_list_kind: 'excluded',
     call_list_set_at: '2026-11-20T18:00:00.000Z',

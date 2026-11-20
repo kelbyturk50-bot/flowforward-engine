@@ -586,6 +586,205 @@ describe('call list outcomes', () => {
     expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
     expect(api.recordCallOutcome).not.toHaveBeenCalled();
   });
+
+  it('leaves focus on another row when the first countdown ends', async () => {
+    const post = deferred();
+    api.recordCallOutcome.mockImplementation(() => post.promise);
+    const region = await ready();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'No answer' }));
+    const other = within(region).getByRole('button', { name: 'Log TEST: Eagle Mountain Plumbing' });
+    other.focus();
+    expect(document.activeElement).toBe(other);
+    await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+    expect(document.activeElement).toBe(other);
+    await act(async () => {
+      post.resolve({ activity_id: 31, removed: true, back_on: null, stage: 'found' });
+    });
+    await settle();
+    expect(document.activeElement).toBe(other);
+    expect(within(listRegion()).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+  });
+
+  it('leaves focus inside an open drawer when a countdown ends', async () => {
+    const post = deferred();
+    api.recordCallOutcome.mockImplementation(() => post.promise);
+    function TodayAndDrawer() {
+      const [version, setVersion] = useState(0);
+      const [leadId, setLeadId] = useState(null);
+      return (
+        <>
+          <button type="button" onClick={() => setVersion((value) => value + 1)}>Refresh day</button>
+          <Today version={version} bump={() => setVersion((value) => value + 1)} openLead={setLeadId} openProject={() => {}} />
+          <LeadDrawer id={leadId} onClose={() => setLeadId(null)} bump={() => {}} openProject={() => {}} openProposal={() => {}} />
+        </>
+      );
+    }
+    render(<TodayAndDrawer />);
+    await settle();
+    const region = listRegion();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'No answer' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'TEST: Eagle Mountain Plumbing' }));
+    await settle();
+    const dialog = screen.getByRole('dialog');
+    const close = within(dialog).getByRole('button', { name: 'Close' });
+    close.focus();
+    expect(document.activeElement).toBe(close);
+    await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+    expect(document.activeElement).toBe(close);
+    await act(async () => {
+      post.resolve({ activity_id: 32, removed: true, back_on: null, stage: 'found' });
+    });
+    await settle();
+    expect(document.activeElement).toBe(close);
+    expect(screen.getByRole('dialog')).toBe(dialog);
+  });
+
+  it('does not move focus or remount the card when a refresh reorders rows', async () => {
+    const region = await ready();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Talked' }));
+    const undo = within(region).getByRole('button', { name: 'Undo Talked (8)' });
+    const card = undo.closest('.call-list-card');
+    const other = within(region).getByRole('button', { name: 'Log TEST: Eagle Mountain Plumbing' });
+    other.focus();
+    expect(document.activeElement).toBe(other);
+    api.todayCallList.mockResolvedValueOnce(enabledCallList([walkRow, callRow]));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh day' }));
+    await settle();
+    const undoAfter = within(listRegion()).getByRole('button', { name: 'Undo Talked (8)' });
+    expect(undoAfter).toBe(undo);
+    expect(undoAfter.closest('.call-list-card')).toBe(card);
+    expect(document.activeElement).toBe(other);
+    const items = within(listRegion()).getAllByRole('listitem');
+    expect(items[0]).toHaveTextContent('TEST: Eagle Mountain Plumbing');
+    expect(items[1]).toHaveTextContent('TEST: Wasatch Heating');
+  });
+
+  it('leaves focus alone on first paint', async () => {
+    const outside = document.createElement('button');
+    outside.type = 'button';
+    outside.textContent = 'Stay here';
+    document.body.appendChild(outside);
+    outside.focus();
+    try {
+      renderToday();
+      expect(document.activeElement).toBe(outside);
+      await settle();
+      expect(screen.getByRole('region', { name: 'Calls due / Walk-ins' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Log TEST: Wasatch Heating' })).toBeInTheDocument();
+      expect(document.activeElement).toBe(outside);
+
+      const region = listRegion();
+      fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+      fireEvent.click(within(region).getByRole('button', { name: 'Talked' }));
+      outside.focus();
+      expect(document.activeElement).toBe(outside);
+      api.todayCallList.mockResolvedValueOnce(enabledCallList([walkRow, callRow]));
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh day' }));
+      await settle();
+      expect(document.activeElement).toBe(outside);
+      expect(within(listRegion()).getByRole('button', { name: 'Undo Talked (8)' })).toBeInTheDocument();
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it('moves focus to the next row when a removed outcome had focus', async () => {
+    api.recordCallOutcome.mockResolvedValue({ activity_id: 33, removed: true, back_on: null, stage: 'responded' });
+    const region = await ready();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Talked' }));
+    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Undo Talked (8)' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+    await settle();
+    const next = within(listRegion()).getByRole('button', { name: 'TEST: Eagle Mountain Plumbing' });
+    expect(document.activeElement).toBe(next);
+    expect(next.closest('.call-list-card').querySelector('button')).toBe(next);
+    expect(within(listRegion()).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+  });
+
+  it('moves focus to the previous row when the last focused row is removed', async () => {
+    api.recordCallOutcome.mockResolvedValue({ activity_id: 34, removed: true, back_on: null, stage: 'found' });
+    const region = await ready();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Eagle Mountain Plumbing' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Voicemail' }));
+    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Undo Voicemail (8)' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+    await settle();
+    const previous = within(listRegion()).getByRole('button', { name: 'TEST: Wasatch Heating' });
+    expect(document.activeElement).toBe(previous);
+    expect(previous.closest('.call-list-card').querySelector('button')).toBe(previous);
+    expect(within(listRegion()).queryByText('TEST: Eagle Mountain Plumbing')).not.toBeInTheDocument();
+  });
+
+  it('moves focus to the heading when a removed outcome empties the list', async () => {
+    api.todayCallList.mockResolvedValue(enabledCallList([callRow]));
+    api.recordCallOutcome.mockResolvedValue({ activity_id: 35, removed: true, back_on: null, stage: 'responded' });
+    const region = await ready();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+    fireEvent.click(within(region).getByRole('button', { name: 'Talked' }));
+    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Undo Talked (8)' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+    await settle();
+    const heading = screen.getByRole('heading', { name: 'Calls due / Walk-ins' });
+    expect(heading.tabIndex).toBe(-1);
+    expect(document.activeElement).toBe(heading);
+    expect(screen.getByText(EMPTY_CALL_LIST)).toBeInTheDocument();
+  });
+
+  it('lets the later list GET win when Show more and refresh share a generation', async () => {
+    api.todayCallList.mockResolvedValue(enabledCallList([callRow], { more: 2 }));
+    const region = await ready();
+    const show = deferred();
+    const refresh = deferred();
+    api.todayCallList.mockImplementationOnce(() => show.promise);
+    fireEvent.click(within(region).getByRole('button', { name: 'Show 2 more' }));
+    api.todayCallList.mockImplementationOnce(() => refresh.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh day' }));
+    await act(async () => {
+      refresh.resolve(enabledCallList([walkRow]));
+    });
+    await settle();
+    expect(within(listRegion()).getByText('TEST: Eagle Mountain Plumbing')).toBeInTheDocument();
+    await act(async () => {
+      show.resolve(enabledCallList([
+        callRow,
+        callListItem({ prospect_id: 43, company: 'TEST: Lehi Electric' }),
+      ], { more: 0 }));
+    });
+    await settle();
+    expect(within(listRegion()).queryByText('TEST: Lehi Electric')).not.toBeInTheDocument();
+    expect(within(listRegion()).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+    expect(within(listRegion()).getByText('TEST: Eagle Mountain Plumbing')).toBeInTheDocument();
+  });
+
+  it('lets Show more win when an earlier refresh from the same generation resolves later', async () => {
+    api.todayCallList.mockResolvedValue(enabledCallList([callRow], { more: 1 }));
+    const region = await ready();
+    const refresh = deferred();
+    const show = deferred();
+    api.todayCallList.mockImplementationOnce(() => refresh.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh day' }));
+    api.todayCallList.mockImplementationOnce(() => show.promise);
+    fireEvent.click(within(region).getByRole('button', { name: 'Show 1 more' }));
+    await act(async () => {
+      show.resolve(enabledCallList([
+        callRow,
+        callListItem({ prospect_id: 43, company: 'TEST: Lehi Electric' }),
+      ], { more: 0 }));
+    });
+    await settle();
+    expect(within(listRegion()).getByText('TEST: Lehi Electric')).toBeInTheDocument();
+    await act(async () => {
+      refresh.resolve(enabledCallList([walkRow]));
+    });
+    await settle();
+    expect(within(listRegion()).getByText('TEST: Lehi Electric')).toBeInTheDocument();
+    expect(within(listRegion()).getByText('TEST: Wasatch Heating')).toBeInTheDocument();
+    expect(within(listRegion()).queryByText('TEST: Eagle Mountain Plumbing')).not.toBeInTheDocument();
+  });
 });
 
 describe('call list on Today replaces the other call surfaces', () => {
@@ -1092,6 +1291,17 @@ describe('call list helpers and tokens', () => {
     await expect(api.saveCallListKind(11, 'call')).rejects.toMatchObject({ message: 'not_found', status: 404 });
     await expect(api.removeCallList(11)).rejects.toMatchObject({ message: 'not_found', status: 404 });
     await expect(api.recordCallOutcome(11, { outcome: 'talked', kind: 'call' })).rejects.toMatchObject({ message: 'not_found', status: 404 });
+    setMockCallListEnabled(true);
+    await expect(api.removeCallList(11)).rejects.toMatchObject({
+      message: 'not_found',
+      status: 404,
+      body: { error: 'not_found' },
+    });
+    seedCallListLead({ id: 11, stage: 'found' });
+    await expect(api.removeCallList(11)).resolves.toMatchObject({
+      call_list_kind: 'excluded',
+      call_list_set_at: '2026-11-20T18:00:00.000Z',
+    });
     const hidden = presentProspectKeys({
       id: 11,
       company: 'TEST: Wasatch Heating',

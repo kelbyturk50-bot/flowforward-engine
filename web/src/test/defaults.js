@@ -56,7 +56,7 @@ export function installApiDefaults() {
   api.todayCallList.mockResolvedValue({ enabled: false, items: [] });
   api.recordCallOutcome.mockImplementation(async (id, body) => mockRecordCallOutcome(id, body));
   api.saveCallListKind.mockImplementation(async (id, kind) => mockSaveCallListKind(id, kind));
-  api.removeCallList.mockImplementation(async () => mockRemoveCallList());
+  api.removeCallList.mockImplementation(async (id) => mockRemoveCallList(id));
   api.demoViewTaskDone.mockResolvedValue({ id: 1, status: 'done', prospect_id: 10 });
   api.demoViewTaskSnooze.mockResolvedValue({ id: 1, status: 'open', snoozed_until: '2026-11-15T21:14:00.000Z' });
   api.demoViewTaskDismiss.mockResolvedValue({ id: 1, status: 'dismissed', prospect_id: 10 });
