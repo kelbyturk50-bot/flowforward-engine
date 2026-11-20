@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { missingRecipient, recipientHint, trimRecipientEdges } from '../recipient';
 import { TryLiveDemoLink } from '../demo/DemoLinks';
@@ -7,6 +7,7 @@ import { useJobs, elapsed } from '../jobs';
 import PrototypeCard from './PrototypeCard';
 import ProspectViews from './ProspectViews';
 import { hasProspectViewFields } from './prospect-views.js';
+import { approveSendBody, isHeldBackConfirm, recentReplyDetails } from './approve-send.js';
 
 function guardedSend(p) {
   const reason = String(p.stop_reason || '').trim().toLowerCase();
@@ -59,6 +60,9 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   };
   const [busy, setBusy] = useState('');
   const [confirming, setConfirming] = useState(false);
+  const [confirmAck, setConfirmAck] = useState(false);
+  const [recentReply, setRecentReply] = useState(null);
+  const sendLock = useRef(false);
   const [confirmingManual, setConfirmingManual] = useState(false);
   const [manualNote, setManualNote] = useState('');
   const [regen, setRegen] = useState(false);
@@ -76,6 +80,47 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
     } catch (e) { toast(e.message); } finally { setBusy(''); }
   };
   const save = (patch, msg) => act('save', () => api.updateProposal(p.id, patch), msg);
+
+  // Approve posts once per tap. A recent_reply 409 keeps the draft and shows
+  // the inline warning. A held-back 409 remembers confirm: true. The next post
+  // sends every acknowledgement already earned, in either order.
+  const submitApprove = async (acknowledge) => {
+    if (sendLock.current) return;
+    sendLock.current = true;
+    setBusy('send');
+    try {
+      await api.sendProposal(p.id, approveSendBody({
+        confirm: guardedSend(p) || confirmAck,
+        acknowledge,
+      }));
+      toast(`Sent to ${p.to_email}.`);
+      bump();
+      setConfirming(false);
+      setRecentReply(null);
+      setConfirmAck(false);
+      await reload(p.id);
+    } catch (e) {
+      const reply = recentReplyDetails(e);
+      if (reply) {
+        setRecentReply(reply);
+        setConfirming(false);
+        return;
+      }
+      if (isHeldBackConfirm(e)) {
+        setConfirmAck(true);
+        setConfirming(true);
+        return;
+      }
+      toast(e.message);
+    } finally {
+      sendLock.current = false;
+      setBusy('');
+    }
+  };
+  const cancelReplyWarning = () => {
+    if (sendLock.current) return;
+    setRecentReply(null);
+  };
 
   return (
     <div className="drawer-body">
@@ -147,16 +192,33 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
         )}
       </div>
 
-      {confirming && (
+      {confirming && !recentReply && (
         <div className="confirm" role="alertdialog" aria-label="Confirm send">
           <p><strong>{approveHeading(p)}</strong></p>
-          {guardedSend(p) && <p>This draft is marked for another look. Send it only if you mean to.</p>}
+          {(guardedSend(p) || confirmAck) && <p>This draft is marked for another look. Send it only if you mean to.</p>}
           <p className="muted">“{p.subject}” goes out now from your Gmail. Follow-ups are scheduled for day 3 and day 10 and stop automatically if they reply, book, bounce or opt out.</p>
           <div className="link-row">
-            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => act('send', () => api.sendProposal(p.id, guardedSend(p) ? { confirm: true } : undefined), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>
+            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => submitApprove(false)}>
               {busy === 'send' ? 'Sending…' : 'Send it'}
             </button>
             <button className="btn btn-quiet" onClick={() => setConfirming(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {recentReply && (
+        <div className="reply-warning" role="alert">
+          <p>{recentReply.sentence}</p>
+          <button type="button" className="linklike reply-warning-link" onClick={() => openProposal(recentReply.sibling_proposal_id)}>
+            Open that proposal
+          </button>
+          {confirmAck && <p>This draft is marked for another look. Send it only if you mean to.</p>}
+          <div className="reply-warning-actions">
+            <button type="button" className="btn" disabled={busy === 'send' || noRecipient} onClick={() => submitApprove(true)}>
+              {busy === 'send' ? 'Sending…' : 'Send anyway'}
+            </button>
+            <button type="button" className="btn btn-quiet" disabled={busy === 'send'} onClick={cancelReplyWarning}>
+              Cancel
+            </button>
           </div>
         </div>
       )}
