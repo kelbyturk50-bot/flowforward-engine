@@ -14,6 +14,7 @@ import {
   safeMaps,
   safeTel,
 } from './call-list';
+import { noteLeadStage } from './lead-stage';
 
 function rowKey(item, index) {
   return `${item?.prospect_id ?? 'row'}-${index}`;
@@ -91,6 +92,7 @@ export default function CallListPanel({ version, openLead, onActiveChange }) {
     try {
       const result = await api.recordCallOutcome(entry.id, { outcome: entry.outcome, kind: entry.kind });
       if (!alive.current) return;
+      if (typeof result?.stage === 'string' && result.stage) noteLeadStage(entry.id, result.stage);
       const back = backOnLabel(result?.back_on);
       setRows((list) => {
         if (result?.removed && back) {

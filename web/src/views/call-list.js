@@ -93,7 +93,27 @@ export function safeMaps(item) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts.join(' '))}`;
 }
 
-export function backOnLabel(value) {
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function denverYmd(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Denver',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const pick = (type) => parts.find((part) => part.type === type).value;
+  return `${pick('year')}-${pick('month')}-${pick('day')}`;
+}
+
+function ymdUtc(ymd) {
+  const [year, month, day] = ymd.split('-').map(Number);
+  return Date.UTC(year, month - 1, day);
+}
+
+// The existing "Back on …" line. Within 6 America/Denver calendar days the
+// date is a weekday name. Farther away it stays a short date.
+export function backOnLabel(value, now = new Date()) {
   if (value == null || value === '') return null;
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value).trim());
   if (!match) return null;
@@ -101,12 +121,17 @@ export function backOnLabel(value) {
   const month = Number(match[2]);
   const day = Number(match[3]);
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  const date = new Date(Date.UTC(year, month - 1, day, 12));
+  const ymd = `${match[1]}-${match[2]}-${match[3]}`;
+  const probe = new Date(Date.UTC(year, month - 1, day, 18));
+  if (denverYmd(probe) !== ymd) return null;
+  const today = denverYmd(now instanceof Date && !Number.isNaN(now.getTime()) ? now : new Date());
+  const diff = Math.round((ymdUtc(ymd) - ymdUtc(today)) / 86400000);
+  if (Math.abs(diff) <= 6) return `Back on ${WEEKDAYS[probe.getUTCDay()]}`;
   const formatted = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Denver',
     month: 'short',
     day: 'numeric',
-  }).format(date);
+  }).format(probe);
   return `Back on ${formatted}`;
 }
 

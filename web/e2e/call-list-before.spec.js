@@ -30,7 +30,7 @@ function lead(extra = {}) {
     city: 'Saratoga Springs',
     state: 'UT',
     address: '100 Test Street',
-    contact_name: 'Sam Rivera',
+    contact_name: '',
     phone: '801-555-0142',
     email: 'test+owner@example.test',
     website: 'https://example.test/shop',

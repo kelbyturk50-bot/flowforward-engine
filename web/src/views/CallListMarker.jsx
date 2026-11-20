@@ -28,6 +28,7 @@ export default function CallListMarker({ lead, onLead }) {
   if (!ready || !enabled || !lead) return null;
 
   const marker = readCallListKind(lead);
+  if (!marker.present) return null;
   const onList = marker.kind === 'call' || marker.kind === 'walk_in';
   const keptOff = marker.kind === 'excluded';
 

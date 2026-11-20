@@ -8,6 +8,14 @@ import { CALL_LIST_KIND_FIELD, CALL_LIST_SET_AT_FIELD, CALL_OUTCOMES, api } from
 import { foundLead, focus } from '../test/fixtures.js';
 import { installApiDefaults } from '../test/defaults.js';
 import {
+  mockRecordCallOutcome,
+  presentProspectKeys,
+  resetCallListMock,
+  seedCallListLead,
+  setMockCallListEnabled,
+  stageAfterOutcome,
+} from '../test/call-list-rules.js';
+import {
   CALL_REASONS,
   SCOUT_COPY,
   callListItem,
@@ -15,6 +23,8 @@ import {
   walkInItem,
 } from '../test/call-list-fixtures.js';
 import LeadDrawer from './LeadDrawer';
+import Leads from './Leads';
+import Pipeline from './Pipeline';
 import Today from './Today';
 import {
   CALL_OUTCOME_LABELS,
@@ -88,6 +98,11 @@ describe('call list flag off', () => {
       expect(offHtml).toContain('Follow-ups due');
       expect(offHtml).not.toContain('Calls due');
       expect(offHtml).not.toContain('Add to call list');
+      expect(foundLead).not.toHaveProperty('call_list_kind');
+      expect(foundLead).not.toHaveProperty('call_list_set_at');
+      expect(focus.followups_due[0]).not.toHaveProperty('call_list_kind');
+      expect(focus.top_new_leads[0]).not.toHaveProperty('call_list_set_at');
+      expect(focus.gone_quiet).toEqual([]);
       expect(screen.queryByRole('heading', { name: 'Calls due / Walk-ins' })).not.toBeInTheDocument();
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     } finally {
@@ -249,6 +264,55 @@ describe('call list rows', () => {
     expect(within(region).queryByRole('button', { name: 'Show 2 more' })).not.toBeInTheDocument();
   });
 
+  it('prints the server reason as-is, including a tier 1 view after an outcome', async () => {
+    const tier1 = callListItem({
+      last_outcome: 'talked',
+      last_outcome_at: '2026-11-19T18:00:00.000Z',
+      reason: CALL_REASONS.demo_view,
+    });
+    const listed = callListItem({
+      prospect_id: 45,
+      company: 'TEST: Lehi Electric',
+      reason: CALL_REASONS.listedCall,
+      reason_code: 'listed',
+      emailed: false,
+      script: SCOUT_COPY.callNeverEmailed,
+      open_task_id: null,
+    });
+    const missed = callListItem({
+      prospect_id: 46,
+      company: 'TEST: American Fork Air',
+      reason: CALL_REASONS.no_answer,
+      reason_code: 'sequence_done',
+      last_outcome: 'no_answer',
+      last_outcome_at: '2026-11-17T18:00:00.000Z',
+    });
+    const stopped = walkInItem({
+      reason: CALL_REASONS.stoppedBy,
+      last_outcome: 'voicemail',
+    });
+    const talked = callListItem({
+      prospect_id: 47,
+      company: 'TEST: Peak Plumbing',
+      reason: CALL_REASONS.talked,
+      reason_code: 'intro_3_5d',
+      last_outcome: 'talked',
+      script: SCOUT_COPY.callNeverEmailed,
+      open_task_id: null,
+    });
+    api.todayCallList.mockResolvedValue(enabledCallList([tier1, listed, missed, stopped, talked]));
+    renderToday();
+    const region = await screen.findByRole('region', { name: 'Calls due / Walk-ins' });
+    expect(within(region).getByText(CALL_REASONS.demo_view)).toBeInTheDocument();
+    expect(within(region).getByText(CALL_REASONS.listedCall)).toBeInTheDocument();
+    expect(within(region).getByText(CALL_REASONS.no_answer)).toBeInTheDocument();
+    expect(within(region).getByText(CALL_REASONS.stoppedBy)).toBeInTheDocument();
+    expect(within(region).getByText(CALL_REASONS.talked)).toBeInTheDocument();
+    expect(within(region).queryByText(CALL_REASONS.voicemail)).not.toBeInTheDocument();
+    expect(panelSource).not.toContain('Viewed the demo');
+    expect(panelSource).not.toContain('try again');
+  });
+
   it('uses the empty sentence when the list is on and has no rows', async () => {
     api.todayCallList.mockResolvedValue(enabledCallList([]));
     renderToday();
@@ -382,6 +446,7 @@ describe('call list outcomes', () => {
   });
 
   it('drops a removed row and shows when a lead comes back', async () => {
+    vi.setSystemTime(new Date('2026-11-20T18:00:00.000Z'));
     api.recordCallOutcome.mockResolvedValue({ activity_id: 8, removed: true, back_on: null });
     const region = await ready();
     fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
@@ -396,7 +461,7 @@ describe('call list outcomes', () => {
     fireEvent.click(within(region).getByRole('button', { name: 'Voicemail' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     await settle();
-    expect(within(region).getByText('Back on Nov 23')).toBeInTheDocument();
+    expect(within(region).getByText('Back on Mon')).toBeInTheDocument();
     expect(within(region).queryByRole('button', { name: 'Voicemail' })).not.toBeInTheDocument();
 
     api.recordCallOutcome.mockResolvedValue({ activity_id: 10, removed: false, back_on: '2026-11-24', stage: 'contacted' });
@@ -409,7 +474,7 @@ describe('call list outcomes', () => {
     fireEvent.click(within(next).getByRole('button', { name: 'No answer' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
     await settle();
-    expect(within(next).getByText('Back on Nov 24')).toBeInTheDocument();
+    expect(within(next).getByText('Back on Tue')).toBeInTheDocument();
     expect(within(next).getByRole('button', { name: 'No answer' })).toBeInTheDocument();
     expect(within(next).getByText('TEST: American Fork Air')).toBeInTheDocument();
   });
@@ -459,6 +524,10 @@ describe('call list on Today replaces the other call surfaces', () => {
 });
 
 describe('lead drawer call list control', () => {
+  beforeEach(() => {
+    setMockCallListEnabled(true);
+  });
+
   function renderDrawer(lead) {
     api.prospect.mockResolvedValue(lead);
     return render(
@@ -508,6 +577,34 @@ describe('lead drawer call list control', () => {
     expect(screen.getByRole('button', { name: 'Call', pressed: false })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Walk-in', pressed: false })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Keep off call list' })).not.toBeInTheDocument();
+  });
+
+  it('shows a 409 from the mock when the lead is do-not-contact or archived', async () => {
+    api.todayCallList.mockResolvedValue(enabledCallList([]));
+    seedCallListLead({ id: foundLead.id, stage: 'found', do_not_contact: true });
+    const blocked = renderDrawer({ ...foundLead, company: 'TEST: Wasatch Heating', call_list_kind: null });
+    expect(await screen.findByRole('heading', { name: 'Add to call list' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Call', pressed: false }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This lead is on do-not-contact'));
+    expect(screen.queryByText('On the call list.')).not.toBeInTheDocument();
+    blocked.unmount();
+
+    seedCallListLead({ id: foundLead.id, stage: 'found', archived_at: '2026-11-01T00:00:00.000Z' });
+    renderDrawer({ ...foundLead, company: 'TEST: Wasatch Heating', call_list_kind: null });
+    expect(await screen.findByRole('heading', { name: 'Add to call list' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Walk-in', pressed: false }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This lead is archived'));
+    expect(screen.queryByText('On the walk-in list.')).not.toBeInTheDocument();
+  });
+
+  it('stays quiet when the marker keys are absent', async () => {
+    api.todayCallList.mockResolvedValue(enabledCallList([]));
+    const bare = { ...foundLead, company: 'TEST: Wasatch Heating' };
+    renderDrawer(bare);
+    expect(await screen.findByRole('heading', { name: 'TEST: Wasatch Heating' })).toBeInTheDocument();
+    await waitFor(() => expect(api.todayCallList).toHaveBeenCalled());
+    expect(screen.queryByRole('heading', { name: 'Add to call list' })).not.toBeInTheDocument();
+    expect(bare).not.toHaveProperty('call_list_kind');
   });
 
   it('shows the contract errors inline and reads the marker response', async () => {
@@ -560,6 +657,112 @@ describe('lead drawer call list control', () => {
   });
 });
 
+describe('call outcome stage from the POST body', () => {
+  const OPEN = ['found', 'contacted', 'responded', 'qualified', 'proposal'];
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('moves talked, audit booked, and not interested, and leaves the others', () => {
+    expect(stageAfterOutcome('found', 'talked')).toBe('responded');
+    expect(stageAfterOutcome('contacted', 'talked')).toBe('responded');
+    expect(stageAfterOutcome('responded', 'talked')).toBe('responded');
+    expect(stageAfterOutcome('qualified', 'talked')).toBe('qualified');
+    expect(stageAfterOutcome('proposal', 'talked')).toBe('proposal');
+    expect(stageAfterOutcome('found', 'audit_booked')).toBe('qualified');
+    expect(stageAfterOutcome('contacted', 'audit_booked')).toBe('qualified');
+    expect(stageAfterOutcome('responded', 'audit_booked')).toBe('qualified');
+    expect(stageAfterOutcome('qualified', 'audit_booked')).toBe('qualified');
+    expect(stageAfterOutcome('proposal', 'audit_booked')).toBe('proposal');
+    for (const stage of OPEN) expect(stageAfterOutcome(stage, 'not_interested')).toBe('lost');
+    for (const stage of ['won', 'lost', 'disqualified']) {
+      expect(stageAfterOutcome(stage, 'not_interested')).toBe(stage);
+    }
+    for (const outcome of ['no_answer', 'voicemail', 'do_not_contact']) {
+      for (const stage of [...OPEN, 'won', 'lost', 'disqualified']) {
+        expect(stageAfterOutcome(stage, outcome)).toBe(stage);
+      }
+    }
+    expect(panelSource).not.toContain('responded');
+    expect(panelSource).not.toContain('qualified');
+  });
+
+  it('writes the returned stage onto the drawer, the pipeline, and the leads list', async () => {
+    setMockCallListEnabled(true);
+    const lead = {
+      ...foundLead,
+      id: 41,
+      company: 'TEST: Wasatch Heating',
+      stage: 'found',
+      contact_name: '',
+    };
+    seedCallListLead(lead);
+    api.recordCallOutcome.mockImplementation(async (id, body) => ({
+      ...mockRecordCallOutcome(id, body, 'found'),
+      removed: false,
+    }));
+    api.prospect.mockResolvedValue({ ...lead, activities: [], projects: [] });
+    api.prospects.mockImplementation(async (filters = {}) => {
+      const stage = String(filters.stage || '');
+      if (stage === 'found' || stage === 'open' || stage === '') return { total: 1, prospects: [lead] };
+      return { total: 0, prospects: [] };
+    });
+    api.todayCallList.mockResolvedValue(enabledCallList([callListItem({ prospect_id: 41 })]));
+    render(
+      <>
+        <Today version={0} bump={() => {}} openLead={() => {}} openProject={() => {}} />
+        <LeadDrawer id={41} onClose={() => {}} bump={() => {}} openProject={() => {}} openProposal={() => {}} />
+        <Leads version={0} bump={() => {}} openLead={() => {}} />
+        <Pipeline version={0} bump={() => {}} openLead={() => {}} openProject={() => {}} />
+      </>,
+    );
+    const region = await screen.findByRole('region', { name: 'Calls due / Walk-ins' });
+    const stage = () => within(screen.getByRole('dialog')).getByRole('combobox', { name: 'Stage' });
+    const column = (name) => screen.getByRole('region', { name });
+    const chip = () => within(screen.getByRole('table')).getByText(/^(Found|Contacted|Responded|Qualified|Proposal|Lost)$/);
+
+    async function log(label) {
+      fireEvent.click(within(region).getByRole('button', { name: label }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(UNDO_MS); });
+      await settle();
+    }
+
+    await settle();
+    expect(stage()).toHaveValue('found');
+    expect(within(column('Found')).getByText('TEST: Wasatch Heating')).toBeInTheDocument();
+    expect(chip()).toHaveTextContent('Found');
+    vi.useFakeTimers();
+    fireEvent.click(within(region).getByRole('button', { name: 'Log TEST: Wasatch Heating' }));
+
+    await log('No answer');
+    expect(stage()).toHaveValue('found');
+    expect(chip()).toHaveTextContent('Found');
+    await log('Voicemail');
+    expect(stage()).toHaveValue('found');
+    await log('Do not contact');
+    expect(stage()).toHaveValue('found');
+    expect(within(column('Found')).getByText('TEST: Wasatch Heating')).toBeInTheDocument();
+
+    await log('Talked');
+    expect(stage()).toHaveValue('responded');
+    expect(within(column('Responded')).getByText('TEST: Wasatch Heating')).toBeInTheDocument();
+    expect(within(column('Found')).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+    expect(chip()).toHaveTextContent('Responded');
+
+    await log('Audit booked');
+    expect(stage()).toHaveValue('qualified');
+    expect(within(column('Qualified')).getByText('TEST: Wasatch Heating')).toBeInTheDocument();
+    expect(chip()).toHaveTextContent('Qualified');
+
+    await log('Not interested');
+    expect(stage()).toHaveValue('lost');
+    expect(within(column('Qualified')).queryByText('TEST: Wasatch Heating')).not.toBeInTheDocument();
+    expect(chip()).toHaveTextContent('Lost');
+    vi.useRealTimers();
+  });
+});
+
 describe('call list helpers and tokens', () => {
   it('reads the marker only when the field is present', () => {
     expect(readCallListKind({})).toEqual({ present: false, kind: null });
@@ -571,7 +774,7 @@ describe('call list helpers and tokens', () => {
     expect(CALL_LIST_KIND_FIELD).toBe('call_list_kind');
   });
 
-  it('keeps tel and https map links and drops anything else', () => {
+  it('keeps tel and https map links and drops anything else', async () => {
     expect(safeTel({ tel: 'tel:8015550142' })).toBe('tel:8015550142');
     expect(safeTel({ tel: 'javascript:alert(1)', phone: '(801) 555-0100' })).toBe('tel:8015550100');
     expect(safeTel({ phone: '' })).toBeNull();
@@ -579,8 +782,12 @@ describe('call list helpers and tokens', () => {
     expect(safeMaps({ maps_url: 'javascript:alert(1)', company: 'TEST: Shop', address: '1 Test St' }))
       .toBe('https://www.google.com/maps/search/?api=1&query=TEST%3A%20Shop%201%20Test%20St');
     expect(safeMaps({ maps_url: 'http://maps.example/x', company: 'TEST: Shop' })).toMatch(/^https:\/\/www\.google\.com\/maps\/search\//);
-    expect(backOnLabel('2026-11-23')).toBe('Back on Nov 23');
-    expect(backOnLabel(null)).toBeNull();
+    const denver = new Date('2026-11-20T18:00:00.000Z');
+    expect(backOnLabel('2026-11-23', denver)).toBe('Back on Mon');
+    expect(backOnLabel('2026-11-26', denver)).toBe('Back on Thu');
+    expect(backOnLabel('2026-11-27', denver)).toBe('Back on Nov 27');
+    expect(backOnLabel('2026-11-14', denver)).toBe('Back on Sat');
+    expect(backOnLabel(null, denver)).toBeNull();
     expect(callListErrorMessage(Object.assign(new Error('do_not_contact'), { status: 409 }))).toBe('This lead is on do-not-contact');
     expect(callListErrorMessage(Object.assign(new Error('archived'), { status: 409 }))).toBe('This lead is archived');
     expect(callListErrorMessage(Object.assign(new Error('invalid_kind'), { status: 400 }))).toBe('Pick a call or a walk-in.');
@@ -594,15 +801,39 @@ describe('call list helpers and tokens', () => {
     expect(marked[CALL_LIST_KIND_FIELD]).toBe('excluded');
     expect(marked[CALL_LIST_SET_AT_FIELD]).toBe('2026-11-20T18:00:00.000Z');
     expect(CALL_LIST_SET_AT_FIELD).toBe('call_list_set_at');
+    resetCallListMock();
+    await expect(api.saveCallListKind(11, 'call')).rejects.toMatchObject({ message: 'not_found', status: 404 });
+    await expect(api.removeCallList(11)).rejects.toMatchObject({ message: 'not_found', status: 404 });
+    await expect(api.recordCallOutcome(11, { outcome: 'talked', kind: 'call' })).rejects.toMatchObject({ message: 'not_found', status: 404 });
+    const hidden = presentProspectKeys({
+      id: 11,
+      company: 'TEST: Wasatch Heating',
+      call_list_kind: 'call',
+      call_list_set_at: '2026-11-20T18:00:00.000Z',
+    }, false);
+    expect(hidden).not.toHaveProperty('call_list_kind');
+    expect(hidden).not.toHaveProperty('call_list_set_at');
+    const shown = presentProspectKeys({ id: 11, company: 'TEST: Wasatch Heating', call_list_kind: 'excluded' }, true);
+    expect(shown.call_list_kind).toBe('excluded');
   });
 
   it('uses Scout copy in fixtures and never mentions a view in a script', () => {
     const scripts = [SCOUT_COPY.callEmailed, SCOUT_COPY.callNeverEmailed, SCOUT_COPY.voicemail, SCOUT_COPY.walkIn, SCOUT_COPY.ask];
     for (const line of scripts) expect(line).not.toMatch(/viewed|opened/i);
+    expect(CALL_REASONS.demo_today).toBe('Viewed the demo today');
     expect(CALL_REASONS.demo_view).toBe('Viewed the demo yesterday');
+    expect(CALL_REASONS.demo_days).toBe('Viewed the demo 3 days ago');
     expect(CALL_REASONS.intro_3_5d).toBe('Intro email 4 days ago, no reply');
+    expect(CALL_REASONS.listedCall).toBe('On your call list');
     expect(CALL_REASONS.listedWalkIn).toBe('On your walk-in list');
     expect(CALL_REASONS.sequence_done).toBe('Emails finished, no reply');
+    expect(CALL_REASONS.no_answer).toBe('No answer Mon, try again');
+    expect(CALL_REASONS.voicemail).toBe('Left a voicemail Tue');
+    expect(CALL_REASONS.talked).toBe('Talked Nov 19, follow up');
+    expect(CALL_REASONS.stoppedBy).toBe('Stopped by Wed, try again');
+    expect(panelSource).not.toContain('Viewed the demo');
+    expect(panelSource).not.toContain('try again');
+    expect(panelSource).not.toContain('On your call list');
     expect(SCOUT_COPY.voicemail).not.toMatch(/tomorrow/i);
   });
 
@@ -622,7 +853,9 @@ describe('call list helpers and tokens', () => {
     expect(block).not.toMatch(/#[0-9A-Fa-f]{3,8}/);
     const root = css.slice(css.indexOf(':root {'), css.indexOf('@media (prefers-color-scheme: dark)'));
     const hex = (name) => root.match(new RegExp(`${name}:\\s*(#[0-9A-Fa-f]{6})`))[1];
-    expect(contrast(hex('--ink-2'), hex('--paper'))).toBeGreaterThanOrEqual(4.5);
+    const mutedOnPaper = contrast(hex('--ink-2'), hex('--paper'));
+    expect(mutedOnPaper).toBeGreaterThanOrEqual(4.5);
+    expect(mutedOnPaper).toBeCloseTo(5.58, 1);
     expect(contrast(hex('--ink-2'), hex('--surface'))).toBeGreaterThanOrEqual(4.5);
     expect(contrast(hex('--ink'), hex('--ochre-wash'))).toBeGreaterThanOrEqual(4.5);
     expect(contrast(hex('--ink'), hex('--rust-wash'))).toBeGreaterThanOrEqual(4.5);

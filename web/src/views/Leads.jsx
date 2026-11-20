@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useAsync, ErrorNote, FitBadge, StageChip, Stars, STAGES, relDate, isOverdue, Drawer, BottomSheet, useNarrow, toast, presentError } from '../ui';
 import { compactMoney } from '../format';
+import { useLeadStageRevision, withNotedStage } from './lead-stage';
 
 const PAGE = 100;
 const DEFAULTS = { q: '', stage: 'open', tier: '', industry: '', city: '', sort: 'fit', min_value: '' };
@@ -31,6 +32,8 @@ export default function Leads({ version, bump, openLead }) {
 
   const { data, error, loading, reload } = useAsync(
     () => api.prospects({ ...f, limit: PAGE * pages }), [f, pages, version]);
+  useLeadStageRevision();
+  const prospects = data?.prospects?.map(withNotedStage);
 
   const set = (k) => (e) => setF(x => ({ ...x, [k]: e.target.value }));
   const filtered = Object.entries(f).some(([k, v]) => v !== DEFAULTS[k]);
@@ -97,7 +100,7 @@ export default function Leads({ version, bump, openLead }) {
 
       <div className="table-wrap">
         {narrow && <ul className="lead-cards">
-          {data?.prospects.map(l => (
+          {prospects?.map(l => (
             <li key={l.id}>
               <button type="button" className="lead-card" onClick={() => openLead(l.id)}>
                 <span className="lead-card-main">
@@ -117,7 +120,7 @@ export default function Leads({ version, bump, openLead }) {
             <tr><th>Fit</th><th>Company</th><th>Trade</th><th>City</th><th>Reviews</th><th>Stage</th><th>Next step</th></tr>
           </thead>
           <tbody>
-            {data?.prospects.map(l => (
+            {prospects?.map(l => (
               <tr key={l.id} onClick={() => openLead(l.id)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && openLead(l.id)}>
                 <td><FitBadge score={l.fit_score} tier={l.fit_tier} /></td>
                 <td className="t-company">
@@ -135,13 +138,13 @@ export default function Leads({ version, bump, openLead }) {
             ))}
           </tbody>
         </table>}
-        {data && data.prospects.length === 0 && (
+        {data && prospects.length === 0 && (
           <p className="empty pad">No leads match these filters. {filtered && 'Clear filters to see everything.'}</p>
         )}
         {loading && <p className="muted pad">Loading leads…</p>}
-        {data && data.prospects.length < data.total && !loading && (
+        {data && prospects.length < data.total && !loading && (
           <button className="btn btn-quiet more" onClick={() => setPages(p => p + 1)}>
-            Show {Math.min(PAGE, data.total - data.prospects.length)} more
+            Show {Math.min(PAGE, data.total - prospects.length)} more
           </button>
         )}
       </div>

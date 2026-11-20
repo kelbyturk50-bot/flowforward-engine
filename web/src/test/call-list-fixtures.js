@@ -9,11 +9,19 @@ export const SCOUT_COPY = Object.freeze({
   ask: 'Free, 15 minutes. I look at how calls and open estimates are handled and tell you the two spots losing you jobs. You keep what I find.',
 });
 
+// Server reason lines from src/call-list/copy.js. The UI prints `reason` as-is.
 export const CALL_REASONS = Object.freeze({
+  demo_today: 'Viewed the demo today',
   demo_view: 'Viewed the demo yesterday',
+  demo_days: 'Viewed the demo 3 days ago',
+  listedCall: 'On your call list',
   listedWalkIn: 'On your walk-in list',
   intro_3_5d: 'Intro email 4 days ago, no reply',
   sequence_done: 'Emails finished, no reply',
+  no_answer: 'No answer Mon, try again',
+  voicemail: 'Left a voicemail Tue',
+  talked: 'Talked Nov 19, follow up',
+  stoppedBy: 'Stopped by Wed, try again',
 });
 
 export function callListItem(extra = {}) {

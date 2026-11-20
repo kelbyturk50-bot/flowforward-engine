@@ -1,7 +1,10 @@
 import { FitBadge, StageChip, Stars, relDate, isOverdue, telHref } from '../ui';
+import { notedStage, useLeadStageRevision } from './lead-stage';
 
 /** A compact, tappable lead line used on Today and in lists. */
 export default function LeadRow({ lead, onOpen, actions, showStage = true, showNext = false }) {
+  useLeadStageRevision();
+  const stage = notedStage(lead.id) ?? lead.stage;
   return (
     <li className="lead-row">
       <button className="lead-hit" onClick={() => onOpen(lead.id)} aria-label={`Open ${lead.company}`}>
@@ -19,7 +22,7 @@ export default function LeadRow({ lead, onOpen, actions, showStage = true, showN
             </span>
           )}
         </span>
-        {showStage && <StageChip stage={lead.stage} />}
+        {showStage && <StageChip stage={stage} />}
       </button>
       <span className="lead-actions">
         {lead.phone && <a className="btn btn-quiet btn-sm" href={telHref(lead.phone)} aria-label={`Call ${lead.company}`}>Call</a>}
