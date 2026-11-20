@@ -452,6 +452,23 @@ label > .input { color: var(--ink); font-weight: 400; font-size: 1rem; }
   text-underline-offset: 2px;
 }
 .confirm { position: relative; z-index: 90; border: 1px solid var(--line); border-left: 4px solid var(--juniper); border-radius: var(--radius-s); padding: .9rem 1rem; display: flex; flex-direction: column; gap: .5rem; background: var(--paper); }
+.reply-warning {
+  border: 1px solid var(--ochre);
+  border-left: 4px solid var(--ochre);
+  background: var(--ochre-wash);
+  color: var(--ink);
+  border-radius: var(--radius-s);
+  padding: .9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: .65rem;
+  min-width: 0;
+  max-width: 100%;
+}
+.reply-warning p { margin: 0; overflow-wrap: anywhere; }
+.reply-warning-actions { display: flex; flex-wrap: wrap; gap: .5rem; min-width: 0; }
+.reply-warning-actions .btn { min-height: 44px; min-width: 44px; }
 .check { flex-direction: row; align-items: center; gap: .5rem; color: var(--ink); }
 .check input { width: 18px; height: 18px; accent-color: var(--juniper); }
 .review-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 1.5rem; align-items: start; }
@@ -1614,6 +1631,8 @@ html body .prototype-root > p.prototype-ribbon[data-prototype-ribbon][role="note
   .boost { align-items: stretch; }
   .boost input { min-width: 0; width: 100%; flex-basis: 100%; }
   .link-row .btn, .action-bar .btn { max-width: 100%; white-space: normal; text-align: center; }
+  .reply-warning-actions { flex-direction: column; }
+  .reply-warning-actions .btn { width: 100%; white-space: normal; text-align: center; }
   .action-bar { min-width: 0; }
   .prop-mini { min-width: 0; }
   .prop-mini .grow { min-width: 0; overflow-wrap: anywhere; }

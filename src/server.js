@@ -114,6 +114,8 @@ app.use('/api/campaigns', campaignsApi.flagGate);
 const offersApi = require('./api/offers');
 app.use('/api', requireApiKey);
 app.use('/api/prospects', require('./api/prospects'));
+app.use('/api/prospects', require('./api/call-list').prospectRouter);
+app.use('/api/today', require('./api/call-list').todayRouter);
 app.use('/api/offers',    offersApi.gated(offersApi.router));
 app.use('/api/leads',     offersApi.gated(offersApi.leadsRouter));
 app.use('/api/projects',  projects);

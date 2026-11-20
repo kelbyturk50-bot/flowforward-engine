@@ -6015,12 +6015,27 @@ describe('follow-ups need a recipient', { concurrency: false }, () => {
     });
 
     it('QA r11: a render failure on approve puts the draft back with the attempt key cleared', async () => {
+      // The intro no longer renders HTML. A thrown MIME build is the same
+      // prepare failure: the draft goes back and the transport is not called.
       const prospect = await lead();
       const draft = await insertProposal(prospect.id, { status: 'draft', toEmail: 'test+l-render@example.com' });
       const calls = useTransport();
-      const restore = qaLStubRender();
+      const MimeNode = require('nodemailer/lib/mime-node');
+      const origBuild = MimeNode.prototype.build;
+      let armed = 1;
+      MimeNode.prototype.build = function build(...args) {
+        if (armed > 0) {
+          armed -= 1;
+          const err = new Error('build exploded');
+          err.code = 'EQA_RENDER';
+          const cb = args[0];
+          if (typeof cb === 'function') return cb(err);
+          return Promise.reject(err);
+        }
+        return origBuild.apply(this, args);
+      };
       let first;
-      try { first = await qaLPost(draft.id, 'send', {}); } finally { restore(); }
+      try { first = await qaLPost(draft.id, 'send', {}); } finally { MimeNode.prototype.build = origBuild; }
       const row = (await pool.query('SELECT status, send_attempt_key, approved_at FROM proposals WHERE id = $1', [draft.id])).rows[0];
       assert.equal(calls.length, 0);
       assert.notEqual(first.status, 200);

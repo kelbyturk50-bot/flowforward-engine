@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { missingRecipient, recipientHint, trimRecipientEdges } from '../recipient';
 import { TryLiveDemoLink } from '../demo/DemoLinks';
@@ -7,6 +7,7 @@ import { useJobs, elapsed } from '../jobs';
 import PrototypeCard from './PrototypeCard';
 import ProspectViews from './ProspectViews';
 import { hasProspectViewFields } from './prospect-views.js';
+import { approveSendBody, isHeldBackConfirm, recentReplyDetails } from './approve-send.js';
 
 function guardedSend(p) {
   const reason = String(p.stop_reason || '').trim().toLowerCase();
@@ -25,14 +26,23 @@ function approveHeading(p) {
 export default function ProposalDrawer({ id, onClose, bump, openLead, openProposal }) {
   const [p, setP] = useState(null);
   const [error, setError] = useState(null);
+  const openId = useRef(id);
+  openId.current = id;
 
   const load = async (pid = id) => {
+    // A send reload can finish after the drawer has moved. Ignore that
+    // response so it cannot replace the proposal that is open now.
+    if (pid !== openId.current) return;
     try {
       setError(null);
       const data = await api.proposal(pid);
+      if (pid !== openId.current) return;
       setP(data);
       if (data.status === 'draft' && !data.reviewed_at) api.markProposalSeen(pid).then(() => bump()).catch(() => {});
-    } catch (e) { setError(e); }
+    } catch (e) {
+      if (pid !== openId.current) return;
+      setError(e);
+    }
   };
   useEffect(() => { setP(null); if (id) load(id); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -42,6 +52,16 @@ export default function ProposalDrawer({ id, onClose, bump, openLead, openPropos
       {!p && !error && <div className="drawer-body"><p className="muted">Loading…</p></div>}
       {p && p.id === id && <Body key={`${p.id}-${p.updated_at}`} p={p} reload={load} bump={bump} openLead={openLead} openProposal={openProposal} onClose={onClose} />}
     </Drawer>
+  );
+}
+
+function ReplyWarning({ children }) {
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.focus(); }, []);
+  return (
+    <div className="reply-warning" role="alert" tabIndex={-1} ref={ref}>
+      {children}
+    </div>
   );
 }
 
@@ -59,6 +79,9 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   };
   const [busy, setBusy] = useState('');
   const [confirming, setConfirming] = useState(false);
+  const [confirmAck, setConfirmAck] = useState(false);
+  const [recentReply, setRecentReply] = useState(null);
+  const sendLock = useRef(false);
   const [confirmingManual, setConfirmingManual] = useState(false);
   const [manualNote, setManualNote] = useState('');
   const [regen, setRegen] = useState(false);
@@ -77,6 +100,49 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
   };
   const save = (patch, msg) => act('save', () => api.updateProposal(p.id, patch), msg);
 
+  // Approve posts once per tap. A recent_reply 409 keeps the draft and shows
+  // the inline warning. A held-back 409 remembers confirm: true. The next post
+  // sends every acknowledgement already earned, in either order.
+  const submitApprove = async (acknowledge) => {
+    if (sendLock.current) return;
+    sendLock.current = true;
+    setBusy('send');
+    try {
+      await api.sendProposal(p.id, approveSendBody({
+        confirm: guardedSend(p) || confirmAck,
+        acknowledge,
+      }));
+      toast(`Sent to ${p.to_email}.`);
+      bump();
+      setConfirming(false);
+      setRecentReply(null);
+      setConfirmAck(false);
+      await reload(p.id);
+    } catch (e) {
+      const reply = recentReplyDetails(e);
+      if (reply) {
+        setRecentReply(reply);
+        setConfirming(false);
+        return;
+      }
+      if (isHeldBackConfirm(e)) {
+        setConfirmAck(true);
+        setConfirming(true);
+        return;
+      }
+      toast(e.message);
+    } finally {
+      sendLock.current = false;
+      setBusy('');
+    }
+  };
+  const cancelReplyWarning = () => {
+    if (sendLock.current) return;
+    setRecentReply(null);
+    setConfirming(false);
+  };
+  const sending = busy === 'send';
+
   return (
     <div className="drawer-body">
       <header className="lead-head">
@@ -87,7 +153,7 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
           <div className="head-chips">
             <ProposalChip status={p.status} verdict={a.fit_verdict} stopReason={p.stop_reason} />
             {p.versions?.length > 1 ? (
-              <select className="mini-select" value={p.id} onChange={e => openProposal(Number(e.target.value))} aria-label="Version">
+              <select className="mini-select" value={p.id} disabled={sending} onChange={e => openProposal(Number(e.target.value))} aria-label="Version">
                 {p.versions.map(v => <option key={v.id} value={v.id}>v{v.version} · {v.status === 'superseded' ? 'older' : (PROPOSAL_STATUS[v.status] || v.status)}{v.instructions ? ' · w/ notes' : ''}</option>)}
               </select>
             ) : <span className="muted small">v{p.version}</span>}
@@ -147,18 +213,35 @@ function Body({ p, reload, bump, openLead, openProposal, onClose }) {
         )}
       </div>
 
-      {confirming && (
+      {confirming && !recentReply && (
         <div className="confirm" role="alertdialog" aria-label="Confirm send">
           <p><strong>{approveHeading(p)}</strong></p>
-          {guardedSend(p) && <p>This draft is marked for another look. Send it only if you mean to.</p>}
+          {(guardedSend(p) || confirmAck) && <p>This draft is marked for another look. Send it only if you mean to.</p>}
           <p className="muted">“{p.subject}” goes out now from your Gmail. Follow-ups are scheduled for day 3 and day 10 and stop automatically if they reply, book, bounce or opt out.</p>
           <div className="link-row">
-            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => act('send', () => api.sendProposal(p.id, guardedSend(p) ? { confirm: true } : undefined), `Sent to ${p.to_email}.`, async () => { setConfirming(false); await reload(p.id); })}>
+            <button className="btn" disabled={!!busy || noRecipient} title={noRecipient ? hint : undefined} onClick={() => submitApprove(false)}>
               {busy === 'send' ? 'Sending…' : 'Send it'}
             </button>
             <button className="btn btn-quiet" onClick={() => setConfirming(false)}>Cancel</button>
           </div>
         </div>
+      )}
+      {recentReply && (
+        <ReplyWarning>
+          <p>{recentReply.sentence}</p>
+          {confirmAck && <p>This draft is marked for another look. Send it only if you mean to.</p>}
+          <div className="reply-warning-actions">
+            <button type="button" className="btn" disabled={sending} onClick={() => openProposal(recentReply.sibling_proposal_id)}>
+              Open that proposal
+            </button>
+            <button type="button" className="btn btn-quiet" disabled={!!busy || noRecipient} onClick={() => submitApprove(true)}>
+              {sending ? 'Sending…' : 'Send anyway'}
+            </button>
+            <button type="button" className="btn btn-quiet" disabled={sending} onClick={cancelReplyWarning}>
+              Cancel
+            </button>
+          </div>
+        </ReplyWarning>
       )}
       {confirmingManual && (
         <div className="confirm" role="alertdialog" aria-label="Confirm manual send">

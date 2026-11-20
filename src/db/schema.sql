@@ -176,6 +176,34 @@ CREATE INDEX IF NOT EXISTS idx_prospects_archived ON prospects(archived_at) WHER
 -- read this column and do not fetch.
 ALTER TABLE prospects ADD COLUMN IF NOT EXISTS fsm_detected TEXT;
 
+-- F-010 call list. NULL means Kelby has not set a marker. call and walk_in
+-- are his list. excluded is a sticky Remove. Boot adds the columns and does
+-- not set them, and it does not update existing rows.
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS call_list_kind TEXT;
+ALTER TABLE prospects ADD COLUMN IF NOT EXISTS call_list_set_at TIMESTAMPTZ;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE c.conname = 'prospects_call_list_kind_check'
+       AND t.relname = 'prospects'
+       AND n.nspname = 'public'
+  ) THEN
+    ALTER TABLE prospects
+      ADD CONSTRAINT prospects_call_list_kind_check
+      CHECK (
+        (call_list_kind IS NULL AND call_list_set_at IS NULL)
+        OR (
+          call_list_kind IN ('call', 'walk_in', 'excluded')
+          AND call_list_set_at IS NOT NULL
+        )
+      );
+  END IF;
+END $$;
+
 -- One row per generated version. Regenerating creates a new version and marks
 -- the previous draft 'superseded'. Human edits land on the same row; the AI's
 -- untouched output is kept in ai_original so edits can be compared later.
@@ -885,6 +913,9 @@ CREATE TRIGGER inbox_items_updated_at
 -- Server feature flags. Seeded off, except FF_PROTOTYPE_ON_DRAFT, which is
 -- seeded on (Kelby, Oct 20). A re-boot inserts missing names only.
 -- ON CONFLICT DO NOTHING does not update enabled, updated_at, or updated_by.
+-- FF_APPROVE_REPLY_WARNING is seeded off (F-009). It warns on approve when
+-- another proposal for the same lead has replied_at within 60 days.
+-- FF_CALL_LIST is seeded off (F-010). It gates Calls due / Walk-ins.
 -- FF_PILOT_ESTIMATE_SMS and FF_CAMPAIGN_OPEN_PIXEL are env-only (exactly
 -- "true") and are not seeded. A row left from an older boot is ignored.
 -- FF_PILOT_ESTIMATE_LIVE_SEND stays env-only and is not seeded.
@@ -914,7 +945,9 @@ VALUES
   ('FF_PROTOTYPE_GALLERY', false),
   ('FF_LIVE_CHAT_DEMO', false),
   ('FF_CAMPAIGNS', false),
-  ('FF_PROTOTYPE_ON_DRAFT', true)
+  ('FF_PROTOTYPE_ON_DRAFT', true),
+  ('FF_APPROVE_REPLY_WARNING', false),
+  ('FF_CALL_LIST', false)
 ON CONFLICT (name) DO NOTHING;
 
 -- Campaigns slice 1 (F-006). Additive and idempotent. Applied on every boot.

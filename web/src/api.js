@@ -68,7 +68,15 @@ async function request(method, path, body) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (res.status === 401) window.dispatchEvent(new CustomEvent('ff:unauthorized'));
-    throw new ApiError(data.error || `Request failed (${res.status})`, res.status);
+    const err = new ApiError(data.error || `Request failed (${res.status})`, res.status);
+    // F-009: the 409 body is exactly these three keys. Keep the id and time
+    // so the drawer can warn without a second request.
+    if (res.status === 409 && data && data.error === 'recent_reply') {
+      err.code = 'recent_reply';
+      err.sibling_proposal_id = data.sibling_proposal_id;
+      err.replied_at = data.replied_at;
+    }
+    throw err;
   }
   return data;
 }

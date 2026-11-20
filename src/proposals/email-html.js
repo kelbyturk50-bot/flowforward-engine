@@ -1,4 +1,8 @@
-// HTML version of an outgoing email (sent alongside the plain text).
+// HTML version of a message.
+//
+// Inbox replies still send this part. Intros and follow-ups do not (F-011):
+// those are one text/plain part, with no logo. This file and the
+// /brand/flowforward-logo.png route stay for the inbox signature.
 //
 // Kept deliberately close to a personal email so it reads as one person
 // writing, not a newsletter: normal text, no banners, no big buttons, no
@@ -7,7 +11,7 @@
 //     ("See the ideas for Beehive" rather than https://…/p/beehive-…)
 //   - a real signature with the FlowForward logo (one small hosted image)
 //   - the CAN-SPAM footer in small gray text
-// Every string from the draft is escaped. The plain-text part is unchanged.
+// Every string from the draft is escaped. The plain-text outreach body is unchanged.
 
 const cfg = require('./config');
 

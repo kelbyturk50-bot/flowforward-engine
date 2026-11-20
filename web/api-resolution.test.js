@@ -331,4 +331,52 @@ describe('real API client', () => {
     await expect(api.demoViewTaskDismiss(0)).rejects.toMatchObject({ status: 404 });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it('keeps the recent_reply id and time on a 409 and leaves other errors as a message', async () => {
+    const repliedAt = '2026-09-22T15:04:00.000Z';
+    const fetchSpy = vi.fn(async (url) => {
+      if (String(url).endsWith('/api/proposals/9/send')) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ error: 'recent_reply', sibling_proposal_id: 42, replied_at: repliedAt }),
+        };
+      }
+      return {
+        ok: false,
+        status: 409,
+        json: async () => ({ error: 'This version is sent; only drafts can be sent.' }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    _setRuntimeForTests({
+      dev: true,
+      prod: false,
+      hostname: 'localhost',
+      port: '',
+      protocol: 'http:',
+      viteApiUrl: '',
+      savedUrl: '',
+    });
+    await expect(api.sendProposal(9, { confirm: true })).rejects.toMatchObject({
+      message: 'recent_reply',
+      status: 409,
+      code: 'recent_reply',
+      sibling_proposal_id: 42,
+      replied_at: repliedAt,
+    });
+    const sent = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(sent).toEqual({ confirm: true });
+    expect(sent.confirm).toBe(true);
+
+    try {
+      await api.sendProposal(8);
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toMatchObject({ message: 'This version is sent; only drafts can be sent.', status: 409 });
+      expect(err.code).toBeUndefined();
+      expect(err.sibling_proposal_id).toBeUndefined();
+      expect(err.replied_at).toBeUndefined();
+    }
+  });
 });
