@@ -147,9 +147,12 @@ describe('feature flags contract', () => {
     expect(locked.FF_PROTOTYPE_GALLERY).toBe(true);
     expect(locked.FF_CAMPAIGNS).toBe(false);
     expect(FEATURE_FLAG_NAMES).toContain('FF_PROTOTYPE_ON_DRAFT');
-    expect(FEATURE_FLAG_NAMES.at(-1)).toBe('FF_APPROVE_REPLY_WARNING');
+    expect(FEATURE_FLAG_NAMES.at(-2)).toBe('FF_APPROVE_REPLY_WARNING');
+    expect(FEATURE_FLAG_NAMES.at(-1)).toBe('FF_CALL_LIST');
     const catalog = closedPanelFlags().find((flag) => flag.name === 'FF_APPROVE_REPLY_WARNING');
     expect(catalog.label).toBe('Warn before approving if the lead replied to another proposal in the last 60 days');
     expect(catalog.label.endsWith('.')).toBe(false);
+    const callList = closedPanelFlags().find((flag) => flag.name === 'FF_CALL_LIST');
+    expect(callList.label).toBe('Calls due / Walk-ins');
   });
 });

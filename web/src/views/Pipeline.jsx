@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { useAsync, ErrorNote, FitBadge, STAGES, stageLabel, money, relDate, isOverdue, useNarrow, toast, presentError } from '../ui';
 import { compactMoney } from '../format';
+import { replaceNotedStage, useLeadStageRevision, withNotedStage } from './lead-stage';
 
 const COLUMNS = ['found', 'contacted', 'responded', 'qualified', 'proposal'];
 const OUTCOMES = ['won', 'lost', 'disqualified'];
@@ -32,13 +33,17 @@ export default function Pipeline({ version, bump, openLead, openProject }) {
         bump(); openProject(proj.id);
       } else {
         await api.updateLead(lead.id, { stage });
+        replaceNotedStage(lead.id, stage);
         toast(`${lead.company} moved to ${stageLabel(stage)}.`);
         bump();
       }
     } catch (e) { toast(e.message); }
   };
 
-  const byId = (id) => data?.leads.find(l => l.id === id);
+  useLeadStageRevision();
+  const openLeads = data?.leads?.map(withNotedStage);
+  const closedLeads = data?.closed?.map(withNotedStage);
+  const byId = (id) => openLeads?.find(l => l.id === id);
   const dropProps = (stage) => ({
     onDragOver: (e) => { e.preventDefault(); setOver(stage); },
     onDragLeave: () => setOver(o => o === stage ? null : o),
@@ -56,13 +61,13 @@ export default function Pipeline({ version, bump, openLead, openProject }) {
       </header>
       <ErrorNote error={presentError(error)} onRetry={reload} />
 
-      {narrow && <StageChips stage={stage} onPick={setStage} stats={data?.stats} leads={data?.leads} closed={data?.closed} />}
+      {narrow && <StageChips stage={stage} onPick={setStage} stats={data?.stats} leads={openLeads} closed={closedLeads} />}
       {narrow && <div className="pipe-list">
-        {stage === 'found' && data && data.foundTotal > (data.leads.filter(l => l.stage === 'found').length) && (
-          <p className="panel-note">Showing the top {data.leads.filter(l => l.stage === 'found').length} A and B leads of {data.foundTotal}.</p>
+        {stage === 'found' && data && data.foundTotal > (openLeads.filter(l => l.stage === 'found').length) && (
+          <p className="panel-note">Showing the top {openLeads.filter(l => l.stage === 'found').length} A and B leads of {data.foundTotal}.</p>
         )}
         <PipeCards
-          leads={(OUTCOMES.includes(stage) ? data?.closed : data?.leads)?.filter(l => l.stage === stage) || []}
+          leads={(OUTCOMES.includes(stage) ? closedLeads : openLeads)?.filter(l => l.stage === stage) || []}
           ready={!!data}
           stage={stage}
           move={move}
@@ -72,7 +77,7 @@ export default function Pipeline({ version, bump, openLead, openProject }) {
 
       {!narrow && <div className="board">
         {COLUMNS.map(stage => {
-          const leads = data?.leads.filter(l => l.stage === stage) || [];
+          const leads = openLeads?.filter(l => l.stage === stage) || [];
           const value = leads.reduce((s, l) => s + (Number(l.est_value) || 0), 0);
           return (
             <section key={stage} className={`col ${over === stage ? 'col-over' : ''}`} {...dropProps(stage)} aria-label={stageLabel(stage)}>

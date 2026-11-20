@@ -25,6 +25,16 @@ describe('feature flags panel', () => {
     installApiDefaults();
   });
 
+  it('lists FF_CALL_LIST with the other database flags', async () => {
+    api.flags.mockResolvedValue(records());
+    render(<FeatureFlagsPanel />);
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'FF_CALL_LIST' })).toBeEnabled());
+    const sw = screen.getByRole('switch', { name: 'FF_CALL_LIST' });
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+    expect(flagRow('FF_CALL_LIST').getByText('Calls due / Walk-ins')).toBeInTheDocument();
+    expect(flagRow('FF_CALL_LIST').queryByText('Read-only')).not.toBeInTheDocument();
+  });
+
   it('gives every flag control a 44px target', () => {
     const block = css.slice(css.indexOf('.flag-panel {'), css.indexOf('.flag-list'));
     expect(block).toContain('min-height: 44px');

@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useJobs } from '../jobs';
 import { Drawer, FitBadge, STAGES, Stars, ErrorNote, money, money2, relDate, isOverdue, timeAgo, addDays, telHref, mapsHref, statusLabel, toast, ProposalChip } from '../ui';
+import CallListMarker from './CallListMarker';
 import ProspectViews from './ProspectViews';
 import { hasProspectViewFields } from './prospect-views.js';
+import { replaceNotedStage, subscribeLeadStages, withNotedStage } from './lead-stage';
 
 const ACT_LABEL = { note: 'Note', call: 'Call', email: 'Email', meeting: 'Meeting', stage_change: 'Stage' };
 
@@ -14,15 +16,23 @@ export default function LeadDrawer({ id, onClose, bump, openProject, openProposa
   useEffect(() => {
     if (!id) { setLead(null); return; }
     let live = true; setError(null);
-    api.prospect(id).then(d => live && setLead(d)).catch(e => live && setError(e));
+    api.prospect(id).then(d => live && setLead(withNotedStage(d))).catch(e => live && setError(e));
     return () => { live = false; };
   }, [id]);
+
+  useEffect(() => subscribeLeadStages(() => {
+    setLead((current) => {
+      const next = withNotedStage(current);
+      return next === current ? current : next;
+    });
+  }), []);
 
   const save = async (patch, msg) => {
     try {
       const updated = await api.updateLead(lead.id, patch);
+      if (patch && typeof patch.stage === 'string') replaceNotedStage(lead.id, updated?.stage || patch.stage);
       const fresh = await api.prospect(lead.id);
-      setLead({ ...updated, activities: fresh.activities, projects: fresh.projects });
+      setLead(withNotedStage({ ...updated, activities: fresh.activities, projects: fresh.projects }));
       if (msg) toast(msg);
       bump();
     } catch (e) { toast(e.message); }
@@ -93,6 +103,8 @@ function LeadBody({ lead, save, setLead, bump, openProject, openProposal }) {
         {lead.website && <a className="btn btn-quiet btn-sm" href={lead.website} target="_blank" rel="noreferrer">Website</a>}
         <a className="btn btn-quiet btn-sm" href={mapsHref(lead)} target="_blank" rel="noreferrer">Map</a>
       </div>
+
+      <CallListMarker lead={lead} onLead={setLead} />
 
       <section className="block">
         <label className="stage-pick">Stage

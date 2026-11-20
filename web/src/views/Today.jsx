@@ -1,7 +1,10 @@
+import { useState } from 'react';
 import { api } from '../api';
 import { useAsync, ErrorNote, money, relDate, isOverdue, addDays, toast } from '../ui';
+import CallListPanel from './CallListPanel';
 import DemoViewTasks from './DemoViewTasks';
 import LeadRow from './LeadRow';
+import { callListIsOnlySurface } from './call-list';
 
 function greeting() {
   const h = new Date().getHours();
@@ -10,6 +13,8 @@ function greeting() {
 
 export default function Today({ version, bump, openLead, openProject }) {
   const { data, error, loading, reload } = useAsync(() => api.focus(), [version]);
+  const [callListOn, setCallListOn] = useState(false);
+  const onlyCallSurface = callListIsOnlySurface(callListOn);
 
   const act = async (fn, msg) => {
     try { await fn(); toast(msg); bump(); } catch (e) { toast(e.message); }
@@ -32,6 +37,8 @@ export default function Today({ version, bump, openLead, openProject }) {
         <p className="muted">{date}</p>
       </header>
 
+      <CallListPanel version={version} openLead={openLead} onActiveChange={setCallListOn} />
+
       <ErrorNote error={error} onRetry={reload} />
 
       {c && (
@@ -45,7 +52,7 @@ export default function Today({ version, bump, openLead, openProject }) {
         </dl>
       )}
 
-      <DemoViewTasks version={version} bump={bump} openLead={openLead} />
+      {!onlyCallSurface && <DemoViewTasks version={version} bump={bump} openLead={openLead} />}
 
       {loading && !data && <p className="muted pad">Loading your day…</p>}
 
@@ -61,16 +68,18 @@ export default function Today({ version, bump, openLead, openProject }) {
                 ))}</ul>}
           </section>
 
-          <section className="panel">
-            <h2>Call next</h2>
-            <p className="panel-note">{"Highest-fit leads you haven't contacted yet."}</p>
-            {data.top_new_leads.length === 0
-              ? <p className="empty">No untouched A or B leads. Run discovery from Settings or widen your markets.</p>
-              : <ul className="lead-list">{data.top_new_leads.map(l => (
-                  <LeadRow key={l.id} lead={l} onOpen={openLead} showStage={false}
-                    actions={<button className="btn btn-sm" onClick={() => markContacted(l)}>Contacted</button>} />
-                ))}</ul>}
-          </section>
+          {!onlyCallSurface && (
+            <section className="panel">
+              <h2>Call next</h2>
+              <p className="panel-note">{"Highest-fit leads you haven't contacted yet."}</p>
+              {data.top_new_leads.length === 0
+                ? <p className="empty">No untouched A or B leads. Run discovery from Settings or widen your markets.</p>
+                : <ul className="lead-list">{data.top_new_leads.map(l => (
+                    <LeadRow key={l.id} lead={l} onOpen={openLead} showStage={false}
+                      actions={<button className="btn btn-sm" onClick={() => markContacted(l)}>Contacted</button>} />
+                  ))}</ul>}
+            </section>
+          )}
 
           {data.gone_quiet.length > 0 && (
             <section className="panel">

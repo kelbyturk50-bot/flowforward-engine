@@ -2,11 +2,15 @@ import { flagRecords, savedFlag } from './flag-fixtures.js';
 import { campaignsResponse } from './campaign-api.js';
 import { api, settings } from './mock-api.js';
 import { contactedLead, discoveryRun, focus, foundLead, project, proposal, summary } from './fixtures.js';
+import { mockRecordCallOutcome, mockRemoveCallList, mockSaveCallListKind, resetCallListMock } from './call-list-rules.js';
+import { resetNotedStages } from '../views/lead-stage.js';
 
 const TEST_URL = 'http://127.0.0.1:3000';
 
 export function installApiDefaults() {
   for (const fn of Object.values(api)) fn.mockReset();
+  resetCallListMock();
+  resetNotedStages();
 
   settings.apiUrl = TEST_URL;
   settings.apiKey = 'test-key';
@@ -49,6 +53,10 @@ export function installApiDefaults() {
   });
   api.flags.mockResolvedValue(flagRecords());
   api.demoViewTasks.mockRejectedValue(Object.assign(new Error('not_found'), { status: 404 }));
+  api.todayCallList.mockResolvedValue({ enabled: false, items: [] });
+  api.recordCallOutcome.mockImplementation(async (id, body) => mockRecordCallOutcome(id, body));
+  api.saveCallListKind.mockImplementation(async (id, kind) => mockSaveCallListKind(id, kind));
+  api.removeCallList.mockImplementation(async (id) => mockRemoveCallList(id));
   api.demoViewTaskDone.mockResolvedValue({ id: 1, status: 'done', prospect_id: 10 });
   api.demoViewTaskSnooze.mockResolvedValue({ id: 1, status: 'open', snoozed_until: '2026-11-15T21:14:00.000Z' });
   api.demoViewTaskDismiss.mockResolvedValue({ id: 1, status: 'dismissed', prospect_id: 10 });
