@@ -885,6 +885,8 @@ CREATE TRIGGER inbox_items_updated_at
 -- Server feature flags. Seeded off, except FF_PROTOTYPE_ON_DRAFT, which is
 -- seeded on (Kelby, Oct 20). A re-boot inserts missing names only.
 -- ON CONFLICT DO NOTHING does not update enabled, updated_at, or updated_by.
+-- FF_APPROVE_REPLY_WARNING is seeded off (F-009). It warns on approve when
+-- another proposal for the same lead has replied_at within 60 days.
 -- FF_PILOT_ESTIMATE_SMS and FF_CAMPAIGN_OPEN_PIXEL are env-only (exactly
 -- "true") and are not seeded. A row left from an older boot is ignored.
 -- FF_PILOT_ESTIMATE_LIVE_SEND stays env-only and is not seeded.
@@ -914,7 +916,8 @@ VALUES
   ('FF_PROTOTYPE_GALLERY', false),
   ('FF_LIVE_CHAT_DEMO', false),
   ('FF_CAMPAIGNS', false),
-  ('FF_PROTOTYPE_ON_DRAFT', true)
+  ('FF_PROTOTYPE_ON_DRAFT', true),
+  ('FF_APPROVE_REPLY_WARNING', false)
 ON CONFLICT (name) DO NOTHING;
 
 -- Campaigns slice 1 (F-006). Additive and idempotent. Applied on every boot.

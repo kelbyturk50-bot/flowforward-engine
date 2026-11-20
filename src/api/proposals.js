@@ -32,7 +32,18 @@ const VIEWS = {
 };
 
 const fail = (res, err) => {
-  if (err && err.status) return res.status(err.status).json({ error: err.message });
+  if (err && err.status) {
+    // Approve-time recent-reply warning. The body is the code, the other
+    // proposal's id, and replied_at. No subject, body, or other email content.
+    if (err.code === 'recent_reply') {
+      return res.status(err.status).json({
+        error: 'recent_reply',
+        sibling_proposal_id: err.sibling_proposal_id,
+        replied_at: err.replied_at,
+      });
+    }
+    return res.status(err.status).json({ error: err.message });
+  }
   console.error(`[api] ${err && err.code || 'error'}`);
   return res.status(500).json({ error: 'Something went wrong.' });
 };
@@ -340,10 +351,14 @@ router.patch('/:id', async (req, res) => {
 });
 
 // POST /api/proposals/:id/send — approve + send the first email now
+// confirm: true is only the held-back resend acknowledgement.
+// acknowledge_recent_reply: true is only the F-009 sibling-reply warning.
+// Neither value satisfies the other check. Only a JSON boolean true counts.
 router.post('/:id/send', async (req, res) => {
   try {
     const confirm = !!(req.body && req.body.confirm === true);
-    res.json(withUrl(await send.approveAndSend(parseInt(req.params.id, 10), { confirm })));
+    const acknowledgeRecentReply = !!(req.body && req.body.acknowledge_recent_reply === true);
+    res.json(withUrl(await send.approveAndSend(parseInt(req.params.id, 10), { confirm, acknowledgeRecentReply })));
   } catch (err) { fail(res, err); }
 });
 
